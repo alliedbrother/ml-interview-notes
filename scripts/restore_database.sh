@@ -4,11 +4,11 @@
 # This script restores a backup to an RDS PostgreSQL instance
 
 # Configuration - Update these values for your RDS instance
-RDS_ENDPOINT="your-rds-endpoint.region.rds.amazonaws.com"
+RDS_ENDPOINT="ml-interview-notes.cfy2muw6o6vp.us-east-2.rds.amazonaws.com"
 RDS_DB_NAME="ml_interview_notes"
-RDS_USERNAME="your_rds_username"
+RDS_USERNAME="mlinterviews"
 RDS_PORT="5432"
-BACKUP_FILE="backups/ml_interview_notes_latest.sql"
+BACKUP_FILE="backups/ml_interview_notes_20250622_013520.sql"
 
 # Check if backup file exists
 if [ ! -f "$BACKUP_FILE" ]; then
