@@ -1,177 +1,90 @@
 # ML Interview Notes
 
-A comprehensive Django web application for organizing and studying machine learning interview materials.
+Open-source notes for machine learning interviews — live at
+**[mlinterviewnotes.com](https://mlinterviewnotes.com)**.
 
-## Features
+Every page on the site is a Markdown file in this repository. Adding or improving
+a page is a pull request.
 
-- **ML Deep Dives**: In-depth coverage of machine learning topics including mathematics, algorithms, and libraries
-- **Question & Answer**: Structured Q&A format for interview preparation
-- **System Design**: System design concepts and patterns for ML systems
-- **Interactive Learning**: Web-based interface for easy navigation and study
+## What's here
 
-## Technology Stack
+| Section | Contents |
+|---|---|
+| [Courses](https://mlinterviewnotes.com/courses/) | Long-form, sequential material. Currently **Transformers Deep Dive** — 17 modules from "why did we abandon RNNs?" to the configuration choices in production 2026 models. |
+| [Notes](https://mlinterviewnotes.com/notes/) | Topic-by-topic reference notes: Math, Libraries, ML, Deep Learning, NLP. In progress — contributions welcome. |
 
-- **Backend**: Django 5.2.3
-- **Database**: PostgreSQL (with psycopg2)
-- **Frontend**: HTML, CSS, JavaScript
-- **Python**: 3.11+
+## Repository layout
 
-## Installation
+```
+content/
+  site.yml                      site title, tagline, top nav
+  courses/<slug>/course.yml     course title, blurb, track definitions
+  courses/<slug>/NN-*.md        course modules; 00 becomes the course index
+  notes/<slug>.md               note pages
+site/
+  build.py                      the static site generator
+  test_build.py                 build verification, runs in CI
+  theme/                        stylesheet, scripts, favicon
+legacy/                         the retired Django app (see legacy/README.md)
+```
 
-1. Clone the repository:
+## Building locally
+
 ```bash
-git clone https://github.com/alliedbrother/ml-interview-notes.git
-cd ml-interview-notes
+pip install -r site/requirements.txt
+python site/build.py --serve      # builds to _site/ and serves on :8000
 ```
 
-2. Create a virtual environment:
+`_site/` is generated and gitignored — never edit it by hand. To check your work
+the way CI does:
+
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python site/build.py && python site/test_build.py
 ```
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
+The verification pass asserts that every source file produced a page, every
+internal link resolves, every Mermaid diagram rendered, and math survived the
+pipeline. A static site fails silently, so this is what stops a broken link from
+shipping.
+
+## Writing content
+
+Markdown, with a few conveniences the build understands:
+
+- **Math** — `$inline$` and `$$display$$`, rendered with KaTeX.
+- **Diagrams** — ` ```mermaid ` fences become pan/zoomable diagrams.
+- **Tables, code fences, and blockquotes** get styled treatments; a blockquote at
+  the top of a course module becomes its prerequisites box.
+- **Links between pages** — link to the other file (`[text](./05-positional-encodings.md)`)
+  and the build rewrites it to the right URL.
+
+Course modules are split into sections on `## ` headings, which drive the
+right-hand table of contents. Sections titled `Key takeaways`, `Self-check`, or
+`Reconciling…` get their own visual treatment.
+
+Note pages accept optional YAML front matter:
+
+```yaml
+---
+order: 1
+description: One-sentence blurb used on cards and in meta tags.
+meta: 5 topics planned
+---
 ```
 
-4. Set up the database:
-```bash
-python manage.py migrate
-```
+### Adding a course
 
-5. Create a superuser (optional):
-```bash
-python manage.py createsuperuser
-```
+Create `content/courses/<slug>/` with a `course.yml` and `NN-*.md` modules. The
+home page, the courses index, and the module rail all pick it up automatically —
+no code change needed.
 
-6. Run the development server:
-```bash
-python manage.py runserver
-```
+## Deployment
 
-7. Visit http://127.0.0.1:8000/ in your browser
-
-## Project Structure
-
-```
-ml-interview-notes/
-├── core/                 # Core app with home page
-├── ml_deep_dives/        # ML topics and deep dives
-├── question_answer/      # Q&A format content
-├── system_design/        # System design concepts
-├── templates/           # HTML templates
-├── static/              # Static files (CSS, JS, images)
-├── scripts/             # Deployment and migration scripts
-└── manage.py           # Django management script
-```
-
-## Usage
-
-- Navigate through different sections using the main menu
-- Browse ML topics by category
-- Study system design concepts
-- Practice with Q&A format questions
-
-## AWS Deployment
-
-### Prerequisites
-- AWS Account
-- EC2 instance (Ubuntu 20.04+ recommended)
-- RDS PostgreSQL instance
-
-### Quick Deployment
-
-1. **Set up RDS Database**:
-   ```bash
-   # Follow the detailed guide in scripts/aws_rds_setup.md
-   # Or use the automated setup script:
-   python3 scripts/setup_rds.py
-   ```
-
-2. **Backup Local Database**:
-   ```bash
-   ./scripts/backup_database.sh
-   ```
-
-3. **Restore to RDS**:
-   ```bash
-   # Update scripts/restore_database.sh with your RDS details
-   ./scripts/restore_database.sh
-   ```
-
-4. **Deploy to EC2**:
-   ```bash
-   # Copy deploy script to your EC2 instance
-   sudo ./scripts/deploy_to_ec2.sh
-   ```
-
-### Manual Deployment Steps
-
-1. **Create RDS PostgreSQL Instance**:
-   - Engine: PostgreSQL 14.x
-   - Instance: db.t3.micro (free tier) or larger
-   - Storage: 20 GB minimum
-   - Enable public access for initial setup
-
-2. **Configure Security Groups**:
-   - Allow PostgreSQL (5432) from your IP and EC2
-   - Allow HTTP (80) and HTTPS (443) for web traffic
-
-3. **Migrate Data**:
-   ```bash
-   # Backup local database
-   pg_dump -U mlinterviews -h localhost ml_interview_notes > backup.sql
-   
-   # Restore to RDS
-   psql -h <rds-endpoint> -U <username> -d ml_interview_notes -f backup.sql
-   ```
-
-4. **Deploy Application**:
-   - Clone repository on EC2
-   - Install dependencies (Python, Nginx, Gunicorn)
-   - Configure environment variables
-   - Set up systemd service
-   - Configure Nginx
-
-### Environment Variables
-
-Create a `.env` file for production:
-```bash
-DB_NAME=ml_interview_notes
-DB_USER=your_rds_username
-DB_PASSWORD=your_rds_password
-DB_HOST=your-rds-endpoint.region.rds.amazonaws.com
-DB_PORT=5432
-DEBUG=False
-SECRET_KEY=your-production-secret-key
-ALLOWED_HOSTS=your-domain.com,your-ec2-ip
-```
-
-## Database Management
-
-### Check Database Contents
-```bash
-python check_db.py
-```
-
-### Create Sample Data
-```bash
-python manage.py create_sample_data
-```
-
-### Backup Database
-```bash
-./scripts/backup_database.sh
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+Pushes to `main` trigger `.github/workflows/pages.yml`, which builds, runs the
+verification pass, and publishes to GitHub Pages. Pull requests run the same
+build and verification without deploying.
 
 ## License
 
-This project is open source and available under the [MIT License](LICENSE).
+Content and code are open source. Contributions are welcome — open an issue or a
+pull request.
