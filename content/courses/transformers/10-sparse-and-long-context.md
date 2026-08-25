@@ -415,7 +415,7 @@ flowchart TD
     P --> SPARSE["Content-based sparse<br/>DeepSeek V3.2, GLM-5"]
     M --> LIN["Linear attention<br/>Gated DeltaNet: Qwen3-Next, Kimi Linear"]
     M --> SSM["State-space models<br/>Mamba-2: Nemotron 3, Granite 4.0"]
-    SW --> HY["ALL of these ship as HYBRIDS<br/>a few full-attention layers always remain"]
+    SW --> HY["ALL of these ship as HYBRIDS<br/>full-attention capability is always retained somewhere"]
     SPARSE --> HY
     LIN --> HY
     SSM --> HY

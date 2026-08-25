@@ -331,9 +331,9 @@ training pipeline as well as the inference scaling strategies."
 
 ```mermaid
 flowchart LR
-    MHA["MHA<br/>H_kv = H<br/>cache 1x<br/>quality baseline"] --> GQA["GQA<br/>H_kv = 4 to 8<br/>cache 4-8x smaller<br/>quality approx equal"]
+    MHA["MHA<br/>H_kv = H<br/>cache 1x<br/>quality baseline"] --> GQA["GQA<br/>H_kv = 4 to 8<br/>cache H/H_kv x smaller (4-8x typical)<br/>quality approx equal"]
     GQA --> MQA["MQA<br/>H_kv = 1<br/>cache Hx smaller<br/>quality drops"]
-    MHA --> MLA["MLA<br/>latent d_c approx 512<br/>cache approx 50x smaller<br/>quality equal or better"]
+    MHA --> MLA["MLA<br/>latent d_c approx 512<br/>cache approx 57x smaller<br/>quality equal or better"]
 ```
 
 | | MHA | MQA | GQA | MLA |

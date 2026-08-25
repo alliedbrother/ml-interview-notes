@@ -16,7 +16,7 @@ model's knowledge lives.
 Its structure is simple. Two linear layers with a nonlinearity between:
 
 ```
-FFN(x) = W_2 · activation(W_1 · x + b_1) + b_2
+FFN(x) = activation(x · W_1 + b_1) · W_2 + b_2
 ```
 
 The playlist walks the exact shapes from the paper:
@@ -195,7 +195,7 @@ flowchart TD
         S1["x"] --> S2["W_gate"]
         S1 --> S3["W_up"]
         S2 --> S4["Swish"]
-        S4 --> S5(("x elementwise"))
+        S4 --> S5(("⊙"))
         S3 --> S5
         S5 --> S6["W_down<br/>contract"]
         S6 --> S7["out"]
