@@ -1,0 +1,2009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Profiling, roofline of a decode step, capacity planning — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i is-current" href="10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 10 · Benchmarking and performance engineering · 10-05</div>
+<h1>Profiling, roofline of a decode step, capacity planning</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/profiler/</code></li><li><code>python/sglang/profiler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A derived bound with no measurement beside it is a hypothesis. This chapter closes the
+loop opened in <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>:
+derive the floor for one decode step, capture a trace, attribute the gap kernel by kernel, and then
+turn the surviving number into a replica count and a price per million tokens.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Turn on vLLM's built-in performance metrics and the engine will start telling you how fast it is
+going. The log line is one <code>printf</code> in <code>vllm/v1/metrics/loggers.py</code>, fed by an
+analytic model in <code>vllm/v1/metrics/perf.py</code> whose module docstring says exactly what it is
+for:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/perf.py:L4-L7</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>"""
+Analytic flops/memory estimation module for transformer components,
+to help derive MFU (Model Flops Utilization) stats for a running model.
+"""</code></pre>
+</div>
+
+<p>Analytic. Not counted &mdash; multiplied out from the config, per scheduler step, in
+<code>vllm/v1/core/sched/scheduler.py:L1764-L1766</code>. That is the right design; counting real
+FLOPs would cost more than the model does. But it makes the number only as good as its arithmetic,
+and on Multi-head Latent Attention the arithmetic is wrong:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/perf.py:L670-L681</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # KV projection (always compressed, shared across heads)
+        # kv_a: h -&gt; (kv_lora_rank + qk_rope_head_dim)  [replicated]
+        flops["kv_a_proj"] = 2 * T * D * (c + r) * L
+        # kv_b: kv_lora_rank -&gt; num_heads * (qk_nope + v_head_dim)
+        flops["kv_b_proj"] = 2 * T * c * q * (self.qk_nope_head_dim + v_d) * L
+
+        # Attention core
+        flops["attn_qk"] = 2 * q * TC * qk_head_dim * L
+        flops["attn_av"] = 2 * q * TC * v_d * L
+
+        # Output projection: num_heads * v_head_dim -&gt; h
+        flops["out_proj"] = 2 * T * q * v_d * D * L</code></pre>
+</div>
+
+<p><code>qk_head_dim</code> is <code>qk_nope_head_dim + qk_rope_head_dim</code> = 192 for DeepSeek-V3,
+and <code>v_d</code> is 128. Those are the widths of the <em>un-absorbed</em> attention core.
+<a href="../07-architectures/07-02-mla-in-depth.html">&sect;7.2</a> walked one decode token through
+vLLM's real MLA path and found the kernel attending against a 576-wide latent row with a 512-wide
+value slice, because <code>forward_impl</code> folds $W_{UK}$ into the query before the kernel ever
+runs. The model charges 320 units of head width per context token; the hardware does 1,088. That
+finding was handed to this chapter to verify and price; it holds, with one correction that makes it
+cleaner. Section 6 has the arithmetic.</p>
+
+<p>That is the failure mode this chapter exists to prevent, in miniature: <strong>a number produced by
+a model nobody checked against the machine.</strong> The cure is not to distrust models &mdash; the
+whole book is models &mdash; but to pair every derived bound with a measurement and an explicit
+account of the difference.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Performance work on an inference engine is three steps in a fixed order, and the order is what makes
+it a method rather than a hunt. <strong>Derive</strong> the floor for the specific model, batch and
+context from &sect;0.4's roofline &mdash; this is pure arithmetic and takes two minutes.
+<strong>Measure</strong> one step under a trace. <strong>Attribute</strong> the gap: every microsecond
+between the floor and the measurement belongs to a named cause, and the trace tells you which.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Division of labour</span>
+  <p>This book does step 1. It has no GPU, so every number below is <em>derived</em> arithmetic or a
+  <em>cited</em> vendor spec, and none of it is measured. Steps 2 and 3 are
+  <a href="../LABS.html">Lab 10, <code>10-profile-a-decode-step</code></a>. A derived bound on its own
+  tells you what is <em>possible</em>; only the trace tells you what is <em>happening</em>. Never ship
+  a performance claim that has only one of the two.</p>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the loop.</b> The left branch is arithmetic and
+  costs minutes; the right branch is instrumentation and costs an afternoon. Doing them in the wrong
+  order is how afternoons disappear.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Fix the operating point<br/>Llama-3-8B bf16, TP=1, B=32, s=2048"] --> B["DERIVE the floor<br/>bytes 23.60 GB / 3.35 TB per s<br/>= 7.04 ms per step"]
+    B --> C["MEASURE one step<br/>torch.profiler via POST /start_profile"]
+    C --> D{"measured minus 7.04 ms"}
+    D -->|"gaps between kernels"| E["launch-bound<br/>330 launches x 2.374 us = 0.78 ms<br/>see 8.1"]
+    D -->|"one long kernel"| F["compute-bound kernel<br/>Nsight Compute: occupancy, roofline"]
+    D -->|"kernels back to back<br/>near peak DRAM throughput"| G["at the bound<br/>only fewer bytes helps"]
+    D -->|"kernels back to back<br/>far below peak"| H["occupancy or tail effect<br/>grid too small for 132 SMs"]
+    E --> Z["Attribution complete:<br/>every microsecond named"]
+    F --> Z
+    G --> Z
+    H --> Z
+  </script>
+</div>
+
+<p>The branch labels in Figure 1 are the whole diagnostic vocabulary. Four shapes, four causes. Section
+4 draws them.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">One decode step on the roofline, worked</h2></div><div class="sec__body"><p>Fix an operating point and never move it mid-analysis: <strong>Llama-3-8B, bf16, TP=1, one H100 SXM,
+batch $B = 32$, context $s = 2048$ tokens per sequence.</strong> Symbols follow
+<a href="../FORMULAS.html">FORMULAS</a>: $L=32$ layers, $d=4096$, $h=32$ query heads, $h_{kv}=8$,
+$d_h=128$, $b=2$ bytes, $\beta = 3.35$ TB/s and $\pi = 989.4$ TFLOP/s (cited NVIDIA peaks),
+$I^{*} = \pi/\beta = 295$ FLOP/byte.</p>
+
+<h3>Bytes</h3>
+
+<p>&sect;0.4 established that a decode step streams $\text{bytes}_{\text{weights}} = 15.01$ GB &mdash;
+7.50 B parameters at 2 bytes, the full 8.03 B count minus the input embedding table, which is
+<em>gathered</em> one row at a time rather than streamed. KV bytes come from the cell size
+$k = 2 L h_{kv} d_h b = 131{,}072$ bytes = 128 KiB per token, times the resident tokens
+$B \cdot s$.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap"><b>Derived</b> &mdash; compulsory HBM traffic for one decode step at
+  $B=32$, $s=2048$. Nothing measured.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Term</th><th>Expression</th><th class="num">Bytes</th><th class="num">Share</th></tr></thead>
+    <tbody>
+      <tr><td>Weights streamed</td><td>$2 \cdot 7.50\times10^{9}$</td><td class="num">15.01 GB</td><td class="num">63.6%</td></tr>
+      <tr><td>KV read</td><td>$k \cdot B \cdot s = 131072 \times 65536$</td><td class="num">8.590 GB</td><td class="num">36.4%</td></tr>
+      <tr><td>KV write</td><td>$k \cdot B$</td><td class="num">0.0042 GB</td><td class="num">0.02%</td></tr>
+      <tr><td><b>Total $Q$</b></td><td></td><td class="num"><b>23.60 GB</b></td><td class="num">100%</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Note what batching did to the mix. At batch 1 and short context, &sect;0.4 found 98% of the traffic
+was weights; at $B=32$, $s=2048$ the KV cache is already a third of it &mdash; which is the difference
+between "quantise the weights" and "quantise the KV" being the right next move.</p>
+
+<h3>FLOPs</h3>
+
+<p>From FORMULAS, cached decode costs $F = 2P + 4 L h d_h s$ per token, with $P = 7.50\times10^{9}$ the
+streamed parameter count. Per token: $1.500\times10^{10}$ for the GEMVs and
+$4 \times 32 \times 32 \times 128 \times 2048 = 1.074\times10^{9}$ for attention &mdash; attention is
+6.7% of decode FLOPs, matching
+<a href="../00-foundations/00-02-decode-loop-and-kv-cache.html">&sect;0.2</a>'s point that the cache
+saves weight GEMMs, not attention arithmetic. Times $B = 32$:</p>
+
+<div class="math-display">$$F = 32 \times (1.500\times10^{10} + 1.074\times10^{9}) = 5.144\times10^{11}\ \text{FLOP}.$$</div>
+
+<h3>Placing it, and the prediction</h3>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">7.04 ms</div><div class="kpi__l">Predicted step floor, $B$=32, $s$=2048 (derived)</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">4,542 tok/s</div><div class="kpi__l">Implied decode ceiling (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">21.8</div><div class="kpi__l">FLOP/byte &mdash; $13.5\times$ left of the 295 ridge</div></div>
+  <div class="kpi"><div class="kpi__n">7.4%</div><div class="kpi__l">MFU at the floor: 73.0 of 989.4 TFLOP/s</div></div>
+</div>
+
+<p>$I = F/Q = 5.144\times10^{11} / 2.360\times10^{10} = 21.8$ FLOP/byte, so
+$\min(\pi, \beta I) = \beta I = 73.0$ TFLOP/s and
+$t = Q/\beta = 2.360\times10^{10}/3.35\times10^{12} = 7.04$ ms. <strong>Even a perfect
+implementation of this operating point reaches 7.4% of the H100's bf16 peak.</strong> If someone
+demands 50% MFU on decode, the answer is not "optimise harder", it is "that number is
+unreachable by a factor of seven at this batch and context, and here is why".</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the worked decode step on the H100 SXM bf16
+  roofline, with the attribution budget drawn.</b> The filled dot is the derived prediction, which sits
+  <em>on</em> the bandwidth roof by construction. Any real measurement lands on or below it; the
+  vertical distance is exactly the time you have to account for. All coordinates derived; nothing
+  measured.</p>
+  <svg viewBox="0 0 880 540" width="100%" role="img" aria-labelledby="rl2Title rl2Desc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="rl2Title">Roofline with the worked Llama-3-8B decode step placed</title>
+    <desc id="rl2Desc">Log-log roofline for H100 SXM. The bandwidth roof of 3.35 terabytes per second
+    meets the 989 teraFLOP per second compute ceiling at intensity 295. The worked decode step at batch
+    32 and context 2048 sits at intensity 21.8 and 73 teraFLOP per second, on the bandwidth roof. A
+    shaded band below the point marks where any measured step must land, labelled the attribution
+    budget. Batch-1 decode at intensity 1 is marked for comparison.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.13" stroke-width="1">
+      <line x1="90" y1="60" x2="90" y2="470"/>
+      <line x1="240" y1="60" x2="240" y2="470"/>
+      <line x1="390" y1="60" x2="390" y2="470"/>
+      <line x1="540" y1="60" x2="540" y2="470"/>
+      <line x1="690" y1="60" x2="690" y2="470"/>
+      <line x1="840" y1="60" x2="840" y2="470"/>
+      <line x1="90" y1="470" x2="840" y2="470"/>
+      <line x1="90" y1="367.5" x2="840" y2="367.5"/>
+      <line x1="90" y1="265" x2="840" y2="265"/>
+      <line x1="90" y1="162.5" x2="840" y2="162.5"/>
+      <line x1="90" y1="60" x2="840" y2="60"/>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.55" stroke-width="1.4">
+      <line x1="90" y1="470" x2="840" y2="470"/>
+      <line x1="90" y1="60" x2="90" y2="470"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.62" font-size="12" text-anchor="middle">
+      <text x="90" y="490">0.1</text>
+      <text x="240" y="490">1</text>
+      <text x="390" y="490">10</text>
+      <text x="540" y="490">100</text>
+      <text x="690" y="490">1000</text>
+      <text x="840" y="490">10000</text>
+    </g>
+    <g fill="currentColor" fill-opacity="0.62" font-size="12" text-anchor="end">
+      <text x="80" y="474">0.1</text>
+      <text x="80" y="371.5">1</text>
+      <text x="80" y="269">10</text>
+      <text x="80" y="166.5">100</text>
+      <text x="80" y="64">1000</text>
+    </g>
+    <text x="465" y="516" fill="currentColor" fill-opacity="0.8" font-size="13" text-anchor="middle">arithmetic intensity I — FLOP per byte moved from HBM (log scale)</text>
+    <text x="26" y="265" fill="currentColor" fill-opacity="0.8" font-size="13" text-anchor="middle" transform="rotate(-90 26 265)">achievable TFLOP/s (log scale)</text>
+
+    <path d="M 90 416.2 L 610.5 60.5 L 840 60.5" fill="none" stroke="var(--teal)" stroke-width="2.6" stroke-linejoin="round"/>
+    <line x1="610.5" y1="60.5" x2="610.5" y2="470" stroke="var(--teal)" stroke-width="1.4" stroke-dasharray="5 5" stroke-opacity="0.7"/>
+    <text x="602" y="88" text-anchor="end" fill="var(--teal)" font-size="12.5">ridge I* = 295 FLOP/byte</text>
+
+    <rect x="425" y="176.5" width="32" height="240" fill="var(--plum)" fill-opacity="0.13"/>
+    <line x1="441" y1="176.5" x2="441" y2="416" stroke="var(--plum)" stroke-width="1.4" stroke-dasharray="4 4"/>
+    <path d="M 441 207 L 437 197 L 445 197 Z" fill="var(--plum)"/>
+
+    <circle cx="240" cy="313.7" r="5" fill="currentColor" fill-opacity="0.35"/>
+    <text x="250" y="330" fill="currentColor" fill-opacity="0.55" font-size="12">batch-1 decode, I = 1.0 (from §0.4)</text>
+
+    <circle cx="441" cy="176.5" r="7" fill="var(--copper)"/>
+    <g fill="currentColor" font-size="12.5">
+      <text x="458" y="150">Llama-3-8B decode, B = 32, s = 2048</text>
+      <text x="458" y="166" fill-opacity="0.72">I = 21.8, 73.0 TFLOP/s, 7.04 ms/step — PREDICTED</text>
+      <text x="470" y="243" fill="var(--plum)">attribution budget</text>
+      <text x="470" y="259" fill="var(--plum)" fill-opacity="0.75">every measured step lands in here;</text>
+      <text x="470" y="275" fill="var(--plum)" fill-opacity="0.75">the trace says which cause owns each gap</text>
+    </g>
+    <text x="112" y="452" fill="var(--teal)" font-size="12">memory bound</text>
+    <text x="822" y="452" fill="var(--teal)" font-size="12" text-anchor="end">compute bound</text>
+    <text x="106" y="104" fill="currentColor" fill-opacity="0.45" font-size="12">unattainable — above the roof</text>
+  </svg>
+</div>
+
+<h3>What a measurement would have to show</h3>
+
+<p>Three quantities are checkable independently, and each plausible gap has a distinct signature.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The confirm/refute table for the operating point above. Left column
+  <b>derived</b>; right column is what Lab 10 must produce.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Prediction</th><th class="num">Value</th><th>Refuted if the trace shows&hellip;</th></tr></thead>
+    <tbody>
+      <tr><td>Step wall time</td><td class="num">&ge; 7.04 ms</td><td>anything <em>below</em> 7.04 ms &mdash; then $\beta$ or the byte model is wrong, most likely because prefix caching or an L2-resident weight slice made some traffic non-compulsory</td></tr>
+      <tr><td>Sum of kernel durations</td><td class="num">&asymp; 7.04 ms</td><td>much less &mdash; the missing time is host-side, i.e. launch-bound</td></tr>
+      <tr><td>DRAM throughput on the GEMV kernels</td><td class="num">near 3.35 TB/s</td><td>far below with kernels back-to-back &mdash; occupancy or tail effect, not bandwidth</td></tr>
+      <tr><td>Bytes actually moved</td><td class="num">23.60 GB</td><td>materially more &mdash; extra traffic: an unfused residual, a dtype cast, a KV layout that reads whole pages for partial rows</td></tr>
+      <tr><td>Launch overhead share</td><td class="num">&le; 0.78 ms (11%)</td><td>more &mdash; framework cost above the 2.374 &micro;s driver floor; see <a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">&sect;8.1</a></td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>The launch-overhead row is where this operating point diverges from &sect;8.1's.
+<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">&sect;8.1</a> derived 330 kernel
+launches for a TP=1 Llama-3-8B step against a <em>cited</em> driver-only 2.374 &micro;s per
+<code>cudaLaunchKernel</code> (Vellaisamy et al., ISPASS 2025,
+<a href="https://arxiv.org/abs/2504.11750">arXiv:2504.11750</a>, Table V) &mdash; 0.78 ms of host
+time. That was 17% of &sect;8.1's 4.48 ms batch-1 step and "marginal"; it is 11% of this one and
+comfortably hidden. <strong>Batching buys launch headroom as well as throughput.</strong> The other
+direction is the dangerous one: at TP=8 device work falls to roughly an eighth while the launch count
+<em>rises</em> to 395, giving 0.94 ms of launches against 0.56 ms of work &mdash; launch-bound before
+Python is considered. Derive first and you know which world you are in.</p></div></section>
+<section class="sec" id="reading-a-trace" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Reading a trace: four shapes, four diagnoses</h2></div><div class="sec__body"><p>A decode-step trace has two lanes that matter: a host lane of <code>cudaLaunchKernel</code> calls and
+a device lane of kernels. Everything diagnosable is a relationship between them.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the four diagnosable decode-step shapes.</b>
+  Schematic, not a capture: these are the geometries the two lanes can take, drawn from the cost model,
+  not from a profile. Bar widths are illustrative within each lane.</p>
+  <svg viewBox="0 0 900 470" width="100%" role="img" aria-labelledby="shTitle shDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="shTitle">Four decode-step trace shapes</title>
+    <desc id="shDesc">Four stacked pairs of lanes, each a CPU launch lane above a GPU kernel lane.
+    Launch-bound shows a packed CPU lane and a GPU lane full of gaps. Bandwidth-bound shows a sparse
+    CPU lane and a GPU lane of long back-to-back kernels at peak memory throughput. Compute-bound shows
+    one very long kernel dominating the GPU lane. Occupancy-limited shows back-to-back kernels well
+    below peak throughput with idle streaming multiprocessors.</desc>
+
+    <g font-size="12.5" fill="currentColor">
+      <text x="10" y="34" font-size="13.5" fill="var(--plum)">1 · LAUNCH-BOUND</text>
+      <text x="10" y="52" fill-opacity="0.7">gaps between kernels; CPU lane saturated</text>
+      <text x="10" y="146" font-size="13.5" fill="var(--teal)">2 · BANDWIDTH-BOUND — the healthy decode step</text>
+      <text x="10" y="164" fill-opacity="0.7">kernels back to back, DRAM throughput near 3.35 TB/s</text>
+      <text x="10" y="258" font-size="13.5" fill="var(--copper)">3 · COMPUTE-BOUND</text>
+      <text x="10" y="276" fill-opacity="0.7">one kernel dominates; DRAM idle inside it</text>
+      <text x="10" y="370" font-size="13.5" fill="var(--copper)">4 · OCCUPANCY-LIMITED</text>
+      <text x="10" y="388" fill-opacity="0.7">back to back but far below any roof; grid too small for 132 SMs</text>
+    </g>
+
+    <g font-size="11" fill="currentColor" fill-opacity="0.55" text-anchor="end">
+      <text x="86" y="76">CPU</text><text x="86" y="102">GPU</text>
+      <text x="86" y="188">CPU</text><text x="86" y="214">GPU</text>
+      <text x="86" y="300">CPU</text><text x="86" y="326">GPU</text>
+      <text x="86" y="412">CPU</text><text x="86" y="438">GPU</text>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.12" fill="none">
+      <rect x="94" y="60" width="796" height="22"/><rect x="94" y="86" width="796" height="22"/>
+      <rect x="94" y="172" width="796" height="22"/><rect x="94" y="198" width="796" height="22"/>
+      <rect x="94" y="284" width="796" height="22"/><rect x="94" y="310" width="796" height="22"/>
+      <rect x="94" y="396" width="796" height="22"/><rect x="94" y="422" width="796" height="22"/>
+    </g>
+
+    <g fill="var(--plum)">
+      <rect x="96" y="62" width="786" height="18" fill-opacity="0.55"/>
+      <rect x="96" y="88" width="46" height="18"/><rect x="166" y="88" width="46" height="18"/>
+      <rect x="236" y="88" width="46" height="18"/><rect x="306" y="88" width="46" height="18"/>
+      <rect x="376" y="88" width="46" height="18"/><rect x="446" y="88" width="46" height="18"/>
+      <rect x="516" y="88" width="46" height="18"/><rect x="586" y="88" width="46" height="18"/>
+      <rect x="656" y="88" width="46" height="18"/><rect x="726" y="88" width="46" height="18"/>
+      <rect x="796" y="88" width="46" height="18"/>
+    </g>
+    <text x="890" y="76" text-anchor="end" font-size="11" fill="var(--plum)">330 x 2.374 us of driver time, saturated</text>
+    <text x="890" y="102" text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.6">GPU idle in every gap — fix with CUDA graphs, §8.1</text>
+
+    <g fill="var(--teal)">
+      <rect x="96" y="174" width="12" height="18"/><rect x="118" y="174" width="12" height="18"/>
+      <rect x="140" y="174" width="12" height="18"/><rect x="162" y="174" width="12" height="18"/>
+      <rect x="96" y="200" width="152" height="18"/><rect x="252" y="200" width="118" height="18"/>
+      <rect x="374" y="200" width="152" height="18"/><rect x="530" y="200" width="118" height="18"/>
+      <rect x="652" y="200" width="152" height="18"/><rect x="808" y="200" width="74" height="18"/>
+    </g>
+    <text x="890" y="188" text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.6">host runs ahead; launches queued long before they execute</text>
+
+    <g fill="var(--copper)">
+      <rect x="96" y="286" width="10" height="18"/><rect x="116" y="286" width="10" height="18"/>
+      <rect x="96" y="312" width="60" height="18"/>
+      <rect x="162" y="312" width="600" height="18"/>
+      <rect x="768" y="312" width="60" height="18"/>
+    </g>
+    <text x="462" y="326" text-anchor="middle" font-size="11" fill="var(--bg, #fff)" fill-opacity="0.9">one kernel — take it to Nsight Compute</text>
+
+    <g fill="var(--copper)" fill-opacity="0.45">
+      <rect x="96" y="398" width="10" height="18"/><rect x="116" y="398" width="10" height="18"/>
+      <rect x="96" y="424" width="140" height="18"/><rect x="240" y="424" width="140" height="18"/>
+      <rect x="384" y="424" width="140" height="18"/><rect x="528" y="424" width="140" height="18"/>
+      <rect x="672" y="424" width="140" height="18"/>
+    </g>
+    <text x="890" y="412" text-anchor="end" font-size="11" fill="currentColor" fill-opacity="0.6">looks like shape 2 in the timeline — only per-kernel counters tell them apart</text>
+  </svg>
+</div>
+
+<p>The decision procedure is mechanical. <strong>Is the GPU lane gappy?</strong> If yes, and the host
+lane is dense, you are launch-bound; nothing about the kernels matters until you fix that, and
+&sect;8.1 owns the fix. <strong>If the GPU lane is dense, is one kernel most of it?</strong> If yes,
+that kernel is your entire problem &mdash; take its name to Nsight Compute. <strong>If neither, are the
+kernels near a roof?</strong> Only per-kernel counters answer that, and this is exactly the question
+where using the wrong tool costs an afternoon: shapes 2 and 4 are visually identical in a timeline and
+differ only in achieved DRAM throughput. Shape 2 means you are done and the only lever left is fewer
+bytes. Shape 4 means the kernel is leaving the machine idle; for decode the usual cause is the
+FlashAttention-2 grid, which at query length 1 is $\text{batch} \times h$ blocks &mdash; 1,024 at
+$B=32$, $h=32$, but only 128 at $B=4$, under-filling 132 SMs before the kernel starts.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">torch.profiler</span><h4>Which op, and how long</h4>
+  <p>Op-level attribution with CPU and CUDA times, a Chrome/Perfetto trace, and (with
+  <code>record_shapes</code>) tensor shapes. Answers <em>where does the time go by operator</em>. Both
+  engines drive it. It does not tell you why a kernel is slow.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Nsight Systems</span><h4>Timeline, gaps, NCCL</h4>
+  <p>System-wide timeline including the CUDA driver, NVTX ranges and NCCL collectives across ranks.
+  Answers <em>is the GPU idle, and who is waiting for whom</em>. The only tool that shows a TP=8 rank
+  skew or an all-reduce that arrived late. Attach it with <code>nsys profile -c cudaProfilerApi</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Nsight Compute</span><h4>Why this kernel is slow</h4>
+  <p>Per-kernel achieved occupancy, DRAM throughput, and its own roofline. Answers <em>is this kernel
+  at a roof, and which one</em>. Replays each kernel many times, so it is unusable on a live serving
+  loop &mdash; isolate the kernel first.</p></div>
+</div>
+
+<p>Pick by question, not by habit. "The step is 40% slower than the floor" is a Systems question.
+"This attention kernel is 40% of the step" is a Compute question. "Which op is 40% of the step" is a
+torch.profiler question.</p></div></section>
+<section class="sec" id="production" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Turning profiling on, in each engine</h2></div><div class="sec__body"><p>Both engines expose <code>torch.profiler</code> behind an HTTP endpoint, and differ in one
+instructive way.</p>
+
+<h3>vLLM: configure at launch, arm at runtime</h3>
+
+<p>As of <code>a556f3f</code>, vLLM's profiling is a config object, not an environment variable &mdash;
+the old <code>VLLM_TORCH_PROFILER_DIR</code> is gone from <code>vllm/envs.py</code> and a
+<code>ProfilerConfig</code> has taken its place:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/profiler.py:L42-L52</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    profiler: ProfilerKind | None = None
+    """Which profiler to use. Defaults to None. Options are:
+
+    - 'torch': Use PyTorch profiler.
+    - 'cuda': Use CUDA profiler.
+    - 'proton': Use Triton Proton profiler."""
+
+    torch_profiler_dir: str = ""
+    """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
+    worker's traces (CPU &amp; GPU) will be saved under this directory. Note that
+    it must be an absolute path."""</code></pre>
+</div>
+
+<p>Forget to set it and the engine tells you the exact flags, which is the friendliest error string in
+this part of the codebase:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_worker.py:L1146-L1153</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        # Check if profiling is enabled
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"</code></pre>
+</div>
+
+<p>The endpoints are two bare POSTs, attached to the app only when a profiler is configured:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/serve/profile/api_router.py:L21-L34</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@router.post("/start_profile")
+async def start_profile(raw_request: Request):
+    logger.info("Starting profiler...")
+    await engine_client(raw_request).start_profile()
+    logger.info("Profiler started.")
+    return Response(status_code=200)
+
+
+@router.post("/stop_profile")
+async def stop_profile(raw_request: Request):
+    logger.info("Stopping profiler...")
+    await engine_client(raw_request).stop_profile()
+    logger.info("Profiler stopped.")
+    return Response(status_code=200)</code></pre>
+</div>
+
+<p>Both take no body. <em>When</em> to capture is decided at launch instead, through
+<code>delay_iterations</code>, <code>max_iterations</code>, and a <code>torch.profiler.schedule</code>
+built from <code>wait_iterations</code> / <code>warmup_iterations</code> /
+<code>active_iterations</code> (default 5) in <code>vllm/profiler/wrapper.py:L215-L232</code>. The
+per-step bookkeeping lives in <code>WorkerProfiler.step</code>
+(<code>vllm/profiler/wrapper.py:L97-L129</code>), which counts iterations, starts after the delay and
+auto-stops once <code>max_iterations</code> of <em>recorded</em> steps have elapsed. Without it, a
+capture on a busy server is gigabytes of trace with no way to find the step you wanted.</p>
+
+<h3>SGLang: describe the capture in the request</h3>
+
+<p>SGLang puts the same knobs in the POST body. <code>python/sglang/profiler.py</code> is a thin client
+that builds the request and blocks until the trace is flushed:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/profiler.py:L51-L65</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Start profiler. The API replies when all steps are processed
+    # and files are generated.
+    json_data = {
+        "output_dir": str(output_dir),
+        "num_steps": str(num_steps),
+        "activities": activities,
+        "profile_by_stage": profile_by_stage,
+        "merge_profiles": merge_profiles,
+        "profile_prefix": profile_prefix,
+    }
+    if start_step is not None:
+        json_data["start_step"] = str(start_step)
+
+    response = requests.post(url=url + "/start_profile", json=json_data)
+    response.raise_for_status()</code></pre>
+</div>
+
+<p><code>activities</code> is a list from <code>["CPU", "GPU", "MEM", "RPD"]</code>
+(<code>python/sglang/srt/managers/io_struct.py:L2073-L2074</code>), plus <code>"CUDA_PROFILER"</code>
+handled separately. The scheduler arms and disarms by forward-pass counter, checked once per batch:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/profiler_manager.py:L436-L446</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            # Check profiler
+            if (
+                self.profiler_target_forward_ct
+                and self.profiler_target_forward_ct &lt;= self.get_forward_ct()
+            ):
+                self._stop_profile()
+            if (
+                self.profiler_start_forward_ct
+                and self.profiler_start_forward_ct == self.get_forward_ct()
+            ):
+                self._start_profile()</code></pre>
+</div>
+
+<p>The call site is <code>python/sglang/srt/managers/scheduler.py:L3723-L3724</code>, inside the
+batch-run path, so <code>start_step</code> counts forward passes, not requests. SGLang also has
+<code>profile_by_stage</code>, which no vLLM flag matches: it starts a fresh profile the first time it
+sees a prefill batch and another the first time it sees a decode batch, force-flushing the prefill
+trace in between (same file, L413-L430). On a continuously-batched server that is the difference
+between one trace containing both phases mixed and two traces you can read.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Where they differ, and why</span>
+  <p>vLLM binds the capture window at launch and keeps the endpoint stateless; SGLang binds it per
+  request. vLLM's shape suits a fixed benchmark harness (<code>vllm/benchmarks/latency.py:L125-L129</code>
+  wraps one run in <code>start_profile()</code>/<code>stop_profile()</code>); SGLang's suits poking a
+  running server from a laptop, which is exactly what <code>python3 -m sglang.profiler</code> is. Both
+  warn you off production: vLLM logs <em>"Profiler with mode '%s' is enabled in the API server. This
+  should ONLY be used for local development!"</em>
+  (<code>vllm/entrypoints/serve/profile/api_router.py:L41-L45</code>).</p>
+</div>
+
+<h3>The annotations are the reason the trace is readable</h3>
+
+<p>A raw kernel timeline cannot tell you what the batch <em>was</em>. Both engines solve this by naming
+the per-step trace span after the batch composition. SGLang wraps every
+<code>ModelRunner.forward</code> in a span built here:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/profile_utils.py:L476-L487</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    mode = forward_batch.forward_mode
+    bs = forward_batch.batch_size
+    if mode == ForwardMode.EXTEND:
+        ext_toks = forward_batch.extend_num_tokens or 0
+        base = f"step[EXTEND bs={bs} toks={ext_toks}"
+    else:
+        base = f"step[{mode.name} bs={bs}"
+
+    if detailed_annotations:
+        suffix = build_detailed_annotation_suffix(forward_batch)
+        if suffix:
+            base = f"{base} {suffix}"</code></pre>
+</div>
+
+<p>With <code>detailed_annotations</code> on, a decode span also carries four aggregates whose names
+are worth memorising, because they are the roofline inputs:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/step_span_utils.py:L92-L102</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if mode == ForwardMode.DECODE or mode == ForwardMode.TARGET_VERIFY:
+        if seq_lens_cpu is None:
+            return ""
+        nq = _decode_query_width(forward_batch)
+        nkvs = [int(x) for x in seq_lens_cpu.tolist()]
+        nqs = [nq] * len(nkvs)
+        sq, sk, sqsq, sqsk = _agg(nqs, nkvs)
+        # ``sq`` is always emitted (self-contained suffix): it equals ``bs``
+        # (vanilla decode) or ``bs * num_tokens_per_req`` (spec draft-decode /
+        # target-verify).
+        return f"g_sq={sq} g_sqsq={sqsq} g_sqsk={sqsk} g_sk={sk}"</code></pre>
+</div>
+
+<p>$\Sigma N_Q$, $\Sigma N_{KV}$, $\Sigma N_Q^2$, $\Sigma N_Q N_{KV}$. The last one is the token-context
+product &mdash; the exact quantity attention FLOPs are linear in. vLLM emits the same four under
+different spelling: <code>sq</code>, <code>sk</code>, <code>sqsq</code>, <code>sqsk</code>, split into
+<code>context</code> and <code>generation</code> groups, assembled in
+<code>vllm/v1/worker/gpu_worker.py:L1000-L1024</code> behind
+<code>--profiler-config.detailed_trace_annotation</code>. Two projects independently landing on the same
+four aggregates is decent evidence they are the right four. <strong>Turn detailed annotations on and
+every step span carries its own roofline inputs</strong>, so you re-derive the floor for the batch
+that step actually ran rather than the batch you assumed.</p>
+
+<h3>Worked trace: one POST to one trace file</h3>
+
+<p>The whole vLLM path, in order, so you know where to put a breakpoint when nothing appears in your
+trace directory:</p>
+
+<ol>
+  <li><code>start_profile</code> handles the POST and calls
+  <code>engine_client(raw_request).start_profile()</code>
+  (<code>vllm/entrypoints/serve/profile/api_router.py:L22-L24</code>).</li>
+  <li><code>AsyncLLM.start_profile</code> fans out: an
+  <code>engine_core.profile_async(True, profile_prefix)</code> RPC to every worker, plus
+  <code>self.profiler.start</code> on a thread for the front-end CPU trace unless
+  <code>ignore_frontend</code> is set (<code>vllm/v1/engine/async_llm.py:L945-L949</code>).</li>
+  <li>In each worker, <code>Worker.profile(is_start=True)</code> raises if no profiler is configured,
+  builds the rank-qualified trace name from <code>get_worker_rank_suffix</code>, constructs a
+  <code>TorchProfilerWrapper</code> on first call, and calls <code>.start()</code>
+  (<code>vllm/v1/worker/gpu_worker.py:L1146-L1199</code>).</li>
+  <li><code>WorkerProfiler.start</code> sets <code>_active</code> and, if
+  <code>delay_iterations == 0</code>, calls <code>_call_start</code> &rarr;
+  <code>TorchProfilerWrapper._start</code> &rarr; <code>torch.profiler.profile.start()</code>
+  (<code>vllm/profiler/wrapper.py:L85-L95</code>, <code>L68-L74</code>, <code>L302-L306</code>).</li>
+  <li>Every subsequent step, <code>Worker.annotate_profile(scheduler_output)</code> calls
+  <code>self.profiler.step()</code> for the delay/limit bookkeeping and returns the annotation context
+  manager that wraps the forward &mdash; a <code>record_function</code> for the torch profiler, an NVTX
+  range for the CUDA one (<code>vllm/v1/worker/gpu_worker.py:L930-L942</code>).</li>
+  <li><code>stop_profile</code> unwinds the same path to
+  <code>TorchProfilerWrapper._stop</code>, which stops Kineto, optionally builds the
+  <code>self_cuda_time_total</code> table, and lets
+  <code>tensorboard_trace_handler</code> write the gzipped trace
+  (<code>vllm/profiler/wrapper.py:L309-L332</code>).</li>
+</ol>
+
+<p>Two failure points live in that chain. If step 3 raises, you get the flag-naming
+<code>RuntimeError</code> quoted above and nothing else happens. If <code>max_iterations</code> fires
+in step 5, <code>_call_stop</code> runs without your ever calling <code>/stop_profile</code>, and a
+later stop logs <em>"Profiler was not started, nothing to stop."</em> &mdash; which reads like a bug
+and is not one.</p>
+
+<h3>Nsight Systems on a live server</h3>
+
+<p>The <code>"cuda"</code> profiler kind in vLLM is a two-line wrapper around
+<code>torch.cuda.profiler.start()</code>/<code>.stop()</code> whose annotation context manager is
+<code>torch.cuda.nvtx.range(name)</code> (<code>vllm/profiler/wrapper.py:L472-L489</code>). SGLang's
+equivalent is the <code>"CUDA_PROFILER"</code> activity, and its log message says the quiet part out
+loud:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/one_batch.py:L121-L126</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if "CUDA_PROFILER" in profile_activities:
+        try:
+            torch.cuda.cudart().cudaProfilerStart()
+            rank_print("CUDA Profiler started (nsys will begin capturing)")
+        except Exception as e:
+            rank_print(f"Failed to start CUDA profiler: {e}")</code></pre>
+</div>
+
+<p>Neither engine launches <code>nsys</code>; you wrap the server in it and let the endpoint trip the
+capture range. SGLang's own test spells out the invocation
+(<code>test/registered/profiling/test_start_profile.py:L233-L241</code>): <code>nsys profile -c
+cudaProfilerApi --capture-range-end stop -o OUT python3 -m sglang.launch_server ...</code>. vLLM ships
+a post-processing tool for the result under <code>tools/profiler/nsys_profile_tools/gputrc2graph.py</code>,
+which shells out to <code>nsys stats -r cuda_gpu_kern_trace</code> and computes non-overlapped GPU
+cycles per kernel &mdash; the number you actually want, because overlapping kernels double-count in a
+naive sum.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I found no Nsight <em>Compute</em> (<code>ncu</code>) integration in either tree at these SHAs:
+  <code>grep -rni "ncu\|nsight"</code> over both repositories returns only Nsight Systems references
+  (<code>tools/profiler/nsys_profile_tools/</code> in vLLM,
+  <code>test/registered/profiling/test_start_profile.py</code> in SGLang). If a per-kernel counter hook
+  exists it is likely under <code>vllm/profiler/</code> or
+  <code>python/sglang/srt/utils/profile_utils.py</code>; I read both and did not see one. Treat
+  Nsight Compute as an external tool you point at an isolated kernel, not something the server drives.</p>
+</div></div></section>
+<section class="sec" id="mla-flop-bug" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The MLA FLOP model, verified and corrected</h2></div><div class="sec__body"><p>Now back to the opening. &sect;7.2 flagged two defects in <code>MLAAttentionMetrics</code>. Reading
+the code against &sect;7.2's own trace of the absorbed decode path, <strong>one holds exactly and one
+needs correcting &mdash; and the correction makes the remaining error cleaner, not smaller.</strong></p>
+
+<p><b>The attention core is under-counted by exactly 3.4&times;.</b> Confirmed.
+<code>attn_qk</code> charges <code>qk_head_dim</code> = $d_{\text{nope}} + d_{\text{rope}}$ = 192 and
+<code>attn_av</code> charges <code>v_head_dim</code> = 128, for $2(192+128) = 640$ FLOP per head per
+context token. &sect;7.2's trace of <code>forward_impl</code> shows the decode kernel receiving a
+576-wide query (concat of the 512-wide folded $\tilde q$ and the 64-wide $q^{\text{pe}}$) against the
+576-wide latent cache row, with V the leading 512-wide slice: $2(576+512) = 2{,}176$ FLOP per head per
+context token. $2176/640 = 3.4$.</p>
+
+<p><b>The spurious <code>kv_b_proj</code> charge is, arithmetically, not spurious.</b> &sect;7.2 is
+right that the absorbed path never calls <code>kv_b_proj</code>. But it runs two <code>bmm</code>s
+instead &mdash; the q-fold $2h\,d_{\text{nope}}r_{kv}$ and the v-fold $2h\,r_{kv}d_v$ &mdash; whose sum
+is $2h\,r_{kv}(d_{\text{nope}}+d_v)$, <em>identically</em> the product
+<code>2 * T * c * q * (qk_nope + v_d)</code> the model bills. For DeepSeek-V3 both come to 33.55 MFLOP
+per layer per token. That line is mislabelled but numerically correct, so the entire error is the
+attention core &mdash; one term, one constant factor. That is a better bug report than "two things are
+wrong".</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap"><b>Derived.</b> DeepSeek-V3 ($L$=61, $h$=128, $r_{kv}$=512,
+  $d_{\text{rope}}$=64, $d_{\text{nope}}$=$d_v$=128, $D$=7168, $q_{\text{lora}}$=1536), one decode
+  token, $s$ = 4,096, before TP division. Model FLOPs from <code>get_num_flops_breakdown</code>;
+  "actual" from &sect;7.2's traced shapes. &sect;7.2 independently derives the same 69.6 GFLOP core.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Term</th><th class="num">vLLM model</th><th class="num">Actual</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td><code>q_a_proj</code> + <code>q_b_proj</code></td><td class="num">5.95 GFLOP</td><td class="num">5.95 GFLOP</td><td>correct</td></tr>
+      <tr><td><code>kv_a_proj</code></td><td class="num">0.50 GFLOP</td><td class="num">0.50 GFLOP</td><td>correct</td></tr>
+      <tr><td><code>kv_b_proj</code></td><td class="num">2.05 GFLOP</td><td class="num">2.05 GFLOP</td><td>mislabelled &mdash; it is the q-fold + v-fold <code>bmm</code>s, same product</td></tr>
+      <tr><td><code>attn_qk</code> + <code>attn_av</code></td><td class="num">20.47 GFLOP</td><td class="num"><b>69.59 GFLOP</b></td><td><b>under-counted 3.4&times;</b></td></tr>
+      <tr><td><code>out_proj</code></td><td class="num">14.33 GFLOP</td><td class="num">14.33 GFLOP</td><td>correct</td></tr>
+      <tr><td><b>MLA block total</b></td><td class="num"><b>43.30 GFLOP</b></td><td class="num"><b>92.42 GFLOP</b></td><td><b>2.13&times;</b></td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>What that does to a reported MFU depends on context length, because the error is on the only term
+that scales with $s$. DeepSeek-V3 activates about 37 B parameters per token, so the non-attention work
+is roughly $2 \times 37\times10^{9} = 74$ GFLOP per decode token and is unaffected. Reported total
+versus true total:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap"><b>Derived.</b> Factor by which the true achieved FLOP/s exceeds what
+  <code>vllm:estimated_flops_per_gpu_total</code> reports for DeepSeek-V3 decode. Approximately
+  invariant under tensor parallelism, since both core terms divide by TP together.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th class="num">Context $s$</th><th class="num">Reported</th><th class="num">Actual</th><th class="num">True / reported</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1,024</td><td class="num">79.1 GFLOP</td><td class="num">91.4 GFLOP</td><td class="num">1.16&times;</td></tr>
+      <tr><td class="num">4,096</td><td class="num">94.5 GFLOP</td><td class="num">143.6 GFLOP</td><td class="num">1.52&times;</td></tr>
+      <tr><td class="num">16,384</td><td class="num">155.9 GFLOP</td><td class="num">352.4 GFLOP</td><td class="num">2.26&times;</td></tr>
+      <tr><td class="num">65,536</td><td class="num">401.5 GFLOP</td><td class="num">1,187 GFLOP</td><td class="num">2.96&times;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p><strong>If you are tuning a DeepSeek deployment against vLLM's reported TFLOP/s, at 16k context you
+are reading a number 2.3&times; too low, and the error grows with your context window.</strong> The
+consequence is a wrong decision: you conclude there is tensor-core headroom that does not exist and
+spend a week chasing it. The byte model is right &mdash; <code>get_read_bytes_breakdown</code> reads
+<code>kv_compressed_dim</code> = $r_{kv}+d_{\text{rope}}$ from cache on the decode path
+(<code>vllm/v1/metrics/perf.py:L747-L751</code>) &mdash; which is why the GB/s half of the log line can
+be trusted while the TF/s half cannot.</p>
+
+<p>The unit test that covers MLA decode
+(<code>tests/v1/metrics/test_perf_metrics.py:L1056-L1087</code>) asserts only on
+<code>get_write_bytes_breakdown</code> and <code>get_read_bytes_breakdown</code>; the FLOP breakdown is
+asserted only in the <em>prefill</em> test at L1118-L1122, where the un-absorbed 192/128 geometry is
+correct. <strong>The decode FLOP path is untested.</strong> That is the shape of the upstream issue:
+one term, one constant, one missing test.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">The correct arithmetic</span>
+  <p>For an absorbed MLA decode step, replace <code>qk_head_dim</code> with
+  $r_{kv} + d_{\text{rope}}$ and <code>v_head_dim</code> with $r_{kv}$, i.e.
+  $F_{\text{core}} = 2\,q\,\text{TC}\,L\,\big[(r_{kv}+d_{\text{rope}}) + r_{kv}\big]$, and relabel
+  <code>kv_b_proj</code> as the absorbed folds. Prefill keeps the existing 192/128 form, because
+  &sect;7.2 shows the MHA branch decompresses. A correct model therefore has to branch on
+  <code>ctx.decode_num_tokens &gt; 0</code> exactly as <code>get_read_bytes_breakdown</code> already
+  does &mdash; the FLOP function simply never learned the trick its own byte function knows.</p>
+</div></div></section>
+<section class="sec" id="capacity" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Capacity planning, end to end</h2></div><div class="sec__body"><p>Everything above prices one step. Capacity planning is the arithmetic that turns a step time into a
+replica count and a bill. Here is the template, worked. Change the six inputs and it re-runs.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The six inputs. Everything downstream is derived from these plus the
+  book's H100 constants.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Input</th><th>Value</th><th>Owner</th></tr></thead>
+    <tbody>
+      <tr><td>Model &amp; parallelism</td><td>Llama-3-8B bf16, TP=1, one H100 SXM</td><td>&mdash;</td></tr>
+      <tr><td>Workload</td><td>mean prompt 1,800 tok, mean output 220 tok</td><td><a href="10-01-workload-characterization.html">&sect;10.1</a></td></tr>
+      <tr><td>SLO</td><td>p99 TTFT &le; 900 ms, p99 ITL &le; 60 ms</td><td><a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a></td></tr>
+      <tr><td>Peak demand</td><td>240 req/s</td><td>product</td></tr>
+      <tr><td>Prefill efficiency</td><td><b>assumed 40% MFU</b> &mdash; a planning placeholder, not a measurement</td><td>Lab 11 replaces it</td></tr>
+      <tr><td>Price</td><td>$3.00 per GPU-hour (stated input; substitute yours)</td><td>finance</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p><b>Step 1 &mdash; concurrency from the KV budget.</b>
+<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> derives a 52.32 GiB KV
+pool for this deployment, holding 428,569 tokens at 128 KiB each. A request's mean resident context
+over its life is $1800 + 220/2 = 1{,}910$ tokens, so
+$B_{\max} = \lfloor 428{,}569 / 1{,}910 \rfloor = 224$ concurrent sequences.</p>
+
+<p><b>Step 2 &mdash; price a step at that batch.</b> Step bytes at $B=224$, $\bar s = 1910$:
+$15.01 + 224 \times 1910 \times 131072 = 71.09$ GB, so $t = 71.09/3.35 = 21.2$ ms, and decode
+throughput is $224 / 21.2\ \text{ms} = 10{,}556$ tok/s. Note that 21.2 ms is the <em>step</em> time,
+not the ITL a user sees: the reader's ITL is the step time divided by the fraction of wall clock the
+replica spends in decode rather than in someone else's prefill. Step 5 comes back to that.</p>
+
+<p><b>Step 3 &mdash; price the prefill.</b> $F_{\text{prefill}}(1800) = 2PS + 2Lhd_hS^2 =
+2.700\times10^{13} + 8.49\times10^{11} = 2.785\times10^{13}$ FLOP. At the assumed 40% of 989.4
+TFLOP/s that is 70.4 ms per request. Prefill is above the ridge, so it is compute-bound and the MFU
+assumption is doing real work here &mdash; it is the softest number on the page. Replacing it is
+<a href="../LABS.html">Lab 11, <code>11-end-to-end-benchmark</code></a>'s job, not Lab 10's: prefill
+MFU is a saturated-throughput measurement over a realistic workload on 80&nbsp;GB-class hardware,
+whereas Lab 10 is deliberately one decode iteration on a 24&nbsp;GB card and has no prefill mode.</p>
+
+<p><b>Step 4 &mdash; the GPU-time budget.</b> Prefill and decode contend for the same card. Per request
+the replica spends 70.4 ms of prefill plus $220/10{,}556 = 20.8$ ms of decode share: 91.2 ms.
+Saturation is $1000/91.2 = 10.96$ req/s. <strong>Prefill is 77% of the GPU time at this input/output
+ratio</strong> &mdash; a result that surprises people who assume decode dominates because decode
+dominates <em>latency</em>.</p>
+
+<p><b>Step 5 &mdash; headroom for burst.</b> &sect;1.2's $W_{p99} = S\ln(100\rho)/(1-\rho)$ with
+$S = 70.4$ ms and a 900 ms budget requires $\ln(100\rho)/(1-\rho) \le 11.78$, so
+$\rho^{*} = 0.645$ and sustainable load is $0.645 \times 10.96 = 7.07$ req/s per replica.
+<strong>The 35% left idle is not waste; it is the SLO.</strong> It must stand rather than autoscale:
+<a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a>
+derives 2.3 s just to read this checkpoint off local NVMe, 12.8 s over 10 GbE and 80.3 s from an
+object store &mdash; and 20.2 / 45.2 / 112.9 / 705 s for a Llama-3-70B TP=8 replica &mdash; before CUDA
+graph capture and warmup. Nothing that takes tens of seconds to arrive can defend a 900 ms percentile.
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html">&sect;9.4</a> owns the lifecycle.</p>
+
+<p><b>Step 6 &mdash; Little's Law, replicas, cost.</b> $\bar L = \lambda \bar W$ closes the loop and
+catches the two places the template is optimistic. Mean residence is queueing plus prefill plus decode:
+$\frac{\rho}{1-\rho}S + 70.4 + 220 \times 21.2 \approx 4.80$ s, so
+$\bar L = 7.07 \times 4.80 = 34$ requests in the replica &mdash; against $B_{\max} = 224$.
+<strong>The KV pool is over-provisioned by nearly 7&times; for this workload; the SLO, not the memory,
+sets the batch.</strong> Then $240/7.07 = 33.9 \to \mathbf{34}$ replicas, goodput
+$7.07 \times 220 = 1{,}555$ output tok/s each, 52,870 output tok/s across the fleet.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Two second-order corrections</span>
+  <p>The template above is first-order and slightly optimistic, in a way the trace will show. (a) The
+  replica never reaches $B = 224$, so its steps are cheaper than 21.2 ms but amortise the 15.01 GB
+  weight stream over fewer tokens &mdash; decode efficiency is worse than the $B_{\max}$ figure implies.
+  (b) The user's ITL is $t_{\text{step}}$ divided by the decode duty cycle; at $\rho = 0.645$ with
+  prefill taking 77% of busy time, decode gets roughly 18% of wall clock, so a 10.8 ms step reads as an
+  ITL near 59 ms &mdash; against a 60 ms SLO. Solving the two constraints together (token balance plus
+  $\text{ITL}_{\text{eff}} \le 60$ ms) gives a self-consistent $B^{*} \approx 85$ and
+  $\lambda \approx 6.6$ req/s, i.e. <b>37 replicas rather than 34 and $0.58 rather than $0.54</b>. Use
+  the first-order chain to size the fleet and the correction to size the safety margin;
+  <a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a> owns the prefill-steals-ITL
+  mechanism and the chunking that bounds it.</p>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the capacity funnel.</b> Every node is derived
+  arithmetic from the node above plus one cited constant. Change the two input nodes and the whole
+  chain re-runs; the Little's Law node is the consistency check that catches an over-provisioned pool.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    W["WORKLOAD 10.1<br/>mean prompt 1800 tok, mean output 220 tok<br/>mean resident context 1910 tok"] --> KV
+    M["KV POOL 2.1<br/>52.32 GiB = 428,569 tokens at 128 KiB"] --> KV
+    KV["B_max = 428,569 / 1,910 = 224 concurrent"] --> ST
+    ST["DECODE STEP 0.4<br/>15.01 GB weights + 56.08 GB KV = 71.09 GB<br/>21.2 ms per step, 10,556 tok/s"] --> PF
+    PF["PREFILL<br/>27.85 TFLOP at assumed 40 pct MFU = 70.4 ms"] --> SAT
+    SAT["GPU TIME PER REQUEST<br/>70.4 ms prefill + 20.8 ms decode share = 91.2 ms<br/>saturation 10.96 req/s — prefill is 77 pct"] --> Q
+    Q["QUEUEING 1.2<br/>W_p99 = S ln 100rho / 1-rho, S = 70.4 ms<br/>rho star = 0.645"] --> GP
+    GP["GOODPUT PER REPLICA<br/>7.07 req/s = 1,555 output tok/s"] --> LL
+    LL["LITTLE'S LAW CHECK<br/>W = 4.80 s so L = 34 in flight, not 224<br/>KV pool over-provisioned 6.6x"] --> N
+    N["REPLICAS<br/>240 / 7.07 = 34 first-order, 37 corrected"] --> C
+    C["COST<br/>1e6 x 3.00 / 3600 x 1555 = 0.54 USD per million output tokens"]
+    N --> CS["standing headroom, not autoscale<br/>8.4: 2.3 s NVMe to 80.3 s object store<br/>cannot defend a 900 ms percentile"]
+  </script>
+</div></div></section>
+<section class="sec" id="cost" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Cost per million tokens, and how much it moves</h2></div><div class="sec__body"><p>FORMULAS names this chapter the owner of the cost expression, so here is the derivation. A replica
+of $N_{\text{GPU}}$ cards costs $\text{price}_{\text{GPU-hour}} \cdot N_{\text{GPU}}$ per hour and
+delivers $\text{goodput}_{\text{tok/s}}$ sellable tokens per second, i.e.
+$3600 \cdot \text{goodput}$ per hour. Dividing and scaling to $10^{6}$ tokens:</p>
+
+<div class="math-display">$$\text{cost}_{\text{1M}} = \frac{10^{6} \cdot \text{price}_{\text{GPU-hour}} \cdot N_{\text{GPU}}}{3600 \cdot \text{goodput}_{\text{tok/s}}}$$</div>
+
+<p>For the worked example: $10^{6} \times 3.00 \times 1 / (3600 \times 1555) = \mathbf{\$0.536}$ per
+million output tokens. Two properties matter more than the number. It is linear in price and inversely
+linear in goodput, so halving the GPU price and doubling the goodput are worth the same. And
+<strong>the denominator is goodput, not throughput</strong>: at $\rho = 0.9$ this replica would "serve"
+9.86 req/s, but &sect;1.2's formula puts p99 TTFT at $70.4 \times \ln(90)/0.1 + 70.4 = 3.24$ s against
+a 900 ms SLO. Those tokens burned GPU-seconds and cannot be billed under the contract that defines the
+service. Counting them is how a plan comes in 3&times; optimistic.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap"><b>Derived</b>, first-order &mdash; same model, same H100, same
+  $3.00/GPU-hour, same 240 req/s of demand. Only the SLO moves. $\rho^{*}$ from
+  $\ln(100\rho)/(1-\rho) \le (\text{SLO} - S)/S$ with $S$ = 70.4 ms.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th class="num">p99 TTFT SLO</th><th class="num">$\rho^{*}$</th><th class="num">req/s per replica</th><th class="num">replicas</th><th class="num">$ / 1M output tok</th></tr></thead>
+    <tbody>
+      <tr><td class="num">400 ms</td><td class="num">0.285</td><td class="num">3.12</td><td class="num">77</td><td class="num">1.214</td></tr>
+      <tr><td class="num">900 ms</td><td class="num">0.645</td><td class="num">7.07</td><td class="num">34</td><td class="num">0.536</td></tr>
+      <tr><td class="num">2 s</td><td class="num">0.838</td><td class="num">9.18</td><td class="num">27</td><td class="num">0.413</td></tr>
+      <tr><td class="num">5 s</td><td class="num">0.935</td><td class="num">10.25</td><td class="num">24</td><td class="num">0.370</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p><strong>3.3&times; on price for a latency promise, with no change to the hardware or the model.</strong>
+The input/output ratio moves it further. Rerun the whole funnel for a 500-in / 2,000-out workload &mdash;
+a chat or agent shape rather than a summarisation shape &mdash; and every stage shifts: mean resident
+context 1,500, $B_{\max} = 285$, step 21.2 ms, decode 13,437 tok/s; prefill is only 7.57 TFLOP so
+19.1 ms; per request 19.1 + 148.8 = 167.9 ms, saturation 5.96 req/s. Now <em>decode</em> is 89% of GPU
+time, and the short prefill lets $\rho^{*}$ rise to 0.90. Goodput is
+$5.36 \times 2000 = 10{,}720$ output tok/s and the cost is <strong>$0.078 per million output
+tokens</strong>.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">6.9&times;</div><div class="kpi__l">Cost ratio between the two workloads, same GPU, same SLO (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">77% &rarr; 11%</div><div class="kpi__l">Prefill's share of GPU time, 1800/220 vs 500/2000</div></div>
+  <div class="kpi"><div class="kpi__n">0.645 &rarr; 0.90</div><div class="kpi__l">Sustainable utilisation &mdash; short prefill buys headroom</div></div>
+</div>
+
+<p>Same card, same engine, same SLO, unit economics a factor of seven apart. This is why
+<a href="10-01-workload-characterization.html">&sect;10.1</a> comes first in this part, and why a
+published "tokens per dollar" with no workload attached carries no information. It is also a design
+lever: at 1800/220 the right optimisation is prefill throughput &mdash; chunking, prefix caching,
+prefill/decode disaggregation &mdash; and KV quantisation buys almost nothing; at 500/2000 the
+priorities invert exactly.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">trap 1</span><h4>Profiling the warmup</h4>
+  <p>A capture that starts at <code>POST /start_profile</code> and stops two seconds later on a freshly
+  started server records <code>torch.compile</code>, autotuning and first-touch allocations, not
+  steady state. Both engines give you the fix: vLLM's <code>warmup_iterations</code> /
+  <code>wait_iterations</code> feed a <code>torch.profiler.schedule</code> whose warmup steps are
+  recorded and discarded (<code>vllm/profiler/wrapper.py:L215-L232</code>); SGLang's
+  <code>start_step</code> arms on a forward-pass counter. Use them.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">trap 2</span><h4>Nsight Compute on a live server</h4>
+  <p><code>ncu</code> serialises and replays each kernel to collect counters. A serving loop under it
+  is not a serving loop &mdash; the batch composition changes because the scheduler sees different
+  timings. Capture the kernel name and shapes with torch.profiler first, reproduce it standalone, then
+  point <code>ncu</code> at that.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">trap 3</span><h4>Trusting a reported MFU</h4>
+  <p>Section 6 is the general lesson, not a DeepSeek footnote. Any analytic FLOP model encodes an
+  assumed execution path; when a backend takes a different one, the model silently diverges. Before
+  quoting MFU, read the model and check its widths against the shapes your backend actually launches.
+  vLLM's counters are named <code>estimated_*</code> for exactly this reason.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">trap 4</span><h4>NVTX ranges and CUDA graphs</h4>
+  <p>vLLM's <code>--enable-layerwise-nvtx-tracing</code> logs, from
+  <code>vllm/v1/worker/gpu_model_runner.py:L4178-L4183</code>, that markers may be "part or all"
+  missing when CUDA graphs are involved &mdash; hooks fire at capture, not at replay. A layer-annotated
+  Nsight timeline and a graph-replayed step are mutually exclusive; profile eager for attribution,
+  then confirm the win with graphs on.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">trap 5</span><h4>Planning on throughput</h4>
+  <p>Dividing peak demand by throughput instead of goodput gives 24 replicas where the SLO needs 34,
+  and the shortfall arrives as a latency incident rather than a capacity alert. Anchor the plan to
+  goodput at a stated $\rho$.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">trap 6</span><h4>One trace, one batch</h4>
+  <p>Under continuous batching consecutive steps have different composition, so one step is not
+  representative. This is what the detailed annotations exist for: the
+  <code>g_sq</code>/<code>g_sk</code>/<code>g_sqsk</code> suffix lets you select the steps matching the
+  operating point you derived instead of averaging over a moving target.</p></div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Capture five decode steps on a live vLLM server and reconcile them against the 7.04 ms floor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">shell &mdash; vLLM, capture with warmup and a hard stop</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --max-num-seqs 32 \
+  --profiler-config.profiler=torch \
+  --profiler-config.torch_profiler_dir=/abs/path/traces \
+  --profiler-config.detailed_trace_annotation=true \
+  --profiler-config.warmup_iterations=3 \
+  --profiler-config.active_iterations=5 \
+  --profiler-config.ignore_frontend=true
+
+# drive load in another shell, then:
+curl -X POST http://localhost:8000/start_profile
+sleep 2
+curl -X POST http://localhost:8000/stop_profile</code></pre>
+</div>
+
+<p>Open the trace in Perfetto. Find a span named <code>execute_32_context_0(...)_generation_32(...)</code>
+&mdash; zero context requests, 32 generation requests, i.e. a pure decode step at your batch. Read
+<code>sk</code> from the generation group: that is $\Sigma N_{KV}$, which times 128 KiB is the KV bytes
+that step actually read. Add 15.01 GB, divide by 3.35 TB/s, and compare to the span's wall duration.
+Then sum the kernel durations inside the span: the difference between that sum and the span duration is
+your launch-overhead budget, against &sect;8.1's derived 0.78 ms.</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">shell &mdash; SGLang, prefill and decode as separate traces</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code>SGLANG_TORCH_PROFILER_DIR=/abs/path/traces \
+  python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct
+
+python3 -m sglang.profiler --url http://localhost:30000 \
+  --num-steps 5 --profile-by-stage --output-dir /abs/path/traces
+
+# Nsight Systems instead, using the engine's own capture range:
+nsys profile -c cudaProfilerApi --capture-range-end stop -o /abs/path/step \
+  python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct
+curl -X POST http://localhost:30000/start_profile \
+  -H 'Content-Type: application/json' \
+  -d '{"num_steps": 5, "activities": ["CUDA_PROFILER"]}'</code></pre>
+</div>
+
+<p>SGLang's step spans are named <code>step[DECODE bs=32 g_sq=32 g_sqsq=32 g_sqsk=... g_sk=...]</code>
+when <code>detailed_annotations</code> is set, so the same reconciliation works verbatim. Full
+procedure in <a href="../LABS.html">Lab 10</a>.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the file.</b> Open <code>vllm/v1/metrics/perf.py</code> and compare
+  <code>AttentionMetrics.get_read_bytes_breakdown</code> (L470-L513) with the byte model this chapter
+  derived in section 3. Which term does vLLM charge once per step regardless of batch size, and which
+  scales with <code>decode_context_len</code>? Does its total match 23.60 GB for our operating point?
+  Name any term it omits.</li>
+
+  <li><b>Predict, then verify.</b> Take the worked operating point to $B=64$ at the same $s=2048$.
+  Predict the step time, the arithmetic intensity, the decode throughput, and whether launch overhead
+  becomes a larger or smaller share. Then check whether $B=64$ even fits &mdash; use &sect;2.1's
+  428,569-token pool.</li>
+
+  <li><b>Re-derive the MFU error.</b> Redo section 6's table for DeepSeek-V3 at TP=8 and $s = 8{,}192$,
+  per GPU. Show that the true/reported ratio is unchanged by TP, and explain in one sentence which term
+  in <code>get_num_flops_breakdown</code> is <em>not</em> divided by <code>tp_size</code> and why that
+  barely matters here.</li>
+
+  <li><b>Rerun the funnel.</b> Same model, same H100, same $3/GPU-hour, but Llama-3-70B at TP=8 with a
+  4,000-in / 500-out workload and a p99 TTFT SLO of 3 s. Use &sect;2.1's 1,332,954-token cluster pool
+  and 320 KiB/token cell. Produce replica count and cost per million output tokens. Which constraint
+  binds &mdash; KV capacity, ITL, or queueing?</li>
+
+  <li><b>Break the model.</b> Name a decode configuration in which the derived floor is <em>too
+  optimistic by more than 2&times;</em> &mdash; i.e. no implementation could approach it &mdash; and
+  say which trace shape from Figure 3 you would expect to see.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> <code>read_bytes["qkv_weight"]</code> and <code>read_bytes["out_weight"]</code> have no
+    <code>T</code> factor &mdash; weights are streamed once per step regardless of batch, exactly the
+    15.01 GB term. <code>attn_input</code> carries
+    <code>2 * ctx.decode_context_len * kv * d * cache_byte_size * L</code>, the KV read. It will
+    <em>not</em> total 23.60 GB, because <code>AttentionMetrics</code> covers only the attention block:
+    the MLP weights are a separate <code>ComponentMetrics</code> subclass, and the full step total is
+    the sum over <code>self.metrics</code> in <code>get_read_bytes_breakdown</code> (L1313-L1322). It
+    also adds activation traffic our compulsory-traffic model deliberately ignores, so the two models
+    answer slightly different questions &mdash; vLLM's counts what moves, ours counts what
+    <em>must</em> move.</p>
+    <p><b>2.</b> $B=64$, $s=2048$: KV read $= 131072 \times 131072 = 17.18$ GB, total 32.19 GB,
+    $t = 9.61$ ms, throughput $64/9.61\,\text{ms} = 6{,}660$ tok/s. $F = 1.029\times10^{12}$ so
+    $I = 32.0$ FLOP/byte, still $9\times$ left of the ridge. Launch overhead is unchanged in absolute
+    terms (0.78 ms, the kernel count does not depend on batch) so it falls to 8.1% &mdash; a smaller
+    share. Fit: $64 \times 2048 = 131{,}072$ resident tokens against a 428,569-token pool, so it fits
+    three times over; you could run $B = 209$ at this context.</p>
+    <p><b>3.</b> Reported and corrected cores both carry the factor
+    <code>q = max(1, q // tp_size)</code>, so dividing by 8 scales both by the same amount and the
+    3.4&times; on that term is untouched. <code>kv_a_proj</code> is the exception &mdash; the comment at
+    L671 marks it <code>[replicated]</code>, so it is not divided &mdash; but at 0.50 GFLOP against a
+    &gt;100 GFLOP total it shifts the ratio by well under a percent.</p>
+    <p><b>4.</b> Mean resident context $4000 + 250 = 4{,}250$; $B_{\max} = 1{,}332{,}954/4250 = 313$.
+    Step bytes per GPU: weights $141.1/8 = 17.64$ GB plus KV $313 \times 4250 \times 40\ \text{KiB} =
+    54.5$ GB $= 72.1$ GB, $t = 21.5$ ms &mdash; inside a 60 ms ITL. Prefill
+    $F = 2 \times 70.55\times10^{9} \times 4000 + 2 \times 80 \times 64 \times 128 \times 4000^{2} =
+    5.644\times10^{14} + 2.097\times10^{13} = 5.85\times10^{14}$ FLOP, over 8 GPUs at 40% MFU
+    $= 185$ ms. Per request $185 + 500 \times 21.5/313 = 185 + 34.3 = 219$ ms, saturation 4.56 req/s.
+    $\rho^{*}$ from $\ln(100\rho)/(1-\rho) \le (3000-185)/185 = 15.2$: $\rho^{*} \approx 0.718$, so
+    3.27 req/s, goodput 1,635 output tok/s across 8 GPUs. Cost
+    $= 10^{6} \times 3 \times 8/(3600 \times 1635) = \$4.08$ per million &mdash; 7.6&times; the 8B
+    number, most of it the eight cards. <b>Queueing binds</b>: KV allows 313 and the step time allows
+    more, but the 185 ms prefill service time forces $\rho$ down.</p>
+    <p><b>5.</b> Any configuration where the compulsory-traffic model is not the constraint. The clean
+    example is small-batch decode at high TP: at TP=8, batch 1, the per-rank byte floor is 0.56 ms but
+    &sect;8.1 derives 0.94 ms of pure driver launch time, so no implementation reaches the floor &mdash;
+    it is optimistic by 1.7&times; before any framework cost. Expected shape: <b>1, launch-bound</b>
+    &mdash; a saturated host lane and a gappy device lane. A second answer: batch 1 with $h_{kv}=8$ and
+    split-K disabled, where the FA2 grid is $1 \times 32 = 32$ blocks on 132 SMs &mdash; shape 4,
+    occupancy-limited.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>A bound tells you what is possible; a trace tells you what is happening. Shipping one without the
+  other is how a performance claim becomes unfalsifiable. This book owns the first, Lab 10 the second.</li>
+  <li>Four trace shapes exhaust the diagnoses for a decode step, and two of them &mdash;
+  bandwidth-bound and occupancy-limited &mdash; are indistinguishable in a timeline. That fact picks
+  the tool: Systems for gaps and rank skew, Compute for per-kernel counters, torch.profiler for op
+  attribution.</li>
+  <li>vLLM's analytic FLOP model under-counts MLA decode attention by exactly 3.4&times;, because
+  <code>vllm/v1/metrics/perf.py:L677-L678</code> charges the un-absorbed 192/128 head widths where the
+  absorbed decode kernel runs 576/512. The <code>kv_b_proj</code> line is mislabelled but numerically
+  right, so it is one term with one constant. At 16k context the reported TFLOP/s is 2.3&times; low and
+  the error grows with the context window.</li>
+  <li>Batching buys launch headroom, not just throughput: the same 0.78 ms of driver time is 17% of a
+  batch-1 step and 11% of a batch-32 step. Tensor parallelism moves it the other way. Derive the launch
+  budget before you go hunting for it in a trace.</li>
+  <li>Queueing is the binding constraint in capacity planning far more often than memory. The KV pool
+  allowed 224 concurrent requests; the p99 TTFT target held the replica at 34 in flight and forced
+  utilisation to 0.645. Plan against goodput at a stated $\rho$, never against throughput.</li>
+  <li>Cost per million output tokens moves 3.3&times; with the SLO and 6.9&times; with the input/output
+  ratio on identical hardware, so a price quoted without both attached carries no information. The same
+  ratio tells you which optimisation to fund: prefill throughput at 1800/220, decode batching at
+  500/2000.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><b>Vellaisamy, Kumar, Hoe et al.</b>, <i>Characterizing GPU Kernel Launch Overheads</i>, ISPASS
+  2025, <a href="https://arxiv.org/abs/2504.11750">arXiv:2504.11750</a>. Table V is the source of the
+  2.374 &micro;s driver-only <code>cudaLaunchKernel</code> figure this book uses on H100 / CUDA 12.6.
+  &sect;8.1 owns its application.</li>
+  <li><b>Williams, Waterman, Patterson</b>, <i>Roofline: An Insightful Visual Performance Model</i>,
+  CACM 2009. The original; &sect;0.4 derives the inference-specific form.</li>
+  <li><b>DistServe</b>, Zhong et al., <a href="https://arxiv.org/pdf/2401.09670">arXiv:2401.09670</a>
+  &mdash; the goodput framing behind the cost formula, and the paper vLLM's <code>--goodput</code> help
+  text points at.</li>
+  <li><b>PyTorch profiler recipe</b>,
+  <a href="https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html">pytorch.org</a>, and the
+  <a href="https://pytorch.org/blog/understanding-gpu-memory-1/">memory-timeline</a> post for
+  <code>activities=["MEM"]</code>, which SGLang exposes directly
+  (<code>python/sglang/profiler.py:L117-L123</code>).</li>
+  <li><b>vLLM's nsys post-processor</b>, <code>tools/profiler/nsys_profile_tools/gputrc2graph.py</code>
+  &mdash; computes non-overlapped GPU cycles per kernel from an <code>nsys</code> report, which is the
+  correct denominator when kernels overlap.</li>
+  <li><b>SGLang's profiling test</b>,
+  <code>test/registered/profiling/test_start_profile.py:L144-L252</code> &mdash; the only in-tree
+  documentation of the <code>nsys profile -c cudaProfilerApi</code> wrapper, including the
+  <code>--capture-range-end stop</code> flag that makes a single capture terminate cleanly.</li>
+  <li><b>Formula sheet</b>, <a href="../FORMULAS.html">FORMULAS</a> &mdash; the cost expression derived
+  here, plus every bound this chapter composed.</li>
+</ul></div></section>
+<div class="pager"><a href="10-04-batch-invariance.html"><div class="pager__k">← Previous</div><div class="pager__t">Batch invariance and reproducible inference</div></a><a class="pager__next" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><div class="pager__k">Next →</div><div class="pager__t">Repo map, and what V1 changed</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">One decode step on the roofline, worked</a>
+<a href="#reading-a-trace">Reading a trace: four shapes, four diagnoses</a>
+<a href="#production">Turning profiling on, in each engine</a>
+<a href="#mla-flop-bug">The MLA FLOP model, verified and corrected</a>
+<a href="#capacity">Capacity planning, end to end</a>
+<a href="#cost">Cost per million tokens, and how much it moves</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

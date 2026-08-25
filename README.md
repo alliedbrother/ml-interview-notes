@@ -10,7 +10,7 @@ a page is a pull request.
 
 | Section | Contents |
 |---|---|
-| [Courses](https://mlinterviewnotes.com/courses/) | Long-form, sequential material. Currently **Transformers Deep Dive** — 17 modules from "why did we abandon RNNs?" to the configuration choices in production 2026 models. |
+| [Courses](https://mlinterviewnotes.com/courses/) | Long-form, sequential material. **Transformers Deep Dive** — 17 modules from "why did we abandon RNNs?" to the configuration choices in production 2026 models. **The Inference Engineering Book** — 14 chapters on how LLM serving works, read out of the vLLM and SGLang source. |
 | [Notes](https://mlinterviewnotes.com/notes/) | Topic-by-topic reference notes: Math, Libraries, ML, Deep Learning, NLP. In progress — contributions welcome. |
 
 ## Repository layout
@@ -18,9 +18,12 @@ a page is a pull request.
 ```
 content/
   site.yml                      site title, tagline, top nav
+  roadmap.yml                   drives the /status/ page
   courses/<slug>/course.yml     course title, blurb, track definitions
   courses/<slug>/NN-*.md        course modules; 00 becomes the course index
-  notes/<slug>.md               note pages
+  courses/<slug>/html/          a prebuilt course, published as-is (see below)
+  notes/<slug>.md               a note category
+  notes/<slug>/<topic>.md       a topic inside that category
 site/
   build.py                      the static site generator
   test_build.py                 build verification, runs in CI
@@ -71,6 +74,16 @@ description: One-sentence blurb used on cards and in meta tags.
 meta: 5 topics planned
 ---
 ```
+
+### Prebuilt courses
+
+A course that already exists as finished HTML can be published without being
+converted to Markdown. Set `type: prebuilt` in its `course.yml` and put the pages
+under `html/`. The build copies them verbatim and injects two things per page: the
+shared top bar, and a stylesheet that re-points the course's CSS custom properties
+at the site palette. The content itself is never parsed or rewritten, so nothing
+can be corrupted in translation — but such a course cannot be edited as Markdown
+until someone converts it.
 
 ### Adding a course
 

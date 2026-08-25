@@ -1,0 +1,1486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speculative decoding acceptance rate — The Inference Engineering Book</title>
+<meta name="description" content="Measure acceptance length across workloads and find the point where speculation becomes a net loss.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Lab 08 · for chapter 06-02</div>
+<h1>Speculative decoding acceptance rate</h1>
+<p class="hd__sub">Measure acceptance length across workloads and find the point where speculation becomes a net loss.</p>
+
+</header>
+<div class="prose"><p class="lead">Speculative decoding has exactly one input you cannot compute on paper &mdash; the
+acceptance rate &mdash; and exactly one output that decides whether to ship it: the batch size at which
+the speedup crosses 1.0. This lab measures the first across workload types, then finds the second, and
+keeps the two apart, because they fail for completely different reasons.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Hardware</span>
+  <p>Part A &mdash; acceptance across workloads &mdash; runs on <b>one 24&nbsp;GB card</b> with an 8B
+  target and the n-gram proposer, which needs no draft weights at all. Part B &mdash; the break-even
+  batch &mdash; needs <b>one 80&nbsp;GB card</b>, because the crossing is predicted near 150 concurrent
+  sequences and Llama-3-8B at 2k context costs 128&nbsp;KiB of KV per token
+  (<a href="../../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>): 150 sequences at
+  2,304 tokens is 44&nbsp;GB of cache before you count weights. On 24&nbsp;GB you will run out of KV
+  before you reach the crossing, and the curve will bend for the wrong reason. Part C substitutes a
+  <em>synthetic</em> acceptance rate for a real draft, and needs whatever Part B needed.</p>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Not executed here</span>
+  <p><code>run.py</code> was written against the config fields, metric names and harness output cited
+  below, and its argument handling and arithmetic were exercised, but it has <b>not</b> been run
+  against a live engine &mdash; no GPU was available while writing. Every acceptance figure on this page
+  is either a <em>swept parameter</em> or <em>derived</em> arithmetic from the model in
+  <a href="../../06-decoding-algorithms/06-02-speculative-decoding.html">&sect;6.2</a>. None is measured.
+  If your measured &alpha; disagrees with anything here, your number is the real one.</p>
+</div></div>
+<section class="sec" id="what" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">What you measure</h2></div><div class="sec__body"><p>Three quantities, and the relationship between them:</p>
+
+<ol>
+  <li><b>Mean acceptance length</b> $E$ &mdash; tokens emitted per verify step, bonus token included.
+  This is what both engines actually report. Measure it per workload type.</li>
+  <li><b>The per-position acceptance vector</b> $r_i$ &mdash; the unconditional probability that the
+  first $i{+}1$ drafts all survive. The i.i.d. model says $r_i = \alpha^i$. It will not be.</li>
+  <li><b>The break-even batch</b> $B^{*}$ &mdash; where speculation stops paying, measured by sweeping
+  concurrency with speculation on and off and finding the crossing.</li>
+</ol>
+
+<p>&sect;6.2 derives the arithmetic that connects them. With $\kappa$ drafted tokens per step and
+per-token acceptance $\alpha$,</p>
+
+<div class="math-display">$$E = \frac{1-\alpha^{\kappa+1}}{1-\alpha}, \qquad
+B^{*} = \frac{T^{*}\big(E - \kappa c\big)}{\kappa+1}$$</div>
+
+<p>where $T^{*}$ is the roofline ridge in token positions (295 for bf16 on an H100&nbsp;SXM,
+<a href="../../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>) and $c$ is the
+draft step's cost as a fraction of the target's. For a Llama-3.2-1B draft against a Llama-3-8B target,
+&sect;6.2 derives $c = 0.165$; for the n-gram proposer there is no draft forward pass at all, so
+$c \approx 0$ and every number in the table below moves right.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">What your measured &alpha; would imply, at $\kappa=3$, $T^{*}=295$ &mdash; derived, arithmetic from the &sect;6.2 model. &alpha; is a swept parameter here; measuring it is Part&nbsp;A.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>&alpha;</th><th>$E$</th><th>speedup, 1B draft ($c$=0.165)</th>
+      <th>break-even $B^{*}$</th><th>speedup, n-gram ($c\approx0$)</th>
+      <th>break-even $B^{*}$</th></tr></thead>
+    <tbody>
+      <tr><td class="num">0.4</td><td class="num">1.624</td><td class="num">1.09&times;</td><td class="num">83</td><td class="num">1.62&times;</td><td class="num">120</td></tr>
+      <tr><td class="num">0.5</td><td class="num">1.875</td><td class="num">1.25&times;</td><td class="num">102</td><td class="num">1.88&times;</td><td class="num">138</td></tr>
+      <tr><td class="num">0.6</td><td class="num">2.176</td><td class="num">1.46&times;</td><td class="num">124</td><td class="num">2.18&times;</td><td class="num">160</td></tr>
+      <tr><td class="num">0.7</td><td class="num">2.533</td><td class="num">1.69&times;</td><td class="num">150</td><td class="num">2.53&times;</td><td class="num">187</td></tr>
+      <tr><td class="num">0.8</td><td class="num">2.952</td><td class="num">1.97&times;</td><td class="num">181</td><td class="num">2.95&times;</td><td class="num">218</td></tr>
+      <tr><td class="num">0.9</td><td class="num">3.439</td><td class="num">2.30&times;</td><td class="num">217</td><td class="num">3.44&times;</td><td class="num">254</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Read the break-even columns as a ceiling, not a ladder. $B^{*}$ is linear in $E$ and $E$ is capped
+at $\kappa+1$, so $B^{*} \le T^{*}$ always: <b>no draft, however good, pushes the crossing past the
+roofline ridge</b>. A perfect draft at $\kappa = 3$ would give $E = 4$ and $B^{*} = 295$, and that is
+the end of the road. What actually moves the crossing is a smaller $\kappa$ &mdash; at
+$\alpha = 0.7$, $\kappa=1$ breaks even at 226 concurrent sequences against $\kappa=3$'s 150, because
+the verify step carries fewer wasted positions. That asymmetry is why both engines adapt $\kappa$ at
+runtime rather than switching speculation on and off, and it is a place where they picked different
+signals. vLLM schedules $\kappa$ by batch size:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/speculative.py:L180-L186</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    &quot;&quot;&quot;Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    inclusive batch-size range.
+    &quot;&quot;&quot;</code></pre>
+</div>
+
+<p>SGLang adapts on the measured acceptance rate instead:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L2278-L2287</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    speculative_adaptive: A[
+        bool,
+        &quot;Enable adaptive speculative decoding that dynamically adjusts num_steps based on acceptance rate.&quot;,
+        NS(&quot;spec&quot;),
+    ] = False
+    speculative_adaptive_config: A[
+        Optional[str],
+        &quot;Path to a JSON config file for adaptive speculative decoding tuning knobs.&quot;,
+        NS(&quot;spec&quot;),
+    ] = None</code></pre>
+</div>
+
+<p>Both are defensible and they fail differently: batch size is known before the step, acceptance
+only after it. vLLM's schedule reacts instantly to load and not at all to a change of workload;
+SGLang's reacts to the workload and lags load by however long its controller averages over. Which you
+want depends on whether your traffic mix or your traffic volume is the thing that moves.</p></div></section>
+<section class="sec" id="metric" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Where the acceptance number lives</h2></div><div class="sec__body"><p>Do not compute acceptance from output token counts. Both engines already track it, both include the
+bonus token in the length and exclude it from the rate, and getting that convention wrong is a
+consistent one-token offset that looks exactly like a better draft.</p>
+
+<h3>vLLM: three counters, and a harness that already diffs them</h3>
+
+<p>The Prometheus counters are declared here, and the class docstring above them is the definition of
+every derived quantity:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/spec_decode/metrics.py:L177-L196</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class SpecDecodingProm:
+    &quot;&quot;&quot;Record spec decoding metrics in Prometheus.
+
+    The acceptance rate can be calculated using a PromQL query:
+
+      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_draft_tokens_total[$interval])
+
+    The mean acceptance length (conventionally including bonus tokens)
+    can be calculated using:
+
+      1 + (
+      rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
+      rate(vllm:spec_decode_num_drafts[$interval]))
+
+    A per-position acceptance rate vector can be computed using
+
+      vllm:spec_decode_num_accepted_tokens_per_pos[$interval] /
+      vllm:spec_decode_num_drafts[$interval]
+    &quot;&quot;&quot;</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/spec_decode/metrics.py:L227-L232</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        else:
+            counter_specs = [
+                (&quot;vllm:spec_decode_num_drafts&quot;, &quot;Number of spec decoding drafts.&quot;),
+                (&quot;vllm:spec_decode_num_draft_tokens&quot;, &quot;Number of draft tokens.&quot;),
+                (&quot;vllm:spec_decode_num_accepted_tokens&quot;, &quot;Number of accepted tokens.&quot;),
+            ]</code></pre>
+</div>
+
+<p>You do not have to write that PromQL. <code>vllm bench serve</code> scrapes
+<code>/metrics</code> before and after the measured window and reports the delta, which is the correct
+thing to do &mdash; a counter read once tells you about the server's whole lifetime, not about your
+run:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L1107-L1119</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if delta_draft_tokens &gt; 0:
+            acceptance_rate = (delta_accepted / delta_draft_tokens) * 100
+            acceptance_length = (
+                1 + delta_accepted / delta_drafts if delta_drafts &gt; 0 else 0.0
+            )
+            spec_decode_stats = {
+                &quot;num_drafts&quot;: delta_drafts,
+                &quot;draft_tokens&quot;: delta_draft_tokens,
+                &quot;accepted_tokens&quot;: delta_accepted,
+                &quot;acceptance_rate&quot;: acceptance_rate,
+                &quot;acceptance_length&quot;: acceptance_length,
+                &quot;per_position_acceptance_rates&quot;: per_pos_rates,
+            }</code></pre>
+</div>
+
+<p>It prints an <code>Acceptance rate (%)</code> / <code>Acceptance length</code> block, and a
+per-position vector, at the end of the run
+(<code>vllm/benchmarks/serve.py:L1381-L1408</code>), and writes the same three fields into the result
+JSON as <code>spec_decode_acceptance_rate</code>, <code>spec_decode_acceptance_length</code> and
+<code>spec_decode_per_position_acceptance_rates</code> (<code>L1300-L1308</code>). That per-position
+vector is the $r_i$ you need for exercise 2; nothing else in either project exposes it.</p>
+
+<p>For per-request acceptance &mdash; which is what you want if you are bucketing a <em>mixed</em>
+workload rather than running one category at a time &mdash; vLLM has an opt-in response field:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/observability.py:L48-L53</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    per_request_spec_decode_metrics: Literal[&quot;none&quot;, &quot;summary&quot;, &quot;detailed&quot;] = &quot;none&quot;
+    &quot;&quot;&quot;Include per-request speculative-decoding acceptance metrics in the
+    response under `metrics.speculative_decoding`. `none` disables; `summary` adds mean
+    acceptance length, draft acceptance rate, and the step-by-draft-length
+    histogram; `detailed` additionally records the ordered per-step
+    accepted/proposed arrays (one entry per verify step). Only reported for</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/openai/engine/protocol.py:L132-L151</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class SpeculativeDecodingMetrics(OpenAIBaseModel):
+    &quot;&quot;&quot;Per-request speculative-decoding acceptance metrics.
+
+    Experimental, subject to change. Only populated for single-sequence requests
+    (`n == 1`); `null` for `n &gt; 1`, mirroring the timing metrics.
+    &quot;&quot;&quot;
+
+    mean_acceptance_length: float
+    draft_acceptance_rate: float
+    # Dense histogram: index j holds the number of verify steps that accepted
+    # exactly j draft tokens (length num_spec_tokens + 1). Excludes the
+    # always-accepted bonus token.
+    acceptance_histogram: list[int]
+    num_spec_steps: int
+    num_accepted_draft_tokens: int
+    num_draft_tokens: int
+    num_spec_tokens: int
+    # Ordered per-verify-step arrays; populated only at the `detailed` level.
+    per_step_accepted: list[int] | None = None
+    per_step_drafted: list[int] | None = None</code></pre>
+</div>
+
+<h3>SGLang: a per-request field and a decode-log line</h3>
+
+<p>SGLang reports the same statistic per request, under
+<code>return_spec_tokens_details</code> on the request body:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/openai/protocol.py:L418-L427</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class SpecTokensDetails(BaseModel):
+    &quot;&quot;&quot;Per-request speculative decoding statistics.&quot;&quot;&quot;
+
+    spec_accept_rate: float = 0.0
+    spec_accept_length: float = 0.0
+    spec_cap_length: float = 0.0
+    spec_block_accept_length: float = 0.0
+    spec_num_correct_drafts: int = 0
+    spec_num_proposed_drafts: int = 0
+    spec_verify_ct: int = 0</code></pre>
+</div>
+
+<p>and prints a running figure into the decode log every interval. Read the arithmetic carefully,
+because it is not the same denominator as vLLM's:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/metrics_reporter.py:L818-L830</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            spec_cap_length = 0
+            spec_block_accept_length = 0
+        else:
+            spec_accept_length = self.spec_num_accept_tokens / self.spec_num_forward_ct
+            num_correct_drafts = self.spec_num_accept_tokens - self.spec_num_forward_ct
+            if get_spec().speculative_num_draft_tokens:
+                draft_per_round = get_spec().speculative_num_draft_tokens - 1
+            else:
+                draft_per_round = get_spec().speculative_num_steps or 0
+            total_draft_tokens = self.spec_num_forward_ct * draft_per_round
+            spec_accept_rate = (
+                num_correct_drafts / total_draft_tokens if total_draft_tokens &gt; 0 else 0
+            )</code></pre>
+</div>
+
+<p><code>spec_accept_length</code> is accepted-plus-bonus tokens over forward passes &mdash; the same
+$E$ vLLM calls <code>acceptance_length</code>. <code>spec_accept_rate</code> divides
+<em>correct drafts</em> by <em>proposed drafts</em>, where "proposed" is
+<code>speculative_num_draft_tokens - 1</code> per round rather than $\kappa$ &mdash; so under a tree
+draft the two engines' "acceptance rate" are not the same ratio and must not be tabulated together.
+The lengths <em>are</em> comparable. Compare $E$; ignore the rates across engines.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Aggregate</span>
+  <p>SGLang also folds a run-lifetime figure into <code>/get_server_info</code> as
+  <code>avg_spec_accept_length</code>
+  (<code>python/sglang/srt/managers/scheduler.py:L4404-L4411</code>). It is a lifetime average and does
+  not reset between your runs, so diff it the way vLLM's harness diffs its counters, or flush and
+  restart.</p>
+</div></div></section>
+<section class="sec" id="run" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">Running it</h2></div><div class="sec__body"><p>Part A: hold the model and $\kappa$ fixed and vary only the workload. Both projects ship a dataset
+built for this. vLLM carries Spec-Bench, whose rows are tagged by category, and its own docs enumerate
+them:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/benchmarking/cli.md:L371-L371</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>Available categories include `[writing, roleplay, reasoning, math, coding, extraction, stem, humanities, translation, summarization, qa, math_reasoning, rag]`.</code></pre>
+</div>
+
+<p>SGLang carries SPEED-Bench, whose categories are graded by output entropy directly &mdash; which
+is the acceptance axis, since $\alpha = 1 - D_{\mathrm{TV}}(p, q)$ and a high-entropy target
+distribution is one no draft can match:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/serving.py:L2266-L2272</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    parser.add_argument(
+        &quot;--speed-bench-category&quot;,
+        type=str,
+        default=None,
+        choices=[&quot;low_entropy&quot;, &quot;mixed&quot;, &quot;high_entropy&quot;],
+        help=&quot;Category filter for the speed-bench dataset.&quot;,
+    )</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; acceptance, one category at a time</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># server: n-gram proposer, no draft weights, kappa = 3
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+    --speculative-config &#x27;{&quot;method&quot;: &quot;ngram&quot;, &quot;num_speculative_tokens&quot;: 3,
+                           &quot;prompt_lookup_max&quot;: 5, &quot;prompt_lookup_min&quot;: 2}&#x27;
+
+# one run per category; the acceptance block is printed at the end of each
+for CAT in summarization translation qa math_reasoning rag writing; do
+  vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
+      --dataset-name spec_bench --dataset-path ./question.jsonl \
+      --spec-bench-category &quot;$CAT&quot; --num-prompts 200 --request-rate 4 \
+      --save-result --result-filename &quot;accept-$CAT.json&quot;
+done
+
+# or let run.py drive the loop and print one table
+$ python3 run.py accept --categories summarization translation qa writing</code></pre>
+</div>
+
+<p>Part B: the break-even sweep. Hold the workload fixed, sweep concurrency, and run the whole
+sweep twice &mdash; once with the speculative server and once with a plain one. The number that crosses
+1.0 is the ratio of <b>output-token throughput</b>, not of latency; speculation improves latency at
+every batch size and that is not the question.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; the crossing</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># two servers, identical in every other respect, one at a time
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-num-seqs 320          # baseline
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-num-seqs 320 \
+    --speculative-config &#x27;{&quot;method&quot;: &quot;ngram&quot;, &quot;num_speculative_tokens&quot;: 3,
+                           &quot;prompt_lookup_max&quot;: 5, &quot;prompt_lookup_min&quot;: 2}&#x27;
+
+for C in 8 16 32 64 96 128 160 192 256; do
+  vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
+      --dataset-name random --random-input-len 2048 --random-output-len 256 \
+      --max-concurrency $C --num-prompts $((C*8)) --seed 1 \
+      --save-result --result-filename &quot;spec-c$C.json&quot;
+done
+
+$ python3 run.py sweep --concurrency 8 16 32 64 96 128 160 192 256</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Read &sect;10.3 first</span>
+  <p>That sweep uses <code>--max-concurrency</code>, which is a closed loop with the client-side clock
+  started <em>after</em> the semaphore &mdash; every latency percentile it reports excludes client
+  queueing. For finding a throughput crossing that is fine and it is the right tool, because you want
+  the batch size pinned. It is not fine for any latency claim you make afterwards.
+  <a href="../../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> has the mechanism; flush
+  the prefix cache between runs or the second half of your sweep is measuring the first half's
+  leftovers.</p>
+</div>
+
+<p>Part C separates draft quality from speculation's cost. vLLM will fake the acceptance rate for you,
+which sounds like cheating and is in fact the cleanest experiment on this page: it holds $E$ exactly
+constant across the whole batch sweep, so whatever curvature you measure is the roofline and nothing
+else.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/speculative.py:L219-L241</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    rejection_sample_method: RejectionSampleMethod = &quot;standard&quot;
+    &quot;&quot;&quot;The rejection sampling method to use. &#x27;standard&#x27; uses probabilistic
+    rejection sampling (with or without cached draft logits, controlled by
+    draft_sample_method). &#x27;synthetic&#x27; accepts draft tokens with a decaying
+    probability calibrated to synthetic_acceptance_rate. &#x27;block&#x27; uses block
+    verification (Sun et al.), which jointly verifies the draft tokens as a
+    block instead of one at a time.&quot;&quot;&quot;
+
+    synthetic_acceptance_rates: list[float] | None = None
+    &quot;&quot;&quot;Per-position *unconditional* acceptance rates for synthetic rejection
+    sampling. Position i&#x27;s entry is the marginal probability that the first
+    i+1 draft tokens are all accepted; the list must have length
+    num_speculative_tokens, each entry in [0, 1], and be monotonically
+    non-increasing. Only valid when rejection_sample_method is &#x27;synthetic&#x27;.
+    Mutually exclusive with synthetic_acceptance_length.&quot;&quot;&quot;
+
+    synthetic_acceptance_length: float | None = None
+    &quot;&quot;&quot;Target mean acceptance length for synthetic rejection sampling, in
+    [1, num_speculative_tokens + 1]. Resolved internally to
+    synthetic_acceptance_rates. Only valid when rejection_sample_method is &#x27;synthetic&#x27;.
+    Mutually exclusive with synthetic_acceptance_rates.&quot;&quot;&quot;
+
+    enable_adaptive_verification: bool = False</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; hold E fixed, vary only the batch</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-num-seqs 320 \
+    --speculative-config &#x27;{&quot;method&quot;: &quot;ngram&quot;, &quot;num_speculative_tokens&quot;: 3,
+                           &quot;prompt_lookup_max&quot;: 5, &quot;prompt_lookup_min&quot;: 2,
+                           &quot;rejection_sample_method&quot;: &quot;synthetic&quot;,
+                           &quot;synthetic_acceptance_length&quot;: 2.533}&#x27;</code></pre>
+</div>
+
+<p>Re-run the Part B sweep against that server. The measured crossing should land on the
+$B^{*} = 150$ row of the table above for $E = 2.533$, $\kappa = 3$ &mdash; and if it does not, the gap
+is everything the &sect;6.2 model leaves out: the sampler's top-k/top-p sort, which speculation
+multiplies by $\kappa+1$ rows; the KV slots reserved per request per step; and the draft proposer's own
+cost, which the n-gram path makes small but not zero.</p></div></section>
+<section class="sec" id="expect" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">What to expect</h2></div><div class="sec__body"><h3>Acceptance is a property of the workload, not of the model</h3>
+
+<p>The n-gram proposer copies from the prompt, so its acceptance is a direct function of how much of
+the output is already present in the input. Summarization and RAG-style extraction quote heavily and
+should accept well; open-ended writing has nothing to copy and should collapse. A draft <em>model</em>
+behaves differently &mdash; its $\alpha = 1 - D_{\mathrm{TV}}(p, q)$ tracks how well the small model
+approximates the big one, which is worst exactly where the target is most uncertain. Both effects point
+the same way on high-entropy text and for different reasons, which is why SGLang's categories are named
+after entropy and vLLM's after task.</p>
+
+<h3>Temperature moves &alpha; and nothing else</h3>
+
+<p>Raising temperature flattens $p$, raises $D_{\mathrm{TV}}(p, q)$, and lowers acceptance. Run the
+same category at <code>--temperature 0</code> and <code>--temperature 1.0</code> and you have the
+cheapest possible sensitivity study. Note what does <em>not</em> change: the output distribution is
+still exactly the target's, at every temperature &mdash; &sect;6.2 proves it. Speculation trades compute
+for latency and never quality, unless you touch
+<code>--speculative-accept-threshold-acc</code>, which voids the proof deliberately.</p>
+
+<h3>The per-position vector will not be geometric</h3>
+
+<p>The i.i.d. model says $r_i = \alpha^i$. Real acceptance decays faster than geometric, because a
+draft that has already been wrong once is drafting from a context it partly invented. Fit $\alpha$
+from $r_0$ and plot $\alpha^i$ against the measured $r_i$; the gap at $i=2$ and $i=3$ is the whole
+reason the optimal $\kappa$ is smaller than the geometric model suggests.</p>
+
+<h3>Where the crossing actually comes from</h3>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Why your measured crossing may sit left of the derived one. Every row costs throughput at high batch and none of them is in the $S(B)$ formula.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Cause</th><th>Direction</th><th>How to confirm it</th></tr></thead>
+    <tbody>
+      <tr><td>KV slots reserved for drafting, per request, per step</td><td>large</td>
+        <td>Compare the engine's reported cache capacity and max concurrency with speculation on and
+        off. SGLang reserves $2\max(\text{topk}\cdot\text{steps},\ \kappa{+}1)$ per request per
+        step (&sect;6.2); vLLM subtracts a drafting budget from the token budget every step. You lose
+        concurrency before you lose throughput.</td></tr>
+      <tr><td>Sampler sort, multiplied by $\kappa+1$ rows</td><td>medium</td>
+        <td>Re-run with top-k and top-p disabled. If the gap shrinks, you were paying for
+        <code>apply_top_k_top_p</code>, which &sect;6.2 flags with the source's own warning.</td></tr>
+      <tr><td>CUDA-graph bucketing across the concurrency sweep</td><td>medium</td>
+        <td>Sweep on the capture ladder's rungs. A plateau is bucketing
+        (<a href="../../08-compilation-and-runtime/08-01-cuda-graphs.html">&sect;8.1</a>), not the
+        crossing.</td></tr>
+      <tr><td>Prefix-cache carryover between the two arms</td><td>either way</td>
+        <td>Flush between runs. The n-gram proposer is especially sensitive: a warm cache changes which
+        prompts are even prefilled.</td></tr>
+      <tr><td>Long context keeps the step bandwidth-bound</td><td>right, not left</td>
+        <td>At 8k context the KV read dominates and is independent of $\kappa$, so drafted positions
+        stay free far past $B^{*}$. Re-run at <code>--random-input-len 8192</code> and watch the
+        crossing move right &mdash; this is the one effect that helps you.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I could not find, at either SHA, any per-position acceptance vector on the SGLang side comparable
+  to vLLM's <code>vllm:spec_decode_num_accepted_tokens_per_pos</code>. SGLang exposes
+  <code>spec_correct_drafts_histogram</code> per request
+  (<code>python/sglang/srt/entrypoints/openai/protocol.py:L418-L427</code>), which is a histogram over
+  <em>accepted counts</em> rather than a rate per position; the two carry the same information for a
+  chain draft but are not the same array, and I did not find a conversion in tree. I looked in
+  <code>python/sglang/srt/managers/scheduler_components/metrics_reporter.py</code> and
+  <code>python/sglang/srt/entrypoints/openai/utils.py</code>. Exercise 2 is therefore a vLLM exercise
+  unless you derive $r_i$ from the histogram yourself.</p>
+</div></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Before running anything: you measure $E = 2.10$ with $\kappa = 3$ on the n-gram proposer. What
+  $\alpha$ does the i.i.d. model imply, and what break-even batch does that predict? Now measure it.
+  Which of the two numbers do you trust, and why does the disagreement matter more than its size?</li>
+
+  <li>Read the vector, not the scalar. Run one category with
+  <code>--spec-tokens 5</code> and record <code>spec_decode_per_position_acceptance_rates</code>. Fit
+  $\alpha$ from position 0 alone, then plot $\alpha^i$ against the measured $r_i$. At which position
+  does the geometric model first overstate reality by more than 20%, and what does that say about the
+  $\kappa$ you should be running?</li>
+
+  <li>Predict, then verify. Run the same category at temperature 0 and at temperature 1.0. Predict the
+  direction and rough magnitude of the change in $E$ before you look, from
+  $\alpha = 1 - D_{\mathrm{TV}}(p, q)$. Then answer a second question: did the output
+  <em>distribution</em> change? Cite the part of &sect;6.2 that settles it.</li>
+
+  <li>Read the file. Open <code>vllm/config/speculative.py</code> and find
+  <code>synthetic_acceptance_rates</code>. It must be "monotonically non-increasing". Say why that is a
+  correctness requirement and not a style rule &mdash; what would a non-monotone vector mean about the
+  early-terminating rejection loop? Then find the function in
+  <code>vllm/v1/spec_decode/utils.py</code> that converts these unconditional rates into conditional
+  ones and explain the division.</li>
+
+  <li>Run the Part B sweep twice: once with a real proposer, once with
+  <code>rejection_sample_method: "synthetic"</code> pinned to the $E$ you measured. The two crossings
+  should coincide. If the synthetic one sits to the right, what did the real proposer cost you that the
+  model does not charge for? Name it, then measure it.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <ol>
+    <li>Solve $(1-\alpha^{4})/(1-\alpha) = 2.10$ numerically: $\alpha \approx 0.575$. With
+    $c \approx 0$ for n-gram, $B^{*} = 295 \times 2.10/4 \approx 155$. The measured crossing will
+    almost certainly land left of that, and the size of the gap matters less than its direction: the
+    model charges only for extra token positions in the verify step, so anything that moves the crossing
+    <em>left</em> is a cost the model does not know about &mdash; reserved KV, the sampler sort, the
+    proposer's own time. Every one of those is in the table above and can be measured separately.
+    (Derived; arithmetic.)</li>
+
+    <li>Real acceptance decays faster than geometric, so the fitted $\alpha^i$ curve sits above the
+    measured $r_i$ and the gap widens with $i$. Whatever position you find, the operational reading is
+    that the marginal drafted token is worth less than $\alpha^{\kappa+1}$ while costing a full
+    $c$ &mdash; so the optimal $\kappa$ is smaller than the geometric table in &sect;6.2 says, and
+    lengthening the draft past it is a pure loss.</li>
+
+    <li>$E$ falls with temperature: a flatter $p$ raises $D_{\mathrm{TV}}(p,q)$, and
+    $\alpha = 1 - D_{\mathrm{TV}}$. The output distribution does <b>not</b> change. &sect;6.2's proof
+    is an identity chain with no assumption on $q$ whatsoever &mdash; every emitted token is drawn from
+    exactly $p$ at whatever temperature $p$ was computed at. A bad draft costs throughput and nothing
+    else.</li>
+
+    <li>$r_i$ is the unconditional probability that the <em>first $i{+}1$ drafts are all accepted</em>,
+    so it is a survival function: $r_i \le r_{i-1}$ by construction, since the event at $i$ is a subset
+    of the event at $i-1$. A non-monotone vector would make the conditional rate
+    $c_i = r_i/r_{i-1}$ exceed 1, i.e. a probability greater than one, and the early-terminating loop
+    would be sampling from something that is not a distribution. The converter is
+    <code>unconditional_to_conditional_rates</code>
+    (<code>vllm/v1/spec_decode/utils.py:L598-L601</code>); the division is exactly
+    $c_i = p_i / p_{i-1}$ with $p_{-1} = 1$.</li>
+
+    <li>The real proposer costs draft-side time and draft-side KV that the synthetic path does not pay:
+    n-gram costs a lookup and a scheduler round trip, a draft model costs $\kappa$ sequential forward
+    passes at $c$ each. Measure it by taking the difference in output-token throughput between the two
+    arms at a batch small enough to be well below either crossing, where the roofline term is identical
+    and only the proposer differs.</li>
+  </ol>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>Both engines already compute mean acceptance length with the bonus token included; compute it
+  yourself from output token counts and you will be off by exactly one. <code>vllm bench serve</code>
+  diffs the Prometheus counters around your measured window and prints the answer &mdash; a counter read
+  once describes the server's whole lifetime, not your run.</li>
+  <li>Acceptance <em>rate</em> is not comparable across engines: vLLM divides accepted by drafted
+  tokens, SGLang divides correct drafts by <code>speculative_num_draft_tokens - 1</code> per round.
+  Acceptance <em>length</em> is comparable. Tabulate lengths.</li>
+  <li>The break-even batch is nearly flat in &alpha; and steeply decreasing in $\kappa$: at
+  $\alpha = 0.7$, $\kappa=1$ breaks even at 226 concurrent sequences and $\kappa=3$ at 150 (derived).
+  A better draft buys latency; a shorter draft buys headroom. Both engines therefore adapt $\kappa$ at
+  runtime rather than toggling speculation &mdash; vLLM on batch size, SGLang on the measured acceptance
+  rate. No draft, however good, moves the crossing past the roofline ridge at all.</li>
+  <li>Pin $E$ with <code>rejection_sample_method: "synthetic"</code> and the batch sweep isolates the
+  roofline from the draft. Anything left over is reserved KV, the $\kappa{+}1$&times; sampler sort, or
+  the proposer &mdash; three separately measurable things that the textbook $S(B)$ formula charges
+  nothing for.</li>
+  <li>Measure at your real context length. At 8k the step stays bandwidth-bound far longer and the
+  crossing moves right; a break-even measured on 128-token prompts is a number about your benchmark,
+  not about your service.</li>
+</ul></div></section>
+
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#what">What you measure</a>
+<a href="#metric">Where the acceptance number lives</a>
+<a href="#run">Running it</a>
+<a href="#expect">What to expect</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

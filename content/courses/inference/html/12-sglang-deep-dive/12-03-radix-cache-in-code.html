@@ -1,0 +1,2072 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RadixAttention and the memory pools, in code — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i is-current" href="12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 12 · SGLang deep dive · 12-03</div>
+<h1>RadixAttention and the memory pools, in code</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>python/sglang/srt/mem_cache/radix_cache.py</code></li><li><code>python/sglang/srt/mem_cache/memory_pool.py</code></li><li><code>python/sglang/srt/mem_cache/allocator/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">You set a breakpoint in <code>radix_cache.py</code>'s <code>match_prefix</code>, start a server, send a request — and it never fires. The file is 863 lines of textbook radix tree, it is the file every blog post about RadixAttention points at, and at this SHA the serving path does not call it. This chapter is a guided read of the code that actually runs.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p><code>python/sglang/srt/mem_cache/</code> is 126 Python files and 62,482 lines, forty of them at the directory root. Eleven classes implement <code>BasePrefixCache</code> directly or through <code>RadixCache</code>, two more subclass <code>ChunkCache</code>, and every name sounds like the one you want: <code class="c-sglang">RadixCache</code>, <code class="c-sglang">HiRadixCache</code>, <code class="c-sglang">SWARadixCache</code>, <code class="c-sglang">MambaRadixCache</code>, <code class="c-sglang">PureSWARadixCache</code>, <code class="c-sglang">RadixCacheCpp</code>, <code class="c-sglang">LMCRadixCache</code>, <code class="c-sglang">FlexKVRadixCache</code>, <code class="c-sglang">UnifiedRadixCache</code>.</p>
+
+<p>Three of those are dead at this SHA. <code>grep -rn "HiRadixCache(" --include="*.py" .</code> returns two hits: the <code>class</code> statement at <code>hiradix_cache.py:L77</code>, and one unit test — 2,022 lines nothing in <code>srt/</code> constructs. <code>MambaRadixCache(</code> and <code>SWARadixCache(</code> are constructed only under <code>test/registered/unit/mem_cache/</code> and nowhere in <code>srt/</code>: another 2,867 lines. And <code>RadixCache</code> is constructed in exactly one place, which is not the serving path:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/radix_cache.py:L335-L350</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def create_simulated(
+        self,
+        disable: bool = False,
+        mock_allocator: Optional[Any] = None,
+        page_size: int = 1,
+        enable_kv_cache_events: bool = False,
+    ) -&gt; RadixCache:
+        """Init a radix cache without memory pools for simulation purpose."""
+        params = CacheInitParams(
+            disable=disable,
+            req_to_token_pool=None,
+            token_to_kv_pool_allocator=mock_allocator,
+            page_size=page_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+        )
+        return RadixCache(params)</code></pre>
+</div>
+
+<p>Its one caller in <code>srt/</code> is <code>python/sglang/srt/managers/schedule_policy.py:L235</code> — <code>self.waiting_queue_radix_tree = RadixCache.create_simulated()</code>. The earlier implementation survives at this SHA as a <em>pool-free simulator</em> the scheduler uses to sort its waiting queue by longest prefix match. It caches no KV.</p>
+
+<p>So the question this chapter answers is not "how does a radix tree work" — <a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a> owns that, and everything it says about the compressed trie, edge splitting, <code>lock_ref</code>, and tree-aware LRU still holds. The question is <b>which files do I open, in what order, and what is the control flow between them</b>.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Scope</span>
+  <p>Concepts are elsewhere. RadixAttention as an algorithm: <a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>. KV sizing: <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>. Allocator concepts: <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>. HiCache's tiers: <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">§2.6</a>. The repo at large: <a href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html">§12.1</a>. Scheduler layering: <a href="../12-sglang-deep-dive/12-02-sglang-request-path.html">§12.2</a>. This chapter is SGLang-only and code-only.</p>
+</div></div></section>
+<section class="sec" id="the-file-map" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: the file map</h2></div><div class="sec__body"><p>The directory has one honest map and it is checked in. <code>mem_cache/README.md</code> states the layering, and — unusually for a README — it is accurate at this SHA:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/README.md:L28-L36</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>| Layer | Cares about | In -&gt; Out |
+|---|---|---|
+| `allocation.py` | per-batch allocation policy | `batch` -&gt; `out_cache_loc` |
+| `hybrid_cache/` | per-layer routing across pools | `layer_id` -&gt; pool |
+| `allocator/` | which slots are free | `need_size` -&gt; `indices` |
+| `pool/` | physical KV / SSM state layout | `(layer_id, indices)` &lt;-&gt; tensor |
+| `pool_host/` | host mirror + H2D/D2H | `device_indices` &lt;-&gt; `host_indices` |
+| `storage/` | L3 backends (file, NIXL, HF3FS, Mooncake, ...) | hash -&gt; bytes |
+| radix cache | what to keep and what to evict | token prefix -&gt; node |</code></pre>
+</div>
+
+<p>Read the last row twice. <b>The radix cache is not a layer in that stack; it is a separate axis beside it.</b> The stack answers "where are the bytes and who hands out slots"; the tree answers "what is worth keeping". They meet at exactly one type — a tensor of int64 slot indices.</p>
+
+<p>The README states the convergence explicitly at <code>python/sglang/srt/mem_cache/README.md:L38-L45</code>: the per-model variants "are converging onto the <b>Unified Radix Cache</b>", tracked as sglang issue #20415. That is why the dead files are still there — they are the pre-image of a merge that has already landed on the default path.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — what to open, in order, with line counts at 7d89325.</b> Solid arrows are calls; the dashed box is code that exists but is never constructed in <code>srt/</code>.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    BLD["kv_cache_builder.py · 387 L<br/>builds CacheInitParams<br/>then calls create_tree_cache"]
+    REG["registry.py · 258 L<br/>default_radix_cache_factory<br/>READ THIS FIRST"]
+    IFACE["base_prefix_cache.py · 437 L<br/>BasePrefixCache + MatchResult<br/>the contract"]
+    URC["unified_radix_cache.py · 2887 L<br/>the facade: HiCache, storage,<br/>locks, cache_finished_req"]
+    CORE["unified_cache/unified_tree_core.py · 2529 L<br/>the tree: nodes, match, split,<br/>insert, LRUs, sanity_check"]
+    COMP["unified_cache/components/<br/>full 444 · swa 1166 · mamba 930<br/>tree_component 702"]
+    ALLOC["allocator/ · 1812 L<br/>token.py 84 · paged.py 347"]
+    POOL["memory_pool.py · 5059 L<br/>ReqToTokenPool · MHA and MLA pools"]
+    OLD["radix_cache.py 863 · hiradix_cache.py 2022<br/>swa_radix_cache.py 1440 · mamba_radix_cache.py 1427<br/>never constructed on the default path"]
+    BLD --> REG
+    REG --> URC
+    REG -.-> OLD
+    IFACE -.-> URC
+    URC --> CORE
+    CORE --> COMP
+    URC --> ALLOC
+    ALLOC --> POOL
+  </script>
+</div>
+
+<p>Four of those must actually be read: <code>registry.py</code> (258 lines, whole), <code>base_prefix_cache.py</code> (437 lines, the class at the bottom), <code>unified_cache/unified_tree_core.py</code> (2,529 lines — <code>match_prefix</code>, the insert walk, <code>_split_node</code>, <code>sanity_check</code>), and <code>ReqToTokenPool</code> (33 lines out of <code>memory_pool.py</code>'s 5,059). The rest is on demand.</p></div></section>
+<section class="sec" id="the-interface" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the contract every cache satisfies</h2></div><div class="sec__body"><p><code>BasePrefixCache</code> declares 44 methods, of which exactly seven carry <code>@abstractmethod</code>. Those seven are the entire obligation; five of them are here:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/base_prefix_cache.py:L315-L335</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    @abstractmethod
+    def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs):
+        pass
+
+    @abstractmethod
+    def cache_unfinished_req(self, req: Req, **kwargs):
+        pass
+
+    @abstractmethod
+    def evict(self, params: EvictParams) -&gt; EvictResult:
+        pass
+
+    @abstractmethod
+    def inc_lock_ref(self, node: Any) -&gt; IncLockRefResult:
+        pass
+
+    @abstractmethod
+    def dec_lock_ref(
+        self, node: Any, params: Optional[DecLockRefParams] = None
+    ) -&gt; DecLockRefResult:
+        pass</code></pre>
+</div>
+
+<p>Plus <code>reset</code> and <code>match_prefix</code> at <code>python/sglang/srt/mem_cache/base_prefix_cache.py:L273-L279</code>. Who calls each is the useful half:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Six of the seven abstract methods and their call sites — repo observations. <code>reset</code> has no per-request caller.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Method</th><th>Called by</th><th>When</th></tr></thead>
+      <tbody>
+        <tr><td><code>match_prefix</code></td><td><code>managers/schedule_batch.py:L1362</code>, <code>managers/schedule_policy.py:L156</code></td><td>Once per request admission, and again inside <code>cache_unfinished_req</code></td></tr>
+        <tr><td><code>inc_lock_ref</code></td><td><code>managers/schedule_policy.py:L958</code>, <code>L1059</code></td><td>When a matched prefix is adopted by a batch</td></tr>
+        <tr><td><code>dec_lock_ref</code></td><td><code>managers/schedule_policy.py:L1068</code>, <code>disaggregation/decode.py:L399</code></td><td>On release, retraction, or abort</td></tr>
+        <tr><td><code>evict</code></td><td><code>mem_cache/common.py:L131</code>, <code>L138</code>; <code>mem_cache/allocation.py:L261</code></td><td>Only when the allocator is short — never speculatively</td></tr>
+        <tr><td><code>cache_unfinished_req</code></td><td><code>mem_cache/common.py:L111</code></td><td>End of every chunked-prefill chunk</td></tr>
+        <tr><td><code>cache_finished_req</code></td><td><code>mem_cache/common.py:L215</code></td><td>Request completion, inside <code>release_kv_cache</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Two things there. <code>evict</code> is <em>demand-driven</em>: <code>evict_from_tree_cache</code> at <code>python/sglang/srt/mem_cache/common.py:L114-L138</code> evicts only <code>num_tokens - available_size</code>, and no background thread evicts anything. And the scheduler never touches a node — it holds opaque handles, which for <code>UnifiedRadixCache</code> are <em>integers</em> (<code>resolve_node_handle</code> and <code>root_node_handle</code>, <code>python/sglang/srt/mem_cache/base_prefix_cache.py:L284-L297</code>, both carrying a <code>TODO</code> to remove the indirection).</p>
+
+<p>The return value of a match is a <code>NamedTuple</code> with eleven fields, and reading it tells you the whole feature surface the tree has grown:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/base_prefix_cache.py:L200-L211</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    device_indices: torch.Tensor
+    last_device_node: Any
+    last_host_node: Any
+    best_match_node: Any
+    host_hit_length: int = 0
+    swa_host_hit_length: int = 0
+    mamba_host_hit_length: int = 0
+    mamba_branching_seqlen: Optional[int] = None
+    cache_protected_len: Optional[int] = None
+    full_kv_hit_length: int = 0
+    # Actions the Controller applies: CacheActions itself, ComponentActions routed to the owning component.
+    cache_actions: Sequence[CacheAction | ComponentAction] = ()</code></pre>
+</div>
+
+<p>Three node handles, not one. <code>last_device_node</code> is what the scheduler locks and what <code>prefix_indices</code> corresponds to; <code>last_host_node</code> anchors L3 storage prefetch; <code>best_match_node</code> is the deepest node all components agreed on and anchors L2 load-back. Without HiCache all three are the same node; with it they diverge, and confusing them is the commonest way to misread this code.</p></div></section>
+<section class="sec" id="the-factory" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The factory, read properly</h2></div><div class="sec__body"><p><code>registry.py</code> is 258 lines and is the most practically useful file in the directory: it is the only place that answers "which cache will my flags produce". Entry is <code>create_tree_cache</code> at <code>python/sglang/srt/mem_cache/registry.py:L199</code>, called once from <code>python/sglang/srt/mem_cache/kv_cache_builder.py:L337</code>. If <code>--radix-cache-backend NAME</code> is set it looks up a registered factory and raises on an unknown name; otherwise it calls <code>default_radix_cache_factory</code>. The chain, first half:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L80-L104</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def default_radix_cache_factory(ctx: TreeCacheBuildContext) -&gt; BasePrefixCache:
+    """Built-in Radix Cache selection chain."""
+    server_args = ctx.server_args
+    params = ctx.params
+
+    if (
+        ctx.disable_radix_cache
+        and get_disagg().disaggregation_decode_retraction_backup == "host_pool"
+    ):
+        return _create_unified_radix_cache(ctx, server_args, params)
+
+    if ctx.effective_chunked_prefill_size is not None and ctx.disable_radix_cache:
+        if not ctx.is_hybrid_swa:
+            from sglang.srt.mem_cache.chunk_cache import ChunkCache
+
+            return ChunkCache(params)
+        if ctx.full_tokens_per_layer == 0:
+            from sglang.srt.mem_cache.chunk_cache import PureSWAChunkCache
+
+            return PureSWAChunkCache(params)
+        from sglang.srt.mem_cache.chunk_cache import SWAChunkCache
+
+        return SWAChunkCache(params)
+
+    if envs.SGLANG_EXPERIMENTAL_CPP_RADIX_TREE.get():</code></pre>
+</div>
+
+<p>Second half, through the fall-through:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L104-L142</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if envs.SGLANG_EXPERIMENTAL_CPP_RADIX_TREE.get():
+        # lazy import to avoid JIT overhead
+        from sglang.srt.mem_cache.radix_cache_cpp import RadixCacheCpp
+
+        logger.info("Using experimental C++ radix tree implementation.")
+        return RadixCacheCpp(params=params, server_args=server_args)
+
+    if ctx.is_hybrid_swa and ctx.full_tokens_per_layer == 0:
+        from sglang.srt.mem_cache.pure_swa_radix_cache import PureSWARadixCache
+
+        return PureSWARadixCache(params=params)
+
+    if get_memory().enable_lmcache:
+        from sglang.srt.mem_cache.storage.lmcache.lmc_radix_cache import (
+            LMCRadixCache,
+        )
+
+        return LMCRadixCache(
+            params=params,
+            model_config=ctx.model_config,
+            tp_size=ctx.tp_size,
+            rank=ctx.tp_rank,
+            tp_group=ctx.tp_group,
+        )
+
+    if get_memory().enable_flexkv:
+        # Importing the package side-effect registers the explicit
+        # ``--radix-cache-backend=flexkv`` factory; we then call the
+        # factory directly so --enable-flexkv stands on its own.
+        import os
+
+        from sglang.srt.mem_cache.storage.flexkv import _flexkv_factory
+
+        # Honor a CLI --flexkv-config-file by forwarding it via the env
+        # var that FlexKV's config loader actually reads.
+        if get_memory().flexkv_config_file and not os.environ.get("FLEXKV_CONFIG_PATH"):
+            os.environ["FLEXKV_CONFIG_PATH"] = get_memory().flexkv_config_file
+        return _flexkv_factory(ctx)
+</code></pre>
+</div>
+
+<p>Seven branches, top to bottom, first match wins. Note what is <em>not</em> a branch: nothing tests for a Mamba model, or a hybrid-SWA model with a full-attention layer. Those no longer select a class — they select a <em>component set</em> inside the same class:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L159-L167</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    tree_components = [ComponentType.FULL]
+    if ctx.is_hybrid_swa:
+        tree_components.append(ComponentType.SWA)
+    if ctx.is_hybrid_ssm:
+        tree_components.append(ComponentType.MAMBA)
+
+    if hasattr(params.req_to_token_pool, "req_to_c128_sidecar"):</code></pre>
+</div>
+
+<p>and HiCache is attached after construction, not selected as a class:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L186-L196</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        }
+    cache = UnifiedRadixCache(params)
+    if (
+        ctx.enable_hierarchical_cache
+        or get_disagg().disaggregation_decode_retraction_backup == "host_pool"
+    ):
+        cache.init_hicache(server_args, params)
+        ctx.tp_worker.register_hicache_layer_transfer_counter(
+            cache.cache_controller.layer_done_counter
+        )
+    return cache</code></pre>
+</div>
+
+<p>That is the mechanical form of the convergence <a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a> described. A dimension that used to be a subclass is now a <code>ComponentType</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/component_type.py:L6-L12</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class ComponentType(int, Enum):
+    """Integer enum so that per-node list/tuple storage can be indexed directly."""
+
+    FULL = 0
+    SWA = 1
+    MAMBA = 2
+    C128 = 3</code></pre>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — <code>default_radix_cache_factory</code>'s selection chain, with the real branch conditions.</b> Every edge is a line in <code>registry.py:L80-L142</code>. <code>MambaRadixCache</code>, <code>SWARadixCache</code> and <code>HiRadixCache</code> appear nowhere in it.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    ENTRY["create_tree_cache · L199"]
+    NAMED{"server_args.radix_cache_backend<br/>is set?"}
+    REGD["get_radix_cache_factory name<br/>ValueError if unregistered"]
+    B1{"disable_radix_cache AND<br/>retraction_backup == host_pool"}
+    B2{"effective_chunked_prefill_size not None<br/>AND disable_radix_cache"}
+    B2A{"is_hybrid_swa?"}
+    B2B{"full_tokens_per_layer == 0?"}
+    CC["ChunkCache"]
+    PSCC["PureSWAChunkCache"]
+    SWCC["SWAChunkCache"]
+    B3{"env SGLANG_EXPERIMENTAL_CPP_RADIX_TREE"}
+    CPP["RadixCacheCpp"]
+    B4{"is_hybrid_swa AND<br/>full_tokens_per_layer == 0"}
+    PSWA["PureSWARadixCache"]
+    B5{"enable_lmcache"}
+    LMC["LMCRadixCache"]
+    B6{"enable_flexkv"}
+    FKV["_flexkv_factory"]
+    UNI["_create_unified_radix_cache<br/>UnifiedRadixCache with<br/>FULL plus SWA plus MAMBA plus C128"]
+    HIC{"enable_hierarchical_cache<br/>or host_pool retraction?"}
+    HIC2["cache.init_hicache<br/>L187 to L196"]
+    ENTRY --> NAMED
+    NAMED -->|yes| REGD
+    NAMED -->|no| B1
+    B1 -->|yes| UNI
+    B1 -->|no| B2
+    B2 -->|no| B3
+    B2 -->|yes| B2A
+    B2A -->|no| CC
+    B2A -->|yes| B2B
+    B2B -->|yes| PSCC
+    B2B -->|no| SWCC
+    B3 -->|yes| CPP
+    B3 -->|no| B4
+    B4 -->|yes| PSWA
+    B4 -->|no| B5
+    B5 -->|yes| LMC
+    B5 -->|no| B6
+    B6 -->|yes| FKV
+    B6 -->|no| UNI
+    UNI --> HIC
+    HIC -->|yes| HIC2
+  </script>
+</div>
+
+<p>Read it against the flags you type. Plain <code>--model-path meta-llama/Meta-Llama-3-8B-Instruct</code>: every guard false, <code>UnifiedRadixCache</code> with <code>tree_components == (FULL,)</code>. Add <code>--enable-hierarchical-cache</code>: same class plus <code>init_hicache</code>. Add <code>--disable-radix-cache</code> (which implies a chunked-prefill size): second branch, <code>ChunkCache</code>, whose <code>disable</code> property is a hard-coded <code>True</code> and whose <code>match_prefix</code> always returns empty (<code>python/sglang/srt/mem_cache/chunk_cache.py:L35-L77</code>). Set <code>SGLANG_EXPERIMENTAL_CPP_RADIX_TREE=1</code> and you get a Python wrapper over a JIT-compiled C++ tree that <em>no flag</em> can reach — <code>python/sglang/srt/environ.py:L588</code> is the only door.</p>
+
+<p>After the chain, <code>create_tree_cache</code> runs three post-conditions whose error strings you will actually see (<code>python/sglang/srt/mem_cache/registry.py:L216-L246</code>): <code>--hicache-host-memory-mode buffer_only</code> and <code>--enable-session-radix-cache</code> each raise unless the result is a <code>UnifiedRadixCache</code>, and <code>--enable-streaming-session</code> wraps the cache in <code>StreamingSession</code>. Then it logs <code>"Tree cache initialized: source=%s impl=%s ..."</code> — the fastest runtime confirmation of everything above.</p></div></section>
+<section class="sec" id="the-tree-core" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">UnifiedRadixCache and the tree core</h2></div><div class="sec__body"><p>The 2,887-line <code>unified_radix_cache.py</code> is a <em>facade</em>, and reading it as the tree will waste your afternoon. Its <code>__init__</code> at <code>python/sglang/srt/mem_cache/unified_radix_cache.py:L148-L230</code> instantiates the components, builds a tree core, and then spends most of the file on HiCache: write-through acks, prefetch, storage backends, retraction backup. The tree itself lives behind <code>self.tree_core</code>, built at <code>L193-L197</code> via <code>create_tree_core(name=envs.SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND.get(), ...)</code> — a second, smaller registry in <code>unified_cache/tree_core_registry.py</code> (73 lines).</p>
+
+<h3>The node</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L104-L136</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class UnifiedTreeNode:
+    counter = 0
+
+    def __init__(self, tree_components: tuple[ComponentType, ...], priority: int = 0):
+        # Plain dict (not defaultdict): a missing-key read must raise, never
+        # silently mint an unregistered node outside the TreeCore arena.
+        self.children: dict[Any, UnifiedTreeNode] = {}
+        self.parent: UnifiedTreeNode | None = None
+        self.key: Optional[RadixKey] = None
+        self.component_types = tree_components
+        # list indexed by ComponentType (int enum 0..N-1)
+        self.component_data: list[ComponentData] = [
+            ComponentData() for _ in range(_NUM_COMPONENT_TYPES)
+        ]
+        self.last_access_time = get_and_increase_time_counter()
+        self.creation_time = get_and_increase_time_counter()
+        self.hash_value = None
+        # Namespace-aware hashes used only for external KV events.
+        self.event_hash_value: Optional[list[str]] = None
+        self.hit_count = 0
+        self.priority = priority
+        self.lru_prev: list[UnifiedTreeNode | None] = [None] * (
+            _NUM_COMPONENT_TYPES * 2
+        )
+        self.lru_next: list[UnifiedTreeNode | None] = [None] * (
+            _NUM_COMPONENT_TYPES * 2
+        )
+        self.id = UnifiedTreeNode.counter
+        UnifiedTreeNode.counter += 1
+        self.write_through_pending_id: Optional[int] = None
+        # Anchor NodeId of an in-flight H-&gt;D load-back reading this node's
+        # host slots; such host copies must not be reclaimed until the ack.
+        self.load_back_pending_id: Optional[int] = None</code></pre>
+</div>
+
+<p>Four structural facts. (1) <code>children</code> is keyed by a <em>child key</em> — the first page of the edge, from <code>RadixKey.child_key(page_size)</code> — not a single token, so at <code>page_size &gt; 1</code> the fan-out is over pages. (2) <code>component_data</code> is a plain list indexed by the int enum, so <code>node.component(ComponentType.SWA)</code> is an array index. (3) <code>lru_prev</code>/<code>lru_next</code> are <em>lists</em> of length <code>2 × N_components</code>: each node belongs to up to eight intrusive linked lists at once, device and host per component. (4) The comment on <code>children</code> is load-bearing — a plain dict, not a <code>defaultdict</code>, so a missing key raises instead of minting a node outside the arena.</p>
+
+<h3>Matching</h3>
+
+<p><code>match_prefix</code> (<code>python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L640-L666</code>) page-aligns the key, delegates to <code>_match_prefix_helper</code>, then post-processes. The walk itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L721-L743</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        while len(key) &gt; 0 and child_key in node.children:
+            child = node.children[child_key]
+
+            # HiCache: dead node (evicted + not backuped) — stop traversal
+            if child.evicted and not child.backuped:
+                break
+
+            prefix_len = child.key.match(key, page_size=self.page_size)
+            full_kv_hit_length += prefix_len
+            if prefix_len &lt; len(child.key):
+                node, action = self._split_node(child.key, child, prefix_len)
+                if not node.evicted:
+                    value.append(node.component_data[BASE_COMPONENT_TYPE].value)
+                _update_best_if_valid(node)
+                break
+
+            if not child.evicted:
+                value.append(child.component_data[BASE_COMPONENT_TYPE].value)
+            node = child
+            _update_best_if_valid(node)
+            key = key[prefix_len:]
+            if len(key):
+                child_key = key.child_key(self.page_size)</code></pre>
+</div>
+
+<p>Descend by dict lookup on <code>child_key</code>, compare the edge with <code>RadixKey.match</code>, split and stop on a mid-edge divergence, otherwise consume the edge and continue. Each hop appends <em>the node's own index tensor</em> to a Python list; concatenation happens once, in <code>_match_post_processor</code>. A 20-node match does one <code>torch.cat</code>, not twenty.</p>
+
+<p>The one piece with no counterpart in the earlier implementation is the validator pair. With HiCache on, the walk keeps two answers: the deepest node all components accept on <em>either</em> tier, and the deepest accepted with <code>match_device_only=True</code>. That is where <code>MatchResult</code>'s three node handles come from, and why <code>separate_device_match = self.enable_hicache</code> at <code>L687</code> changes the shape of the return value.</p>
+
+<h3>Splitting</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L1074-L1099</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _split_node(
+        self, key: RadixKey, child: UnifiedTreeNode, split_len: int
+    ) -&gt; tuple[UnifiedTreeNode, Optional[CacheAction | ComponentAction]]:
+        new_node = self._new_node(priority=child.priority)
+        new_node.children = {key[split_len:].child_key(self.page_size): child}
+        new_node.parent = child.parent
+        new_node.key = child.key[:split_len]
+        new_node.hit_count = child.hit_count
+        new_node.creation_time = child.creation_time
+        # Split fragments stay on the anchor's root path for the ack's walk.
+        new_node.load_back_pending_id = child.load_back_pending_id
+
+        self._for_each_component_lru(child, UnifiedLRUList.remove_node)
+
+        child.parent = new_node
+        child.key = child.key[split_len:]
+        new_node.hash_value, child.hash_value = split_node_hash_value(
+            child.hash_value, split_len, self.page_size
+        )
+        new_node.event_hash_value, child.event_hash_value = split_node_hash_value(
+            child.event_hash_value, split_len, self.page_size
+        )
+
+        for component in self.components:
+            component.redistribute_on_node_split(new_parent=new_node, child=child)
+        new_node.parent.children[key.child_key(self.page_size)] = new_node</code></pre>
+</div>
+
+<p>The mechanic is the textbook one <a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a> describes; what is new is the bookkeeping it must carry. The child leaves every component LRU <em>before</em> re-parenting and both halves re-enter at MRU afterwards (<code>L1113-L1118</code>); hash chains are split; and an in-flight device-to-host write emits <code>ReplaceWriteThroughOnNodeSplit</code> so the ack lands on the right node. A split is not a pointer shuffle, it is a small transaction.</p>
+
+<h3>Inserting</h3>
+
+<p>Insert is a resumable state machine — the biggest departure from the earlier recursive <code>_insert_helper</code>. <code>begin_insert</code> builds an <code>_InsertWalkState</code>; <code>_advance_insert</code> loops <code>WALK → COMMIT → TAIL</code> and <em>suspends</em> whenever a step emits a non-deferrable action (<code>python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L915-L938</code>). The facade pumps it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_radix_cache.py:L518-L536</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def insert(self, params: InsertParams) -&gt; InsertResult:
+        if self.disable:
+            return InsertResult(prefix_len=0)
+        # Fail fast on re-entrancy without touching the in-flight walk.
+        assert not self.tree_core.has_ongoing_insert(), "re-entrant insert"
+        # Pump the resumable insert, applying each step's actions at its barrier.
+        try:
+            step = self.tree_core.begin_insert(params)
+            while True:
+                self._apply_cache_actions(step.actions)
+                if step.result is not None:
+                    # Walk actions flow through the steps; the result is action-free.
+                    assert not step.result.cache_actions
+                    return step.result
+                step = self.tree_core.resume_insert()
+        finally:
+            # Drain still-pending actions so frees reach the allocator on abort.
+            self._apply_cache_actions(self.tree_core.end_insert())
+</code></pre>
+</div>
+
+<p>The barrier exists because a step can decide "free this node's KV" or "back this node up to host" — side effects the tree must not perform itself, since it does not own the allocator. One walk step:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L944-L959</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _insert_walk_step(self, state: _InsertWalkState) -&gt; None:
+        """Process one walked node, appending its barrier actions to the state."""
+        key = state.key
+        child_key = key.child_key(self.page_size) if len(key) else None
+        if child_key not in state.node.children:
+            state.phase = _InsertPhase.COMMIT
+            return
+        step_actions = state.pending_actions
+        node = state.node.children[child_key]
+        self._touch_node(node)
+        prefix_len = node.key.match(key, page_size=self.page_size)
+        if prefix_len &lt; len(node.key):
+            node, action = self._split_node(node.key, node, prefix_len)
+            if action is not None:
+                step_actions.append(action)
+        node.priority = max(node.priority, state.priority)</code></pre>
+</div>
+
+<p>When the walk runs out of matching edges it moves to <code>COMMIT</code>, which creates the tail leaf:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L1127-L1146</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _add_new_node(
+        self,
+        parent: UnifiedTreeNode,
+        key: RadixKey,
+        value: torch.Tensor,
+        priority: int = 0,
+    ) -&gt; UnifiedTreeNode:
+        new_node = self._new_node(priority=priority)
+        new_node.parent = parent
+        new_node.key = key
+        new_node.component_data[BASE_COMPONENT_TYPE].value = value.clone()
+        parent.children[key.child_key(self.page_size)] = new_node
+        self.component_evictable_size_[BASE_COMPONENT_TYPE] += len(value)
+        if self.enable_storage:
+            new_node.hash_value = compute_node_hash_values(new_node, self.page_size)
+
+        self._update_evictable_leaf_sets(new_node)
+        self._update_evictable_leaf_sets(parent)
+        self.kv_events.record_store(new_node)
+        return new_node</code></pre>
+</div>
+
+<p>Three lines to internalise. <code>value.clone()</code>: the tree owns its index tensor, never a view of the request's row. <code>component_evictable_size_[FULL] += len(value)</code>: the accounting is updated at the same statement that creates the value, which is what makes it checkable by recomputation. And <code>_update_evictable_leaf_sets</code> runs on the new node <em>and its parent</em>, because the parent just stopped being a leaf.</p>
+
+<h3>Evicting</h3>
+
+<p>Eviction is driven per component. <code>UnifiedRadixCache.evict</code> (<code>python/sglang/srt/mem_cache/unified_radix_cache.py:L537-L563</code>) turns an <code>EvictParams</code> into a per-component request count and calls <code>_evict_components</code>, which for each component runs <code>evict_device_start → evict_device_next_node* → evict_device_end</code>. The FULL component's implementation is the tree-aware LRU, in code:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/components/full_component.py:L190-L224</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _evict_device_start(self, request_cnt: int) -&gt; None:
+        self._ensure_eviction_strategy()
+        self._evict_device_request_cnt = request_cnt
+        self._evict_device_last_node = None
+        self._evict_device_heap = [
+            (self.session_ref_eviction_strategy(n), n)
+            for n in self.tree_core.evictable_device_leaves
+        ]
+        heapq.heapify(self._evict_device_heap)
+
+    def _evict_device_next_node(
+        self,
+        tracker: dict[ComponentType, int],
+        device_frees: dict[ComponentType, list[torch.Tensor]],
+        host_frees: dict[ComponentType, list[torch.Tensor]],
+    ) -&gt; Optional[NodeId]:
+        ct = self.component_type
+        lv = self._evict_device_last_node
+        if (
+            lv is not None
+            and lv.parent is not None
+            and lv.parent in self.tree_core.evictable_device_leaves
+        ):
+            heapq.heappush(
+                self._evict_device_heap,
+                (self.session_ref_eviction_strategy(lv.parent), lv.parent),
+            )
+        self._evict_device_last_node = None
+        while tracker[ct] &lt; self._evict_device_request_cnt and self._evict_device_heap:
+            _, x = heapq.heappop(self._evict_device_heap)
+            if x not in self.tree_core.evictable_device_leaves:
+                continue
+            self._evict_device_last_node = x
+            return x.id
+        return None</code></pre>
+</div>
+
+<p>This is the concrete answer to §2.4's "LRU over leaves". <code>evictable_device_leaves</code> is a maintained <code>set</code>, heapified once per eviction pass; the key is <code>(session_ref &gt; 0, session_ref, eviction_strategy.get_priority(node))</code> from <code>L186-L188</code>. Interior nodes are not in the set, so they cannot be selected — the invariant, not a comparison, is what protects the shared system prompt. And the loop's cadence is what makes it <em>cascading</em>: after a leaf is evicted its parent may become a leaf, so the next call pushes <code>lv.parent</code> back onto the heap before popping. Stale entries are skipped by the <code>if x not in ... evictable_device_leaves: continue</code> guard rather than by removal from the heap.</p>
+
+<p>The priority function is pluggable and the file is 65 lines total. <code>--radix-eviction-policy</code> selects among them; the two least obvious:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/evict_policy.py:L41-L65</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class PriorityStrategy(EvictionStrategy):
+    """Priority-aware eviction: lower priority values evicted first, then LRU within same priority."""
+
+    def get_priority(self, node: TreeNode) -&gt; Tuple[int, float]:
+        # Return (priority, last_access_time) so lower priority nodes are evicted first
+        return (node.priority, node.last_access_time)
+
+
+class SLRUStrategy(EvictionStrategy):
+    def __init__(self, protected_threshold: int = 2):
+        self.protected_threshold = protected_threshold
+
+    def get_priority(self, node: TreeNode) -&gt; Tuple[int, float]:
+        # Priority Logic:
+        # Smaller value = Evicted earlier.
+        #
+        # Segment 0 (Probationary): hit_count &lt; threshold
+        # Segment 1 (Protected): hit_count &gt;= threshold
+        #
+        # Tuple comparison: (segment, last_access_time)
+        # Nodes in segment 0 will always be evicted before segment 1.
+        # Inside the same segment, older nodes (smaller time) are evicted first.
+
+        is_protected = 1 if node.hit_count &gt;= self.protected_threshold else 0
+        return (is_protected, node.last_access_time)</code></pre>
+</div></div></section>
+<section class="sec" id="the-pools" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The memory pools underneath</h2></div><div class="sec__body"><p>Now the join. A matched prefix is a tensor of int64 <em>slot indices</em>; three separate structures interpret those integers.</p>
+
+<p><b>1. <code>ReqToTokenPool</code></b> — a dense int32 matrix, one row per in-flight request, one column per position:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L256-L288</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class ReqToTokenPool:
+    """A memory pool that maps a request to its token locations."""
+
+    enable_mamba_extra_buffer_lazy: bool = False
+
+    def __init__(
+        self,
+        size: int,
+        max_context_len: int,
+        device: str,
+        enable_memory_saver: bool,
+    ):
+        memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=enable_memory_saver
+        )
+
+        self.size = size
+        # +1 padding row at index 0: cuda-graph padded batches default
+        # req_pool_indices to 0, so dummy reads/writes land here harmlessly.
+        self._alloc_size = size + 1
+        self.max_context_len = max_context_len
+        self.device = device
+        with memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            self.req_to_token = torch.zeros(
+                (self._alloc_size, max_context_len), dtype=torch.int32, device=device
+            )
+        self.free_slots = list(range(1, self._alloc_size))
+        self.req_generation = torch.zeros(self._alloc_size, dtype=torch.int64)
+
+    def write(self, indices, values):
+        self.req_to_token[indices] = values
+
+    def available_size(self):</code></pre>
+</div>
+
+<p><code>req_to_token[req_pool_idx, pos]</code> is the KV slot holding position <code>pos</code>. For 256 running requests at <code>max_context_len = 8192</code> that is $(256+1) \times 8192 \times 4\ \mathrm{B} = 8{,}421{,}376$ B $\approx$ 8.03 MiB of HBM — arithmetic, not a measurement. Row 0 is padding, so CUDA-graph-padded batches (whose <code>req_pool_indices</code> default to 0) write somewhere harmless.</p>
+
+<p><b>2. The KV pool</b> — where the bytes are. <code>MHATokenToKVPool</code> (<code>python/sglang/srt/mem_cache/memory_pool.py:L1759</code>) holds a <code>k_buffer</code> and <code>v_buffer</code> per layer, shaped by:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L2049-L2060</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _kv_buffer_shapes(self):
+        """(k_shape, v_shape)"""
+        if self.use_hnd:
+            return (
+                (self.num_pages, self.head_num, self.page_size, self.head_dim),
+                (self.num_pages, self.head_num, self.page_size, self.v_head_dim),
+            )
+        rows = self.size + self.page_size
+        return (
+            (rows, self.head_num, self.head_dim),
+            (rows, self.head_num, self.v_head_dim),
+        )</code></pre>
+</div>
+
+<p>An index $i$ addresses row $i$ of a <code>[size + page_size, head_num, head_dim]</code> tensor — unless the layout is HND, where it addresses <em>within</em> a page. <code>MLATokenToKVPool</code> (<code>python/sglang/srt/mem_cache/memory_pool.py:L3949</code>) instead holds one buffer per layer of width <code>kv_lora_rank + qk_rope_head_dim</code>: one latent vector per token, not K and V per head. Same index space, different byte layout; both reserve slot 0 as padding.</p>
+
+<p><b>3. The allocator</b> — who owns which slots. The token allocator is 84 lines and is a free list of exactly the kind you would write yourself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocator/token.py:L42-L64</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def clear(self):
+        # The padded slot 0 is used for writing dummy outputs from padded tokens.
+        self.free_pages = torch.arange(
+            1, self.size + 1, dtype=torch.int64, device=self.device
+        )
+        self.is_not_in_free_group = True
+        self.free_group = []
+        self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+
+    def available_size(self):
+        # To avoid minor "len(free_pages) * 1" overhead
+        return len(self.free_pages) + len(self.release_pages)
+
+    def alloc(self, need_size: int):
+        if self.need_sort and need_size &gt; len(self.free_pages):
+            self.merge_and_sort_free()
+
+        if need_size &gt; len(self.free_pages):
+            return None
+
+        select_index = self.free_pages[:need_size]
+        self.free_pages = self.free_pages[need_size:]
+        return select_index</code></pre>
+</div>
+
+<p><code>free_pages</code> is a device tensor, allocation is a slice, <code>free</code> concatenates — no sorting unless <code>need_sort</code> is set, in which case frees queue in <code>release_pages</code> and merge lazily (<code>python/sglang/srt/mem_cache/allocator/base.py:L77-L83</code>). The paged allocator cannot hand out a slice, because a request's slots must be page-contiguous with its existing tail, so it calls a Triton kernel:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocator/paged.py:L191-L219</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            self.merge_and_sort_free()
+
+        out_indices = torch.empty(
+            (extend_num_tokens,), dtype=torch.int64, device=self.device
+        )
+
+        alloc_extend_kernel[(bs,)](
+            prefix_lens,
+            seq_lens,
+            last_loc,
+            self.free_pages,
+            out_indices,
+            next_power_of_2(bs),
+            self.page_size,
+        )
+
+        if self.debug_mode:
+            assert len(torch.unique(out_indices)) == len(out_indices)
+
+        if num_new_pages is None:
+            num_new_pages = get_num_new_pages(
+                seq_lens=seq_lens_cpu,
+                page_size=self.page_size,
+                prefix_lens=prefix_lens_cpu,
+            )
+        if num_new_pages &gt; len(self.free_pages):
+            return None
+
+        self.free_pages = self.free_pages[num_new_pages:]</code></pre>
+</div>
+
+<p><code>last_loc</code> is the last slot of the matched prefix — which is to say, the last element of the tensor the <em>tree</em> just returned. That is the join, made explicit at <code>python/sglang/srt/mem_cache/allocation.py:L332-L346</code>, where <code>last_loc</code> is built as <code>t[-1:]</code> over <code>prefix_tensors = [r.prefix_indices for r in batch.reqs]</code>. The tree's output is the paged allocator's input.</p>
+
+<p>Then the row is written:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocation.py:L348-L361</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Write to req_to_token_pool
+    write_cache_indices(
+        out_cache_loc,
+        req_pool_indices_device,
+        req_pool_indices_cpu,
+        prefix_lens_device,
+        prefix_lens_cpu,
+        batch.seq_lens,
+        batch.seq_lens_cpu,
+        extend_lens_device,
+        extend_lens_cpu,
+        prefix_tensors,
+        batch.req_to_token_pool,
+    )</code></pre>
+</div>
+
+<p>Positions <code>[0, prefix_len)</code> get the tree's indices verbatim; <code>[prefix_len, seq_len)</code> get the fresh ones. The fast path is a Triton kernel over the whole batch (<code>python/sglang/srt/mem_cache/allocation.py:L69-L85</code>); the loop above is the readable version of the same write.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — the tree-to-pool join, with real numbers.</b> Llama-3-8B, bf16, TP=1, <code>page_size=1</code>: $L=32$, $h_{kv}=8$, $d_h=128$, so KV per token is $2 \cdot 32 \cdot 8 \cdot 128 \cdot 2\ \mathrm{B} = 128$ KiB (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>). A 2,048-token matched prefix is 16 KiB of int64 indices addressing 256 MiB of HBM — a 16,384:1 leverage. All arithmetic, derived.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    N1["tree node A · system prompt<br/>key = 512 tokens<br/>component FULL value =<br/>int64 tensor of 512 slot ids"]
+    N2["tree node B · few-shot block<br/>key = 1536 tokens<br/>component FULL value =<br/>int64 tensor of 1536 slot ids"]
+    MR["MatchResult.device_indices<br/>torch.cat of the two<br/>shape 2048 · int64 · 16 KiB"]
+    R2T["req_to_token row 7<br/>positions 0 to 2047 = those ids<br/>positions 2048 to 2143 = fresh<br/>int32 · 8192 wide"]
+    ALLOC["PagedTokenToKVPoolAllocator<br/>free_pages device tensor<br/>last_loc = device_indices at -1"]
+    KV["MHATokenToKVPool<br/>k_buffer of layer 0 to 31<br/>row shape 8 by 128 · bf16<br/>2 KiB per row per layer per K"]
+    TOT["2048 tokens times 128 KiB<br/>= 256 MiB of HBM reused<br/>96 new tokens times 128 KiB<br/>= 12 MiB newly allocated"]
+    N1 --> MR
+    N2 --> MR
+    MR --> R2T
+    MR -->|"last_loc"| ALLOC
+    ALLOC -->|"out_cache_loc · 96 fresh ids"| R2T
+    R2T -->|"index into"| KV
+    KV --- TOT
+  </script>
+</div>
+
+<p>One consequence explains a whole class of bug reports. <b>Two tree nodes and one request row can name the same slot.</b> The tree's <code>value</code> tensors and <code>req_to_token</code> rows are both <em>references</em>; the allocator's free list is the only ownership record. That is why <code>cache_finished_req</code> frees only the unaligned tail and why <code>_add_new_node</code> clones. Free a slot twice and the next allocation hands the same physical KV rows to two requests — nothing crashes, you just get wrong tokens.</p></div></section>
+<section class="sec" id="the-invariants" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">The invariants, with the asserts as evidence</h2></div><div class="sec__body"><p>There are nineteen <code>assert</code> statements in <code>unified_radix_cache.py</code>, each naming something a contributor must not break. Four groups matter.</p>
+
+<p><b>Refcount discipline.</b> A lock is taken on a <em>path</em>, not a node. <code>acquire_component_lock</code> walks from the matched node to the root, and the accounting moves token counts between two scalars as each node's refcount crosses zero:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/components/full_component.py:L277-L302</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        root = self.tree_core.root_node
+        cur = node
+
+        # Skip the bottom evicted segment
+        while cur is not root and cur.component_data[ct].value is None:
+            result.skip_lock_node_ids.setdefault(ct, set()).add(cur.id)
+            cur = cur.parent
+
+        # Lock the device-on segment up to root
+        delta = 0
+        while cur is not root:
+            cd = cur.component_data[ct]
+            assert (
+                cd.value is not None
+            ), f"FULL invariant broken: evicted ancestor {cur.id} above device-on segment"
+            if cd.lock_ref == 0:
+                key_len = len(cd.value)
+                self.tree_core.component_evictable_size_[ct] -= key_len
+                self.tree_core.component_protected_size_[ct] += key_len
+                delta += key_len
+            cd.lock_ref += 1
+            self.tree_core.evictable_device_leaves.discard(cur)
+            cur = cur.parent
+        result.delta = delta
+        return result
+</code></pre>
+</div>
+
+<p>Read the assert: <code>"FULL invariant broken: evicted ancestor {id} above device-on segment"</code>. It encodes the deepest structural rule in the tree — <b>if a node has device KV, every ancestor has device KV</b>; there is no hole in a path. The release path at <code>L303-L342</code> is the exact mirror, with <code>assert cd.lock_ref &gt; 0</code> catching an unbalanced <code>dec</code>.</p>
+
+<p><b>Leaf-set maintenance.</b> The device-leaf set is the eviction candidate set, so anything that changes a node's leaf-ness must update it. The predicate:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L1699-L1715</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _is_device_leaf(self, node: UnifiedTreeNode) -&gt; bool:
+        """D-leaf: Full device value present, no child with Full KV on device,
+        unlocked, not root.
+
+        Only the Full (base) component is required; auxiliary components
+        (Mamba, SWA) are not mandatory for D-leaf membership."""
+        ct = BASE_COMPONENT_TYPE
+        if node is self.root_node or node.evicted:
+            return False
+        if any(cd.lock_ref &gt; 0 for cd in node.component_data):
+            return False
+        if any(
+            child.component_data[ct].value is not None
+            for child in node.children.values()
+        ):
+            return False
+        return True</code></pre>
+</div>
+
+<p><code>_update_evictable_leaf_sets</code> is called from <code>_add_new_node</code>, <code>_split_node</code>, <code>_unevict_node_on_insert</code>, and all four lock-ref entry points. Miss one in a patch and the cache silently stops evicting a subtree, surfacing as an out-of-memory hours later.</p>
+
+<p><b>Size accounting.</b> <code>evictable_size_</code> and <code>protected_size_</code> are per-component dicts, and their relationship is a partition, not an ordering: every non-root node with a device value contributes <code>len(value)</code> to exactly one of them, chosen by <code>lock_ref &gt; 0</code>. <code>sanity_check</code> proves it by brute force:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L2271-L2294</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # ── PART 4: Size Accounting ──
+        for ct in self.component_types:
+            evictable = 0
+            protected = 0
+            for n in all_nodes:
+                if n is self.root_node:
+                    continue
+                cd = n.component_data[ct]
+                if cd.value is not None:
+                    toks = len(cd.value)
+                    if cd.lock_ref &gt; 0:
+                        protected += toks
+                    else:
+                        evictable += toks
+            if self.component_evictable_size_[ct] != evictable:
+                E(
+                    f"[Size] {ct} evictable={self.component_evictable_size_[ct]} "
+                    f"!= recomputed={evictable}"
+                )
+            if self.component_protected_size_[ct] != protected:
+                E(
+                    f"[Size] {ct} protected={self.component_protected_size_[ct]} "
+                    f"!= recomputed={protected}"
+                )</code></pre>
+</div>
+
+<p>Their consumer is the scheduler's admission arithmetic: <code>available_and_evictable_str</code> (<code>python/sglang/srt/mem_cache/base_prefix_cache.py:L434-L437</code>) reports <code>available_size() + evictable_size()</code> as the tokens a batch may assume. Drift high and the scheduler admits a batch it cannot allocate; drift low and throughput quietly collapses.</p>
+
+<p><b>The whole check.</b> <code>UnifiedTreeCore.sanity_check</code> is 256 lines in five parts — tree structure, per-node state machine and leaf qualification, tracking structures, size accounting, ongoing operations — raising <code>AssertionError</code> with every violation listed after a <code>pretty_print()</code>. Its rules are the contributor's checklist: root keeps a Full device value and <code>lock_ref &gt; 0</code>; parent and child pointers agree; aux components require Full data on the same tier; every node keeps Full data on at least one tier ("node {id} dead: no Full device and no Full host"); <code>full_lock &gt;= component_lock</code>; no node in both a device and a host LRU. The catch is its caller (<code>python/sglang/srt/managers/scheduler_components/invariant_checker.py:L453-L459</code>): it runs <em>only</em> for hybrid-SWA or hybrid-SSM models. On a plain Llama-3 deployment nothing checks any of this at runtime.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Reading trap</span>
+  <p><code>_check_tree_cache</code> at <code>python/sglang/srt/managers/scheduler_components/invariant_checker.py:L453-L459</code> combines its guards as <code>A and B or C</code> with no parentheses. Python binds <code>and</code> tighter than <code>or</code>, so the condition is <code>(is_tree_cache and (is_hybrid_swa and supports_swa)) or (is_hybrid_ssm and supports_mamba)</code> — the <code>is_tree_cache()</code> guard does not apply to the SSM arm. Worth knowing before you trust the shape of that condition.</p>
+</div></div></section>
+<section class="sec" id="rank-consensus" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Why TP divergence bites in the cache</h2></div><div class="sec__body"><p>Search the entire SGLang tree for <code>@rank_consensus</code> and you get three hits outside the decorator's own docstring. All three are in <code>unified_radix_cache.py</code>:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Every <code>@rank_consensus</code> use in the repo at 7d89325 — repo observation.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Site</th><th>Method</th><th>Checked</th></tr></thead>
+      <tbody>
+        <tr><td><code>unified_radix_cache.py:L495</code></td><td><code>match_prefix</code></td><td><code>same_params=["params"]</code>, <code>same_results=["result.full_kv_hit_length", "result.swa_host_hit_length"]</code></td></tr>
+        <tr><td><code>unified_radix_cache.py:L1753</code></td><td><code>check_prefetch_progress</code></td><td><code>same_params=True, same_results=True</code></td></tr>
+        <tr><td><code>unified_radix_cache.py:L1971</code></td><td><code>release_aborted_request</code></td><td><code>same_params=True</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>SGLang's own engineers have marked <em>cache bookkeeping and nothing else</em> as the place tensor-parallel ranks silently disagree, and the reason is structural. Every rank runs the same scheduler loop, and the forward is kept in lock-step by collectives — but the radix tree is <b>host-side state, replicated per rank, synchronised by nothing.</b> A dict iteration order, a float comparison, a <code>time.perf_counter()</code> tiebreak, an exception caught on one rank only: any of those and rank 0 believes the prefix hit 2,048 tokens while rank 1 believes 1,536. The forwards then have different sequence lengths, the next collective mismatches, and the process hangs on an all-reduce with no error message.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_radix_cache.py:L495-L514</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    @rank_consensus(
+        same_params=["params"],
+        same_results=["result.full_kv_hit_length", "result.swa_host_hit_length"],
+    )
+    def match_prefix(self, params: MatchPrefixParams) -&gt; MatchResult:
+        result = self.session.try_match_prefix(params)
+        if result is not None:
+            return result
+        if self.disable:
+            return self.tree_core.empty_match_result
+        result = self.tree_core.match_prefix(params)
+        # Apply the walk's actions (e.g. a pending write-through relocation on
+        # a split) before the finalizers, which can evict or raise.
+        self._apply_cache_actions(result.cache_actions)
+        for component in self._components_tuple:
+            result = component.finalize_match_result_in_cache(params, result)
+        # Finalizers must not emit actions; the walk's were applied above.
+        assert not result.cache_actions
+        return result
+</code></pre>
+</div>
+
+<p>Note what is compared: not the tree, not the index tensors, but <code>result.full_kv_hit_length</code> and <code>result.swa_host_hit_length</code> — two integers the batch shape depends on. Comparing the tensors would be expensive and wrong; slot ids are per-rank by design.</p>
+
+<p>The mechanism is cheap and brutal. The decorator compiles to the identity function unless <code>SGLANG_ENABLE_RANK_CONSENSUS_CHECKER</code> is set — evaluated at import time (<code>python/sglang/srt/utils/rank_consensus_checker.py:L87-L88</code>), so zero cost when off. When on, each call pushes a payload string onto a queue from the scheduler thread; a background thread drains a globally agreed number of events, hashes their concatenation, and all-reduces the digest over a dedicated gloo group:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/rank_consensus_checker.py:L413-L431</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    min_value = torch.tensor(list(hasher.digest()), dtype=torch.uint8)
+    max_value = min_value.clone()
+    for group in _sync_groups:
+        dist.all_reduce(min_value, op=dist.ReduceOp.MIN, group=group)
+        dist.all_reduce(max_value, op=dist.ReduceOp.MAX, group=group)
+    if not torch.equal(min_value, max_value):
+        # When divergence, all rank should output the following log.
+        logger.critical(
+            f"Found rank divergence for {len(events)} events(s)! local hash: {value_bytes.hex()}, events = {events}"
+        )
+        for handler in logger.handlers:
+            handler.flush()
+
+        # os._exit instead of sys.exit: this runs in a background thread, where
+        # SystemExit would only kill the thread, not the process. os._exit tears
+        # down the whole scheduler process so a TP/PP mismatch can never
+        # silently keep serving.
+        os._exit(1)
+</code></pre>
+</div>
+
+<p>A MIN and a MAX all-reduce over the SHA-1 digest: if they differ, some rank disagreed. Then <code>logger.critical</code>, a handler flush, and <code>os._exit(1)</code> — the comment explains that <code>sys.exit</code> would only kill the background thread and leave a diverged server quietly answering requests. Configured at <code>python/sglang/srt/managers/scheduler.py:L2122-L2130</code> over the attention-CP, attention-TP, TP and PP groups.</p>
+
+<p>The lesson for anyone writing a cache: <b>any decision that changes a tensor shape must be a pure function of replicated inputs</b> — not of wall-clock time, dict order, or exception timing. Hence <code>full_host_duplicates</code> carrying the comment "insertion-ordered dict keeps victims TP-deterministic" (<code>python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py:L472-L474</code>), and the <code>write_back_duplicate_reclaim_digest</code> rolling hash beside it.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Worked trace: one request, end to end</h2></div><div class="sec__body"><p>Llama-3-8B, one H100 SXM, default flags, so <code>UnifiedRadixCache</code> with <code>tree_components == (FULL,)</code> and no HiCache. A request arrives with a 2,048-token prompt whose first 2,048 tokens are already cached under nodes A (512 tok) and B (1,536 tok), and it will generate 96 tokens.</p>
+
+<ol>
+<li><b>Match.</b> <code>Req.init_next_round_input</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1362-L1372</code>) builds a <code>RadixKey</code> and calls <code>match_prefix</code>: through the <code>@rank_consensus</code> wrapper (<code>unified_radix_cache.py:L495</code>) into <code>UnifiedTreeCore.match_prefix</code> (<code>unified_tree_core.py:L640</code>) → <code>_match_prefix_helper</code> (<code>L667</code>). Two dict hops, no split, <code>value == [tensor(512), tensor(1536)]</code>. <code>_match_post_processor</code> (<code>L754</code>) bumps <code>last_access_time</code> up the root path, concatenates once, and returns NodeIds (<code>L804-L810</code>). The unpack at <code>L1378-L1400</code> sets <code>req.prefix_indices</code>, <code>req.last_node</code>, <code>req.cache_protected_len = 2048</code>.</li>
+
+<li><b>Lock.</b> <code>PrefillAdder</code> calls <code>inc_lock_ref(req.last_node)</code> (<code>python/sglang/srt/managers/schedule_policy.py:L1059</code>) → <code>unified_radix_cache.py:L683</code> → <code>unified_tree_core.py:L557</code> → <code>FullComponent.acquire_component_lock</code> (<code>full_component.py:L259</code>). A and B each go <code>lock_ref = 0 → 1</code>; 2,048 tokens move from <code>component_evictable_size_[FULL]</code> to <code>component_protected_size_[FULL]</code>; B leaves <code>evictable_device_leaves</code>. 256 MiB of KV is now unevictable.</li>
+
+<li><b>Allocate.</b> <code>alloc_for_extend</code> (<code>python/sglang/srt/mem_cache/allocation.py:L281</code>) calls <code>alloc_req_slots</code> → <code>ReqToTokenPool.alloc</code> (<code>memory_pool.py:L291</code>) for the row, then — at <code>page_size == 1</code> — <code>alloc_token_slots</code>, which evicts first if the allocator is short and then calls <code>TokenToKVPoolAllocator.alloc</code> (<code>allocator/token.py:L55</code>). At <code>page_size &gt; 1</code> the paged path uses <code>last_loc = prefix_indices[-1:]</code> instead.</li>
+
+<li><b>Write the row.</b> <code>write_cache_indices</code> (<code>allocation.py:L54</code>) writes <code>[0, 2048)</code> from the tree's tensor and <code>[2048, 2144)</code> from <code>out_cache_loc</code>. From here the attention kernel reads <code>req_to_token</code>, never the tree.</li>
+
+<li><b>Decode.</b> 96 steps of <code>alloc_for_decode</code> (<code>allocation.py:L512</code>), each appending one slot per request. The tree is untouched for the whole decode. At the book's 4.48 ms decode floor for Llama-3-8B at batch 1, that is roughly 430 ms during which the cache does nothing — derived, not measured.</li>
+
+<li><b>Insert.</b> <code>release_kv_cache</code> (<code>mem_cache/common.py:L198-L219</code>) calls <code>cache_finished_req</code> (<code>unified_radix_cache.py:L743</code>), which reads the 2,144 slot ids straight out of <code>req_to_token</code>, page-aligns the key, copies the values with <code>.to(dtype=torch.int64, copy=True)</code>, and inserts. The walk re-matches A and B; COMMIT calls <code>_add_new_node</code> with the 96-token suffix; leaf C appears.</li>
+
+<li><b>Free the tail, unlock.</b> Still in <code>cache_finished_req</code>: <code>free_segments</code> releases the unaligned and truncated tails, then <code>_dec_req_lock</code> (<code>unified_radix_cache.py:L706</code>) walks A and B back to <code>lock_ref = 0</code> and 2,048 tokens return to <code>evictable_size_</code>. C is now an unlocked device leaf — the first candidate the next eviction pass sees.</li>
+
+<li><b>Evict, later.</b> A future batch is short by <i>N</i> tokens. <code>evict_from_tree_cache</code> (<code>common.py:L114</code>) → <code>evict(EvictParams(num_tokens=N))</code> → <code>_evict_components</code> (<code>unified_radix_cache.py:L620</code>); <code>_evict_device_start</code> heapifies the leaf set and <code>_evict_device_next_node</code> pops C. <code>evict_device_leaf</code> (<code>unified_tree_core.py:L1245</code>) sees <code>not node.backuped</code> and, in write-through mode, deletes it; <code>device_frees</code> reach the allocator via <code>_free_values</code> (<code>unified_radix_cache.py:L565</code>). B becomes a leaf and joins the heap. A survives as long as anything below it does.</li>
+</ol>
+
+<p>The mid-generation variant: for chunked prefill, <code>cache_unfinished_req</code> does the same insert, then <em>re-matches its own key</em> and repoints the request's row at the tree's canonical slots:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/unified_radix_cache.py:L896-L919</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        radix_key = radix_key.page_aligned(self.page_size)
+        page_aligned_len = len(radix_key)
+        values = kv_indices[:page_aligned_len].to(dtype=torch.int64, copy=True)
+
+        insert_params.key = radix_key
+        insert_params.value = values
+        result = self.insert(insert_params)
+
+        # Match prefix. SWA insertion retains one extra window before the
+        # page-aligned boundary, so the normal match remains safe to repoint.
+        match_result = self.match_prefix(MatchPrefixParams(key=radix_key, req=req))
+        new_indices = match_result.device_indices
+        new_last_node = match_result.last_device_node
+        new_prefix_len = result.prefix_len
+        assert (
+            req.cache_protected_len &lt;= len(new_indices) + self.page_size - 1
+        ), f"{req.cache_protected_len=}, {len(new_indices)=}, {page_aligned_len=}"
+        assert new_prefix_len &lt;= len(
+            new_indices
+        ), f"{new_prefix_len=}, {len(new_indices)=}"
+        self.req_to_token_pool.write(
+            (req.req_pool_idx, slice(req.cache_protected_len, len(new_indices))),
+            new_indices[req.cache_protected_len :],
+        )</code></pre>
+</div>
+
+<p>That <code>req_to_token_pool.write</code> is what makes deduplication real: if another request already owned those slots, this row now points at <em>their</em> KV, and its own duplicates were freed by the <code>FreeDeviceKV</code> action the insert walk emitted at <code>unified_tree_core.py:L991-L994</code>.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Reading pitfalls</h2></div><div class="sec__body"><div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">DEAD</span><h4>hiradix_cache.py</h4><p>2,022 lines, never constructed in <code>srt/</code>. <code>grep -rn "HiRadixCache(" --include="*.py" .</code> returns the class statement and one test. Same for <code>SWARadixCache</code> (1,440 L) and <code>MambaRadixCache</code> (1,427 L). HiCache is reached instead through <code>UnifiedRadixCache.init_hicache</code> at <code>registry.py:L187-L196</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SIMULATOR</span><h4>radix_cache.py</h4><p>Live, but not as a cache. Its only <code>srt/</code> construction is <code>RadixCache.create_simulated()</code> at <code>schedule_policy.py:L235</code>, which builds a tree with <code>req_to_token_pool=None</code> for waiting-queue LPM sorting. Excellent for exposition; it is not on your request's path.</p></div>
+  <div class="ve-card"><span class="ve-card__k">ENV ONLY</span><h4>radix_cache_cpp.py</h4><p>272 lines gated solely on <code>SGLANG_EXPERIMENTAL_CPP_RADIX_TREE</code> (<code>environ.py:L588</code>, default False). No CLI flag reaches it. The C++ tree it wraps lives in <code>mem_cache/cpp_radix_tree/</code> and is JIT-compiled on first import — the lazy import in <code>registry.py:L106</code> exists to avoid paying that cost otherwise.</p></div>
+</div>
+
+<div class="cards cards--2">
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">ALTERNATIVES</span><h4>lmcache and flexkv</h4><p><code>--enable-lmcache</code> and <code>--enable-flexkv</code> both sit <em>above</em> the unified cache in the chain (<code>registry.py:L118-L141</code>) and both produce a <code>RadixCache</code> subclass, not a <code>UnifiedRadixCache</code>. So they inherit the earlier tree, and every <code>UnifiedRadixCache</code>-only flag — <code>--enable-session-radix-cache</code>, <code>--hicache-host-memory-mode buffer_only</code> — will raise against them. <code>--enable-flexkv</code> is documented at <code>server_args.py:L3058-L3066</code> as "equivalent to <code>--radix-cache-backend=flexkv</code> but also participates in the auto-selection chain".</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">NAMING</span><h4>two kinds of allocator</h4><p><code>mem_cache/README.md:L67-L72</code> warns about it explicitly: a <em>slot allocator</em> is a <code>BaseTokenToKVPoolAllocator</code> in <code>allocator/</code>; a <em>host tensor allocator</em> is a <code>HostTensorAllocator</code> in <code>pool_host/common.py</code>. They share a word and nothing else.</p></div>
+</div>
+
+<p>One subtler trap: <code>evictable_size()</code> on the unified cache is a per-component dict lookup (<code>unified_tree_core.py:L2400-L2426</code>) that returns <b>only the FULL component</b>. On a hybrid-SWA model it and <code>swa_evictable_size()</code> are different numbers over different pools, and using the first where you meant the second over-admits by exactly the SWA pool's occupancy.</p></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Everything below is a repo observation or a log line; none of it needs a GPU except the last.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell — SGLang checkout at 7d89325</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>S=~/Documents/other_git_repos/sglang
+
+# 1. Which caches are dead? Anything whose only hit is its own class statement.
+for c in HiRadixCache SWARadixCache MambaRadixCache UnifiedRadixCache; do
+  echo "== $c"; grep -rn "$c(" --include="*.py" $S/python/sglang/srt/
+done
+
+# 2. The whole selection chain in one screen.
+sed -n '80,142p' $S/python/sglang/srt/mem_cache/registry.py
+
+# 3. Every invariant the tree will check for you, as prose.
+grep -n 'E(f\?"' $S/python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py
+
+# 4. The three places TP divergence is guarded.
+grep -rn "@rank_consensus" --include="*.py" $S | grep -v rank_consensus_checker
+
+# 5. Confirm at runtime which cache you got (needs a GPU).
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 2&gt;&amp;1 \
+  | grep "Tree cache initialized"</code></pre>
+</div>
+
+<p>Line 5 prints <code>source=</code>, <code>impl=</code>, <code>hybrid_swa=</code>, <code>hybrid_ssm=</code>, <code>hicache_attached=</code> and <code>streaming_wrapped=</code> from <code>registry.py:L248-L256</code>. It is the ground truth for everything Figure 2 claims. Flip <code>--disable-radix-cache</code>, <code>--enable-hierarchical-cache</code>, and <code>SGLANG_EXPERIMENTAL_CPP_RADIX_TREE=1</code> in turn and watch <code>impl=</code> change.</p>
+
+<p>Two more levers. <code>SGLANG_RADIX_FORCE_MISS</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1367</code>) rewrites every match into a miss via <code>zero_match_result</code> — the cleanest way to measure what prefix caching is buying without changing anything else. <code>SGLANG_DEBUG_MEMORY_POOL</code> (<code>allocator/paged.py:L126</code>) enables <code>assert len(torch.unique(out_indices)) == len(out_indices)</code> inside <code>alloc_extend</code>, the assertion that fires once refcount discipline has already broken upstream.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read and answer.</b> From <code>registry.py</code>: which class does <code>--disable-radix-cache</code> produce on a plain Llama-3-8B, and which when <code>disaggregation_decode_retraction_backup == "host_pool"</code>? Name the branch lines.</li>
+
+<li><b>Read and answer.</b> In <code>_match_prefix_helper</code>, find the line that stops the walk at a node that is neither on device nor on host, and explain in one sentence why that condition cannot occur when HiCache is disabled.</li>
+
+<li><b>Predict, then verify.</b> A node has <code>lock_ref = 2</code> and one child with a device value. Is it in <code>evictable_device_leaves</code>? Now <code>dec_lock_ref</code> twice — is it? Check against <code>_is_device_leaf</code> (<code>unified_tree_core.py:L1699-L1715</code>).</li>
+
+<li><b>Predict, then verify.</b> You add a new <code>ComponentType</code> and forget to update <code>_is_device_leaf</code>. Which of <code>sanity_check</code>'s five parts fires first, and what does the message look like? Read <code>unified_tree_core.py:L2170-L2200</code>.</li>
+
+<li><b>Derive.</b> With <code>max_running_requests=512</code> at <code>max_context_len=32768</code>, how much HBM does <code>ReqToTokenPool</code> alone consume, and what fraction of an H100 SXM&rsquo;s 79.65&nbsp;GiB is that? Use <code>memory_pool.py:L279-L282</code> for the dtype and the padding row.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> Alone: the first guard (<code>registry.py:L85-L89</code>) is false, the second (<code>L91</code>) is true, <code>is_hybrid_swa</code> is false, so <code>ChunkCache</code> at <code>L92-L95</code>. With host-pool retraction the <em>first</em> guard fires and you get a full <code>UnifiedRadixCache</code> despite the flag — retraction needs a host pool to back up into, which only the unified cache provides.</p>
+    <p><b>2.</b> <code>if child.evicted and not child.backuped: break</code> at <code>unified_tree_core.py:L724-L725</code>. Without HiCache there is no host tier, so a node with no device value has no value at all and is deleted rather than left in the tree — <code>evict_device_leaf</code> takes the <code>_delete_unbacked_device_leaf</code> arm at <code>L1258-L1265</code>. The dead-node state is unreachable.</p>
+    <p><b>3.</b> No, twice over: <code>_is_device_leaf</code> returns False both because <code>any(cd.lock_ref &gt; 0 ...)</code> and because a child holds a device value. After two <code>dec_lock_ref</code> calls it is still not a leaf — the child is what disqualifies it. It becomes a candidate only when that child is itself evicted, which is the cascade in <code>_evict_device_next_node</code> pushing <code>lv.parent</code> back onto the heap.</p>
+    <p><b>4.</b> Part 3, tracking structures: the maintained set and the recomputed <code>expected_dev_leaves</code> diverge, giving <code>"D-leaf extra: [...]"</code> or <code>"D-leaf missing: [...]"</code>. Part 2 passes, because it builds its expectation with the same wrong predicate — a lesson about self-checking code.</p>
+    <p><b>5.</b> <code>(512 + 1) × 32768 × 4 B = 67,239,936</code> B = 64.125 MiB, about 0.079% of the card&rsquo;s 79.65&nbsp;GiB (a &ldquo;80 GB&rdquo; H100 SXM &mdash; <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>). Negligible against KV — which is the point: the indirection layer is nearly free, so SGLang can afford a dense matrix rather than a per-request block table. Derived arithmetic.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>Line count is not liveness. Nothing in the 4,889 lines of <code>hiradix_cache.py</code>, <code>swa_radix_cache.py</code> and <code>mamba_radix_cache.py</code> is ever constructed in <code>srt/</code>, and <code>radix_cache.py</code> survives only as a pool-free simulator for waiting-queue sorting. Grep for the constructor, not the class.</li>
+<li><code>registry.py:L80-L142</code> is the single file that answers "which cache do my flags produce". Seven branches, first match wins, and model shape (SWA, Mamba) no longer selects a class — it selects a <code>ComponentType</code> tuple inside <code>UnifiedRadixCache</code>.</li>
+<li>The tree and the pools meet at one type: a tensor of int64 slot indices. The tree's <code>value</code> tensors, <code>req_to_token</code> rows, and the KV buffers all name the same integers; only the allocator's free list records ownership. Every refcount bug in this subsystem is a double-free of that one resource.</li>
+<li>The eviction candidate set is a maintained <code>set</code> of device leaves, heapified per pass, with the parent pushed back after each pop. Interior nodes are protected by <em>not being in the set</em> — a structural invariant, not a scoring rule.</li>
+<li>All three <code>@rank_consensus</code> decorators in the repo are on this file. The radix tree is host-side state replicated per rank and synchronised by nothing, so any cache decision that changes a tensor shape must be a pure function of replicated inputs; on mismatch the checker calls <code>os._exit(1)</code> rather than let a diverged server keep answering.</li>
+<li><code>sanity_check</code> is the contributor's contract as executable prose — five parts, 256 lines — but its caller only invokes it for hybrid-SWA and hybrid-SSM models. On a dense deployment nothing checks these invariants at runtime.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><b>sglang issue #20415</b> — the Unified Radix Cache convergence, named directly in <code>python/sglang/srt/mem_cache/README.md:L43</code>. Read it before proposing anything that adds a ninth cache class.</li>
+<li><b>sglang issue #25371</b> — the <code>mem_cache/</code> layout specification, cited at <code>README.md:L5-L6</code>: why <code>allocator/</code>, <code>pool_host/</code> and <code>storage/</code> are separate packages, and why "layers do not import upwards".</li>
+<li><b><code>unified_cache/components/README.md</code></b> — the Full/SWA/Mamba component model, referenced from <code>README.md:L44-L45</code>. The right next file after this chapter.</li>
+<li><b>sglang PR #20476</b> — cited in a live comment at <code>memory_pool.py:L295-L304</code>, where a <code>ReqToTokenPool.alloc</code> assertion about chunked requests reusing a <code>req_pool_idx</code> was relaxed. An example of how these invariants actually move.</li>
+<li><b>Zheng et al., "SGLang: Efficient Execution of Structured Language Model Programs"</b> — the RadixAttention paper. Read it for the idea; read this directory for what shipped.</li>
+</ul></div></section>
+<div class="pager"><a href="12-02-sglang-request-path.html"><div class="pager__k">← Previous</div><div class="pager__t">TokenizerManager → Scheduler → TpModelWorker → ModelRunner</div></a><a class="pager__next" href="12-04-frontend-grammar-router.html"><div class="pager__k">Next →</div><div class="pager__t">Frontend DSL, grammar backends, router, extension points</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#the-file-map">Mental model: the file map</a>
+<a href="#the-interface">First principles: the contract every cache satisfies</a>
+<a href="#the-factory">The factory, read properly</a>
+<a href="#the-tree-core">UnifiedRadixCache and the tree core</a>
+<a href="#the-pools">The memory pools underneath</a>
+<a href="#the-invariants">The invariants, with the asserts as evidence</a>
+<a href="#rank-consensus">Why TP divergence bites in the cache</a>
+<a href="#worked-trace">Worked trace: one request, end to end</a>
+<a href="#pitfalls">Reading pitfalls</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

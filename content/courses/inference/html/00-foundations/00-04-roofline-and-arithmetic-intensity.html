@@ -1,0 +1,1713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arithmetic intensity and the roofline — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i is-current" href="00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 0 · Foundations · 00-04</div>
+<h1>Arithmetic intensity and the roofline</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/kernels/</code></li><li><code>python/sglang/benchmark/one_batch.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">An H100 SXM is rated at 989 TFLOP/s of dense bf16. A batch-1 decode step of Llama-3-8B
+uses about 0.34% of that. No kernel you write, no compiler you enable, and no amount of
+occupancy tuning changes that number — because the step never had enough arithmetic in it
+to keep the tensor cores fed. This chapter builds the one-page model that tells you, before
+you write any code, whether an optimisation can possibly help.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is the symptom that starts every serving investigation. You load Llama-3-8B in bf16
+onto an 80 GB H100, send a single request, and watch it generate. You get a couple of hundred
+tokens per second. You then send thirty-two requests concurrently and get roughly an order of
+magnitude more in aggregate — many times the work for barely more wall-clock time per step. The
+GPU did not get faster. Something about the first measurement was structurally wasteful, and the
+waste is not in your code. §3 derives both of those figures as bandwidth floors, so you can check
+the claim before you believe it.</p>
+
+<p>The instinct at this point is to profile and optimise the kernels. That instinct is wrong,
+and knowing <em>why</em> it is wrong is the most valuable thing in Part 0. Chapter
+<a href="00-03-gpu-architecture.html">§0.3</a> established the hardware: tensor cores on one
+side of a memory hierarchy, HBM on the other. The tensor cores consume operands far faster
+than HBM can supply them, so every kernel sits somewhere on a spectrum between <em>plenty of
+arithmetic per byte I loaded</em> and <em>I loaded a lot and barely did anything with it</em>.
+That single ratio decides which half of the machine is your bottleneck, and therefore which
+optimisations are even in play.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of the GPU as a workshop with an enormously productive machine floor and a single
+loading dock. Work arrives as pallets of bytes. If a pallet keeps the floor busy for a long
+time, the dock idles and the floor is the limit; if it is consumed instantly, the floor idles
+and the dock is the limit. <em>Arithmetic intensity</em> is how much work comes on one pallet:
+FLOPs performed per byte fetched from HBM.</p>
+
+<p>The roofline plot is the picture of that. Intensity runs along x and achievable throughput
+along y. On the left, throughput is a diagonal — you are bandwidth-limited, so doubling
+intensity doubles throughput. On the right it is a flat ceiling — you are compute-limited, and
+more intensity buys nothing. The corner between them is the <em>ridge point</em>, and where
+your kernel lands relative to it is the entire diagnosis.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — the H100 SXM bf16 roofline, with prefill, decode, and decode attention placed on it.</b>
+    All coordinates are <em>derived</em> arithmetic from the formulas in §3 plus the cited spec-sheet
+    peaks; nothing here is measured.</p>
+  <svg viewBox="0 0 880 540" width="100%" role="img" aria-labelledby="rooflineTitle rooflineDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="rooflineTitle">Roofline plot for H100 SXM with bf16 tensor cores</title>
+    <desc id="rooflineDesc">Log-log plot of achievable throughput against arithmetic intensity. A diagonal
+    bandwidth roof of 3.35 terabytes per second meets a flat compute ceiling of 989 teraFLOP per second at a
+    ridge point of 295 FLOP per byte. Batch-1 decode sits at intensity 1, decode attention at 4, batch-32
+    decode at 31, and a 2048-token prefill GEMM at 1024, past the ridge and on the ceiling.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.13" stroke-width="1">
+      <line x1="90" y1="60" x2="90" y2="470"/>
+      <line x1="240" y1="60" x2="240" y2="470"/>
+      <line x1="390" y1="60" x2="390" y2="470"/>
+      <line x1="540" y1="60" x2="540" y2="470"/>
+      <line x1="690" y1="60" x2="690" y2="470"/>
+      <line x1="840" y1="60" x2="840" y2="470"/>
+      <line x1="90" y1="470" x2="840" y2="470"/>
+      <line x1="90" y1="367.5" x2="840" y2="367.5"/>
+      <line x1="90" y1="265" x2="840" y2="265"/>
+      <line x1="90" y1="162.5" x2="840" y2="162.5"/>
+      <line x1="90" y1="60" x2="840" y2="60"/>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.55" stroke-width="1.4">
+      <line x1="90" y1="470" x2="840" y2="470"/>
+      <line x1="90" y1="60" x2="90" y2="470"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.62" font-size="12" text-anchor="middle">
+      <text x="90" y="490">0.1</text>
+      <text x="240" y="490">1</text>
+      <text x="390" y="490">10</text>
+      <text x="540" y="490">100</text>
+      <text x="690" y="490">1000</text>
+      <text x="840" y="490">10000</text>
+    </g>
+    <g fill="currentColor" fill-opacity="0.62" font-size="12" text-anchor="end">
+      <text x="80" y="474">0.1</text>
+      <text x="80" y="371.5">1</text>
+      <text x="80" y="269">10</text>
+      <text x="80" y="166.5">100</text>
+      <text x="80" y="64">1000</text>
+    </g>
+
+    <text x="465" y="516" fill="currentColor" fill-opacity="0.8" font-size="13" text-anchor="middle">arithmetic intensity I — FLOP per byte moved from HBM (log scale)</text>
+    <text x="26" y="265" fill="currentColor" fill-opacity="0.8" font-size="13" text-anchor="middle" transform="rotate(-90 26 265)">achievable TFLOP/s (log scale)</text>
+
+    <path d="M 90 416.2 L 610.6 60.5 L 840 60.5" fill="none" stroke="var(--teal)" stroke-width="2.6" stroke-linejoin="round"/>
+    <line x1="610.6" y1="60.5" x2="610.6" y2="470" stroke="var(--teal)" stroke-width="1.4" stroke-dasharray="5 5" stroke-opacity="0.7"/>
+
+    <text x="106" y="104" fill="currentColor" fill-opacity="0.45" font-size="12">unattainable — above the roof</text>
+    <text x="112" y="452" fill="var(--teal)" font-size="12">memory bound</text>
+    <text x="822" y="452" fill="var(--teal)" font-size="12" text-anchor="end">compute bound</text>
+
+    <path d="M 250 306 L 452 165" fill="none" stroke="var(--copper)" stroke-width="1.6" stroke-dasharray="6 4"/>
+    <path d="M 452 165 L 441 168 L 447 176 Z" fill="var(--copper)"/>
+    <text x="236" y="222" fill="var(--copper)" font-size="12.5">batching moves decode rightward: B = 1 to 32 to 345</text>
+
+    <g fill="var(--copper)">
+      <circle cx="240" cy="313.7" r="6"/>
+      <circle cx="330.3" cy="251.9" r="6"/>
+      <circle cx="464.7" cy="160.1" r="6"/>
+    </g>
+    <g fill="var(--plum)">
+      <circle cx="691.5" cy="60.5" r="6"/>
+    </g>
+    <circle cx="610.6" cy="60.5" r="6.5" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+
+    <g fill="currentColor" font-size="12.5">
+      <text x="250" y="338">batch-1 decode GEMV</text>
+      <text x="250" y="354" fill-opacity="0.7">I = 1.0 — 3.4 TFLOP/s, 0.34% of peak</text>
+      <text x="342" y="276">decode attention vs KV cache, GQA 32:8</text>
+      <text x="342" y="292" fill-opacity="0.7">I = 4.0 — 13 TFLOP/s, 1.4% of peak</text>
+      <text x="476" y="184">decode weight GEMMs at batch 32</text>
+      <text x="476" y="200" fill-opacity="0.7">I = 31 — 106 TFLOP/s, 11% of peak</text>
+      <text x="700" y="42" fill="var(--plum)" text-anchor="middle">prefill GEMM, T = 2048 tokens: I = 1024</text>
+      <text x="602" y="88" text-anchor="end" fill="var(--teal)">ridge I* = 295 FLOP/byte</text>
+      <text x="602" y="104" text-anchor="end" fill="var(--teal)" fill-opacity="0.7">989 TFLOP/s over 3.35 TB/s</text>
+    </g>
+  </svg>
+</div>
+
+<p>Read Figure 1 once and the rest of the book gets easier. Prefill sits on the ceiling.
+Decode sits in the far bottom-left, two and a half orders of magnitude from the corner. They
+are not two settings of the same workload; they are two different machines running on the
+same silicon, which is why <a href="../01-the-core-loop/01-01-prefill-vs-decode.html">§1.1</a>
+gives them a chapter of their own.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles</h2></div><div class="sec__body"><h3>Definitions</h3>
+
+<p>Let $\pi$ be achievable peak compute in FLOP/s for the dtype you are actually using, and
+$\beta$ achievable HBM bandwidth in bytes/s. For a kernel, let $F$ be the FLOPs it performs
+and $Q$ the bytes it must move across the HBM boundary. Then</p>
+
+<div class="math-display">$$I = \frac{F}{Q}, \qquad \text{achievable FLOP/s} \;=\; \min\!\left(\pi,\; \beta \cdot I\right), \qquad I^{*} = \frac{\pi}{\beta}.$$</div>
+
+<p>Three things about $Q$ matter and are routinely got wrong.</p>
+
+<ul>
+  <li><strong>$Q$ is compulsory traffic, not total traffic</strong> — each distinct byte that
+  must cross the HBM boundary at least once, counted once. A value re-read from L2 or SRAM does
+  not count again. So the $I$ computed below is an <em>upper bound</em> on what any kernel can
+  achieve for that computation; a kernel that spills tiles back to HBM sits further left than
+  the algebra says. FlashAttention
+  (<a href="../03-attention-kernels/03-02-flashattention.html">§3.2</a>) is exactly the story of
+  driving actual traffic down to compulsory traffic.</li>
+  <li><strong>$Q$ counts reads and writes.</strong> Inputs, weights, and outputs.</li>
+  <li><strong>$\pi$ and $\beta$ are achievable, not advertised.</strong> Spec-sheet peak assumes
+  perfect tiling, no throttling, and no tail effects. Every number in this chapter uses the spec
+  sheet because that is all a machine without a GPU can honestly cite;
+  <a href="../LABS.html">lab 01</a> replaces both with numbers measured on your card, and every
+  prediction in this book should be re-checked against them.</li>
+</ul>
+
+<h3>The H100 ridge point</h3>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Cited — NVIDIA H100 datasheet (SXM form factor), dense rates without structured sparsity</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Quantity</th><th class="num">Value</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>bf16 / fp16 tensor core peak, $\pi$</td><td class="num">989.4 TFLOP/s</td><td>The datasheet headline of 1,979 TFLOPS is the 2:4-sparsity number; halve it</td></tr>
+      <tr><td>fp8 tensor core peak</td><td class="num">1,979 TFLOP/s</td><td>Dense</td></tr>
+      <tr><td>HBM3 bandwidth, $\beta$</td><td class="num">3.35 TB/s</td><td>80 GB HBM3</td></tr>
+      <tr><td>Ridge point $I^{*}$, bf16</td><td class="num">295 FLOP/byte</td><td><em>Derived</em>: 989.4e12 / 3.35e12</td></tr>
+      <tr><td>Ridge point $I^{*}$, fp8</td><td class="num">591 FLOP/byte</td><td><em>Derived</em>. Faster math moves the ridge <em>right</em> — it does not help a memory-bound kernel</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Hold that number: <strong>295 FLOP per byte</strong>. To saturate an H100's bf16 tensor
+cores you must do 295 floating-point operations for every single byte you pull out of HBM.
+That is a lot of arithmetic per byte, and almost nothing in decode comes close.</p>
+
+<h3>(a) A prefill GEMM</h3>
+
+<p>Take one linear projection: activations $X$ of shape $[T, d]$ times weights $W$ of shape
+$[d, d]$, producing $[T, d]$, all in a dtype of $b$ bytes. $T$ is the number of tokens in the
+batch, $d$ the hidden size.</p>
+
+<div class="math-display">$$F = 2Td^{2}, \qquad Q = b\left(Td + d^{2} + Td\right), \qquad I(T) = \frac{2Td^{2}}{b\,(2Td + d^{2})} = \frac{2Td}{b\,(2T + d)}.$$</div>
+
+<p>The factor 2 in $F$ is one multiply plus one add per MAC. In $Q$: read the activations,
+read the weights, write the result. For bf16, $b = 2$ and this collapses to
+$I = Td / (2T + d)$.</p>
+
+<p>Two limits carry the meaning. As $T \to \infty$, $I \to d/2$ — 2048 FLOP/byte for Llama-3-8B's
+$d = 4096$, seven times past the ridge, because the weight matrix is read once and reused by
+every token. At $T = 1$, $I \to d/(d+2) \approx 1$, and the GEMM is not a GEMM at all.</p>
+
+<p>Setting $I(T) = I^{*}$ and solving gives the batch at which a square projection becomes
+compute-bound:</p>
+
+<div class="math-display">$$T^{*} = \frac{I^{*} d}{d - b\,I^{*}} \;=\; \frac{295 \times 4096}{4096 - 2 \times 295} \;\approx\; 345 \text{ tokens.}$$</div>
+
+<p><em>Derived.</em> A Llama-3-8B projection needs about 345 tokens in flight before an H100's
+bf16 tensor cores are the limit. A 1,024-token prompt is comfortably past it; so is every
+value vLLM resolves <code>max_num_batched_tokens</code> to on an H100 — the 2,048 declared on
+<code>SchedulerConfig</code> is a fallback, and
+<code>EngineArgs.get_batch_defaults</code> (<code>vllm/engine/arg_utils.py:L2580-L2671</code>)
+picks 8,192 for <code>vllm serve</code> and 16,384 for the offline <code>LLM</code> class on any
+device with at least 70 GiB that is not an A100. Note the denominator: if $d \le b\,I^{*} = 590$, no
+batch size whatsoever makes a square bf16 GEMM compute-bound on an H100. Small models are
+structurally memory-bound.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Real shapes</span>
+  <p>Llama-3-8B's projections are not square. vLLM records the real ones as <code>[K, N]</code>
+  pairs at <code>benchmarks/kernels/weight_shapes.py:L52-L57</code>: <code>[4096, 6144]</code>
+  (fused QKV — 4096 query plus 1024 key plus 1024 value columns, the GQA ratio visible in the
+  shape), <code>[4096, 4096]</code>, <code>[4096, 28672]</code> and <code>[14336, 4096]</code>.
+  The general form is $I = 2TKN / \big(b(TK + KN + TN)\big)$; the square case is the one to
+  memorise.</p>
+</div>
+
+<h3>(b) A decode GEMV</h3>
+
+<p>Now set $T = 1$ — one token per sequence, batch 1, which is what a decode step is. Keep the
+general $[1, K] \times [K, N]$ shape:</p>
+
+<div class="math-display">$$I = \frac{2KN}{b\,(K + KN + N)} \;\xrightarrow[\;KN \gg K+N\;]{}\; \frac{2}{b}.$$</div>
+
+<p>For bf16, $I = 1.0$ FLOP per byte. Not approximately — the fused QKV projection at
+$K = 4096$, $N = 6144$ gives $50{,}331{,}648$ FLOPs over $50{,}352{,}128$ bytes, an intensity of
+0.9996. Notice what dropped out: $K$, $N$, the layer, the model, the head count. Only $b$
+survives. <strong>Every dense weight matrix, read once and applied to one token, does exactly
+$2/b$ FLOPs per byte.</strong> You load two bytes of bf16 weight and do one multiply-add with
+it, forever.</p>
+
+<p>On the roofline that is $\beta \cdot I = 3.35$ TFLOP/s against a ceiling of 989.4: a batch-1
+bf16 decode step can use at most <strong>0.34%</strong> of the H100's advertised tensor-core
+throughput. Quantizing weights to fp8 doubles $I$ to 2.0 and doubles achievable throughput —
+still 0.68% of peak, but the time <em>halved</em>, because in the memory-bound regime time is
+bytes over bandwidth and nothing else. That is the whole argument for weight-only quantization,
+made before opening <a href="../04-quantization/04-01-the-design-space.html">§4.1</a>.</p>
+
+<h3>(c) Decode attention against the KV cache</h3>
+
+<p>The other half of a decode step reads the KV cache. For one sequence at context length $s$,
+one layer, with $h$ query heads, $h_{kv}$ key/value heads and head dimension $d_h$: the kernel
+must read $K$ and $V$ for all $s$ positions, then compute $q K^{\top}$ and $\text{softmax} \cdot V$
+for each of the $h$ query heads.</p>
+
+<div class="math-display">$$F = 4\,h\,s\,d_h, \qquad Q = 2\,s\,h_{kv}\,d_h\,b, \qquad I = \frac{4 h s d_h}{2 s h_{kv} d_h b} = \frac{2h}{b\,h_{kv}}.$$</div>
+
+<p><em>The context length cancels.</em> Decode attention has a fixed arithmetic intensity that
+depends only on the GQA group size $g = h/h_{kv}$ and the dtype: $I = 2g/b$, which for bf16 is
+simply $g$. Llama-3-8B has $g = 32/8 = 4$, so $I = 4$ FLOP/byte — 74 times left of the ridge.
+Multi-head attention ($g = 1$) gives $I = 1$; multi-query ($h_{kv} = 1$, $g = 32$) gives
+$I = 32$. GQA and MQA are visible on the roofline as pure rightward moves, and
+<a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a> is where they get built.</p>
+
+<p>So if intensity does not degrade with context, what gets worse? First, the <em>bytes</em> grow
+linearly in $s$ even though the ratio does not, so the attention part of the step grows linearly
+with context while the weight part stays flat. Second — and this is the structural asymmetry the
+whole book turns on — <strong>batching amortises weight reads but does not amortise KV
+reads.</strong> Every sequence has its own cache, so doubling the batch doubles both the FLOPs
+and the bytes of attention and $I_{\text{attn}}$ is invariant in $B$ as well as in $s$. Taking
+$B \to \infty$ at fixed $s$, the blended intensity of a whole decode step tends to</p>
+
+<div class="math-display">$$I_{\text{step}}(B \to \infty) = \frac{2P_{\text{stream}} + 4 L h d_h s}{2 L h_{kv} d_h b \, s}.$$</div>
+
+<p>where $P_{\text{stream}}$ is the parameters actually streamed per token. For Llama-3-8B at
+$s = 8192$ this is $(15.01 \times 10^{9} + 4.29 \times 10^{9}) / (1.074 \times 10^{9}) \approx 18$
+FLOP/byte. <em>Derived.</em> At 8k context, no batch size on earth makes a Llama-3-8B decode
+step compute-bound on an H100 — a ceiling of 18 against a ridge of 295. Long context is not a
+capacity problem batching solves; it is a bandwidth problem only fewer KV bytes solve. That is
+the roofline predicting prefix caching
+(<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a>), KV quantization
+(<a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">§2.5</a>) and MLA
+(<a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>) before any of them are
+described.</p>
+
+<h3>Batching, and why it is the biggest lever</h3>
+
+<p>Put $B$ sequences in a decode step, one token each. The flattened activation is $[B, d]$
+and hits the same $[d, d]$ weight — algebraically identical to the prefill GEMM with
+$T \to B$. So the weight-GEMM intensity of a decode step is $I = Bd/(2B + d)$ for bf16, and
+batching walks you up the diagonal of Figure 1.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — Llama-3-8B (d = 4096), bf16, weight GEMMs only, against H100 SXM spec-sheet peaks</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Batch B</th><th class="num">I (FLOP/byte)</th><th class="num">Achievable</th><th class="num">% of 989 TFLOP/s</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td class="num">1.0</td><td class="num">3.4 TFLOP/s</td><td class="num">0.34%</td></tr>
+      <tr><td>8</td><td class="num">8.0</td><td class="num">27 TFLOP/s</td><td class="num">2.7%</td></tr>
+      <tr><td>32</td><td class="num">31.5</td><td class="num">106 TFLOP/s</td><td class="num">10.7%</td></tr>
+      <tr><td>128</td><td class="num">120.5</td><td class="num">404 TFLOP/s</td><td class="num">40.8%</td></tr>
+      <tr><td>345</td><td class="num">295</td><td class="num">989 TFLOP/s</td><td class="num">100% — ridge</td></tr>
+      <tr><td>2048 (prefill-scale)</td><td class="num">1024</td><td class="num">989 TFLOP/s</td><td class="num">100% — capped</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Sixteen times the batch for sixteen times the throughput at almost the same step time. That is
+the single largest multiplier available in LLM serving, and it is exactly what continuous
+batching exists to harvest
+(<a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a>) — which is also why that
+chapter is about admission and eviction rather than matmuls. The hard part is keeping $B$ high,
+not making the GEMM fast.</p>
+
+<h3>The decode step lower bound</h3>
+
+<p>Because decode is memory-bound, its step time has a hard floor set by bandwidth:</p>
+
+<div class="math-display">$$t_{\text{decode}} \;\gtrsim\; \frac{\text{bytes}_{\text{weights}} + \text{bytes}_{\text{KV read}}}{\beta}.$$</div>
+
+<p>Work it for Llama-3-8B in bf16, $L = 32$, $d = 4096$, $h = 32$, $h_{kv} = 8$, $d_h = 128$,
+vocabulary 128,256. Per layer: fused QKV $4096 \times 6144$, output $4096 \times 4096$, gate+up
+$2 \times 4096 \times 14336$, down $14336 \times 4096$ — 218.1 M parameters, times 32 layers is
+6.98 B. Add the 525 M-parameter output head and you stream 7.50 B parameters per token. The
+input embedding table is <em>gathered</em>, not streamed — one row of 8 KB, not 1.05 GB — so
+$\text{bytes}_{\text{weights}} = 15.01$ GB, not the 16.06 GB the full 8.03 B parameter count
+suggests. KV per token is
+$2 \cdot L \cdot h_{kv} \cdot d_h \cdot b = 2 \times 32 \times 8 \times 128 \times 2 = 131{,}072$
+bytes, exactly 128 KiB.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">4.48 ms</div><div class="kpi__l">Floor per decode step, batch 1, short context</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">223 tok/s</div><div class="kpi__l">Implied ceiling at batch 1</div></div>
+  <div class="kpi"><div class="kpi__n">14.7 ms</div><div class="kpi__l">Floor at B = 32, s = 8192 (49.4 GB moved)</div></div>
+  <div class="kpi"><div class="kpi__n">3,120 tok/s</div><div class="kpi__l">KV-bandwidth ceiling at s = 8192, any B</div></div>
+</div>
+
+<p><em>All four derived</em> from the formula above with the cited 3.35 TB/s. The first pair is
+the number to carry around: <strong>a single H100 cannot generate Llama-3-8B faster than about
+223 tokens per second at batch 1 in bf16, no matter what you do to the software.</strong> Not
+because the kernels are bad — because streaming 15 GB of weights at 3.35 TB/s takes 4.48 ms.
+Measure 6 ms and you have 1.5 ms of slack to hunt for in launch overhead and CUDA graphs
+(<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>); measure 4.6 ms and
+you are done, go quantize.</p>
+
+<p>The last KPI is the cruel one. At 8k context, KV traffic per token is 1.07 GB, so aggregate
+throughput cannot exceed $3.35\times10^{12} / 1.07\times10^{9} \approx 3{,}120$ tokens/s
+regardless of batch size — and you cannot even reach that. Capacity stops you long before
+bandwidth does: <a href="00-01-what-inference-is.html">§0.1</a> budgets the same card at
+$0.92 \times 79.65 - 14.96 - 6 \approx 52.32$ GiB of KV pool — note that the weight term there is
+the full 14.96 GiB of <em>resident</em> parameters, not the 15.01 GB <em>streamed</em> per step,
+because the embedding table occupies memory whether or not it is read — which is about 429k tokens
+at 128 KiB each, or roughly 52 sequences at 8k context. Well short of the 345 the ridge wants.
+Part 2 is that fight.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — the decision procedure.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Pick the kernel or the whole step<br/>compute I = FLOPs / compulsory HBM bytes"] --> B{"Is I below the ridge?<br/>H100 SXM bf16: I* = 295 FLOP/byte"}
+    B -- "yes, memory bound" --> C["Time is set by bytes<br/>t = bytes / beta"]
+    B -- "no, compute bound" --> D["Time is set by arithmetic<br/>t = FLOPs / pi"]
+    C --> E["Move fewer bytes<br/>weight quantization ch 4<br/>KV quantization ch 2.5<br/>GQA and MLA ch 3.5 and 7.2<br/>prefix reuse ch 2.3 and 2.4"]
+    C --> F["Raise I by reusing what you loaded<br/>batch more tokens per weight read ch 1.3<br/>keep tiles in SRAM, FlashAttention ch 3.2<br/>fuse elementwise into the GEMM ch 8.2"]
+    C --> G["Buy bandwidth<br/>newer HBM, or split the weights<br/>across GPUs with tensor parallel ch 5.1"]
+    D --> H["Only faster math helps<br/>fp8 or fp4 tensor cores<br/>better tiling and scheduling<br/>remove redundant FLOPs"]
+    E --> I["Recompute I and repeat<br/>the bottleneck may have moved"]
+    F --> I
+    G --> I
+    H --> I
+  </script>
+</div>
+
+<p>The negative results are as useful as the positive ones. At $I = 1$ a faster matmul kernel is
+worthless — you would be making the idle half of the machine idler. Past the ridge, KV
+quantization saves memory but buys no time. Most disappointing optimisations in this field are
+optimisations applied on the wrong side of the ridge.</p></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>Neither engine contains a file called <code>roofline.py</code>. What both contain is
+machinery whose sole purpose is to raise $T$ — the number of tokens handed to one forward
+pass — because that is the only knob that moves a decode step rightward.</p>
+
+<h3>vLLM: one flat token budget, then one flat GEMM</h3>
+
+<p>The V1 scheduler runs a token budget over running and waiting requests, and hands the model
+runner a per-request token count rather than a batch of sequences.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L502-L510</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        num_scheduled_tokens: dict[str, int] = {}
+        token_budget = self.max_num_scheduled_tokens
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        input_budget = self.scheduler_config.max_num_batched_tokens</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L566-L576</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
+            if 0 &lt; self.scheduler_config.long_prefill_token_threshold &lt; num_new_tokens:
+                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            num_new_tokens = min(
+                num_new_tokens, token_budget, input_budget - draft_slots
+            )</code></pre>
+</div>
+
+<p>Each admitted request draws down the budget at
+<code>vllm/v1/core/sched/scheduler.py:L704-L710</code>. The default budget is small and
+explicitly labelled as a testing convenience — real deployments set it much higher, which is
+the point:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/scheduler.py:L42-L55</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
+    DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
+# ...
+    max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
+    """Maximum number of tokens that can be processed in a single iteration.
+
+    The default value here is mainly for convenience when testing.
+    In real usage, this should be set in `EngineArgs.create_engine_config`.
+    """</code></pre>
+</div>
+
+<p>The model runner then flattens every request's scheduled tokens into one contiguous token
+axis. This is where the roofline point is physically created — the $M$ dimension of every
+weight GEMM in the forward pass is <code>total_num_scheduled_tokens</code>. Two GPU runners ship
+at this SHA and a dense model such as Llama-3-8B actually runs on the newer one
+(<code>vllm/v1/worker/gpu/model_runner.py</code>, selected by
+<code>VllmConfig.use_v2_model_runner</code>); the older file quoted here does the same flattening
+in NumPy rather than Triton, which is why it is the readable one.
+<a href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html">§11.4</a> owns the selection
+policy and reads both.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2032-L2050</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_scheduled_tokens &gt; 0
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs &gt; 0
+
+        # OPTIMIZATION: Start copying the block table first.
+        # This way, we can overlap the copy with the following CPU operations.
+        self.input_batch.block_table.commit_block_table(num_reqs)
+
+        # Get request indices.
+        # E.g., [2, 5, 3] -&gt; [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+
+        # cu_num_tokens: [2, 5, 3] -&gt; [2, 7, 10]
+        # self.query_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        cu_num_tokens = self._get_cumsum_and_arange(
+            num_scheduled_tokens, self.query_pos.np
+        )</code></pre>
+</div>
+
+<p>The comment's example — <code>[2, 5, 3]</code> tokens for three requests — is the roofline in
+miniature: three sequences become one $M = 10$ GEMM. Chunked prefill
+(<a href="../01-the-core-loop/01-05-chunked-prefill.html">§1.5</a>) exists so a long prompt can
+be split across steps to <em>top up</em> this $M$ while decode tokens ride along, keeping every
+step near the ridge instead of alternating between a compute-bound prefill and a memory-bound
+decode.</p>
+
+<h3>SGLang: the same budget, a different shape</h3>
+
+<p>SGLang carries the equivalent knob as <code>max_prefill_tokens</code>, resolved from the
+model worker at <code>python/sglang/srt/managers/scheduler.py:L1032-L1042</code> and declared as:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L826-L836</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    max_prefill_tokens: A[
+        int,
+        Arg(
+            help=(
+                "The maximum number of tokens in a prefill batch. The real bound "
+                "will be the maximum of this value and the model's maximum "
+                "context length." + f"\n\n{human_readable_int.__doc__}"
+            ),
+            type_parser=human_readable_int,
+        ),
+        NS("schedule"),</code></pre>
+</div>
+
+<p>The admission loop lives in <code class="c-sglang">PrefillAdder</code>
+(<code>python/sglang/srt/managers/schedule_policy.py:L511</code>) — SGLang's per-step admission
+controller, taken apart properly in
+<a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a>. It tracks three separate
+budgets and reports why it stopped:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_policy.py:L841-L860</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def budget_state(self):
+        no_token = self.rem_total_tokens &lt;= 0 or self.cur_rem_tokens &lt;= 0
+        if not no_token and self.is_hybrid_swa:
+            no_token = self.rem_swa_tokens &lt;= 0
+        # Gate new mamba slots separately: rem_total_tokens' full_evictable can't
+        # cover a mamba slot, which needs mamba-recoverable bytes (see __init__).
+        if not no_token and self.rem_mamba_slots is not None:
+            no_token = self.rem_mamba_slots &lt;= 0
+        if no_token:
+            return AddReqResult.NO_TOKEN
+
+        if self.rem_input_tokens &lt;= 0:
+            return AddReqResult.OTHER
+
+        if self.dllm_config is not None:
+            if self.rem_dllm_tokens &lt;= 0:
+                return AddReqResult.OTHER
+        else:
+            if self.rem_chunk_tokens is not None and self.rem_chunk_tokens &lt;= 0:
+                return AddReqResult.OTHER</code></pre>
+</div>
+
+<p><strong>Where they differ.</strong> vLLM keeps one scalar <code>token_budget</code> plus an
+<code>input_budget</code> and mixes prefill and decode tokens in a single undifferentiated flat
+batch. SGLang separates <code>rem_total_tokens</code> (KV capacity — what stops you reaching the
+ridge), <code>rem_input_tokens</code> (the GEMM-shape budget — what gets you there) and
+<code>rem_chunk_tokens</code>, and returns a typed reason for refusal. Same two roofline
+pressures; SGLang makes the distinction between <em>out of batch</em> and <em>out of KV
+memory</em> explicit in the return value, which is why its scheduler logs tell you which one
+bit.</p>
+
+<h3>The microbenchmark that draws the curve</h3>
+
+<p>vLLM's kernel benchmarks contain a runnable version of §3(a). <code>benchmark_fp8_gemm.py</code>
+sweeps $M$ from 1 to 16,384 against fixed model weight shapes and reports TFLOP/s:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">benchmarks/kernels/benchmark_fp8_gemm.py:L89-L123, L123-L124</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["batch_size"],
+        x_vals=[1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+        x_log=False,
+        line_arg="provider",
+        line_vals=_enabled,
+        line_names=_enabled,
+        ylabel="TFLOP/s (larger is better)",
+        plot_name="BF16 vs FP8 GEMMs",
+        args={},
+    )
+)
+def benchmark(batch_size, provider, N, K):
+# ...
+    to_tflops = lambda t_ms: (2 * M * N * K) * 1e-12 / (t_ms * 1e-3)</code></pre>
+</div>
+
+<p><code>2 * M * N * K</code> is exactly the $F$ of §3(a) and <code>x_vals</code> straddles the
+$T^{*} \approx 345$ crossing, so the printed TFLOP/s column <em>is</em> the roofline's y-axis,
+sampled — the closest thing in either repo to a first-party roofline experiment.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: timing the two points</h2></div><div class="sec__body"><p>SGLang's single-batch harness times prefill and decode separately — precisely the two-point
+measurement Figure 1 needs. Both engines' historical entry points are now shims:
+<code>python/sglang/bench_one_batch.py:L1-L22</code> re-exports from
+<code>sglang.benchmark.one_batch</code>, and <code>benchmarks/benchmark_latency.py:L1-L17</code>
+points at <code>vllm bench latency</code>. The call path is
+<code class="c-sglang">cli_main()</code> →
+<code class="c-sglang">main()</code> →
+<code class="c-sglang">latency_test()</code> →
+<code class="c-sglang">latency_test_run_once()</code>, and inside that last function the two
+phases are bracketed independently. Prefill:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/one_batch.py:L784-L804, L801-L805</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    model_runner.synchronize()
+    tic = time.perf_counter()
+    next_token_ids, _, batch = model_runner.extend(reqs)
+    model_runner.synchronize()
+    prefill_latency = time.perf_counter() - tic
+# ...
+    throughput = input_len * batch_size / prefill_latency
+    rank_print(
+        f"Prefill. latency: {prefill_latency:6.5f} s, throughput: {throughput:9.2f} token/s"
+    )</code></pre>
+</div>
+
+<p>Then decode, one timed iteration at a time, with the median reported rather than the mean —
+the first decode step after a prefill is not representative:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/one_batch.py:L817-L850, L831-L834, L848-L850</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    for i in range(output_len - 1):
+        model_runner.synchronize()
+# ...
+        tic = time.perf_counter()
+        next_token_ids, _ = model_runner.decode(next_token_ids, batch)
+        model_runner.synchronize()
+        latency = time.perf_counter() - tic
+# ...
+        tot_latency += latency
+        throughput = batch_size / latency
+        decode_latencies.append(latency)</code></pre>
+</div>
+
+<p>Two details make this a valid roofline probe rather than a vibe. The
+<code class="c-sglang">model_runner.synchronize()</code> calls on both sides of the timed region
+drain the asynchronous CUDA stream, so <code>perf_counter</code> measures GPU work, not launch
+time. And <code class="c-sglang">extend()</code>
+(<code>python/sglang/benchmark/one_batch.py:L487-L521</code>) versus
+<code class="c-sglang">decode()</code> (<code>python/sglang/benchmark/one_batch.py:L526-L537</code>)
+differ only in <code>prepare_for_extend</code> versus <code>prepare_for_decode</code> and the
+resulting token count — same weights, same kernels, different $T$.</p>
+
+<p>Walk the bytes for one decode step at batch 1, context 1024: 15.01 GB of weights streamed once,
+plus $1024 \times 131072 = 0.134$ GB of KV, is 15.14 GB — floor 4.52 ms, about 221 token/s. At
+<code>--batch-size 64</code> the weights are still read once and KV becomes 8.59 GB, so 23.6 GB —
+floor 7.05 ms, about 9,080 token/s. <em>All derived</em>; the harness prints the measured version
+and the residual is the lesson.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">01</span>
+    <h4>Using the sparsity number</h4>
+    <p>NVIDIA's headline "1,979 TFLOPS BF16" for H100 SXM assumes 2:4 structured sparsity, which
+    no LLM inference path uses. Halving it to 989 moves the ridge from 590 to 295 — a factor of
+    two error in every prediction downstream. Check whether the footnote says "with sparsity"
+    before you divide by anything.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">02</span>
+    <h4>Counting the embedding table as streamed</h4>
+    <p>Llama-3-8B is 8.03 B parameters, but only 7.50 B of them are read during a decode step:
+    the 128,256 x 4096 input embedding is a gather of one row, not a stream. Including it
+    overstates the decode floor by 7%. The output head, by contrast, <em>is</em> fully read
+    every step.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">03</span>
+    <h4>Optimising on the wrong side of the ridge</h4>
+    <p>The classic wasted week: a decode kernel at $I = 1$ gets hand-tuned tiling, wins 3% and
+    the engineer concludes tuning does not work. It cannot work. At $I = 1$ the tensor cores are
+    99.7% idle by construction; the only wins available are fewer bytes or more bandwidth.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">04</span>
+    <h4>Assuming batching fixes long context</h4>
+    <p>It fixes the weight term and does nothing for the KV term. At 8k context the derived
+    intensity ceiling at infinite batch is 18 FLOP/byte. If your throughput plateaus as you raise
+    concurrency at long context, you have hit KV bandwidth, not a scheduler bug — and the KV
+    pool will run out first anyway.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">05</span>
+    <h4>Timing without synchronising</h4>
+    <p>CUDA launches are asynchronous. A timed region without a device sync on both sides measures
+    how fast Python enqueues work, which on a decode step is often faster than the work itself.
+    SGLang's harness syncs at <code>python/sglang/benchmark/one_batch.py:L784-L804</code>.</p>
+  </div>
+  <div class="ve-card ve-card--recessed">
+    <span class="ve-card__k">06</span>
+    <h4>Treating the derived floor as a target</h4>
+    <p>$t \gtrsim \text{bytes}/\beta$ uses spec-sheet $\beta$. It is a bound you cannot beat, never
+    a number you should expect to hit.</p>
+  </div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Three commands, in increasing order of what they tell you.</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">measure your own ridge point</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code># vLLM's GEMM sweep: M from 1 to 16384 against real Llama-3.1-8B weight shapes.
+# The TFLOP/s column is the roofline y-axis, sampled.
+python benchmarks/kernels/benchmark_fp8_gemm.py \
+    --models meta-llama/Llama-3.1-8B-Instruct --tp-sizes 1</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">the two roofline points, separately timed</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code># SGLang. Prints "Prefill. latency ... throughput" and "Decode. median latency ...".
+# Defaults are batch_size=(1,), input_len=(1024,), output_len=(16,)
+#   — python/sglang/benchmark/one_batch.py:L196-L200
+python -m sglang.benchmark.one_batch --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+    --batch-size 1 64 --input-len 1024 --output-len 16</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">the batch-1 latency harness</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code># vLLM. Defaults: --input-len 32 --output-len 128 --batch-size 8
+#   --num-iters-warmup 10 --num-iters 30  (vllm/benchmarks/latency.py:L34-L54)
+vllm bench latency --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --batch-size 1 --input-len 32 --output-len 128</code></pre>
+</div>
+
+<p>The third one gives an end-to-end latency for 128 output tokens
+(<code>vllm/benchmarks/latency.py:L125-L135</code> wraps <code>llm.generate</code> in
+<code>perf_counter</code>). Divide by 128 and compare against the 4.48 ms derived floor. The
+gap is your budget for CUDA graphs, sampling, detokenization, and scheduler overhead — every
+one of which gets a chapter later.</p>
+
+<p><a href="../LABS.html">Lab 01, <code>01-measure-your-gpu-roofline</code></a>, does this
+properly: it sweeps matmul shapes to find achieved TFLOP/s, runs a streaming kernel to find
+achieved GB/s, computes your card's real $I^{*}$, and plots Figure 1 with <em>your</em>
+numbers. Every prediction in this book should be re-derived against them.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><strong>Re-derive the ridge for a different card.</strong> An A100 SXM (80 GB) is rated at
+  312 TFLOP/s dense bf16 and 2.039 TB/s. Compute $I^{*}$. Is a batch-1 bf16 decode GEMV further
+  from the ridge on an A100 or on an H100, and which card is better value for low-latency
+  single-stream serving?</li>
+
+  <li><strong>Read the source.</strong> Open
+  <code>python/sglang/srt/managers/schedule_policy.py:L841-L860</code>. Which of
+  <code>AddReqResult.NO_TOKEN</code> and <code>AddReqResult.OTHER</code> means you ran out of the
+  budget that moves you <em>rightward</em> on the roofline, and which means you ran out of the
+  resource that caps how far right you can ever get?</li>
+
+  <li><strong>Predict, then verify.</strong> Llama-3-70B has $L = 80$, $d = 8192$, $h = 64$,
+  $h_{kv} = 8$. Predict (a) the decode-attention intensity, (b) the KV bytes per token in bf16,
+  (c) the batch size at which an $8192 \times 8192$ projection reaches the H100 bf16 ridge. Check
+  (c) against $T^{*}$ and explain why it is smaller than for Llama-3-8B.</li>
+
+  <li><strong>Find the crossover.</strong> At what context length $s$ does the KV read of a single
+  Llama-3-8B sequence equal the weight read of a whole decode step, and what does that imply about
+  which optimisation to reach for first at 4k versus 128k context?</li>
+
+  <li><strong>Break the model.</strong> Name a decode-time optimisation that reduces bytes moved
+  but does <em>not</em> improve throughput, and explain using Figure 1 why the roofline fails to
+  predict it. (Hint: what does the roofline assume about the gap between kernels?)</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><strong>1.</strong> $I^{*} = 312 / 2.039 = 153$ FLOP/byte, roughly half the H100's 295.
+    A batch-1 GEMV sits at $I = 1$ on both, so it is <em>relatively</em> closer to the ridge on
+    an A100 — but relative position is not what you buy. At $I = 1$ the achievable rate is
+    $\beta \cdot 1$, so the H100 is 1.64x faster at batch-1 decode purely because of HBM3.
+    Low-latency single-stream serving is a bandwidth purchase, not a FLOPs purchase.</p>
+    <p><strong>2.</strong> <code>NO_TOKEN</code> is driven by <code>rem_total_tokens</code>,
+    <code>cur_rem_tokens</code>, <code>rem_swa_tokens</code> and <code>rem_mamba_slots</code> —
+    all KV-pool capacity, the ceiling on how far right you can ever get. <code>OTHER</code> is
+    driven by <code>rem_input_tokens</code> and <code>rem_chunk_tokens</code> — this step's GEMM
+    shape. Capacity refusals mean you need less KV per token; input-budget refusals mean you have
+    simply filled this step.</p>
+    <p><strong>3.</strong> (a) $I = 2h/(b\,h_{kv}) = 8$ FLOP/byte, twice Llama-3-8B because the
+    GQA group is 8. (b) $2 \times 80 \times 8 \times 128 \times 2 = 327{,}680$ bytes = 320 KiB
+    per token, 2.5x the 8B model. (c) $T^{*} = 295 \times 8192 / (8192 - 590) = 318$ tokens,
+    <em>smaller</em> than 345: a wider $d$ makes the weight matrix ($d^2$) grow faster than the
+    activations ($Td$), so each token amortises more weight bytes. Width is friendly to the
+    roofline; depth is not.</p>
+    <p><strong>4.</strong> $s = 15.01 \times 10^{9} / 131072 \approx 114{,}500$ tokens. At 4k
+    context KV is only 3.5% of the step's traffic, so weight quantization is the lever and KV
+    quantization buys concurrency rather than speed. Past ~114k the priority inverts entirely.
+    Note the crossover falls much earlier in batch: at $B = 32$ the KV term is 32x larger, so
+    parity arrives at about 3,600 tokens of context per sequence.</p>
+    <p><strong>5.</strong> Any byte reduction that leaves the step dominated by kernel-launch
+    gaps rather than memory traffic — for example shrinking weights on a tiny model where each of
+    the several hundred kernels per step takes less time than its launch overhead. The roofline
+    assumes the machine executes your kernel continuously and says nothing about the microseconds
+    between kernels. That gap is what CUDA graphs close
+    (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>), and it is why the
+    derived floor is a bound rather than a prediction.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>A dense weight matrix applied to one token does exactly $2/b$ FLOPs per byte — 1.0 in bf16
+  — independent of model, layer, and shape. That is why decode is memory-bound on every GPU ever
+  built, and why the fix is never a better matmul.</li>
+  <li>Decode attention's intensity is $2h/(b\,h_{kv})$: independent of context length <em>and</em>
+  of batch size. Weight reads amortise across a batch; KV reads never do. That asymmetry is why
+  long-context serving is a different engineering problem from high-concurrency serving.</li>
+  <li>The ridge for H100 SXM bf16 is 295 FLOP/byte, reached at about 345 tokens per step for a
+  Llama-3-8B projection. At hidden size $d \le 2I^{*} = 590$, no batch size makes a square bf16
+  GEMM compute-bound at all.</li>
+  <li>The decode floor $t \gtrsim (\text{weight bytes} + \text{KV bytes})/\beta$ gives 4.48 ms and
+  a 223 tok/s ceiling for Llama-3-8B at batch 1 on an H100. Measure your step, subtract the floor;
+  the remainder — not the total — is the part software can fix.</li>
+  <li>Faster math (fp8, fp4) shifts the ridge <em>right</em>. On a memory-bound kernel the benefit
+  of low precision comes entirely from moving fewer bytes, not from the faster tensor cores — two
+  mechanisms wearing the same name.</li>
+  <li>Both engines' scheduler token budgets exist for one reason: to raise the $M$ dimension of
+  the forward pass's GEMMs. Read <code>token_budget</code> and <code>rem_input_tokens</code> as
+  roofline controls and the rest of both schedulers becomes legible.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Williams, Waterman, Patterson, <em>Roofline: An Insightful Visual Performance Model for
+  Multicore Architectures</em>, CACM 2009 — the original model. Everything here is that paper
+  with $\pi$ and $\beta$ swapped for GPU numbers.</li>
+  <li><a href="https://resources.nvidia.com/en-us-tensor-core">NVIDIA H100 Tensor Core GPU
+  datasheet</a> and the <em>NVIDIA H100 Tensor Core GPU Architecture</em> whitepaper — the source
+  of the 989.4 TFLOP/s and 3.35 TB/s used throughout. Read the sparsity footnotes.</li>
+  <li>NVIDIA, <a href="https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html">Matrix
+  Multiplication Background User's Guide</a> — the arithmetic-intensity treatment of GEMM shapes,
+  including why skinny $M$ is pathological.</li>
+  <li>Pope et al., <em>Efficiently Scaling Transformer Inference</em> (2022) — the operational-intensity
+  analysis of PaLM serving that made the memory-bound-decode argument standard.</li>
+  <li>Dao et al., <em>FlashAttention</em> (2022) and <em>FlashAttention-2</em> (2023) — the
+  canonical example of moving actual traffic down to compulsory traffic. Built properly in
+  <a href="../03-attention-kernels/03-02-flashattention.html">§3.2</a>.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/3130">vLLM PR #3130 — chunked prefill</a>
+  and <a href="https://github.com/vllm-project/vllm/issues/3861">issue #3861</a>, plus Agrawal
+  et al., <em>Sarathi-Serve</em> (OSDI 2024): an unusually clear record of engineers arguing
+  about where on the roofline a mixed batch should sit. Picked up in
+  <a href="../01-the-core-loop/01-05-chunked-prefill.html">§1.5</a>.</li>
+</ul></div></section>
+<div class="pager"><a href="00-03-gpu-architecture.html"><div class="pager__k">← Previous</div><div class="pager__t">GPU architecture for inference engineers</div></a><a class="pager__next" href="00-05-numerics.html"><div class="pager__k">Next →</div><div class="pager__t">Numerics: FP32 to INT4, and why bf16 won</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: timing the two points</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

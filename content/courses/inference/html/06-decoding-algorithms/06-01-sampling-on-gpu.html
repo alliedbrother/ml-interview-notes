@@ -1,0 +1,2003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sampling on the GPU — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i is-current" href="06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 6 · Decoding algorithms · 06-01</div>
+<h1>Sampling on the GPU</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/sample/sampler.py</code></li><li><code>vllm/v1/sample/ops/</code></li><li><code>python/sglang/srt/layers/sampler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">The model's job ends at a tensor of shape <code>[batch, 128256]</code>. Turning that
+into one token per request is arithmetically trivial and architecturally the most awkward part of
+the decode step: it is pure bandwidth, it must honour a different set of parameters for every row,
+and it cannot afford a single trip to the host. This chapter is about how both engines got that
+work onto the GPU and kept it there.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Run Llama-3-8B on an H100 at batch 256. The final <code>lm_head</code> projection emits logits of
+shape <code>[256, 128256]</code>. In fp32 — and both engines upcast to fp32 before sampling — that is
+131.3&nbsp;MB. Now suppose you did the obvious thing and sampled on the CPU: copy the logits down,
+apply each request's temperature and top-p in Python, pick a token, copy the ids back.</p>
+
+<p>The copy alone is fatal. 131.3&nbsp;MB over PCIe Gen5 x16 at a generous 64&nbsp;GB/s is
+<strong>2.05&nbsp;ms</strong>. <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>
+put the bandwidth floor of a Llama-3-8B bf16 decode step at 4.48&nbsp;ms — the time to stream
+15.01&nbsp;GB of weights through 3.35&nbsp;TB/s of HBM. So a one-way device-to-host copy of the logits
+is 46% of the entire step's floor, before the CPU has sorted a single row and before the token ids
+go back up. Worse, the copy is a synchronisation point: the GPU must finish, the host must work,
+the GPU must be re-fed. That destroys the overlap the scheduler depends on
+(<a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a>) and makes the step
+un-capturable as a CUDA graph (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>).</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">131.3 MB</div><div class="kpi__l">logits, fp32, batch 256, V=128,256</div></div>
+  <div class="kpi"><div class="kpi__n">2.05 ms</div><div class="kpi__l">D2H at 64 GB/s — derived</div></div>
+  <div class="kpi"><div class="kpi__n">78 &micro;s</div><div class="kpi__l">one read+write HBM sweep of it</div></div>
+  <div class="kpi"><div class="kpi__n">1.75%</div><div class="kpi__l">of the 4.48 ms step floor, per sweep</div></div>
+</div>
+
+<p>Keep it on the GPU and one full read-modify-write pass over that tensor costs
+$2 \cdot 131.3\,\text{MB} / 3.35\,\text{TB/s} = 78\ \mu\text{s}$ — 1.75% of the step. You can afford
+roughly a dozen such passes before sampling is 20% of decode. That budget is the whole design
+constraint, and it is why every operator below is written as a single fused sweep with per-row
+parameters rather than a branch per request.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Provenance</span>
+  <p>Every number in this chapter is <em>derived</em> — arithmetic over the book constants (H100 SXM,
+  3.35&nbsp;TB/s HBM, 989.4&nbsp;TFLOP/s bf16, ridge $I^\ast = 295$) and shapes read out of the source.
+  Nothing here was measured; there is no GPU in this session.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of the logits as a very wide, very short matrix: $B$ rows of $V = 128{,}256$ float32s. Every
+sampling operator is a <em>row-wise reduction or mask</em> over that matrix. Temperature divides each
+row by a scalar. Penalties subtract from selected columns. Top-k and top-p delete all but a prefix
+of the row's sorted order. The multinomial draw reduces each row to one index.</p>
+
+<p>None of these operators has any arithmetic worth speaking of. Temperature is one FLOP per 8 bytes
+of traffic — arithmetic intensity $1/8$, three and a half orders of magnitude below the H100's
+ridge point of 295. On the roofline these operators are pinned to the far-left diagonal: their
+runtime is exactly their byte count divided by bandwidth. The only optimisation available is
+<em>touching the tensor fewer times</em>. That single fact explains every design decision in both
+engines' samplers.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the operator pipeline over the logits tensor, batch 64, Llama-3-8B.</b>
+  Shapes and HBM traffic annotated per stage. All byte counts derived: $B \cdot V \cdot 4$ bytes for an fp32 row-major
+  logits tensor with $B=64$, $V=128{,}256$; times at 3.35 TB/s.</p>
+  <svg viewBox="0 0 900 470" width="100%" role="img" aria-labelledby="pipeTitle pipeDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="pipeTitle">Sampling operator pipeline with tensor shapes and bytes</title>
+    <desc id="pipeDesc">A vertical pipeline. Logits enter as a 64 by 128256 bfloat16 tensor of 16.4 megabytes,
+    are upcast to float32 at 32.8 megabytes, then pass through masks and bias, penalties, temperature, min-p,
+    top-k, top-p, and finally a Gumbel-noised argmax that reduces the tensor to 64 int32 token ids of 256 bytes.
+    Each stage is annotated with its read plus write traffic in megabytes and its derived time in microseconds.</desc>
+
+    <g font-size="12">
+      <rect x="30" y="20" width="270" height="46" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="40" fill="currentColor">lm_head output</text>
+      <text x="44" y="57" fill="currentColor" opacity="0.7">[64, 128256] bf16 &mdash; 16.4 MB</text>
+
+      <rect x="30" y="86" width="270" height="46" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="106" fill="currentColor">upcast to fp32</text>
+      <text x="44" y="123" fill="currentColor" opacity="0.7">[64, 128256] fp32 &mdash; 32.8 MB</text>
+
+      <rect x="30" y="152" width="270" height="46" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="172" fill="currentColor">allowed-ids mask, bad words,</text>
+      <text x="44" y="189" fill="currentColor">logit bias, grammar bitmask</text>
+
+      <rect x="30" y="218" width="270" height="46" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="238" fill="currentColor">penalties: repetition,</text>
+      <text x="44" y="255" fill="currentColor">frequency, presence</text>
+
+      <rect x="30" y="284" width="270" height="34" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="306" fill="currentColor">temperature: logits /= T[row]</text>
+
+      <rect x="30" y="338" width="270" height="34" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="360" fill="currentColor">min-p / top-k / top-p masks</text>
+
+      <rect x="30" y="392" width="270" height="46" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.45"/>
+      <text x="44" y="412" fill="currentColor">softmax + noised argmax</text>
+      <text x="44" y="429" fill="currentColor" opacity="0.7">[64] int32 &mdash; 256 bytes</text>
+
+      <g stroke="currentColor" stroke-opacity="0.5" stroke-width="1.5" fill="none">
+        <path d="M165 66 L165 86"/><path d="M165 132 L165 152"/><path d="M165 198 L165 218"/>
+        <path d="M165 264 L165 284"/><path d="M165 318 L165 338"/><path d="M165 372 L165 392"/>
+      </g>
+      <g fill="currentColor" opacity="0.6">
+        <path d="M161 86 l4 -8 l4 8 z"/><path d="M161 152 l4 -8 l4 8 z"/><path d="M161 218 l4 -8 l4 8 z"/>
+        <path d="M161 284 l4 -8 l4 8 z"/><path d="M161 338 l4 -8 l4 8 z"/><path d="M161 392 l4 -8 l4 8 z"/>
+      </g>
+    </g>
+
+    <g font-size="12">
+      <text x="360" y="40" fill="currentColor" opacity="0.55">read 16.4 &middot; write 32.8</text>
+      <text x="360" y="57" fill="currentColor" opacity="0.55">14.7 &micro;s</text>
+
+      <text x="360" y="172" fill="currentColor" opacity="0.55">r+w 65.6 MB &middot; 19.6 &micro;s</text>
+      <text x="360" y="189" fill="currentColor" opacity="0.55">skipped entirely if no row needs it</text>
+
+      <text x="360" y="238" fill="currentColor" opacity="0.55">r+w 65.6 MB &middot; 19.6 &micro;s</text>
+      <text x="360" y="255" fill="currentColor" opacity="0.55">plus bincount over history</text>
+
+      <text x="360" y="306" fill="currentColor" opacity="0.55">r+w 65.6 MB &middot; 19.6 &micro;s</text>
+
+      <text x="360" y="352" fill="currentColor" opacity="0.55">fused sweep, or a full sort:</text>
+      <text x="360" y="369" fill="currentColor" opacity="0.55">sort touches 98.5 MB per pass</text>
+
+      <text x="360" y="412" fill="currentColor" opacity="0.55">r+w 65.6 MB &middot; 19.6 &micro;s</text>
+      <text x="360" y="429" fill="currentColor" opacity="0.55">reduction to 64 ids</text>
+    </g>
+
+    <g font-size="12">
+      <rect x="620" y="152" width="250" height="286" rx="8" fill="none" stroke="currentColor" stroke-opacity="0.25"/>
+      <text x="638" y="176" fill="currentColor">Budget</text>
+      <text x="638" y="200" fill="currentColor" opacity="0.7">decode step floor, batch 64:</text>
+      <text x="638" y="217" fill="currentColor" opacity="0.7">4.48 ms (weights dominate)</text>
+      <text x="638" y="245" fill="currentColor" opacity="0.7">one r+w sweep: 19.6 &micro;s</text>
+      <text x="638" y="262" fill="currentColor" opacity="0.7">= 0.44% of the step</text>
+      <text x="638" y="290" fill="currentColor" opacity="0.7">twelve sweeps: 0.24 ms</text>
+      <text x="638" y="307" fill="currentColor" opacity="0.7">= 5.3% of the step</text>
+      <text x="638" y="335" fill="currentColor" opacity="0.7">a full descending sort of</text>
+      <text x="638" y="352" fill="currentColor" opacity="0.7">every row costs more than</text>
+      <text x="638" y="369" fill="currentColor" opacity="0.7">all the masks combined</text>
+      <text x="638" y="400" fill="currentColor" opacity="0.55">arithmetic intensity of every</text>
+      <text x="638" y="417" fill="currentColor" opacity="0.55">stage: below 1 FLOP/byte</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the operator algebra</h2></div><div class="sec__body"><p>Let $z \in \mathbb{R}^{V}$ be one row of logits, $V = 128{,}256$ for Llama-3. Define
+$p = \mathrm{softmax}(z)$. The operators, in the order both engines compose them:</p>
+
+<p><strong>Temperature.</strong> $z \leftarrow z / T$ with $T > 0$. Raising $T$ flattens the
+distribution; lowering it sharpens. $T \to 0$ converges to a point mass on $\arg\max z$, which is
+why $T = 0$ is not a division at all but a separate code path (below).</p>
+
+<p><strong>Penalties.</strong> These are the only operators that read the request's <em>history</em>,
+not just the current step. Let $c_v$ be the count of token $v$ in the generated output so far, and
+$m^{\text{prompt}}_v, m^{\text{out}}_v \in \{0,1\}$ indicate presence in prompt and output.</p>
+
+<div class="math-display">$$
+z_v \leftarrow \begin{cases} z_v / \rho & \text{if } z_v > 0 \text{ and } (m^{\text{prompt}}_v \vee m^{\text{out}}_v) \\ z_v \cdot \rho & \text{if } z_v \le 0 \text{ and } (m^{\text{prompt}}_v \vee m^{\text{out}}_v) \end{cases}
+\qquad
+z_v \leftarrow z_v - \alpha_f\, c_v - \alpha_p\, m^{\text{out}}_v
+$$</div>
+
+<p>$\rho$ is the repetition penalty (multiplicative, sign-aware, neutral at 1.0), $\alpha_f$ the
+frequency penalty (scales with count), $\alpha_p$ the presence penalty (fires once). vLLM implements
+exactly this, and the sign-aware branch is the reason repetition penalty is a custom kernel rather
+than a multiply:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/utils.py:L66-L83</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    num_seqs, vocab_size = logits.shape
+    _, prompt_mask = get_token_bin_counts_and_mask(
+        prompt_tokens_tensor, vocab_size, num_seqs
+    )
+    output_bin_counts, output_mask = get_token_bin_counts_and_mask(
+        output_tokens_tensor, vocab_size, num_seqs
+    )
+
+    # Apply repetition penalties as a custom op
+    from vllm._custom_ops import apply_repetition_penalties
+
+    apply_repetition_penalties(logits, prompt_mask, output_mask, repetition_penalties)
+
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
+    logits -= presence_penalties.unsqueeze(dim=1) * output_mask
+    return logits</code></pre>
+</div>
+
+<p>Note the cost hiding in <code>get_token_bin_counts_and_mask</code>: it allocates a
+<code>[num_seqs, vocab_size + 1]</code> int64 buffer and scatter-adds the whole history into it. At
+batch 256 that is $256 \times 128{,}257 \times 8 = 262.7$&nbsp;MB per call, twice (prompt and
+output) — and the source says so itself, at
+<code>vllm/v1/sample/ops/penalties.py:L27-L28</code>: <em>"The penalties implementation is currently
+quite inefficient and will be reworked anyhow."</em> The rework exists at this SHA in the V2 model
+runner's own sampler stack, whose Triton penalty kernel is quoted in §6.1.4.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Which runner</span>
+  <p>vLLM ships <em>two</em> GPU model runners at <code>a556f3f</code>, and they do not share a
+  sampler. <code>vllm/v1/worker/gpu_model_runner.py</code> uses
+  <code>vllm/v1/sample/sampler.py</code>; <code>vllm/v1/worker/gpu/model_runner.py</code> — whose
+  <code>README.md</code> still titles itself "[Experimental] Model Runner V2" — builds its own
+  sampler out of the Triton kernels under <code>vllm/v1/worker/gpu/sample/</code>. That README is
+  behind the config. <code>VLLM_USE_V2_MODEL_RUNNER</code> defaults to unset, and the resolution at
+  <code>vllm/config/vllm.py:L648-L700</code> then falls through to
+  <code>_is_default_v2_model_runner_model</code>, which ends in
+  <code>is_default_v2_architecture or not model_config.is_moe</code>
+  (<code>vllm/config/vllm.py:L725-L743</code>). A <em>dense</em> model such as Llama-3-8B is not MoE,
+  so on CUDA with Triton present and none of
+  <code>_get_v2_model_runner_unsupported_features</code>
+  (<code>vllm/config/vllm.py:L2438-L2543</code>) firing, <strong>V2 is what a plain
+  <code>vllm serve</code> selects</strong>. Read this chapter accordingly: the V1 sampler it traces
+  in §6.1.7 is the fallback path, and the kernels labelled "V2" below are the ones the running
+  example actually executes.</p>
+</div>
+
+<p><strong>Top-k.</strong> Keep the $k$ largest logits, mask the rest to $-\infty$. Purely
+order-based; no probability arithmetic needed.</p>
+
+<p><strong>Top-p (nucleus).</strong> Sort descending, keep the shortest prefix whose cumulative
+probability reaches $p$. Formally, with $\pi$ the descending permutation, keep ranks
+$r \le r^\ast$ where $r^\ast = \min\{ r : \sum_{j \le r} p_{\pi(j)} \ge p \}$. Unlike top-k, the
+number kept is data-dependent: a confident step may keep one token, an ambiguous one may keep
+hundreds.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; top-p is a cutoff on the sorted cumulative mass.</b>
+  The same row under $p = 0.9$ keeps 4 tokens; under $p = 0.99$ it keeps 9. Illustrative probabilities,
+  not from a real model.</p>
+  <svg viewBox="0 0 880 400" width="100%" role="img" aria-labelledby="toppTitle toppDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="toppTitle">Top-p cutoff on a sorted probability distribution</title>
+    <desc id="toppDesc">Bars of descending probability with a rising cumulative curve above them. A horizontal
+    line at 0.9 crosses the cumulative curve after the fourth token; a line at 0.99 crosses after the ninth.
+    Everything to the right of a crossing is masked to negative infinity.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.2">
+      <line x1="70" y1="330" x2="840" y2="330"/>
+      <line x1="70" y1="60" x2="70" y2="330"/>
+    </g>
+    <text x="70" y="360" font-size="12" fill="currentColor" opacity="0.6">tokens, sorted by probability descending &rarr;</text>
+    <text x="14" y="200" font-size="12" fill="currentColor" opacity="0.6" transform="rotate(-90 14 200)">probability</text>
+
+    <g fill="currentColor" fill-opacity="0.30">
+      <rect x="82"  y="168" width="42" height="162"/>
+      <rect x="134" y="222" width="42" height="108"/>
+      <rect x="186" y="249" width="42" height="81"/>
+      <rect x="238" y="276" width="42" height="54"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.14">
+      <rect x="290" y="297" width="42" height="33"/>
+      <rect x="342" y="306" width="42" height="24"/>
+      <rect x="394" y="312" width="42" height="18"/>
+      <rect x="446" y="316" width="42" height="14"/>
+      <rect x="498" y="319" width="42" height="11"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.06">
+      <rect x="550" y="323" width="42" height="7"/>
+      <rect x="602" y="325" width="42" height="5"/>
+      <rect x="654" y="326" width="42" height="4"/>
+      <rect x="706" y="327" width="42" height="3"/>
+      <rect x="758" y="328" width="42" height="2"/>
+    </g>
+
+    <polyline points="103,270 155,216 207,189 259,162 311,151 363,143 415,137 467,132 519,128 571,126 623,124 675,123 727,122 779,121"
+      fill="none" stroke="currentColor" stroke-width="2" stroke-opacity="0.85"/>
+    <g fill="currentColor" opacity="0.85">
+      <circle cx="103" cy="270" r="3"/><circle cx="155" cy="216" r="3"/><circle cx="207" cy="189" r="3"/>
+      <circle cx="259" cy="162" r="3"/><circle cx="311" cy="151" r="3"/><circle cx="363" cy="143" r="3"/>
+      <circle cx="415" cy="137" r="3"/><circle cx="467" cy="132" r="3"/><circle cx="519" cy="128" r="3"/>
+    </g>
+    <text x="792" y="118" font-size="12" fill="currentColor" opacity="0.7">cumulative</text>
+
+    <line x1="70" y1="162" x2="840" y2="162" stroke="currentColor" stroke-dasharray="5 4" stroke-opacity="0.55"/>
+    <text x="700" y="156" font-size="12" fill="currentColor" opacity="0.7">p = 0.90</text>
+    <line x1="70" y1="128" x2="840" y2="128" stroke="currentColor" stroke-dasharray="5 4" stroke-opacity="0.35"/>
+    <text x="700" y="122" font-size="12" fill="currentColor" opacity="0.55">p = 0.99</text>
+
+    <line x1="281" y1="60" x2="281" y2="340" stroke="currentColor" stroke-width="2" stroke-opacity="0.6"/>
+    <text x="288" y="76" font-size="12" fill="currentColor" opacity="0.75">cutoff at p=0.90: keep 4</text>
+    <line x1="541" y1="60" x2="541" y2="340" stroke="currentColor" stroke-width="2" stroke-opacity="0.35"/>
+    <text x="548" y="96" font-size="12" fill="currentColor" opacity="0.55">cutoff at p=0.99: keep 9</text>
+
+    <text x="600" y="300" font-size="12" fill="currentColor" opacity="0.5">everything right of the cutoff &rarr; &minus;&infin;</text>
+  </svg>
+</div>
+
+<p><strong>Min-p.</strong> Keep tokens whose probability is at least a fixed fraction of the most
+likely token's: keep $v$ where $p_v \ge \mu \cdot \max_j p_j$. Because it is relative to the peak, it
+adapts automatically — sharp distributions keep few tokens, flat ones keep many. The V2 runner's
+vLLM kernel does it in log space, which avoids the softmax entirely:
+<code>threshold = max_val + tl.log(min_p)</code> at
+<code>vllm/v1/worker/gpu/sample/min_p.py:L34</code>.</p>
+
+<p><strong>The draw.</strong> Given the masked row, sample $v \sim \mathrm{softmax}(z)$. vLLM avoids
+<code>torch.multinomial</code> in the hot path because it synchronises with the host. The
+standard trick is the Gumbel-max / exponential-race identity: if $q_v \sim \mathrm{Exp}(1)$
+independently, then $\arg\max_v p_v / q_v$ is distributed exactly as a draw from $p$. vLLM's
+<code>random_sample</code> says so in as many words:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/ops/topk_topp_sampler.py:L450-L471</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def random_sample(
+    probs: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    use_fp64_gumbel: bool = False,
+) -&gt; torch.Tensor:
+    """Randomly sample from the probabilities.
+
+    We use this function instead of torch.multinomial because torch.multinomial
+    causes CPU-GPU synchronization.
+    """
+    q = empty_exponential_noise_like(probs, use_fp64_gumbel)
+    # NOTE(woosuk): To batch-process the requests without their own seeds,
+    # which is the common case, we first assume that every request does
+    # not have its own seed. Then, we overwrite the values for the requests
+    # that have their own seeds.
+    if len(generators) != probs.shape[0]:
+        q.exponential_()
+    if generators:
+        # TODO(woosuk): This can be slow because we handle each request
+        # one by one. Optimize this.
+        for i, generator in generators.items():
+            q[i].exponential_(generator=generator)</code></pre>
+</div>
+
+<p>SGLang only half-agrees. Its FlashInfer backend never reaches a PyTorch multinomial, and its
+seeded path uses the hashed-Gumbel argmax below — but its unseeded <code>pytorch</code> backend
+calls <code>torch.multinomial</code> outright, both in the no-filter case
+(<code>sampling_from_probs_torch</code>) and after the top-k/top-p sort at
+<code>python/sglang/srt/layers/sampler.py:L597-L598</code>. So "nobody calls
+<code>torch.multinomial</code>" is a vLLM property, not a universal one.</p>
+
+<h3>Order matters, and the engines do not fully agree</h3>
+
+<p>vLLM's <code>Sampler</code> docstring is the canonical statement of the order — masks, then
+penalties, then temperature, then min-p, then top-k/top-p, then the draw
+(<code>vllm/v1/sample/sampler.py:L21-L59</code>). SGLang's PyTorch backend applies temperature, then
+top-k, then top-p, <em>then</em> min-p, all on one descending sort:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/sampler.py:L581-L587</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    probs_sort[
+        torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1)
+        &gt;= top_ks.view(-1, 1)
+    ] = 0.0
+    probs_sort[(probs_sum - probs_sort) &gt; top_ps.view(-1, 1)] = 0.0</code></pre>
+</div>
+
+<p>Two consequences fall out of reading these side by side. First, the <em>top-p rule itself</em>
+agrees. vLLM sorts ascending and masks where the inclusive cumulative mass from the bottom is
+$\le 1 - p$; SGLang sorts descending and masks where the <em>exclusive</em> prefix mass exceeds $p$.
+For a token at descending rank $r$, vLLM keeps it iff $1 - \text{excl}(r) > 1 - p$, i.e.
+$\text{excl}(r) < p$; SGLang keeps it iff $\text{excl}(r) \le p$. The rules differ only on exact
+equality, and both force the top token to survive — vLLM with an explicit
+<code>top_p_mask[:, -1] = False</code>, SGLang because $\text{excl}(1) = 0$.</p>
+
+<p>Second, when a request sets <em>both</em> <code>min_p</code> and <code>top_p</code> the two engines
+can legitimately keep different sets. vLLM masks with min-p first, so the softmax inside its top-p
+step renormalises over the survivors and reaches cumulative $p$ sooner — keeping fewer tokens.
+SGLang computes top-p against the full, unfiltered distribution and applies min-p afterwards. This
+is an arithmetic consequence of the two code paths, not a measurement; it is exactly the kind of
+divergence that makes "same params, same seed, same output" a false expectation across engines.</p></div></section>
+<section class="sec" id="heterogeneous-batch" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The hard part: a heterogeneous batch</h2></div><div class="sec__body"><p>A production batch is not one workload. Row 0 is a code-completion request at $T=0$. Row 1 is
+creative writing at $T=1.1$, $p=0.95$. Row 2 is a JSON extraction at $T=0.2$, $k=40$, with a seed.
+Row 3 wants none of it. The kernel cannot branch on request identity — there is no request identity
+inside a CUDA block, only <code>blockIdx.x</code>. Every parameter must arrive as a tensor indexed
+by row.</p>
+
+<p>vLLM maintains those tensors as a <em>persistent batch</em>: pinned CPU staging arrays of length
+<code>max_num_seqs</code> written by index when a request is admitted, and matching device tensors
+copied from them. Admission writes the row:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_input_batch.py:L400-L417</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if sampling_params := request.sampling_params:
+            if sampling_params.sampling_type == SamplingType.GREEDY:
+                # Should avoid division by zero later when apply_temperature.
+                self.temperature_cpu[req_index] = 0.0
+                self.greedy_reqs.add(req_id)
+            else:
+                self.temperature_cpu[req_index] = sampling_params.temperature
+                self.random_reqs.add(req_id)
+
+            self.top_p_cpu[req_index] = sampling_params.top_p
+            if sampling_params.top_p &lt; 1:
+                self.top_p_reqs.add(req_id)
+            top_k = sampling_params.top_k
+            if 0 &lt; top_k &lt; self.vocab_size:
+                self.top_k_reqs.add(req_id)
+            else:
+                top_k = self.vocab_size
+            self.top_k_cpu[req_index] = top_k</code></pre>
+</div>
+
+<p>Two design decisions are doing all the work here. <strong>Neutral encoding:</strong> a request that
+does not want top-k is stored as $k = V$, which is a no-op the kernel can execute unconditionally.
+Same for $p = 1.0$, $\rho = 1.0$, $\alpha = 0$. There is no "disabled" branch — only a value that
+happens to do nothing. <strong>Set-based gating:</strong> alongside the array, vLLM keeps a
+<code>set</code> of request ids that actually use each feature. <code>no_top_p</code> and
+<code>no_top_k</code> are just <code>len(...) == 0</code>
+(<code>vllm/v1/worker/gpu_input_batch.py:L1126-L1132</code>), and the metadata build skips both the
+H2D copy and the tensor entirely when the set is empty:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_input_batch.py:L860-L871</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _make_sampling_metadata(self) -&gt; SamplingMetadata:
+        num_reqs = self.num_reqs
+        if not self.all_greedy:
+            temperature = copy_slice(
+                self.temperature_cpu_tensor, self.temperature, num_reqs
+            )
+        else:
+            temperature = None
+        if not self.no_top_p:
+            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+        if not self.no_top_k:
+            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)</code></pre>
+</div>
+
+<p>The result is a <code>SamplingMetadata</code> whose <code>top_p</code> and <code>top_k</code> are
+either a <code>[num_reqs]</code> tensor or <code>None</code>
+(<code>vllm/v1/sample/metadata.py:L20-L21</code>) — and <code>None</code> means the entire kernel is
+skipped. This is how a batch where nobody uses top-k avoids paying for it. It is <em>not</em> how a
+batch where one row uses top-k avoids penalising the other 255: that row forces the tensor to exist,
+and the kernel runs over all rows with $k = V$ for the rest.</p>
+
+<p>The V2 model runner — the default for a dense model, per the callout in §6.1.3 — closes that gap
+by pushing the per-row check <em>into</em> the kernel and returning early before touching the logits
+at all:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu/sample/penalties.py:L123-L136</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
+    freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
+    pres_penalty = tl.load(presence_penalty_ptr + req_state_idx)
+
+    use_rep_penalty = rep_penalty != 1.0
+    use_freq_penalty = freq_penalty != 0.0
+    use_pres_penalty = pres_penalty != 0.0
+    use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
+    if not use_penalty:
+        # Early return to avoid loading logits.
+        return</code></pre>
+</div>
+
+<p>That is the whole trick, and it is worth stating plainly: <em>the branch is per row, not per
+request, and it is taken before the loads.</em> A block whose row has no penalty exits having read
+three floats. The same pattern appears in the temperature kernel (<code>if temperature == 0.0 or
+temperature == 1.0: return</code>, <code>vllm/v1/worker/gpu/sample/gumbel.py:L29-L31</code>) and the
+min-p kernel. Because the logits row is 513&nbsp;KB and the parameter is 4 bytes, an early return is
+five orders of magnitude cheaper than the work it skips.</p>
+
+<p>SGLang builds the same tensors but from a list comprehension over the batch each time the batch
+composition changes, and keeps the per-feature gates as booleans on the struct:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/sampling/sampling_batch_info.py:L203-L208</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            sampling_seed=sampling_seed,
+            is_all_greedy=all(r.sampling_params.top_k &lt;= 1 for r in reqs),
+            is_any_greedy=any(r.sampling_params.top_k &lt;= 1 for r in reqs),
+            need_top_p_sampling=any(r.sampling_params.top_p != 1.0 for r in reqs),
+            need_top_k_sampling=any(r.sampling_params.top_k != TOP_K_ALL for r in reqs),
+            need_min_p_sampling=any(r.sampling_params.min_p &gt; 0 for r in reqs),</code></pre>
+</div>
+
+<p>Under continuous batching the row set changes constantly, so both engines need index surgery.
+vLLM swaps and condenses rows in place (<code>swap_states</code>, <code>condense</code>) and reports
+the moves to logits processors via a <code>BatchUpdate</code> record carrying <code>removed</code>,
+<code>added</code>, <code>moved</code> lists (<code>vllm/v1/sample/logits_processor/interface.py:L36-L57</code>).
+SGLang instead gathers with an index tensor — <code>filter_batch</code> does
+<code>setattr(self, item, value[keep_indices_device])</code> for each parameter tensor
+(<code>python/sglang/srt/sampling/sampling_batch_info.py:L307-L317</code>) and <code>merge_batch</code>
+concatenates. The tradeoff is familiar: vLLM's in-place slots keep tensor addresses stable, which
+matters for CUDA graph capture; SGLang's gather is simpler and reallocates.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; one kernel, four rows, four different parameter sets.</b>
+  Neutral values ($k = V$, $p = 1$, $\rho = 1$) let every row run the same instruction stream.
+  <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    R0["row 0 &mdash; code completion<br/>T=0.0 k=128256 p=1.00 seed=none"]
+    R1["row 1 &mdash; creative<br/>T=1.10 k=128256 p=0.95 seed=none"]
+    R2["row 2 &mdash; extraction<br/>T=0.20 k=40 p=1.00 seed=7"]
+    R3["row 3 &mdash; default<br/>T=1.00 k=128256 p=1.00 seed=none"]
+    R0 --> P["per-row parameter tensors<br/>temperature[4] fp32 &middot; top_k[4] int32<br/>top_p[4] fp32 &middot; seeds[4] int64<br/>total 80 bytes"]
+    R1 --> P
+    R2 --> P
+    R3 --> P
+    P --> K["one launch over logits [4, 128256] fp32<br/>blockIdx.x indexes the row<br/>each block loads its own T, k, p, seed"]
+    K --> B0["row 0: T==0 &rarr; early return,<br/>argmax path taken later"]
+    K --> B1["row 1: divide, then top-p sweep"]
+    K --> B2["row 2: divide, then top-k pivot search"]
+    K --> B3["row 3: T==1 &rarr; early return"]
+    B0 --> O["sampled ids [4] int32"]
+    B1 --> O
+    B2 --> O
+    B3 --> O
+  </script>
+</div></div></section>
+<section class="sec" id="selection" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Sorting, partial selection, and why prefill and decode want different kernels</h2></div><div class="sec__body"><p>Top-p needs an ordering; top-k needs only a threshold. That asymmetry drives everything.</p>
+
+<p>A full <code>torch.sort</code> over the vocabulary dimension moves 4-byte keys plus 8-byte indices
+— 98.5&nbsp;MB at batch 64, per radix pass, read and written. Several passes and you have spent more
+than the entire rest of the pipeline. vLLM's PyTorch fallback does exactly this and the docstring is
+candid about it: <em>"If a top-p is used, this function will sort the logits tensor, which can be
+slow for large batches"</em> (<code>vllm/v1/sample/ops/topk_topp_sampler.py:L374-L378</code>).</p>
+
+<p>For top-k alone you can skip the sort:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/ops/topk_topp_sampler.py:L411-L430</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -&gt; torch.Tensor:
+    """
+    Apply top-k mask to the logits.
+
+    This implementation doesn't involve sorting the entire vocab.
+    Note however that it involves a GPU-&gt;CPU sync which can be detrimental for
+    async scheduling performance.
+
+    The logits tensor may be updated in-place.
+    """
+    no_top_k_mask = k == logits.shape[1]
+    # Set non-top-k rows to 1 so that we can gather.
+    k = k.masked_fill(no_top_k_mask, 1)
+    max_top_k = k.max()
+    # topk.values tensor has shape [batch_size, max_top_k].
+    # Convert top k to 0-based index in range [0, max_top_k).
+    k_index = k.sub_(1).unsqueeze(1)
+    top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
+    # Handle non-topk rows.
+    top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))</code></pre>
+</div>
+
+<p>This is heterogeneity handled by <em>taking the max</em>: run one <code>topk</code> at
+$k_{\max} = \max_i k_i$, then gather each row's own cutoff value out of the result. The whole batch
+pays for the greediest row. And <code>k.max()</code> is a device-to-host read, which is why this path
+is gated behind <code>allow_cpu_sync</code> and only used on CPU at this SHA.</p>
+
+<p>The path that actually runs on an H100 is neither. vLLM's default is a Triton kernel that does
+pivot-based truncation: estimate mean and standard deviation from one 8192-wide sample tile, use a
+lookup table to convert $k/V$ into a Gaussian $\sigma$ cutoff, gather the outliers above that pivot
+into a per-program scratch buffer, then ternary-search the pivot until exactly $k$ survive
+(<code>vllm/v1/sample/ops/topk_topp_triton.py:L127-L200</code>). Nothing is sorted; the row is swept
+in tiles. The launch config is one program per SM, capped by batch:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/ops/topk_topp_triton.py:L933-L947</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
+    # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
+    # approximation; use smaller tiles for accurate top-p results.
+    launch_kwargs = {}
+    if logits.device.type == "cpu":
+        block_size, block_size_trunc = 256, 128
+    elif logits.device.type == "xpu":
+        block_size, block_size_trunc = 4096, 2048
+    else:
+        block_size, block_size_trunc = 8192, 4096
+        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
+        # per-tile latency bounds kernel latency, and Triton's default of 4
+        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
+        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+        launch_kwargs["num_warps"] = 8</code></pre>
+</div>
+
+<p>The dispatcher picks it only when the batch is wide enough to fill the machine —
+<code>if HAS_TRITON and logits.shape[0] &gt;= 8: return apply_top_k_top_p_triton(...)</code>, otherwise
+the PyTorch sort (<code>vllm/v1/sample/ops/topk_topp_sampler.py:L355-L364</code>). Below 8 rows there
+are not enough programs to hide the serial sweep; above it the sort's bandwidth dominates. The third
+option, FlashInfer, avoids the sort with a rejection loop over a shrinking pivot and is used when
+available and no per-request generator is present.</p>
+
+<h3>The prefill/decode kernel split, concretely</h3>
+
+<p><code>csrc/libtorch_stable/sampler.cu</code> contains two separately-instantiated top-k-per-row
+kernels with different shapes of input. The prefill one takes explicit per-row
+<code>[rowStarts, rowEnds]</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/sampler.cu:L549-L569</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;int kNumThreadsPerBlock, bool useRadixSort&gt;
+static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
+    const float* logits, const int* rowStarts, const int* rowEnds,
+    int* outIndices, int stride0, int stride1, const int topK,
+    const int offsetIndex) {
+  // The number of bins in the histogram.
+  static constexpr int kNumBins = 2048;
+
+  // The row computed by this block.
+  int rowIdx = blockIdx.x + offsetIndex;
+
+  // The range of logits within the row.
+  int rowStart = rowStarts[rowIdx];
+  int rowEnd = rowEnds[rowIdx];</code></pre>
+</div>
+
+<p>The decode one instead derives the row's live length from a sequence-length tensor and the
+speculative fan-out <code>next_n</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/sampler.cu:L573-L596</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
+    const float* logits, const int* seqLens, int* outIndices, int stride0,
+    int stride1, const int topK, int next_n, int seqLensIs2D = 0,
+    float* outLogits = nullptr, const int numBlocksToMerge = 0,
+    const int* indices = nullptr) {
+  // The number of bins in the histogram.
+  static constexpr int kNumBins = 2048;
+
+  // The row computed by this block.
+  int rowIdx = blockIdx.x;
+
+  // The range of logits within the row.
+  int rowStart = 0;
+  int batch_idx = rowIdx / next_n;
+  int next_n_idx = rowIdx % next_n;</code></pre>
+</div>
+
+<p>The launch configs diverge more than the kernels do. Decode branches on the <em>row width</em>:
+insertion sort below 12,288 columns, radix sort between there and 200,000, and a split-and-merge
+two-kernel scheme above that (<code>csrc/libtorch_stable/sampler.cu:L717-L751</code>). Prefill
+branches on the <em>row count</em> instead, running the first 12,288 blocks with the insertion-sort
+instantiation and any excess rows with the radix one:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/sampler.cu:L846-L866</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>  constexpr int kSortingAlgorithmThreshold = 12288;
+  constexpr int kNumThreadsPerBlock = 512;
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+
+  int numInsertionBlocks =
+      std::min(static_cast&lt;int&gt;(numRows), kSortingAlgorithmThreshold);
+  vllm::topKPerRowPrefill&lt;kNumThreadsPerBlock, false&gt;
+      &lt;&lt;&lt;numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
+         stream&gt;&gt;&gt;(logits.const_data_ptr&lt;float&gt;(),
+                   rowStarts.const_data_ptr&lt;int&gt;(),
+                   rowEnds.const_data_ptr&lt;int&gt;(),
+                   indices.mutable_data_ptr&lt;int&gt;(), static_cast&lt;int&gt;(stride0),
+                   static_cast&lt;int&gt;(stride1), static_cast&lt;int&gt;(topK), 0);</code></pre>
+</div>
+
+<p>That is the shape argument in miniature. Prefill produces <em>many short rows</em> — one per token
+in the chunk, thousands of them, each covering only that token's causal window, so the grid is huge
+and per-row work is small. Decode produces <em>few very long rows</em> — one per sequence, spanning
+the whole context, so the grid is tiny and each block must be able to split its row across multiple
+blocks and merge. One kernel with runtime branches would carry both register footprints and get the
+worse occupancy of the two; two instantiations of a shared <code>topKPerRowJob</code> device function
+get each shape its own launch bounds and shared-memory budget.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Read carefully</span>
+  <p>These two kernels live in a file called <code>sampler.cu</code>, but at
+  <code>a556f3f</code> they are <em>not</em> the token sampler. They are bound as
+  <code>top_k_per_row_prefill</code> / <code>top_k_per_row_decode</code>
+  (<code>csrc/libtorch_stable/torch_bindings.cpp:L556-L565</code>), and every in-tree caller is an
+  <em>attention</em> caller: the Python wrappers in <code>vllm/_custom_ops.py:L3055-L3096</code>, the
+  DeepSeek sparse-attention indexer that calls them
+  (<code>vllm/model_executor/layers/sparse_attn_indexer.py:L509-L512, L657-L660</code>), its
+  ROCm/AITER variant (<code>vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:L969-L985</code>), and
+  the tests. The token sampler's top-k runs through Triton or
+  FlashInfer, never here. The prefill/decode split is still the right lesson about kernel shape — it
+  is just teaching it from the attention indexer's top-k, not the sampler's.</p>
+</div></div></section>
+<section class="sec" id="production" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">How production systems do it: seeds, greedy, and backends</h2></div><div class="sec__body"><h3>Greedy is a separate path, not $T \to 0$</h3>
+
+<p>Both engines refuse to divide by zero, but they encode greedy differently. vLLM makes it a
+<em>sampling type</em>: <code>SamplingParams.sampling_type</code> returns <code>GREEDY</code> when
+<code>temperature &lt; 1e-5</code> (<code>vllm/sampling_params.py:L745-L750</code>), and
+<code>__post_init__</code> then wipes the other knobs so they cannot interact:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/sampling_params.py:L529-L534</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if self.temperature &lt; _SAMPLING_EPS:
+            # Zero temperature means greedy sampling.
+            self.top_p = 1.0
+            self.top_k = 0
+            self.min_p = 0.0
+            self._verify_greedy_sampling()</code></pre>
+</div>
+
+<p>The temperature tensor still gets a 0.0 in that row, and <code>apply_temperature</code> guards it:
+<code>temp = torch.where(temp &lt; _SAMPLING_EPS, 1.0, temp)</code>
+(<code>vllm/v1/sample/sampler.py:L235-L238</code>). Then <code>sample()</code> computes both answers
+and selects per row with <code>torch.where(temperature &lt; _SAMPLING_EPS, greedy_sampled,
+random_sampled)</code> (<code>vllm/v1/sample/sampler.py:L298-L303</code>) — unless the batch is
+homogeneous, in which case the <code>all_greedy</code> / <code>all_random</code> flags let it skip
+one branch entirely.</p>
+
+<p>SGLang normalises greedy away at the parameter level instead:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/sampling/sampling_params.py:L143-L149</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Process some special cases
+        if 0 &lt;= self.temperature &lt; _SAMPLING_EPS:
+            # top_k = 1 means greedy sampling
+            self.temperature = 1.0
+            self.top_k = 1
+        if self.top_k == -1:
+            self.top_k = TOP_K_ALL  # whole vocabulary</code></pre>
+</div>
+
+<p><code>TOP_K_ALL</code> is <code>1 &lt;&lt; 30</code> — the same neutral-value trick, with a sentinel
+larger than any vocabulary. Greedy becomes $k=1$, and <code>is_all_greedy</code> is
+<code>all(top_k &lt;= 1)</code>, which takes a plain <code>torch.argmax</code>. The encodings are
+semantically equivalent but not observationally identical: in SGLang a request that explicitly sets
+<code>top_k=1</code> with <code>temperature=0.7</code> counts as greedy for that predicate, so a
+batch in which every request does this takes the greedy branch, where the returned logprobs come
+from <code>log_softmax(logits)</code> with no temperature division
+(<code>python/sglang/srt/layers/sampler.py:L143-L145</code>). Note the gate is a whole-batch flag,
+not a per-row one — the same request in a batch containing one random row takes the sampling branch
+instead, and gets its temperature applied.</p>
+
+<h3>A shared global RNG is the wrong primitive</h3>
+
+<p>If two seeded requests share a batch, drawing from one global generator makes each request's
+output depend on <em>who else was in the batch</em> — which under continuous batching is
+nondeterministic by construction. Reproducibility requires the noise for row $i$ to be a pure
+function of $(\text{seed}_i, \text{position}_i, \text{token id})$ and nothing else.</p>
+
+<p>vLLM's V1 path holds a <code>dict[int, torch.Generator]</code> keyed by batch index
+(<code>vllm/v1/sample/metadata.py:L23</code>), created once per request from its seed
+(<code>vllm/v1/worker/gpu_model_runner.py:L1331-L1338</code>), and fills the exponential noise
+row-by-row in a Python loop — the <code>TODO(woosuk)</code> in the quote above. It is correct and it
+is slow, and it is also why FlashInfer gets disabled the moment any seeded request appears:
+<em>"FlashInfer 0.2.3+ does not support per-request generators. Falling back to PyTorch-native
+implementation."</em> (<code>vllm/v1/sample/ops/topk_topp_sampler.py:L164-L170</code>).</p>
+
+<p>Both projects have converged on the same fix: derive the noise from a hash instead of a stream.
+SGLang's <code>multinomial_with_seed</code> hashes <code>(seed, position, column index)</code> with
+murmur3 and turns the result into Gumbel noise in float64:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/sampler.py:L709-L729</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    n, m = logprobs.shape
+    seed = seed.to(torch.uint64)
+    col_indices = torch.arange(m, device=logprobs.device)
+    hashed = murmur_hash32(seed, positions, col_indices)
+
+    # NOTE (sehoon): it is critical to keep gumbel noise calculation in float64 to avoid numerical instability.
+    # keeping logprobs in float64 is less critical, but we found it's still safer to keep it in float64.
+    x = hashed.to(torch.float64) / torch.iinfo(torch.uint32).max
+
+    # x is a uniform sample in [0, 1]. get gumbel noise from it.
+    # which is equivalent to -log(-log(x))
+    # keep everything in in-place operations to avoid unnecessary memory allocations.
+    # clamp both ends: x == 1 gives gumbel +inf (NaN at -inf logprobs); the cap is
+    # the hash spacing so that bucket matches its neighbor instead of dominating
+    x.log_().clamp_(min=torch.finfo(x.dtype).min, max=-(2.0**-32)).neg_()
+    x.log_().neg_()  # -log(-log(x)) == gumbel noise
+
+    # add gumbel noise to logprobs
+    x.add_(logprobs.to(torch.float64))
+
+    return torch.argmax(x, dim=1, keepdim=True)</code></pre>
+</div>
+
+<p>vLLM's V2 runner does the same thing with Triton's counter-based RNG, and gives
+<em>every</em> request a seed — random if the user did not supply one — so there is only one code
+path (<code>vllm/v1/worker/gpu/sample/states.py:L50-L54</code>). The comment on
+<code>gumbel_noised_argmax</code> names the second payoff: <em>"`keys` indexes the noise, so the same
+token draws the same noise wherever it appears; `pos` and `seed` place the draw in the request's
+stream, which is what lets a draft and its verification agree"</em>
+(<code>vllm/v1/worker/gpu/sample/gumbel.py:L97-L99</code>) — that is the property
+<a href="06-02-speculative-decoding.html">§6.2</a>'s rejection sampler needs.</p>
+
+<p>Seeding the noise does not make the whole step reproducible: the logits themselves shift with
+batch composition because reductions reassociate. That is the subject of
+<a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>; the sampler is one of the two
+sources it has to pin down. SGLang's <code>--enable-deterministic-inference</code> forces
+<code>sampling_backend</code> to <code>pytorch</code> for exactly this reason
+(<code>python/sglang/srt/arg_groups/overrides.py:L2031-L2038</code>).</p></div></section>
+<section class="sec" id="worked-trace" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: one batch through vLLM's sampler</h2></div><div class="sec__body"><p>Batch of four, Llama-3-8B, one decode step. Logits arrive as <code>[4, 128256]</code> bf16. This is
+the <em>V1</em> runner's <code>vllm/v1/sample/sampler.py</code>, traced because it is the one whose
+stages map onto the operator algebra above one-for-one; on a default Llama-3-8B server the V2 runner
+runs instead (§6.1.3) and fuses several of these steps into the Triton kernels quoted in §6.1.4.</p>
+
+<ol>
+<li><code>GPUModelRunner</code> calls <code>Sampler.forward(logits, sampling_metadata)</code>.</li>
+<li><code>forward</code> computes <code>raw_logprobs = self.compute_logprobs(logits)</code> first, if
+any row asked for logprobs — deliberately <em>before</em> penalties and temperature, so returned
+logprobs describe the model, not the sampler
+(<code>vllm/v1/sample/sampler.py:L86-L94</code>).</li>
+<li><code>logits = logits.to(torch.float32)</code> — 16.4&nbsp;MB in, 32.8&nbsp;MB out at batch 64;
+2.1&nbsp;MB at batch 4.</li>
+<li><code>apply_logits_processors</code>: allowed-token-ids mask (<code>masked_fill_</code> with a
+<code>[max_num_reqs, vocab]</code> bool tensor), <code>apply_bad_words</code>, then every
+non-argmax-invariant logits processor, then <code>apply_penalties</code>. Each is skipped if its
+gate says no row needs it.</li>
+<li><code>sample()</code>: <code>all_greedy</code> false and <code>all_random</code> false here, so it
+computes <code>greedy_sampled = logits.argmax(dim=-1)</code> for the whole batch — cheap, one read
+pass — and keeps it.</li>
+<li><code>apply_temperature</code> divides in place, with the <code>torch.where</code> guard on the
+greedy rows.</li>
+<li>Argmax-invariant processors run: by default just <code>MinPLogitsProcessor</code>, which returns
+immediately if <code>self.min_p_count == 0</code>
+(<code>vllm/v1/sample/logits_processor/builtin.py:L102-L104</code>).</li>
+<li><code>TopKTopPSampler.__call__</code> dispatches. On CUDA with FlashInfer available and no
+generators, <code>forward_cuda</code> → <code>flashinfer_sample</code>. Otherwise
+<code>forward_native</code> → <code>apply_top_k_top_p</code> (Triton at batch ≥ 8, PyTorch sort
+below) → <code>softmax</code> → <code>random_sample</code>.</li>
+<li><code>torch.where(temperature &lt; 1e-5, greedy_sampled, random_sampled)</code> merges the two
+answers, writing into <code>greedy_sampled</code> to reuse the buffer.</li>
+<li>If logprobs were requested, <code>gather_logprobs</code> runs <code>torch.topk(logprobs,
+num_logprobs)</code>, gathers the sampled token's own logprob, and computes its rank with
+<code>batched_count_greater_than</code> — a full <code>(x &gt;= values).sum(-1)</code> over the vocab
+(<code>vllm/v1/sample/ops/logprobs.py:L25-L27</code>).</li>
+<li>Return <code>SamplerOutput(sampled_token_ids=sampled.unsqueeze(-1), logprobs_tensors=...)</code>,
+all still on device.</li>
+</ol>
+
+<p>SGLang's path is shorter because more of it is fused into <code>SamplingBatchInfo</code>:
+<code>ModelRunner.sample</code> → <code>ModelRunner._preprocess_logits</code> (grammar mask, logit
+bias, accumulated penalties; <code>python/sglang/srt/model_executor/model_runner.py:L1745-L1760</code>)
+→ <code>Sampler.forward</code>, which runs its own <code>_preprocess_logits</code> (custom logit
+processors, then the env-gated NaN sanitisation above) and then either
+<code>torch.argmax</code>, or <code>logits.div_(temperatures)</code> then
+<code>logits[:] = torch.softmax(logits, dim=-1)</code> in place then
+<code>_sample_from_probs</code> (<code>python/sglang/srt/layers/sampler.py:L207-L215</code>). The
+in-place softmax into the logits buffer is a nice touch: it saves a
+$B \cdot V \cdot 4$-byte allocation, 131&nbsp;MB at batch 256.</p></div></section>
+<section class="sec" id="beam-and-logprobs" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Beam search, and what logprobs cost</h2></div><div class="sec__body"><h3>Beam search: still present in vLLM, absent from SGLang</h3>
+
+<p>Beam search maintains $w$ candidate sequences per request and expands all of them each step. That
+requires a per-request tree of hypotheses whose KV state forks — and forking KV fights everything
+Part 2 built. Under paged allocation
+(<a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>) a fork means block-level
+copy-on-write; under continuous batching it means $w$ rows appearing and disappearing together; under
+prefix caching it means the tree's shared prefix is a cache entry with $w$ live readers. It also
+multiplies the decode batch by $w$ for a single user's throughput. Meanwhile instruction tuning
+largely removed the payoff: for open-ended generation from an aligned model, the highest-likelihood
+continuation is usually not the best one.</p>
+
+<p>At <code>a556f3f</code>, vLLM has not removed beam search — it has <em>moved it out of the
+engine</em>. There is no beam logic in <code>vllm/v1/</code> at all. Instead
+<code>vllm/entrypoints/generate/beam_search/</code> implements it as a client of the ordinary
+generate API, one token at a time:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/generate/beam_search/offline.py:L115-L125</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # generate 2 * beam_width candidates at each step
+        # following the huggingface transformers implementation
+        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        base_sampling_params = SamplingParams(
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            detokenize=False,
+            skip_clone=True,  # Internal beam search, safe to skip clone
+        )</code></pre>
+</div>
+
+<p>Every step is a fresh one-token request carrying the full candidate prefix, scored by top-$2w$
+logprobs, ranked on the host, and re-submitted. The engine never learns what a beam is; prefix
+caching does the deduplication that KV forking would have done. <code>BeamSearchParams</code> is a
+separate struct from <code>SamplingParams</code>
+(<code>vllm/sampling_params.py:L1246-L1261</code>) precisely because it never reaches the sampler.</p>
+
+<p>SGLang does not implement it at all. A case-insensitive grep for <code>beam</code> across
+<code>python/sglang/</code> at <code>7d89325</code> returns exactly one hit, and it is a comment in a
+multimodal generation pipeline telling the caller not to set <code>num_beams</code>.</p>
+
+<h3>Logprobs are the most expensive optional feature in the sampler</h3>
+
+<p>Returning top-$n$ logprobs costs a <code>log_softmax</code> over the full vocab, a
+<code>topk</code> over the full vocab, and a rank computation that is another full-vocab reduction —
+three extra sweeps of the 131&nbsp;MB tensor at batch 256, roughly 0.16&nbsp;ms derived, on top of a
+4.48&nbsp;ms step. Worse, it does not fit the "gate on the set being empty" pattern, because both
+engines take the <em>maximum</em> $n$ across the batch and run one <code>topk</code> at that width:
+<code>max_k = max(top_logprobs_nums); values, indices = logprobs.topk(max_k, dim=-1)</code>
+(<code>python/sglang/srt/layers/logprob_processor.py:L93-L94</code>), and
+<code>topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)</code> in vLLM
+(<code>vllm/v1/sample/sampler.py:L335</code>). One request asking for 20 logprobs makes the whole
+batch run a top-20. vLLM caps it at <code>max_logprobs: int = Field(default=20, ge=-1)</code>
+(<code>vllm/config/model.py:L250</code>) for that reason. Both engines also offer an explicit
+token-id list as a cheaper alternative — a <code>gather</code> instead of a <code>topk</code>.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">NaN</span><h4>Out-of-vocab token ids</h4>
+  <p>An fp16 activation overflow produces NaN logits, and NaN in a top-k kernel is undefined
+  behaviour that can return an index equal to <code>vocab_size</code>. SGLang <em>can</em> sanitise
+  with <code>torch.nan_to_num_(logits, nan=-1e30, posinf=1e30, neginf=-1e30)</code>, and explains the
+  odd constant: dtype min/max would overflow to $\pm\infty$ once divided by temperature
+  (<code>python/sglang/srt/utils/async_probe.py:L66-L76</code>). But the call returns before the
+  <code>nan_to_num_</code> unless <code>SGLANG_SANITIZE_NAN_LOGITS</code> is set, and that env var
+  is <code>EnvBool(False)</code> (<code>python/sglang/srt/environ.py:L1091</code>). On a default
+  server the NaN reaches the sampler.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">Silent fallback</span><h4>Seeds disable the fast sampler</h4>
+  <p>Adding <code>seed</code> to one request in vLLM moves the <em>entire batch</em> off FlashInfer
+  onto the PyTorch path with its per-row Python loop. SGLang is blunter and asserts:
+  <code>"Sampling seed is not supported for flashinfer backend"</code>
+  (<code>python/sglang/srt/layers/sampler.py:L270-L273</code>). If throughput drops when you enable
+  reproducibility, this is why.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">Wrong answer</span><h4>min-p plus a seed, in SGLang</h4>
+  <p><code>"With sampling seed, multinomial_with_seed will provide wrong results"</code>
+  (<code>python/sglang/srt/layers/sampler.py:L589-L594</code>) — an assert, because min-p zeroes
+  entries without renormalising and the seeded Gumbel path takes <code>log</code> of the result. The
+  TODO above it says the fix is to renormalise.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">Rejected</span><h4>min-p with speculative decoding</h4>
+  <p><code>"The min_p and logit_bias sampling parameters are not yet supported with speculative
+  decoding."</code> (<code>vllm/sampling_params.py:L992-L996</code>). The rejection sampler needs a
+  target distribution it can evaluate at the draft token; min-p's peak-relative threshold makes that
+  awkward. Covered in <a href="06-02-speculative-decoding.html">§6.2</a>.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">Memory</span><h4>Penalties allocate per-vocab state</h4>
+  <p>SGLang's penalizers each hold a dense <code>[batch, vocab]</code> fp32 accumulator —
+  131.3&nbsp;MB at batch 256, per penalizer
+  (<code>python/sglang/srt/sampling/penaltylib/frequency_penalty.py:L18-L22</code>). They are only
+  allocated when <code>_is_required()</code> is true, which is why enabling
+  <code>frequency_penalty</code> on a large batch can move your KV budget.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">-inf</span><h4>Grammar masks break pivot statistics</h4>
+  <p>The Triton top-k kernel estimates its pivot from mean and variance of a sample tile, and a
+  grammar bitmask sets most of the row to $-\infty$. The kernel excludes them explicitly:
+  <em>"Exclude -inf values (e.g. from grammar bitmasks) from statistics to avoid NaN in pivot
+  computation"</em> (<code>vllm/v1/sample/ops/topk_topp_triton.py:L134-L136</code>). See
+  <a href="06-05-structured-decoding.html">§6.5</a>.</p></div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Price the sampler by toggling its backend, holding everything else fixed.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vLLM: force the PyTorch sort path, then the default</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-num-seqs 256
+# then, in another shell
+vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --dataset-name random --random-input-len 512 --random-output-len 256 \
+  --num-prompts 500 --max-concurrency 256</code></pre>
+</div>
+
+<p>Run it three ways and compare TPOT: (1) all requests <code>temperature=0</code>, which takes the
+<code>all_greedy</code> shortcut and skips temperature, top-k, top-p and the draw entirely;
+(2) <code>temperature=1.0, top_p=0.95</code>, which forces the top-p path; (3) the same plus
+<code>seed</code> on every request, which forces the per-row generator loop. The gap between (1) and
+(2) is the sampler's real cost; the gap between (2) and (3) is what reproducibility costs today.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">SGLang: compare sampling backends</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --sampling-backend flashinfer
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --sampling-backend pytorch
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --enable-deterministic-inference</code></pre>
+</div>
+
+<p>The third command forces <code>pytorch</code> and logs <em>"Sampling backend is set to pytorch for
+deterministic inference."</em> — so it is the same kernel as the second, plus the hashed-seed path.
+The delta between them isolates the hash-per-column cost. Use the profiling recipe from
+<a href="../LABS.html">Lab 10</a> to see the sampler's kernels in a trace; at batch 256 they should be
+a low single-digit percentage of the step, and if they are not, one of the pitfalls above is firing.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><p><strong>Read the code.</strong> In <code>vllm/v1/worker/gpu_input_batch.py</code>, a request
+with <code>top_k=0</code> is stored as <code>top_k_cpu[i] = vocab_size</code>. Find the two other
+places in the sampling stack that use a "neutral value" rather than a disabled flag, and say what
+would break if each used a sentinel like <code>-1</code> instead.</p></li>
+
+<li><p><strong>Derive.</strong> At batch 128 and $V = 128{,}256$, compute the fp32 logits size, the
+cost of one read-modify-write sweep at 3.35&nbsp;TB/s, and the number of such sweeps that would make
+sampling 10% of a 4.48&nbsp;ms decode step.</p></li>
+
+<li><p><strong>Predict, then verify.</strong> A batch has 255 rows with <code>top_k=0</code> and one
+row with <code>top_k=50</code>. Predict which vLLM code path runs and how much of the logits tensor
+it touches. Then read <code>apply_top_k_top_p</code> and
+<code>InputBatch._make_sampling_metadata</code> and check whether the 255 rows pay anything.</p></li>
+
+<li><p><strong>Reason about semantics.</strong> A request sets <code>temperature=1.0</code>,
+<code>top_p=0.9</code>, <code>min_p=0.05</code>. Using the two code paths quoted in §6.1.3, argue
+whether vLLM and SGLang keep the same set of tokens, and which keeps more.</p></li>
+
+<li><p><strong>Design.</strong> vLLM's seeded path fills noise with a Python loop over generators.
+Sketch a kernel that removes the loop, and state the one property it must have for
+<a href="06-02-speculative-decoding.html">§6.2</a>'s draft-verify agreement to hold.</p></li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><strong>1.</strong> <code>top_p = 1.0</code> and <code>repetition_penalty = 1.0</code> (and
+  SGLang's <code>TOP_K_ALL = 1 &lt;&lt; 30</code>). A <code>-1</code> sentinel would require every
+  kernel to branch before using the value, which costs a comparison per row <em>and</em> prevents the
+  value from being used directly in the arithmetic — <code>logits.div_(temp)</code> and
+  <code>positions &lt; top_ks</code> both rely on the stored number being meaningful as-is.</p>
+  <p><strong>2.</strong> $128 \times 128256 \times 4 = 65.7$&nbsp;MB. One read+write sweep is
+  $2 \times 65.7\,\text{MB} / 3.35\,\text{TB/s} = 39.2\ \mu\text{s}$. Ten percent of 4.48&nbsp;ms is
+  448&nbsp;µs, which is 11.4 sweeps. (Derived.)</p>
+  <p><strong>3.</strong> <code>top_k_reqs</code> is non-empty, so <code>no_top_k</code> is false, so
+  the <code>top_k</code> tensor is copied and passed. With batch 256 ≥ 8 the Triton kernel runs, one
+  program per SM, and every row is swept — the 255 rows with $k = V$ take the
+  <code>if k &lt; VOCAB_SIZE</code> guard and skip the pivot search, but the kernel was still launched
+  over them. In the Triton kernel they pay a launch, not a sweep; in the PyTorch fallback they would
+  pay a full sort.</p>
+  <p><strong>4.</strong> Not necessarily the same set. vLLM applies min-p to the logits first, so its
+  top-p cumsum runs over a softmax that has already renormalised away the min-p-rejected mass and
+  reaches 0.9 at a lower rank — vLLM keeps fewer or equal tokens. SGLang computes the top-p prefix
+  against the full distribution and only then applies the min-p threshold. They coincide only when
+  min-p rejects nothing inside the nucleus.</p>
+  <p><strong>5.</strong> Index the noise by <em>(seed, position, token id)</em> — a counter-based hash
+  rather than a stateful stream — so the same request/position/token draws the same value regardless
+  of batch composition or evaluation order. That is what makes a draft token's noise reproducible at
+  verification time. Both <code>multinomial_with_seed</code> and
+  <code>gumbel_noised_argmax</code> have exactly this shape.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>Sampling is bandwidth, not arithmetic. Every operator has intensity well below 1&nbsp;FLOP/byte
+against a ridge of 295, so the only lever is touching the $B \times V$ tensor fewer times. At batch
+256 one read-modify-write sweep is 78&nbsp;µs — 1.75% of the decode step's 4.48&nbsp;ms floor.</li>
+<li>Heterogeneity is solved by <em>neutral values plus per-row early return</em>, never by branching
+on request identity. $k = V$, $p = 1$, $\rho = 1$, $\alpha = 0$ are no-ops the kernel executes
+unconditionally; the newer vLLM kernels load the row's parameter first and return before touching
+the 513&nbsp;KB logits row if it is neutral.</li>
+<li>Operator order is part of the contract and the engines do not fully agree on it. vLLM applies
+min-p before top-k/top-p; SGLang applies it after. For a request that sets both min-p and top-p, the
+kept sets can differ — same parameters, different outputs, by construction.</li>
+<li>Top-p needs an order, top-k needs only a threshold, and a full sort of 128k columns per row costs
+more than every other stage combined. Production kernels use pivot search or rejection loops and
+never sort; the PyTorch sort survives only as the small-batch and CPU fallback.</li>
+<li>Reproducibility requires noise that is a pure function of (seed, position, token) — a shared
+stream makes a request's output depend on its batchmates. Both projects converged on hashed Gumbel
+noise, and the same property is what lets a speculative draft and its verification agree.</li>
+<li>Beam search left the engine rather than being deleted: vLLM reimplements it above the API as
+repeated one-token requests scored by top-$2w$ logprobs, and SGLang has no beam search at all at
+<code>7d89325</code>.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><strong>Holtzman et al., "The Curious Case of Neural Text Degeneration" (2019)</strong> —
+<a href="https://arxiv.org/abs/1904.09751">arXiv:1904.09751</a>. The nucleus-sampling paper; the
+motivation for top-p over top-k is the whole first half.</li>
+<li><strong>Park et al., "Qrita: High-performance Top-k and Top-p Algorithm for GPUs using
+Pivot-based Truncation and Selection"</strong> —
+<a href="https://arxiv.org/abs/2602.01518">arXiv:2602.01518</a>, cited by name in the header of
+<code>vllm/v1/sample/ops/topk_topp_triton.py</code> as the algorithm that kernel implements.</li>
+<li><strong>vLLM PR #26987</strong> —
+<a href="https://github.com/vllm-project/vllm/pull/26987">github.com/vllm-project/vllm/pull/26987</a>,
+referenced in <code>topk_topp_sampler.py:L106-L107</code> for the PowerPC argmax-under-torch.compile
+fallback. A short, concrete example of how platform-specific sampler bugs get fixed.</li>
+<li><strong>FlashInfer sampling kernels</strong> —
+<a href="https://github.com/flashinfer-ai/flashinfer">github.com/flashinfer-ai/flashinfer</a>. The
+rejection-based top-k/top-p sampler both engines call into; read
+<code>top_k_top_p_sampling_from_probs</code> for the loop that avoids the sort.</li>
+<li><strong>OpenAI parameter details</strong> —
+<a href="https://platform.openai.com/docs/api-reference/parameter-details">platform.openai.com</a>,
+the definition vLLM's penalty code links to directly and matches.</li>
+<li><strong>Thinking Machines, "Defeating Nondeterminism in LLM Inference" (2025)</strong> —
+<a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">thinkingmachines.ai</a>,
+the batch-invariance argument that <a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>
+develops and that motivates SGLang's <code>--enable-deterministic-inference</code>.</li>
+</ul></div></section>
+<div class="pager"><a href="../05-parallelism/05-05-worker-orchestration.html"><div class="pager__k">← Previous</div><div class="pager__t">Worker orchestration and multi-node serving</div></a><a class="pager__next" href="06-02-speculative-decoding.html"><div class="pager__k">Next →</div><div class="pager__t">Speculative decoding and the correctness proof</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: the operator algebra</a>
+<a href="#heterogeneous-batch">The hard part: a heterogeneous batch</a>
+<a href="#selection">Sorting, partial selection, and why prefill and decode want different kernels</a>
+<a href="#production">How production systems do it: seeds, greedy, and backends</a>
+<a href="#worked-trace">Worked trace: one batch through vLLM's sampler</a>
+<a href="#beam-and-logprobs">Beam search, and what logprobs cost</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

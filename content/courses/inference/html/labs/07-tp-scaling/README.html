@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tensor-parallel scaling — The Inference Engineering Book</title>
+<meta name="description" content="TP=1,2,4,8 on one node: measure the speedup, then attribute the gap to collectives with a profile.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Lab 07 · for chapter 05-01</div>
+<h1>Tensor-parallel scaling</h1>
+<p class="hd__sub">TP=1,2,4,8 on one node: measure the speedup, then attribute the gap to collectives with a profile.</p>
+
+</header>
+<div class="prose"><p class="lead">Doubling the GPUs never doubles the speed, and the interesting question is not
+how much you lost but <em>where it went</em>. This lab measures TP&nbsp;=&nbsp;1, 2, 4, 8 on one node,
+then makes you account for the shortfall with a profile rather than a shrug &mdash; every microsecond
+of it belongs to a named collective, and both engines ship the kernel-name map that finds it.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Hardware</span>
+  <p>One node with <b>8&nbsp;&times;&nbsp;80&nbsp;GB</b> and a full NVLink/NVSwitch fabric &mdash; an
+  HGX H100 or A100 box. TP=8 across PCIe measures your PCIe topology, not tensor parallelism, and the
+  answer will not resemble anything in this book. The model must fit at TP=1, so use an 8B: Llama-3-8B
+  in bf16 is 16.1&nbsp;GB of weights and runs at every TP from 1 to 8. On 4 GPUs, run TP&nbsp;=&nbsp;1,
+  2, 4 and read the TP=8 row as the prediction it is. With no GPU at all, run
+  <code>--predict-only</code>: Part&nbsp;A is arithmetic and needs nothing.</p>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Not executed here</span>
+  <p><code>run.py</code> was written against the flags, config fields and result-file formats cited
+  below, and its argument handling and arithmetic were exercised, but it has <b>not</b> been run
+  against a live engine &mdash; no GPU was available while writing. Every number on this page is
+  <em>derived</em> (arithmetic, labelled as such) or <em>cited</em> (read out of the pinned source).
+  None is measured. Treat the prediction tables as predictions and report anything that disagrees.</p>
+</div></div></div>
+<section class="sec" id="what" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">What you measure</h2></div><div class="sec__body"><p>Four numbers per TP size, and one residual:</p>
+
+<ol>
+  <li><b>Decode-step latency</b> at fixed batch and context, so the sweep is a clean function of $p$.</li>
+  <li><b>Speedup</b> $S(p) = t(1)/t(p)$, and <b>scaling efficiency</b> $S(p)/p$.</li>
+  <li><b>Output-token throughput</b> at a batch large enough to matter, which scales differently from
+  latency and will disagree with it.</li>
+  <li><b>All-reduce time per step</b>, taken from a profile, in microseconds and as a share of the step.</li>
+</ol>
+
+<p>The residual is the exercise: <em>predicted step time minus measured step time</em>, with the gap
+attributed to a specific collective at a specific message size. A sweep that lands at, say, 62% efficiency
+at TP=8 and stops there has measured nothing you could act on.</p>
+
+<h3>The model you are predicting against</h3>
+
+<p><a href="../../05-parallelism/05-01-tensor-parallelism.html">&sect;5.1</a> gives two terms and they
+behave completely differently. Let $p$ be the TP size, $L$ the layer count, $d$ the model width, $n$
+the tokens in the step, $b$ bytes per element, $\beta$ HBM bandwidth and $B_{\text{net}}$ the
+interconnect bandwidth. A ring all-reduce of $S$ bytes moves $2\frac{p-1}{p}S$ per rank, so the
+<b>bandwidth term</b> is</p>
+
+<div class="math-display">$$t_{\text{bw}}(p, n) = \frac{2L \cdot 2\frac{p-1}{p} \, n\,d\,b}{B_{\text{net}}}$$</div>
+
+<p>and the <b>latency term</b> is $2L\lambda$, where $\lambda$ is the fixed cost of one small
+collective &mdash; a constant that tensor parallelism does not amortise. For Llama-3-8B
+($L=32$, $d=4096$, bf16) that is <b>64 collectives per forward pass</b> and an 8&nbsp;KiB residual
+slice per token. The step's floor is the weight stream:
+<a href="../../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> puts
+Llama-3-8B at 15.01&nbsp;GB streamed per decode step &mdash; 7.505&nbsp;B parameters, because the input
+embedding table is gathered rather than streamed &mdash; which at the H100&nbsp;SXM's 3.35&nbsp;TB/s is
+4.481&nbsp;ms at TP=1, and $1/p$ of that under tensor parallelism because weights, embedding and LM head
+all shard.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Two conventions</span>
+  <p>&sect;5.1's exercise 3 uses the cruder $2P/p\beta$ form and lands about 7% higher, because it
+  counts the input embedding table as streamed. Both are defensible; pick one and say which. This lab
+  uses the &sect;0.4 figure throughout, and <code>run.py</code> exposes it as
+  <code>--streamed-gb</code> so you can switch conventions and watch the residual move.</p>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Bandwidth term for Llama-3-8B on H100&nbsp;SXM over 900&nbsp;GB/s NVLink &mdash; derived, arithmetic from published shapes and the vendor bandwidth figure. Nothing measured.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>TP</th><th>Ring factor $2\frac{p-1}{p}$</th><th>Bytes / rank / token</th>
+      <th>Time / token</th><th>% of floor at batch 1</th><th>% of floor at batch 128</th></tr></thead>
+    <tbody>
+      <tr><td class="num">2</td><td class="num">1.00</td><td class="num">512 KiB</td>
+        <td class="num">0.583 &micro;s</td><td class="num">0.026%</td><td class="num">3.3%</td></tr>
+      <tr><td class="num">4</td><td class="num">1.50</td><td class="num">768 KiB</td>
+        <td class="num">0.874 &micro;s</td><td class="num">0.078%</td><td class="num">10.0%</td></tr>
+      <tr><td class="num">8</td><td class="num">1.75</td><td class="num">896 KiB</td>
+        <td class="num">1.019 &micro;s</td><td class="num">0.182%</td><td class="num">23.3%</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Read that table before you run anything. At batch 1 the bandwidth term is two parts in ten thousand
+&mdash; it cannot possibly explain a 40% efficiency loss. So whatever you measure at batch 1 is
+<b>latency</b>, and the whole lab reduces to estimating one constant.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Predicted batch-1 step time under $t(p) = 4481/p + 64\lambda$ &micro;s &mdash; derived. $\lambda$ is a swept parameter, not a measurement; measuring it is the point of Part&nbsp;C.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>TP</th><th colspan="2">$\lambda = 2\,\mu$s</th><th colspan="2">$\lambda = 5\,\mu$s</th>
+      <th colspan="2">$\lambda = 10\,\mu$s</th></tr>
+      <tr><th></th><th>step</th><th>eff.</th><th>step</th><th>eff.</th><th>step</th><th>eff.</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="num">4481 &micro;s</td><td class="num">100%</td>
+        <td class="num">4481 &micro;s</td><td class="num">100%</td>
+        <td class="num">4481 &micro;s</td><td class="num">100%</td></tr>
+      <tr><td class="num">2</td><td class="num">2368 &micro;s</td><td class="num">95%</td>
+        <td class="num">2560 &micro;s</td><td class="num">88%</td>
+        <td class="num">2880 &micro;s</td><td class="num">78%</td></tr>
+      <tr><td class="num">4</td><td class="num">1248 &micro;s</td><td class="num">90%</td>
+        <td class="num">1440 &micro;s</td><td class="num">78%</td>
+        <td class="num">1760 &micro;s</td><td class="num">64%</td></tr>
+      <tr><td class="num">8</td><td class="num">688 &micro;s</td><td class="num">81%</td>
+        <td class="num">880 &micro;s</td><td class="num">64%</td>
+        <td class="num">1200 &micro;s</td><td class="num">47%</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Three curves, one free parameter. Fit $\lambda$ to your measured TP=8 point, then check the fit
+against TP=2 and TP=4 &mdash; if one $\lambda$ explains all three, the model is right and you are done.
+If it does not, something in the next section is happening to you.</p></div></section>
+<section class="sec" id="run" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Running it</h2></div><div class="sec__body"><p>Part A needs no GPU:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; labs/07-tp-scaling</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>$ python3 run.py --predict-only --model-preset llama-3-8b --tp 1 2 4 8 --lambda-us 2 5 10
+$ python3 run.py --help          # every knob, including --streamed-gb and --nvlink-gb-s</code></pre>
+</div>
+
+<p>Part B drives the engine once per TP size. <code>run.py</code> shells out to each engine's own
+single-batch harness rather than reimplementing a timing loop, because the harnesses already handle
+warmup and CUDA-graph capture correctly. vLLM's takes an explicit warmup count and writes a JSON of
+per-iteration latencies:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/latency.py:L46-L53</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        &quot;--num-iters-warmup&quot;,
+        type=int,
+        default=10,
+        help=&quot;Number of iterations to run for warmup.&quot;,
+    )
+    parser.add_argument(
+        &quot;--num-iters&quot;, type=int, default=30, help=&quot;Number of iterations to run.&quot;
+    )</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/latency.py:L170-L177</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if args.output_json:
+        results = {
+            &quot;avg_latency&quot;: np.mean(latencies),
+            &quot;latencies&quot;: latencies.tolist(),
+            &quot;percentiles&quot;: dict(zip(percentages, percentiles.tolist())),
+        }
+        with open(args.output_json, &quot;w&quot;) as f:
+            json.dump(results, f, indent=4)</code></pre>
+</div>
+
+<p>SGLang's single-batch harness is the closer instrument for this lab, because it separates the
+prefill from the decode steps and reports the <em>median</em> decode latency &mdash; which is the
+quantity the model above predicts, with the prefill and the first token excluded:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/one_batch.py:L857-L864</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if output_len &gt; 1:
+        med_decode_latency = np.median(decode_latencies)
+        med_decode_throughput = batch_size / med_decode_latency
+        rank_print(
+            f&quot;Decode.  median latency: {med_decode_latency:6.5f} s, median throughput: {med_decode_throughput:9.2f} token/s&quot;
+        )
+        measurement_results[&quot;median_decode_latency&quot;] = med_decode_latency
+        measurement_results[&quot;median_decode_throughput&quot;] = med_decode_throughput</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; one TP point, each engine</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: --tensor-parallel-size is the knob (vllm/config/parallel.py); latency in the JSON
+vllm bench latency --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --tensor-parallel-size 8 --batch-size 1 --input-len 128 --output-len 128 \
+    --num-iters-warmup 10 --num-iters 30 --output-json tp8.json
+
+# SGLang: --tp-size is the same knob; median_decode_latency lands in the jsonl
+python3 -m sglang.benchmark.one_batch --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+    --tp-size 8 --batch-size 1 --input-len 128 --output-len 128 \
+    --result-filename tp8.jsonl
+
+# or let run.py do the whole sweep and print the table
+$ python3 run.py --engine vllm --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --tp 1 2 4 8 --batch-size 1 --workdir ./results</code></pre>
+</div>
+
+<p>Part C is the profile. Do not guess which kernels are the collectives &mdash; both projects ship
+a kernel-name-to-bucket map for exactly this, and they agree on the regex:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tools/profiler/nsys_profile_tools/vllm_engine_model.json:L3-L19</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    &quot;llama&quot;: {
+      &quot;fused_moe_kernel|GroupProblemShape|group_gemm_starts|bmm_|GemmUniversal&quot;: &quot;moe_gemm&quot;,
+      &quot;gemm|nvjet&quot;: &quot;gemm&quot;,
+      &quot;moe|sigmoid&quot;: &quot;moe&quot;,
+      &quot;CatArrayBatched|prepare_inputs&quot;: &quot;prepare_next&quot;,
+      &quot;ncclDevKernel|cross_device_reduce&quot;: &quot;nccl_and_custom_ar&quot;,
+      &quot;_norm_|Norm&quot;: &quot;norm&quot;,
+      &quot;act_and_mul_&quot;: &quot;activation&quot;,
+      &quot;Rotary&quot;: &quot;rope&quot;,
+      &quot;SoftMax&quot;: &quot;softmax&quot;,
+      &quot;flash|fmha&quot;: &quot;attn&quot;,
+      &quot;elementwise&quot;: &quot;elementwise&quot;,
+      &quot;fp8_quant|cvt_&quot;: &quot;quantize&quot;,
+      &quot;reduce_kernel&quot;: &quot;reduce&quot;,
+      &quot;triton&quot;: &quot;triton_kernel&quot;,
+      &quot;CUDA mem&quot;: &quot;non-gpu-H_D_memops&quot;,
+      &quot;.*&quot;: &quot;misc&quot;</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">examples/profiler/nsys_profile_tools/sglang_engine_model.json:L3-L20</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    &quot;llama&quot;: {
+      &quot;gemm|nvjet&quot;: &quot;gemm&quot;,
+      &quot;fused_moe_kernel|GroupProblemShape|group_gemm_starts|bmm_|GemmUniversal&quot;: &quot;moe_gemm&quot;,
+      &quot;moe|sigmoid&quot;: &quot;moe&quot;,
+      &quot;CatArrayBatched|prepare_inputs&quot;: &quot;prepare_next&quot;,
+      &quot;ncclDevKernel|cross_device_reduce&quot;: &quot;nccl_and_custom_ar&quot;,
+      &quot;_norm_|Norm&quot;: &quot;norm&quot;,
+      &quot;topk&quot;: &quot;topk&quot;,
+      &quot;act_and_mul_&quot;: &quot;activation&quot;,
+      &quot;Rotary&quot;: &quot;rope&quot;,
+      &quot;SoftMax&quot;: &quot;softmax&quot;,
+      &quot;flash|fmha&quot;: &quot;attn&quot;,
+      &quot;elementwise&quot;: &quot;elementwise&quot;,
+      &quot;fp8_quant|cvt_|quantize&quot;: &quot;quantize&quot;,
+      &quot;reduce_kernel&quot;: &quot;reduce&quot;,
+      &quot;triton&quot;: &quot;triton_kernel&quot;,
+      &quot;CUDA mem&quot;: &quot;non-gpu-H_D_memops&quot;,
+      &quot;.*&quot;: &quot;misc&quot;</code></pre>
+</div>
+
+<p>The <code>nccl_and_custom_ar</code> bucket is your answer. It matches two families of symbol:
+NCCL's device kernels, whose names begin <code>ncclDevKernel</code>, and the engines' own one-shot and
+two-shot kernels, whose names begin <code>cross_device_reduce</code>. vLLM's are readable in tree:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/custom_all_reduce.cuh:L7-L13</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;typename T, int ngpus&gt;
+__global__ void __launch_bounds__(512, 1)
+    cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
+  using P = typename packed_t&lt;T&gt;::P;
+  using A = typename packed_t&lt;T&gt;::A;
+  // note: we don&#x27;t reorder the address so the accumulation order is the same</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Match all three kernel names, not one</span>
+  <p>SGLang's custom all-reduce <em>is</em> in tree at <code>7d89325</code>, under
+  <code>python/sglang/kernels/aot/csrc/allreduce/</code> &mdash; the sources the
+  <code>sgl_kernel</code> wheel is built from, vendored into the repo. Reading it changes the
+  advice. The CUDA path declares <b>three</b> <code>__global__</code> kernels in
+  <code>custom_all_reduce.cuh</code>: <code>cross_device_reduce_1stage</code> (L325),
+  <code>custom_all_reduce_2shot</code> (L365), and <code>cross_device_reduce_2stage</code> (L474).</p>
+  <p>So a trace filter matching only <code>cross_device_reduce</code> &mdash; which is what SGLang's
+  own bucket map above suggests &mdash; <b>silently drops the two-shot kernel</b> and under-counts
+  your all-reduce time. Match <code>cross_device_reduce|custom_all_reduce_2shot</code>, and check
+  the symbol names in your first trace rather than trusting either regex. The ROCm variant in
+  <code>custom_all_reduce_hip.cuh</code> carries only the <code>cross_device_reduce_*</code> pair.
+  The Python dispatch wrapper is
+  <code>python/sglang/srt/distributed/device_communicators/custom_all_reduce.py</code>.</p>
+</div>
+
+<p>Capture with <code>nsys</code>, then run the shipped script &mdash; it produces a per-bucket CSV
+and an HTML chart, and the bucket you want is one row of it. The invocation is documented in the
+repo's own README (<code>tools/profiler/nsys_profile_tools/README.md</code>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; capture and bucket a TP=8 run</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>nsys profile -t cuda -o tp8 -f true --trace-fork-before-exec=true \
+    --cuda-graph-trace=node --delay 60 --duration 60 \
+    vllm serve meta-llama/Meta-Llama-3-8B-Instruct --tensor-parallel-size 8
+
+python3 $VLLM/tools/profiler/nsys_profile_tools/gputrc2graph.py \
+    --in_file tp8.nsys-rep,vllm,llama,0 --title &quot;TP=8 kernel budget&quot;</code></pre>
+</div>
+
+<p>If you would rather stay inside <code>torch.profiler</code>, both engines expose start/stop over
+HTTP; <a href="../../10-benchmarking/10-05-profiling-and-capacity.html">&sect;10.5</a> owns the flags
+(vLLM's <code>--profiler-config.profiler=torch</code> plus
+<code>--profiler-config.torch_profiler_dir</code>; SGLang's <code>SGLANG_TORCH_PROFILER_DIR</code> and
+a POST body). Nsight Systems is the better tool here for one specific reason: it is the only one of the
+three that shows <em>rank skew</em>, and a TP sweep that decays faster than the model predicts is
+usually one slow rank making seven others wait.</p></div></section>
+<section class="sec" id="expect" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What to expect</h2></div><div class="sec__body"><p>Your efficiency will fall monotonically. Five things make it fall faster than
+$t(p) = t(1)/p + 2L\lambda$ predicts, and they are worth checking in this order.</p>
+
+<h3>1. The all-reduce implementation changes under you, by message size</h3>
+
+<p>This is the one that ambushes people, because nothing logs it. vLLM tries a ladder of all-reduce
+implementations per call and falls through to NCCL when none of the fast paths accepts the tensor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/cuda_communicator.py:L287-L289, L316-L336</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # always try quick reduce first, then flashinfer, then the AITER or vLLM
+        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
+        qr_comm = self.qr_comm
+        # ... flashinfer and AITER branches elided ...
+        ca_comm = self.ca_comm
+        if (
+            ca_comm is not None
+            and not ca_comm.disabled
+            and ca_comm.should_custom_ar(input_)
+        ):
+            out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
+        symm_mem_comm = self.symm_mem_comm
+        if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
+            out = symm_mem_comm.all_reduce(input_)
+            assert out is not None
+            return out
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            out = input_.clone()
+            torch.distributed.all_reduce(out, group=self.device_group)
+            return out
+        assert pynccl_comm is not None
+        out = pynccl_comm.all_reduce(input_)</code></pre>
+</div>
+
+<p>The gate on the custom kernel is a byte count:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/custom_all_reduce.py:L348-L361</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def should_custom_ar(self, inp: torch.Tensor):
+        if self.disabled or self.world_size &gt; 8:
+            return False
+        inp_size = inp.numel() * inp.element_size()
+        # custom allreduce requires input byte size to be multiples of 16
+        if inp_size % 16 != 0:
+            return False
+        if not is_weak_contiguous(inp):
+            return False
+        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
+        # little performance improvement over NCCL.
+        if self.world_size == 2 or self.fully_connected:
+            return inp_size &lt; self.max_size
+        return False</code></pre>
+</div>
+
+<p>and <code>max_size</code> is a per-architecture, per-world-size table:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/all_reduce_utils.py:L31-L37</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>CUSTOM_ALL_REDUCE_MAX_SIZES = {
+    &quot;9.0&quot;: {
+        2: 64 * MiB,  # 64 MB
+        4: 32 * MiB,  # 32 MB
+        6: MiB // 2,  # 512 KB
+        8: MiB // 4,  # 256 KB
+    },</code></pre>
+</div>
+
+<p>On an H100 (compute capability 9.0) at TP=8 the ceiling is <b>256&nbsp;KB</b>. A Llama-3-8B
+residual slice is 8&nbsp;KiB per token, so the custom kernel handles up to 31 tokens per step and
+<em>batch 32 and above runs on NCCL instead</em>. That is a discontinuity in the middle of any
+batch-size sweep, invisible from outside, and visible in a profile as the kernel name changing from
+<code>cross_device_reduce_*</code> to <code>ncclDevKernel*</code>.</p>
+
+<p>SGLang gates the same kernel on a single flat constant &mdash;
+<code>_MAX_CAR_SIZE = 8192 * 1024</code>, 8&nbsp;MiB, at every world size
+(<code>python/sglang/srt/distributed/device_communicators/custom_all_reduce.py:L41-L42</code>) &mdash;
+so at TP=8 it keeps its custom kernel out to 1,024 tokens where vLLM has long since switched. If your
+two engines diverge sharply at TP=8 and moderate batch, this is why, and it is a threshold choice
+rather than a kernel-quality difference.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Largest step, in tokens, that still uses the custom all-reduce kernel for Llama-3-8B ($d=4096$, bf16, 8&nbsp;KiB per token) &mdash; derived from the two cited thresholds.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>TP</th><th><code class="c-vllm">vLLM</code> on sm 9.0</th>
+      <th><code class="c-sglang">SGLang</code>, all architectures</th></tr></thead>
+    <tbody>
+      <tr><td class="num">2</td><td class="num">8,192 tokens</td><td class="num">1,024 tokens</td></tr>
+      <tr><td class="num">4</td><td class="num">4,096 tokens</td><td class="num">1,024 tokens</td></tr>
+      <tr><td class="num">8</td><td class="num">32 tokens</td><td class="num">1,024 tokens</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Both engines let you delete the variable entirely, under the same flag spelling &mdash; vLLM's field
+is <code>disable_custom_all_reduce</code> at <code>vllm/config/parallel.py:L205</code>, SGLang's is
+declared here. Force NCCL on both sides and re-run: the difference between the two sweeps is the
+custom kernel's whole contribution.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L2021-L2028</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    disable_custom_all_reduce: A[
+        bool,
+        Arg(
+            help=&quot;Disable the custom all-reduce kernel and fall back to NCCL.&quot;,
+            resolvable=True,
+        ),
+        NS(&quot;exec.comm&quot;),
+    ] = False</code></pre>
+</div>
+
+<h3>2. Fixed collective latency does not amortise</h3>
+
+<p>Sixty-four collectives per forward pass, and $\lambda$ is a property of the fabric and the launch
+path, not of $p$. At TP=8 the step floor is 560&nbsp;&micro;s, so the entire budget is
+560/64&nbsp;=&nbsp;8.75&nbsp;&micro;s per collective before communication consumes the whole step.
+This is why efficiency decays even at batch 1, where the bandwidth term is 0.18% of the floor.</p>
+
+<h3>3. KV heads stop dividing, so throughput and latency diverge</h3>
+
+<p>Llama-3-8B has $h_{kv} = 8$, so at TP=8 every rank holds exactly one KV head and past TP=8 they would
+replicate. Latency keeps improving with $p$; per-card KV capacity stops. Measure both and you will see
+the sweep's two halves disagree &mdash; <a href="../../05-parallelism/05-01-tensor-parallelism.html">&sect;5.1</a>
+derives the capacity law, and <a href="../02-kv-cache-sizing/README.html">lab 02</a> is where you read
+the engine's reported pool size at each TP.</p>
+
+<h3>4. CUDA-graph bucketing flattens the batch axis</h3>
+
+<p>If you sweep batch size as well as TP, remember the capture ladder: batches 9 through 16 replay the
+same graph. A plateau in a batch sweep is bucketing, not scaling. Sweep on the rungs, or report the
+padded size &mdash; <a href="../../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> has the
+full confounder table, and every row of it applies to this lab.</p>
+
+<h3>5. One slow rank</h3>
+
+<p>All-reduce is a barrier. If one GPU is thermally throttled, on a different NUMA node, or sharing a
+PCIe switch with the NIC, all $p$ ranks run at its speed and the profile shows the other ranks parked
+inside the collective. This is the failure that looks exactly like "collectives are expensive" and is
+not. It is the reason Part C uses Nsight Systems rather than a single-rank
+<code>torch.profiler</code> trace.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Do not</span>
+  <p>Do not compare a TP=1 number from one process against a TP=8 number from another and call the
+  ratio "scaling" without holding the batch, the context length, the attention backend, the
+  quantization and the graph-capture setting fixed. Four of the five items above will move if you do
+  not pin them, and the resulting curve is uninterpretable. <code>run.py</code> prints the full
+  invocation for every point it runs so the sweep is auditable afterwards.</p>
+</div></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Before running anything: at TP=4, batch 1, what fraction of the predicted step time is the
+  bandwidth term? Now do the same at batch 128. Which of the two regimes is your sweep in, and does
+  that change which of the five causes above you should look at first?</li>
+
+  <li>Run the sweep at batch 1 and fit a single $\lambda$ to your TP=8 point. Predict TP=2 and TP=4
+  from that $\lambda$, then compare. If one constant explains all three, what have you proved? If it
+  does not, which direction is the error and what does that direction rule out?</li>
+
+  <li>Predict, then verify. Run vLLM at TP=8 with batch 16 and batch 64, profile both, and diff the
+  kernel names in the <code>nccl_and_custom_ar</code> bucket. Predict which kernel each run uses before
+  you look, from the table above. Then set <code>--disable-custom-all-reduce</code> and re-run batch 16:
+  how much did you lose, and does it match the gap between the two batch sizes?</li>
+
+  <li>Read the file. Open <code>vllm/distributed/device_communicators/cuda_communicator.py</code> and
+  list, in order, every all-reduce implementation the dispatch tries before NCCL. For each, name the
+  predicate that can reject the tensor. Which of them can a benchmark user turn off from the command
+  line?</li>
+
+  <li>Measure throughput as well as latency: re-run the sweep with <code>--batch-size 64</code> and
+  compute both $S_{\text{lat}}(p)$ and $S_{\text{tput}}(p)$. They will not agree. Explain the sign of
+  the disagreement using the bandwidth-term table, and say which of the two a serving deployment should
+  be optimising.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <ol>
+    <li>0.078% at batch 1 and 10.0% at batch 128 (derived; the table above). At batch 1 the bandwidth
+    term cannot explain any visible loss, so the only candidates left are cause 2
+    &mdash; fixed per-collective latency &mdash; and cause 5, rank skew. At batch 128 bandwidth is a real term and the custom-kernel threshold
+    (cause 1) has certainly been crossed at TP=8, so the two must be separated before either can be
+    blamed.</li>
+
+    <li>Fitting one $\lambda$ to TP=8: $\lambda = (t_8 - 560\,\mu\mathrm{s})/64$. If that same
+    $\lambda$ reproduces TP=2 and TP=4, you have shown the shortfall is entirely a per-collective
+    constant and that nothing size-dependent is happening &mdash; which at batch 1 is what the arithmetic
+    says should be true. If the fitted $\lambda$ <em>grows</em> with $p$, the constant is not constant:
+    ring latency itself scales with hop count, or you have rank skew (cause 5). If it <em>shrinks</em>
+    with $p$, your TP=1 baseline is wrong &mdash; most often because TP=1 is not memory-bound at the
+    batch you chose, so $t(1)$ is not $4481\,\mu$s and the whole ratio is off.</li>
+
+    <li>Batch 16 at TP=8 is 131,072 bytes, under the 262,144-byte ceiling, so it uses
+    <code>cross_device_reduce_*</code>; batch 64 is 524,288 bytes, over it, so it uses
+    <code>ncclDevKernel*</code>. Forcing <code>--disable-custom-all-reduce</code> at batch 16 should
+    reproduce roughly the per-collective cost you inferred from batch 64 &mdash; if it does, you have
+    isolated the kernel switch from every other batch-size effect, which is the only way to separate it
+    from cause 4.</li>
+
+    <li>In order: NCCL symmetric-memory all-reduce (gated on world size and tensor symmetry), quick
+    reduce (ROCm only), FlashInfer, AITER (ROCm), vLLM's own custom all-reduce
+    (<code>should_custom_ar</code>: not disabled, world size &le; 8, byte size a multiple of 16, weakly
+    contiguous, and under <code>max_size</code>), Torch symmetric memory, then pynccl, then
+    <code>torch.distributed.all_reduce</code>. From the command line the user can turn off the custom
+    kernel with <code>--disable-custom-all-reduce</code>; the rest are selected by predicate, which is
+    exactly why the profile is the only reliable way to know which one ran.</li>
+
+    <li>Latency speedup is larger than throughput speedup at high $p$. At batch 64 the bandwidth term is
+    real (11.6% of the floor at TP=8, derived by scaling the batch-128 column), and it is charged once
+    per step regardless of how many tokens the step carries &mdash; so it is amortised over more tokens
+    at large batch, which helps throughput, while the fixed $2L\lambda$ term is charged per step and
+    hurts both equally. Meanwhile latency at batch 1 pays $2L\lambda$ against a much smaller floor. A
+    serving deployment cares about throughput <em>at an SLO</em>, which is neither of these two numbers;
+    see <a href="../11-end-to-end-benchmark/README.html">lab 11</a>.</li>
+  </ol>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>At batch 1 the bandwidth term is 0.18% of the step floor even at TP=8 (derived). Any efficiency
+  loss you measure there is fixed per-collective latency, and 64 collectives per forward pass on
+  Llama-3-8B gives you a budget of 8.75&nbsp;&micro;s each at TP=8 before communication eats the whole
+  step.</li>
+  <li>One fitted constant $\lambda$ should explain the entire TP=1&rarr;8 curve at batch 1. If it does
+  not, the residual is telling you about rank skew or a wrong TP=1 baseline &mdash; not about
+  collectives.</li>
+  <li>vLLM's custom all-reduce ceiling on an H100 at TP=8 is 256&nbsp;KB, which is 32 tokens for
+  Llama-3-8B. Cross that and the engine silently runs NCCL instead. SGLang's ceiling is a flat
+  8&nbsp;MiB at every world size, so the two engines are running different kernels over most of a
+  batch sweep.</li>
+  <li>Attribute with the shipped map, not by eye. Both repos define
+  <code>"ncclDevKernel|cross_device_reduce": "nccl_and_custom_ar"</code> and ship a script that turns an
+  <code>nsys</code> trace into per-bucket time. Guessing which kernels are collectives is how people
+  attribute an attention regression to the fabric.</li>
+  <li>Latency scaling and throughput scaling are different curves and they diverge with $p$. Report
+  both, or say which one you measured.</li>
+</ul></div></section>
+
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#what">What you measure</a>
+<a href="#run">Running it</a>
+<a href="#expect">What to expect</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

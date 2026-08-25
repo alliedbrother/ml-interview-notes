@@ -1,0 +1,1911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AsyncLLM → EngineCore → Executor → Worker — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i is-current" href="11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 11 · vLLM deep dive · 11-02</div>
+<h1>AsyncLLM → EngineCore → Executor → Worker</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>vllm/v1/executor/abstract.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">vLLM's engine is five objects deep and two processes wide, and the boundary between those processes is drawn at exactly one place. This chapter is about where the lines fall, what each layer owns exclusively, what crosses each boundary, and what the split costs. <a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> already walked a request across these hops; here we stop moving and look at the structure.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>This is the entire error message a vLLM user gets when the thing that actually broke was a CUDA illegal memory access inside an attention kernel on TP rank 3:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/exceptions.py:L12-L21</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class EngineDeadError(VLLMServerError):
+    """Raised when the EngineCore dies. Unrecoverable."""
+
+    def __init__(self, *args, suppress_context: bool = False, **kwargs):
+        ENGINE_DEAD_MESSAGE = "EngineCore encountered an issue. See stack trace (above) for the root cause."  # noqa: E501
+
+        super().__init__(ENGINE_DEAD_MESSAGE, *args, **kwargs)
+        # Make stack trace clearer when using with LLMEngine by
+        # silencing irrelevant ZMQError.
+        self.__suppress_context__ = suppress_context</code></pre>
+</div>
+
+<p>"See stack trace (above)" is doing a lot of work there. The stack trace is <em>not</em> above &mdash; it is in a different process, under a different logger prefix, and at TP&nbsp;&gt;&nbsp;1 in a <em>third</em> process below that. The frontend genuinely does not know what happened; all it knows is that a socket delivered a sentinel byte-string.</p>
+
+<p>That is not sloppiness; it is the unavoidable price of a design decision, and the decision is worth paying for. But you cannot debug vLLM, extend it, or reason about its tail latency until you can say which object lives in which process, what state each owns exclusively, and what may cross between them.</p>
+
+<p>Five layers, named top to bottom: <code>AsyncLLM</code>, <code>EngineCoreClient</code>, <code>EngineCore</code>, <code>Executor</code>, <code>Worker</code>. Two of those names are boundaries pretending to be objects.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: two clocks, one wire, N ranks</h2></div><div class="sec__body"><p>The stack has exactly two interesting cuts in it, and they are cut for different reasons.</p>
+
+<p><b>The first cut &mdash; between <code>EngineCoreClient</code> and <code>EngineCore</code> &mdash; defeats the GIL.</b> Above it sits per-token host work that scales with batch size: detokenisation, chunk objects, JSON, socket writes. Below it sits the step loop, whose period is set by the GPU. Both are Python, so in one process they contend for one interpreter lock and <em>add</em>; in two they <em>overlap</em>. &sect;<a href="#first-principles">3</a> makes that arithmetic.</p>
+
+<p><b>The second cut &mdash; between <code>Executor</code> and <code>Worker</code> &mdash; gets one Python interpreter per GPU,</b> because a CUDA context belongs to a process. It exists only when there is more than one rank: at <code>world_size == 1</code> the backend resolves to <code>uni</code> (<code>vllm/config/parallel.py:L980-L981</code>) and <code>UniProcExecutor</code> builds the worker inline in the EngineCore process (<code>vllm/v1/executor/uniproc_executor.py:L52-L73</code>), so a single-GPU server is two processes wide, not three. That cut is <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a>'s subject; this chapter treats it as given.</p>
+
+<p>Everything else is ordinary in-process composition: <code>AsyncLLM</code> holds an <code>EngineCoreClient</code>, <code>EngineCore</code> holds an <code>Executor</code>, an <code>Executor</code> holds worker handles. The stack looks deep, but only two of the four joints are real boundaries.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the layer stack, with process boundaries drawn and exclusive state labelled.</b> Dashed edges cross a process boundary. Everything inside one box shares an address space and a GIL.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph P0["PROCESS 1 - API server - asyncio event loop"]
+        A["AsyncLLM<br/>owns: renderer, InputProcessor,<br/>OutputProcessor, output_handler task"]
+        OP["OutputProcessor<br/>owns: request_states dict,<br/>one RequestOutputCollector per request,<br/>incremental detokenizer state"]
+        C["AsyncMPClient<br/>owns: ROUTER in, PULL out,<br/>MsgpackEncoder, MsgpackDecoder,<br/>outputs_queue asyncio.Queue"]
+        A --- OP
+        A --- C
+    end
+    subgraph P1["PROCESS 2 - EngineCoreProc - one busy loop thread plus 2 IO threads"]
+        IT["input IO thread<br/>DEALER socket, decode"]
+        Q1["input_queue<br/>queue.Queue"]
+        EC["EngineCore.run_busy_loop<br/>owns: Scheduler, KVCacheManager,<br/>StructuredOutputManager, batch_queue"]
+        Q2["output_queue<br/>queue.Queue"]
+        OT["output IO thread<br/>PUSH socket, encode"]
+        IT --> Q1 --> EC --> Q2 --> OT
+    end
+    subgraph P2["PROCESS 3..N+2 - one WorkerProc per rank<br/>ONLY when TP x PP x DP is above 1<br/>at world_size 1 the Worker lives inside PROCESS 2"]
+        W["Worker<br/>owns: torch.device, CUDA context,<br/>memory snapshot, model runner"]
+        MR["GPUModelRunner<br/>V2 by default: owns persistent RequestState<br/>legacy keeps a persistent InputBatch instead<br/>plus KV cache tensors and CUDA graphs"]
+        W --- MR
+    end
+    C -. "ZMQ  EngineCoreRequest in" .-> IT
+    OT -. "ZMQ  EngineCoreOutputs out" .-> C
+    EC --> EX["Executor<br/>owns: rank fan-out,<br/>rpc_broadcast_mq, response mqs"]
+    EX -. "shm MessageQueue<br/>SchedulerOutput" .-> W
+    W -. "shm MessageQueue<br/>ModelRunnerOutput" .-> EX
+  </script>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">Ownership rule</span>
+  <p>A layer owns state exclusively if no other layer can name the object. <code>OutputProcessor.request_states</code> is invisible to <code>EngineCore</code>; <code>Scheduler.waiting</code> is invisible to <code>AsyncLLM</code>. Both track "the set of live requests" and they are allowed to disagree transiently &mdash; that disagreement is what abort handling is <em>for</em>, and &sect;<a href="#lifecycles">7</a> is about reconciling it.</p>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: what a process boundary costs, and what it buys</h2></div><div class="sec__body"><p>Let $T_{\text{step}}$ be the engine's step period, wall-clock from one <code>schedule()</code> to the next. For Llama-3-8B in bf16 on an H100 SXM at batch 1 the book's derived weight-bandwidth floor is $T_{\text{step}} = 4.48$&nbsp;ms (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>), and because batch 32 is far below the ridge point $I^\* = 295$ the period barely moves as $B$ grows. Let $c$ be the host CPU cost of turning <em>one</em> generated token into <em>one</em> byte-stream frame &mdash; detokenise, build the chunk, JSON, socket write &mdash; and $B$ the batch size.</p>
+
+<p>Per step the frontend does $B$ units of $c$: one forward pass yields one token per sequence, and every sequence has its own socket. Compare the two placements:</p>
+
+<div class="math-display">$$ T_{\text{one process}} = T_{\text{step}} + Bc \qquad\qquad T_{\text{two processes}} = \max\left(T_{\text{step}},\; Bc\right) $$</div>
+
+<p>The addition in the first expression is not a modelling choice; it is CPython. One interpreter lock means the detokeniser loop and the scheduler loop cannot both execute bytecode, so their costs are strictly serial. The second expression is the same two loops in different interpreters on different cores.</p>
+
+<p><a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> derived the frontend budget $T_{\text{step}}/B$ &mdash; 140&nbsp;&micro;s per token at $B=32$, 35&nbsp;&micro;s at $B=128$. That budget is exactly the $c$ at which the two placements differ by 2&times;: substitute $c = T_{\text{step}}/B$ and you get $2T_{\text{step}}$ against $T_{\text{step}}$. The budget is therefore also the <em>break-even point of the process split</em>. Above it, the single-process design degrades without bound while the split degrades only to $Bc$.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">4.48 ms</div><div class="kpi__l">$T_{\text{step}}$, Llama-3-8B bf16 H100, batch 1 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">223 /s</div><div class="kpi__l">Output messages crossing ZMQ, any batch size (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">~1.3 KB</div><div class="kpi__l">One EngineCoreOutputs at B=32, plain decode (derived)</div></div>
+</div>
+
+<h3>The bill for the split</h3>
+
+
+<p><b>1. Serialisation and wire bytes &mdash; small, and shrinking per token as batch grows.</b> <code>EngineCoreOutputs</code> carries the <em>whole batch's</em> tokens for one step, so the boundary is crossed once per step, not once per token &mdash; the single most important structural fact about the split. Each <code>EngineCoreOutput</code> is a msgspec struct with <code>array_like=True, omit_defaults=True</code>, so a plain decode output is a two-element msgpack array: a <code>request_id</code> and a one-element token list. The id is the client-facing one with eight random hex characters appended (<code>vllm/v1/engine/input_processor.py:L262-L279</code>), so an OpenAI chat request carries <code>chatcmpl-</code> + 16 hex + <code>-</code> + 8 hex = 34 characters, a 2-byte str8 header plus 34; the token list is a 1-byte header plus 3 for a mid-range Llama-3 id. About <b>41&nbsp;bytes</b> including the outer array header. Multiply by $B$, add ~50&nbsp;bytes for the outer struct's <code>engine_index</code>, <code>timestamp</code> and <code>SchedulerStats</code>:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Wire cost of the frontend/engine boundary. All figures <b>derived</b> from the msgpack encoding of the structs in <code>vllm/v1/engine/__init__.py</code> plus the 4.48&nbsp;ms step floor. Nothing measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Quantity</th><th class="num">B = 1</th><th class="num">B = 32</th><th class="num">B = 128</th></tr></thead>
+      <tbody>
+        <tr><td>Bytes per <code>EngineCoreOutputs</code></td><td class="num">91</td><td class="num">1,362</td><td class="num">5,298</td></tr>
+        <tr><td>Messages per second</td><td class="num">223</td><td class="num">223</td><td class="num">223</td></tr>
+        <tr><td>Bytes/s across the socket</td><td class="num">20.3 K</td><td class="num">304 K</td><td class="num">1.18 M</td></tr>
+        <tr><td>Wire bytes <em>per generated token</em></td><td class="num">91</td><td class="num">42.6</td><td class="num">41.4</td></tr>
+        <tr><td>Encodes+decodes per generated token</td><td class="num">2</td><td class="num">0.063</td><td class="num">0.016</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>At $B=128$ the boundary costs one encode and one decode per <em>128</em> tokens &mdash; 0.016 operations per token &mdash; moving 1.2&nbsp;MB/s over a Unix domain socket. The same token leaves the frontend as an OpenAI SSE chunk on the order of a few hundred bytes of JSON (uncited: count it on your own deployment with <code>curl -N</code>), so the IPC payload is several times smaller than the HTTP payload the frontend produces from it anyway. <b>Batching amortises the IPC hop, which is why vLLM can afford to put one there.</b></p>
+
+<p>The input direction is per-request and dominated by <code>prompt_token_ids</code>: a 2,048-token Llama-3 prompt at roughly 3 msgpack bytes per id is about 6.2&nbsp;KB, sent once. Generating 256 tokens occupies 256 &times; 4.48&nbsp;ms = 1.15&nbsp;s, so the amortised input rate is 5.4&nbsp;KB/s per in-flight request &mdash; derived, and again negligible.</p>
+
+<p><b>2. One IPC round-trip of latency, added once to TTFT.</b> An <code>add_request</code> traverses ROUTER&rarr;DEALER, is decoded on the input thread, waits in <code>input_queue</code>, and is drained by <code>_process_input_queue</code>. The queue wait is bounded by the current step: up to 4.48&nbsp;ms, zero if the engine is idle. Against a TTFT containing a full prefill that is noise &mdash; but it is <em>not</em> noise for aborts, which is why they get a second queue the step loop drains mid-flight (&sect;<a href="#lifecycles">7</a>).</p>
+
+<p><b>3. A materially worse debugging story.</b> This is the real cost, and the opening error message is what it looks like. No stack trace spans the boundary; a <code>py-spy dump</code> on the API server shows an idle event loop no matter what the engine is doing.</p>
+
+<p>The in-tree comment where the engine's IO threads are created states the benefit side of the trade in vLLM's own words:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1091-L1116</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # Background Threads and Queues for IO. These enable us to
+            # overlap ZMQ socket IO with GPU since they release the GIL,
+            # and to overlap some serialization/deserialization with the
+            # model forward pass.
+            # Threads handle Socket &lt;-&gt; Queues and core_busy_loop uses Queue.
+            ready_event = threading.Event()
+            input_thread = threading.Thread(
+                target=self.process_input_sockets,
+                args=(
+                    addresses.inputs,
+                    addresses.coordinator_input,
+                    identity,
+                    ready_event,
+                ),
+                daemon=True,
+            )
+            input_thread.start()
+
+            self.output_thread = threading.Thread(
+                target=self.process_output_sockets,
+                args=(
+                    addresses.outputs,
+                    addresses.coordinator_output,
+                    self.engine_index,
+                ),
+                daemon=True,</code></pre>
+</div>
+
+<p>The busy loop never touches a socket: it puts a tuple on a <code>queue.Queue</code> and moves on. The msgpack encode happens on the output thread, which can run it <em>during</em> the next forward pass because <code>zmq.send</code> and the C-level encoder both release the GIL. The GIL argument applied recursively &mdash; the same reasoning that split the processes splits the threads.</p></div></section>
+<section class="sec" id="wire-format" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">What actually crosses the wire</h2></div><div class="sec__body"><p>Two struct types cross the boundary in steady state, and a one-byte tag says which. The tag is an enum whose values <em>are</em> the wire bytes, so there is no framing layer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/__init__.py:L284-L297</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class EngineCoreRequestType(enum.Enum):
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+
+    ADD = b"\x00"
+    ABORT = b"\x01"
+    START_DP_WAVE = b"\x02"
+    UTILITY = b"\x03"
+    # Sentinel used within EngineCoreProc.
+    EXECUTOR_FAILED = b"\x04"
+    # Sentinel to wake up input_queue.get() during shutdown.
+    WAKEUP = b"\x05"</code></pre>
+</div>
+
+<p><code>UTILITY</code> is the escape hatch: every out-of-band control call &mdash; <code>get_supported_tasks</code>, <code>profile</code>, <code>reset_prefix_cache</code>, <code>sleep</code>, <code>add_lora</code>, <code>pause_scheduler</code> &mdash; is a <code>(client_index, call_id, method_name, args)</code> tuple dispatched by <code>getattr</code> on the <code>EngineCore</code> instance (<code>vllm/v1/engine/core.py:L1534-L1548</code>), answered by a <code>UtilityOutput</code> keyed on <code>call_id</code>. The whole protocol is two hot-path structs plus a generic RPC.</p>
+
+<p>Both hot-path structs carry three flags, all performance decisions:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/__init__.py:L107-L122</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class EngineCoreRequest(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    request_id: str
+    prompt_token_ids: list[int] | None
+    mm_features: list[MultiModalFeatureSpec] | None
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
+    arrival_time: float
+    lora_request: LoRARequest | None
+    cache_salt: str | None
+    data_parallel_rank: int | None
+    prompt_embeds: torch.Tensor | None = None</code></pre>
+</div>
+
+<p><code>array_like=True</code> drops field names, making the struct a positional msgpack array &mdash; which is why every newly added field carries a comment saying "appended last so <code>array_like</code> positional serialization stays backward compatible." <b>Field order in these two classes is wire-protocol ABI.</b> <code>omit_defaults=True</code> trims trailing defaults, turning a decode output into 41&nbsp;bytes instead of the struct's two required fields plus fifteen defaulted ones. <code>gc=False</code> keeps these objects out of CPython's cyclic collector, which matters when you allocate $B$ of them every 4.48&nbsp;ms.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/__init__.py:L253-L281</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class EngineCoreOutputs(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    # NOTE(Nick): We could consider ways to make this more compact,
+    # e.g. columnwise layout
+
+    engine_index: int = 0
+
+    # [num_reqs]
+    outputs: list[EngineCoreOutput] = []
+    scheduler_stats: SchedulerStats | None = None
+    timestamp: float = 0.0
+
+    utility_output: UtilityOutput | None = None
+    finished_requests: set[str] | None = None
+
+    # In DP case, used to signal that the current wave of requests
+    # has finished and the engines are paused.
+    wave_complete: int | None = None
+    # In DP case, used to signal that a request was received for an
+    # "old" wave, so the next wave needs to be started in other engines.
+    start_wave: int | None = None
+
+    def __post_init__(self):
+        if self.timestamp == 0.0:
+            self.timestamp = time.monotonic()</code></pre>
+</div>
+
+<p>Two details are load-bearing. <code>timestamp</code> is <code>time.monotonic()</code> stamped in the <em>engine</em> process, and monotonic clocks are not comparable across processes &mdash; the <code>EngineCoreEvent</code> docstring at <code>vllm/v1/engine/__init__.py:L177-L186</code> says so. The frontend uses it for intervals only. And <code>finished_requests</code> is the engine telling the frontend which IDs it has forgotten, reconciling the two sets of live-request state without the frontend having to ask.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; what crosses the ZMQ boundary in each direction, with the real fields.</b> Sizes are derived from the msgpack encoding at $B=32$, plain decode, no logprobs.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph IN["INBOUND - once per request - frontend to engine"]
+        I1["frame 0: identity<br/>engine index, 2 bytes"]
+        I2["frame 1: type tag<br/>ADD = 0x00"]
+        I3["frame 2: msgpack array<br/>EngineCoreRequest"]
+        I4["frames 3..n: aux buffers<br/>zero-copy tensor payloads<br/>only if nbytes at least 256"]
+        I1 --> I2 --> I3 --> I4
+    end
+    subgraph INF["EngineCoreRequest fields on the wire"]
+        F1["request_id str<br/>prompt_token_ids list int<br/>mm_features<br/>sampling_params<br/>pooling_params<br/>arrival_time float"]
+        F2["lora_request, cache_salt<br/>data_parallel_rank<br/>prompt_embeds Tensor<br/>client_index, current_wave<br/>priority, trace_headers<br/>2048-token prompt = about 6.2 KB"]
+    end
+    subgraph OUT["OUTBOUND - once per engine STEP - engine to frontend"]
+        O1["frame 0: msgpack array<br/>EngineCoreOutputs<br/>about 1.3 KB at B=32"]
+        O2["frames 1..n: aux buffers<br/>logprob tensors, pooling outputs"]
+        O1 --> O2
+    end
+    subgraph OUTF["EngineCoreOutputs fields on the wire"]
+        G1["engine_index int<br/>outputs list of EngineCoreOutput<br/>scheduler_stats<br/>timestamp float monotonic"]
+        G2["per EngineCoreOutput:<br/>request_id, new_token_ids<br/>new_logprobs, finish_reason<br/>stop_reason, events<br/>kv_transfer_params<br/>about 41 bytes for plain decode"]
+    end
+    IN --> INF
+    OUT --> OUTF
+  </script>
+</div>
+
+<h3>Zero-copy, and where it stops</h3>
+
+<p>Tensors and ndarrays skip msgpack's normal path. <code>MsgpackEncoder</code> stashes backing buffers, encodes an <em>index into that stash</em> in place of the data, and returns the buffers as extra ZMQ frames:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/serial_utils.py:L257-L273</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _encode_tensor(
+        self, obj: torch.Tensor
+    ) -&gt; tuple[str, tuple[int, ...], int | dict | memoryview]:
+        oob_consumer = self.oob_tensor_consumer
+        # view the tensor as a contiguous 1D array of bytes
+        if obj.nbytes &lt; self.size_threshold and obj.is_cpu:
+            # Smaller tensors are encoded inline, just like ndarrays.
+            data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, tensor_data(obj))
+        elif oob_consumer is not None and (data := oob_consumer(obj)) is not None:
+            assert isinstance(data, dict)
+        else:
+            # Otherwise encode index of backing buffer to avoid copy.
+            assert self.aux_buffers is not None
+            data = len(self.aux_buffers)
+            self.aux_buffers.append(tensor_data(obj))
+        dtype = str(obj.dtype).removeprefix("torch.")
+        return dtype, obj.shape, data</code></pre>
+</div>
+
+<p><code>size_threshold</code> defaults to <code>VLLM_MSGPACK_ZERO_COPY_THRESHOLD = 256</code> bytes (<code>vllm/envs.py:L224</code>). Below it, copy inline &mdash; a separate frame is not worth a syscall. Above it, hand ZMQ a pointer, and then keep that buffer alive until ZMQ is done with it. Hence the message-tracker bookkeeping in the output thread:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1829-L1844</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                # Reclaim buffers that zmq is finished with.
+                while pending and pending[-1][0].done:
+                    reclaimed = pending.pop()[1]
+                    if len(reuse_buffers) &lt; max_reuse_bufs:
+                        reuse_buffers.append(reclaimed)
+
+                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
+                buffers = encoder.encode_into(outputs, buffer)
+                tracker = self._send_msg_tracking_payload(
+                    sockets[client_index], buffers
+                )
+                if not tracker.done:
+                    pending.appendleft((tracker, buffer))
+                elif len(reuse_buffers) &lt; max_reuse_bufs:
+                    # Limit the number of buffers to reuse.
+                    reuse_buffers.append(buffer)</code></pre>
+</div>
+
+<p>The payload buffer is <em>recycled</em>, not reallocated: <code>encode_into</code> writes into a <code>bytearray</code> from a free list of size <code>len(sockets) + 1</code>. The 223 allocations per second it saves are trivial; what matters is 223 fewer objects per second entering the GC's young generation in the process whose pause times set $T_{\text{step}}$.</p></div></section>
+<section class="sec" id="layers" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The five layers, and what each owns exclusively</h2></div><div class="sec__body"><h3><code>AsyncLLM</code> &mdash; the frontend</h3>
+
+<p><b>Process:</b> API server. <b>Concurrency:</b> asyncio, single-threaded. It constructs four things and owns three of them:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L135-L156</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.renderer = renderer = renderer_from_config(self.vllm_config)
+
+        # Convert EngineInput --&gt; EngineCoreRequest.
+        self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+        # Converts EngineCoreOutputs --&gt; RequestOutput.
+        self.output_processor = OutputProcessor(
+            renderer.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
+            tracing_enabled=tracing_endpoint is not None,
+        )
+
+        # EngineCore (starts the engine in background process).
+        self.engine_core = EngineCoreClient.make_async_mp_client(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=self.log_stats,
+            client_addresses=client_addresses,
+            client_count=client_count,
+            client_index=client_index,
+        )</code></pre>
+</div>
+
+<p>Read those four lines as a boundary declaration. <code>InputProcessor</code> is the only producer of an <code>EngineCoreRequest</code>; <code>OutputProcessor</code> is the only consumer of an <code>EngineCoreOutputs</code>. The <em>prompt</em> tokeniser lives here and only here (the engine process loads its own for structured output, <code>vllm/v1/structured_output/__init__.py:L71-L80</code>) &mdash; which is why <code>prompt_token_ids</code> crosses the wire as a list of ints, never a string.</p>
+
+<p>The exclusively-owned state is the per-request mailbox: one <code>RequestOutputCollector</code> per <code>add_request</code> (<code>vllm/v1/engine/output_processor.py:L48-L55</code>), whose docstring names the invariant that makes streaming survive backpressure &mdash; "RequestOutputs are merged if the producer gets ahead of the consumer." A collector is <em>one slot</em>, not a queue; <code>put</code> either fills it or merges into it. That is vLLM's coalescing answer to the problem &sect;9.3 opened with.</p>
+
+<p>Demultiplexing is one background task. <code>output_handler()</code> (<code>vllm/v1/engine/async_llm.py:L686-L747</code>) is the <em>only</em> consumer of the engine's output stream, fanning one batched <code>EngineCoreOutputs</code> out to $B$ collectors in chunks so it does not monopolise the event loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L686-L707</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        async def output_handler():
+            try:
+                while True:
+                    # 1) Pull EngineCoreOutputs from the EngineCore.
+                    outputs = await engine_core.get_output_async()
+                    num_outputs = len(outputs.outputs)
+
+                    iteration_stats = (
+                        IterationStats() if (log_stats and num_outputs) else None
+                    )
+
+                    # Split outputs into chunks of at most
+                    # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                    # event loop for too long.
+                    engine_core_outputs = outputs.outputs
+                    for start in range(0, num_outputs, chunk_size):
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
+                        # 2) Process EngineCoreOutputs.
+                        processed_outputs = output_processor.process_outputs(
+                            outputs_slice, outputs.timestamp, iteration_stats
+                        )</code></pre>
+</div>
+
+<p>The <code>await asyncio.sleep(0)</code> between chunks is the frontend admitting that $Bc$ can exceed $T_{\text{step}}$, and that when it does the SSE writers must still get a turn. Note the threshold: <code>VLLM_V1_OUTPUT_PROC_CHUNK_SIZE</code> defaults to <b>128</b> (<code>vllm/envs.py:L169</code>, <code>:L1430-L1431</code>) and the yield is guarded by <code>if end &lt; num_outputs</code>, so at every batch size discussed above &mdash; $B \le 128$ &mdash; there is exactly one chunk and the yield never fires. It is insurance for the large-batch case, not part of the steady-state path.</p>
+
+<h3><code>EngineCoreClient</code> &mdash; the boundary itself</h3>
+
+<p>This layer has no behaviour of its own. Its job is to make "call the engine" look identical whether the engine is in this process, in another reached synchronously, or in another reached from an event loop. The class docstring enumerates those three (the factory itself is <code>make_client</code> at <code>vllm/v1/engine/core_client.py:L88-L110</code>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core_client.py:L78-L87</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class EngineCoreClient(ABC):
+    """
+    EngineCoreClient: subclasses handle different methods for pushing
+        and pulling from the EngineCore for asyncio / multiprocessing.
+
+    Subclasses:
+    * InprocClient: In process EngineCore (for V0-style LLMEngine use)
+    * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
+    * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
+    """</code></pre>
+</div>
+
+<p><code>InprocClient</code> states plainly what the abstraction hides: "get the next batch of outputs" becomes "run one step of the engine, synchronously, right here."</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core_client.py:L316-L329</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def __init__(self, *args, **kwargs):
+        self.engine_core = EngineCore(*args, **kwargs)
+
+    def get_output(self) -&gt; EngineCoreOutputs:
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
+        return outputs and outputs.get(0) or EngineCoreOutputs()
+
+    def get_supported_tasks(self) -&gt; tuple[SupportedTask, ...]:
+        return self.engine_core.get_supported_tasks()
+
+    def add_request(self, request: EngineCoreRequest) -&gt; None:
+        req, request_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_request(req, request_wave)</code></pre>
+</div>
+
+<p><code>AsyncMPClient</code> owns the ROUTER input socket, the PULL output socket, an encoder, a decoder, and an <code>asyncio.Queue</code> filled by a dedicated task (<code>vllm/v1/engine/core_client.py:L1041-L1095</code>). The asymmetry matters: the client <em>binds</em> ROUTER and addresses each send to an engine identity, which is what makes data-parallel routing a client-side concern (<code>DPLBAsyncMPClient</code>).</p>
+
+<h3><code>EngineCore</code> &mdash; the loop</h3>
+
+<p><b>Owns exclusively:</b> the <code>Scheduler</code> (and through it the <code>KVCacheManager</code> and every block table), the <code>StructuredOutputManager</code>, the pipeline-parallel <code>batch_queue</code>, and the two <code>queue.Queue</code>s that face the IO threads. The busy loop is eleven lines:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1390-L1402</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @fault_tolerant_wrapper
+    def run_busy_loop(self):
+        """Core busy loop of the EngineCore."""
+        while self._handle_shutdown():
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+            # Publish request counts before and after GPU step to ensure freshness.
+            self._maybe_publish_request_counts()
+            # 2) Step the engine core and return the outputs.
+            self._process_engine_step()
+            self._maybe_publish_request_counts()
+
+        raise SystemExit</code></pre>
+</div>
+
+<p>And <code>step()</code> is the whole engine in twenty:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L583-L613</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def step(self) -&gt; tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
+
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return {}, False
+        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
+            model_output = future.result()
+            if model_output is None:
+                model_output = self.model_executor.sample_tokens(grammar_output)
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens &gt; 0</code></pre>
+</div>
+
+<p>Two things to notice. <code>execute_model(..., non_block=True)</code> returns a <code>Future</code>, and the grammar bitmask is computed <em>between</em> the launch and the <code>.result()</code>. How much that actually hides depends on the executor: under <code>MultiprocExecutor</code> the call returns as soon as the request is enqueued on the broadcast MQ (<code>vllm/v1/executor/multiproc_executor.py:L310</code>) and the overlap is real, but <code>UniProcExecutor</code> runs the method inline and then calls <code>future.set_result(...)</code> (<code>vllm/v1/executor/uniproc_executor.py:L108-L117</code>) &mdash; on one GPU the only genuine deferral is async scheduling's <code>AsyncOutputFuture</code> (<code>:L32-L47</code>). And <code>_process_aborts_queue()</code> sits between the model output and <code>update_from_output</code>, so an abort that arrived during a 4.48&nbsp;ms forward pass takes effect on the <em>same</em> step. The input thread writes aborts to both queues (<code>vllm/v1/engine/core.py:L1763-L1772</code>) because "aborting in the scheduler is idempotent."</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">One step behind</span>
+  <p>The loop above is the synchronous one, and it is not what a stock server runs.
+  <code>scheduler_config.async_scheduling</code> defaults to <code>None</code>
+  (<code>vllm/config/scheduler.py:L148</code>), and <code>None</code> resolves to <b>True</b> for an
+  ordinary generation model whose executor supports it (<code>vllm/config/vllm.py:L1279-L1328</code>)
+  &mdash; which <code>UniProcExecutor</code> and <code>MultiprocExecutor</code> both do
+  (<code>vllm/v1/executor/uniproc_executor.py:L155-L158</code>). Under async scheduling the engine
+  schedules step $n{+}1$ before step $n$'s tokens have come back, and the scheduler reserves the
+  gap with <code>num_output_placeholders</code>. Everything about the boundary, the wire format and
+  the abort path in this chapter is unchanged; what moves is <em>when</em> the scheduler learns each
+  token. <a href="11-03-the-v1-scheduler-in-code.html">&sect;11.3</a> owns
+  <code>AsyncScheduler</code>.</p>
+</div>
+
+<h3><code>Executor</code> &mdash; rank fan-out</h3>
+
+<p><b>Owns exclusively:</b> the set of ranks, the broadcast channel to them, the response channels back. Nothing else. Its contract is one primitive, <code>collective_rpc</code>; every other base-class method is a one-liner over it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/abstract.py:L223-L235</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def execute_model(
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
+    ) -&gt; ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        output = self.collective_rpc(  # type: ignore[call-overload]
+            "execute_model", args=(scheduler_output,), non_block=non_block
+        )
+        return output[0]
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+    ) -&gt; ModelRunnerOutput:
+        pass</code></pre>
+</div>
+
+<p>Its docstring states the boundary rule: "It is recommended to use this API to only pass control messages, and set up data-plane communication to pass data" (<code>vllm/v1/executor/abstract.py:L183-L185</code>). KV tensors never cross here &mdash; NCCL and the KV connectors carry them. The executor moves a <code>SchedulerOutput</code> down and a <code>ModelRunnerOutput</code> up, and nothing else.</p>
+
+<h3><code>Worker</code> &mdash; the device</h3>
+
+<p><b>Owns exclusively:</b> the <code>torch.device</code>, the CUDA context, the distributed groups, the memory snapshot used for KV sizing, and the model runner. <code>Worker.init_device</code> (<code>vllm/v1/worker/gpu_worker.py:L315-L441</code>) does them in an order that is itself an invariant: resolve the device index, set the device, initialise distributed, <em>then</em> snapshot memory &mdash; "This ensures NCCL buffers are allocated before we measure available memory." Get that order wrong and the KV cache is sized against memory NCCL is about to take.</p></div></section>
+<section class="sec" id="executors" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The Executor implementations, and why external_launcher cannot be the default</h2></div><div class="sec__body"><p><code>Executor.get_class</code> dispatches on one config string, and is the fastest way to see what topologies vLLM supports at this SHA:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/abstract.py:L61-L81</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        elif distributed_executor_backend == "ray":
+            if envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND:
+                from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
+
+                executor_class = RayExecutorV2
+            else:
+                from vllm.v1.executor.ray_executor import RayDistributedExecutor
+
+                executor_class = RayDistributedExecutor
+        elif distributed_executor_backend == "mp":
+            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+            executor_class = MultiprocExecutor
+        elif distributed_executor_backend == "uni":
+            from vllm.v1.executor.uniproc_executor import UniProcExecutor
+
+            executor_class = UniProcExecutor
+        elif distributed_executor_backend == "external_launcher":
+            # TODO: make v1 scheduling deterministic
+            # to support external launcher
+            executor_class = ExecutorWithExternalLauncher</code></pre>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the Executor hierarchy, and what each implementation is for.</b> Only <code>MultiprocExecutor</code> and the Ray executors set <code>supports_pp = True</code>.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    E["Executor - ABC<br/>abstract: _init_executor, collective_rpc, check_health<br/>uses_ray = False, supports_pp = False"]
+    E --> U["UniProcExecutor - backend uni<br/>one WorkerWrapperBase in THIS process<br/>collective_rpc is a direct method call<br/>for TP=1 PP=1 and for tests"]
+    E --> M["MultiprocExecutor - backend mp<br/>DEFAULT once TP x PP x DP is above 1<br/>one WorkerProc per rank<br/>shm MessageQueue broadcast plus per-rank replies<br/>supports_pp = True, multi-node via nnodes"]
+    E --> R["RayDistributedExecutor - backend ray<br/>uses_ray = True, supports_pp = True<br/>Ray actors plus a compiled DAG<br/>for clusters Ray already schedules"]
+    U --> X["ExecutorWithExternalLauncher<br/>backend external_launcher<br/>one worker per torchrun rank<br/>every rank runs its OWN scheduler<br/>requires deterministic scheduling"]
+    M --> R2["RayExecutorV2 - DEFAULT for backend ray<br/>subclasses MultiprocExecutor<br/>Ray placement, WorkerProc protocol<br/>set VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0 for the legacy one"]
+    M --> R2
+  </script>
+</div>
+
+<p>The last one inverts the architecture: instead of one scheduler fanning out to $N$ ranks, you launch $N$ complete engines under <code>torchrun</code> and each schedules for itself. Its docstring says what that requires:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/uniproc_executor.py:L161-L184</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class ExecutorWithExternalLauncher(UniProcExecutor):
+    """An executor that uses external launchers to launch engines,
+    specially designed for torchrun-compatible launchers, for
+    offline inference with tensor parallelism.
+
+    see https://github.com/vllm-project/vllm/issues/11400 for
+    the motivation, and examples/features/torchrun/torchrun_example_offline.py
+    for the usage example.
+
+    The key idea: although it is tensor-parallel inference, we only
+    create one worker per executor, users will launch multiple
+    engines with torchrun-compatible launchers, and all these engines
+    work together to process the same prompts. When scheduling is
+    deterministic, all the engines will generate the same outputs,
+    and they don't need to synchronize the states with each other.
+    """
+
+    def _init_executor(self) -&gt; None:
+        """Initialize the worker and load the model."""
+        assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+            "To get deterministic execution, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
+        )
+        super()._init_executor()</code></pre>
+</div>
+
+<p>"<em>When</em> scheduling is deterministic" is the load-bearing clause, and the <code># TODO: make v1 scheduling deterministic</code> beside the dispatch at <code>vllm/v1/executor/abstract.py:L79-L80</code> is vLLM stating in its own source that it currently is not. <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a> identified that comment as the honest reason vLLM broadcasts a <code>SchedulerOutput</code> rather than letting each rank derive it: <b>replicating a scheduler is only correct if every replica makes bit-identical decisions, and vLLM does not guarantee that.</b> Broadcasting one authoritative decision costs a shared-memory write per step and needs no such guarantee &mdash; which is why <code>external_launcher</code> is a documented offline path with an assert, and <code>mp</code> is the default <em>once there is more than one rank</em>. On a single GPU there is no second process at all: <code>vllm/config/parallel.py:L980-L981</code> sets the backend to <code>uni</code> whenever <code>world_size == 1</code>, and <code>UniProcExecutor</code> constructs the worker inline in the EngineCore process (<code>vllm/v1/executor/uniproc_executor.py:L52-L73</code>).</p>
+
+<p>The consequence, also from &sect;5.5: because <code>mp</code> is the multi-rank default and now supports multi-node TP/PP without Ray (via <code>--nnodes</code>, <code>--node-rank</code> and <code>--headless</code> on non-zero nodes), the Ray executors have narrowed from "required for multi-node" to "useful when Ray already owns your scheduling."</p>
+
+<p>The worker side of <code>mp</code> is smaller than people expect:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/multiproc_executor.py:L1029-L1045</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def worker_busy_loop(self):
+        """Main busy loop for Multiprocessing Workers"""
+        assert self.rpc_broadcast_mq is not None
+        while True:
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
+                indefinite=True
+            )
+            try:
+                if isinstance(method, str):
+                    func = getattr(self.worker, method)
+                elif isinstance(method, bytes):
+                    func = partial(cloudpickle.loads(method), self.worker)
+
+                output = func(*args, **kwargs)
+
+                if output_rank is None or self.rank == output_rank:
+                    self.handle_output(output)</code></pre>
+</div>
+
+<p>A name, a <code>getattr</code>, a call. The <code>isinstance(method, bytes)</code> branch is the extension point: <code>collective_rpc</code> will <code>cloudpickle</code> an arbitrary callable and run it on every rank (<code>vllm/v1/executor/multiproc_executor.py:L415-L420</code>) &mdash; how &sect;11.5's plugin surfaces and every "run this on all workers" debugging trick work.</p></div></section>
+<section class="sec" id="startup" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: construction order at startup</h2></div><div class="sec__body"><p>The order of construction encodes real dependencies: you cannot size the KV cache before you know how much memory the model left, and you cannot build the scheduler before you know how many blocks it may allocate.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; startup construction order, with the dependency each step waits on.</b> Steps 4&ndash;7 are the reason the executor is built before the scheduler.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    S1["1. AsyncLLM.__init__<br/>renderer, InputProcessor, OutputProcessor<br/>tokenizer loaded HERE, frontend process"]
+    S2["2. EngineCoreClient.make_async_mp_client<br/>bind ROUTER input, bind PULL output<br/>resolve tcp host 0 to real endpoints"]
+    S3["3. launch_core_engines<br/>fork DP coordinator if needed<br/>spawn EngineCoreProc per DP rank"]
+    S4["4. EngineCoreProc.__init__<br/>handshake over DEALER<br/>then calls super().__init__ - steps 5 to 9"]
+    S5["5. EngineCore.__init__ step 1<br/>model_executor = executor_class(config)<br/>spawns WorkerProcs, init_device, load_model"]
+    S6["6. determine_available_memory<br/>collective_rpc to every rank<br/>profile run, memory snapshot diff"]
+    S7["7. _initialize_kv_caches<br/>get_kv_cache_specs, fit blocks to memory<br/>may LOWER max_model_len"]
+    S8["8. initialize_from_config plus compile_or_warm_up_model<br/>allocate KV tensors, torch.compile, capture CUDA graphs<br/>still inside _initialize_kv_caches - core.py L329-L331"]
+    S9["9. Scheduler constructed - core.py L161<br/>gets kv_cache_config and block_size<br/>KVCacheManager built inside it"]
+    S10["10. input and output IO threads started - core.py L1097<br/>then the input thread sends EngineCoreReadyResponse up<br/>carrying post-fitting max_model_len, num_gpu_blocks, block_size"]
+    S11["11. run_busy_loop"]
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9 --> S10 --> S11
+  </script>
+</div>
+
+<p>Step 5 is the one that surprises people: <code>EngineCore.__init__</code>'s first action builds the executor &mdash; spawning every worker and loading every weight &mdash; before the scheduler exists at all.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L132-L136</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Setup Model.
+        self.model_executor = executor_class(vllm_config)
+        self._pooler_config_logged = False
+        if executor_fail_callback is not None:
+            self.model_executor.register_failure_callback(executor_fail_callback)</code></pre>
+</div>
+
+<p>Only then is memory profiled and the scheduler constructed with the resulting block count:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L143-L169</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Setup KV Caches and update CacheConfig after profiling.
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
+        self.structured_output_manager = StructuredOutputManager(vllm_config)
+
+        # Setup scheduler.
+        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
+
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+
+        self.scheduler: SchedulerInterface = Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=self.structured_output_manager,
+            include_finished_set=include_finished_set,
+            log_stats=self.log_stats,
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+        )</code></pre>
+</div>
+
+<p>This dependency is why <code>EngineCoreReadyResponse</code> exists: it "Contains post-initialization config that may differ from the original values (e.g. max_model_len after KV cache auto-fitting)" (<code>vllm/v1/engine/__init__.py:L72-L78</code>). The frontend validates request lengths against <code>max_model_len</code>, but the true value is only knowable after profiling in the engine process, so it has to travel back up the wire before the server can accept traffic.</p></div></section>
+<section class="sec" id="lifecycles" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Lifecycles: who cleans up, and when</h2></div><div class="sec__body"><h3>Abort: two owners, one message</h3>
+
+<p>Every request exists twice: as a <code>RequestState</code> in the frontend's <code>OutputProcessor.request_states</code>, and as a <code>Request</code> in the engine's scheduler. Aborting must retire both, and only one can be retired synchronously.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L749-L758</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -&gt; None:
+        """Abort RequestId in OutputProcessor and EngineCore."""
+
+        request_ids = (
+            (request_id,) if isinstance(request_id, str) else as_list(request_id)
+        )
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        await self.engine_core.abort_requests_async(all_request_ids)</code></pre>
+</div>
+
+<p>The frontend goes first and its removal is authoritative: <code>abort_requests</code> pops the <code>RequestState</code>, expands parents into their <code>n&gt;1</code> children, and pushes a final <code>FinishReason.ABORT</code> output into the collector so the waiting <code>generate()</code> unblocks (<code>vllm/v1/engine/output_processor.py:L508-L529</code>). Only the surviving internal IDs go on the wire; the engine's copy dies asynchronously, and the KV blocks come back then &mdash; not before.</p>
+
+<p>The window between the two is real: a client that disconnects mid-generation frees its mailbox immediately and its GPU blocks up to one step &mdash; 4.48&nbsp;ms &mdash; later. Under a mass disconnect at $B$ in flight that is $B$ abort messages through one socket, one queue, and one idempotent scheduler pass.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Why generate() aborts</span>
+  <p>The abort fires from <code>except (asyncio.CancelledError, GeneratorExit)</code> in <code>generate()</code> (<code>vllm/v1/engine/async_llm.py:L615-L621</code>): a disconnect cancels the task and closes the async generator. Write your own consumer of <code>AsyncLLM.generate()</code> and swallow <code>GeneratorExit</code>, and you leak a request into the engine with no owner in the frontend &mdash; it generates to <code>max_tokens</code>, holding blocks the whole time.</p>
+</div>
+
+<h3>Death: the sentinel chain</h3>
+
+<p>When a worker dies, the failure climbs four layers and crosses two process boundaries. Every link is a different mechanism:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/multiproc_executor.py:L305-L324</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        def monitor_workers():
+            sentinels = [h.proc.sentinel for h in workers]
+            died = multiprocessing.connection.wait(sentinels)
+            _self = self_ref()
+            if not _self or getattr(_self, "shutting_down", False):
+                logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
+                return
+            _self.is_failed = True
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
+            logger.error(
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
+            )
+            _self.shutdown()
+            callback = _self.failure_callback
+            if callback is not None:
+                _self.failure_callback = None
+                callback()</code></pre>
+</div>
+
+<ol>
+  <li>A daemon thread blocks on the workers' process sentinels. One dies; <code>wait()</code> returns.</li>
+  <li>The executor marks itself failed, shuts down the remaining workers, and calls the failure callback <code>EngineCore.__init__</code> registered &mdash; a one-liner at <code>vllm/v1/engine/core.py:L1028-L1030</code> that puts <code>(EngineCoreRequestType.EXECUTOR_FAILED, b"")</code> into <code>input_queue</code>, the only safe way a background thread can interrupt the busy loop.</li>
+  <li>The loop picks it up and <code>_handle_client_request</code> does the bluntest thing available: <code>raise RuntimeError("Executor failed.")</code> (<code>vllm/v1/engine/core.py:L1548-L1549</code>).</li>
+  <li><code>run_engine_core</code>'s handler logs "EngineCore encountered a fatal error" and calls <code>_send_engine_dead()</code>, which pushes <code>ENGINE_CORE_DEAD</code> onto <code>output_queue</code> and <em>joins the output thread with a 5-second timeout</em> &mdash; the process is about to exit and the sentinel must win that race (<code>vllm/v1/engine/core.py:L1618-L1631</code>).</li>
+  <li>The frontend's socket task sees a single frame and translates it:</li>
+</ol>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core_client.py:L490-L493</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def validate_alive(self, frames: Sequence[zmq.Frame]):
+        if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
+            self.engine_dead = True
+            raise EngineDeadError()</code></pre>
+</div>
+
+<p>That <code>EngineDeadError</code> lands in <code>outputs_queue</code>, is raised out of <code>get_output_async()</code>, kills the <code>output_handler</code> task, and reaches <em>every</em> in-flight request via <code>OutputProcessor.propagate_error</code>, which puts the exception into each collector (<code>vllm/v1/engine/output_processor.py:L468-L474</code>). Every open stream fails at once, which is correct: the engine's state is gone, so nothing in flight can complete. <a href="../09-serving-system/09-05-observability-and-failure.html">&sect;9.5</a> owns the operational response &mdash; the process is unrecoverable by design and restart is the answer.</p>
+
+<h3>Graceful shutdown: drain or abort</h3>
+
+<p>The clean path is driven by a signal handler that sets a state enum rather than raising. <code>_handle_shutdown</code> then picks one of two modes from one config value:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1477-L1497</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if self.shutdown_state == EngineShutdownState.REQUESTED:
+            shutdown_timeout = self.vllm_config.shutdown_timeout
+            mode = "abort" if shutdown_timeout == 0 else "drain"
+
+            logger.info(
+                "[shutdown] EngineCore: start mode=%s timeout=%ds",
+                mode,
+                shutdown_timeout,
+            )
+
+            if shutdown_timeout == 0:
+                num_requests = self.scheduler.get_num_unfinished_requests()
+                if num_requests &gt; 0:
+                    logger.info(
+                        "[shutdown] EngineCore: aborting in-flight requests count=%d",
+                        num_requests,
+                    )
+                aborted_reqs = self.scheduler.finish_requests(
+                    None, RequestStatus.FINISHED_ABORTED
+                )
+                self._send_abort_outputs(aborted_reqs)</code></pre>
+</div>
+
+<p>Drain is opt-in: <code>shutdown_timeout</code> defaults to <b>0</b> (<code>vllm/config/vllm.py:L451</code>), so the out-of-the-box graceful path is <em>abort</em>. In drain mode the loop stops accepting <code>ADD</code> requests (<code>_reject_add_in_shutdown</code>) and keeps stepping until <code>has_work()</code> goes false. Frontend-side, <code>BackgroundResources.__call__</code> sets <code>engine_dead = True</code> <em>before</em> closing sockets, so late output reads as death rather than as a hang (<code>vllm/v1/engine/core_client.py:L428-L440</code>).</p></div></section>
+<section class="sec" id="v2-runner" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Where the V2 model runner slots in</h2></div><div class="sec__body"><p><a href="11-01-repo-map-and-v1.html">&sect;11.1</a> owns the model-runner rewrite. What belongs <em>here</em> is why it is tractable: the new runner is selected inside <code>Worker.init_device</code>, below every boundary in this chapter.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_worker.py:L423-L438</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Construct the model runner
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.gpu.model_runner import (
+                GPUModelRunner as GPUModelRunnerV2,
+            )
+
+            # HACK(woosuk): This is a temporary fix to avoid type errors.
+            self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            from vllm.v1.worker.gpu_model_runner import (
+                GPUModelRunner as GPUModelRunnerV1,
+            )
+
+            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)</code></pre>
+</div>
+
+<p>An <code>if</code> on a config flag, two imports, one attribute. <code>AsyncLLM</code>, <code>EngineCoreClient</code>, <code>EngineCore</code>, the <code>Scheduler</code>, the <code>Executor</code> and the wire format are untouched, because the runner's contract upward is exactly <code>execute_model(SchedulerOutput) -&gt; ModelRunnerOutput</code> plus <code>sample_tokens</code>. <b>A rewrite is affordable in proportion to how narrow the interface above it is.</b> Contrast the V0&rarr;V1 rewrite, which moved the process boundary itself and therefore touched everything.</p></div></section>
+<section class="sec" id="reading-guide" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls, and a reading guide for contributors</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Adding a field in the middle of a wire struct</h4><p><code>array_like=True</code> makes fields positional. Insert one anywhere but the end of <code>EngineCoreRequest</code> or <code>EngineCoreOutput</code> and a frontend and engine at different commits silently mis-decode everything after it. The comments on <code>mm_cache_miss_hashes</code> and <code>spec_decode_metrics</code> both say "appended last" for this reason.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Blocking the event loop in output_handler</h4><p>Anything added to <code>process_outputs</code> runs $B$ times per step in the same event loop as every SSE writer. At $B=128$ the per-token budget is 35&nbsp;&micro;s (derived, &sect;9.3) &mdash; a regex over generated text there is not a small change.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Comparing timestamps across the boundary</h4><p>Both are <code>time.monotonic()</code> from the engine process. Subtracting one from a frontend <code>time.monotonic()</code> gives a meaningless number, not a queueing delay.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Debugging with the wrong process attached</h4><p><code>py-spy dump --pid $(pgrep -f EngineCore)</code>, not the API server PID. The engine sets its process title at <code>vllm/v1/engine/core.py:L1285-L1289</code> specifically so you can find it.</p></div>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Which file to open for which kind of change. Paths relative to the vLLM repo root at <code>a556f3f</code>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>You want to change&hellip;</th><th>Open</th><th>Because it owns</th></tr></thead>
+      <tbody>
+        <tr><td>How a request is validated or tokenised</td><td><code>vllm/v1/engine/input_processor.py</code></td><td>The only producer of <code>EngineCoreRequest</code></td></tr>
+        <tr><td>What a streaming client sees per token</td><td><code>vllm/v1/engine/output_processor.py</code></td><td><code>RequestState</code>, detokeniser, collectors</td></tr>
+        <tr><td>A new field on the wire</td><td><code>vllm/v1/engine/__init__.py</code></td><td>Both hot-path structs &mdash; append at the end</td></tr>
+        <tr><td>A new out-of-band control call</td><td><code>vllm/v1/engine/core_client.py</code> + a method on <code>EngineCore</code></td><td><code>UTILITY</code> dispatches by <code>getattr</code> on the name</td></tr>
+        <tr><td>Scheduling policy</td><td><code>vllm/v1/core/sched/scheduler.py</code> (<a href="11-03-the-v1-scheduler-in-code.html">&sect;11.3</a>)</td><td>The engine's only decision-maker</td></tr>
+        <tr><td>A new rank topology or launcher</td><td><code>vllm/v1/executor/abstract.py</code> + a subclass</td><td><code>get_class</code> also accepts a fully-qualified class name</td></tr>
+        <tr><td>Anything about tensors or CUDA graphs</td><td><code>vllm/v1/worker/gpu/model_runner.py</code> &mdash; the default for every dense model; <code>vllm/v1/worker/gpu_model_runner.py</code> is the fallback (<a href="11-04-model-runner-and-backends.html">&sect;11.4</a>)</td><td>Below every boundary in this chapter</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p><b>Three objects carry the invariants that matter most.</b> <code>EngineCoreRequest</code>/<code>EngineCoreOutput</code>: field order is ABI. <code>RequestOutputCollector</code>: a one-slot mailbox with merge-on-overflow, so a slow consumer changes <em>chunk shape</em>, never token content &mdash; making <code>put</code> drop instead of merge is a correctness bug. <code>Executor.collective_rpc</code>: control messages only, because a tensor on the RPC channel serialises every rank's step behind one Python pickle.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Path drift</span>
+  <p>If you go looking for the HTTP routes that call <code>AsyncLLM.generate()</code>, note that at this SHA <code>vllm/entrypoints/openai/api_server.py</code> is a 59-line compatibility shim. <code>vllm/entrypoints/launchers/api_server/routers.py</code> is only the 74-line registry (<code>register_api_routers</code>); the handlers that actually reach <code>AsyncLLM.generate()</code> are under <code>vllm/entrypoints/generate/api_router.py</code> and <code>vllm/entrypoints/openai/chat_completion/serving.py</code> and <code>completion/serving.py</code>. <a href="../09-serving-system/09-01-openai-api-surface.html">&sect;9.1</a> covers the surface.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. See both processes, and prove which is busy.</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">shell</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 4096 &amp;
+# in another shell, once it is up:
+ps -eo pid,comm,args | grep -E 'EngineCore|APIServer|VLLM'
+py-spy dump --pid $(pgrep -f 'EngineCore')      # the busy loop
+# NB: with the default --api-server-count 1 the frontend runs in the main
+# `vllm serve` process and sets no process title; use that PID directly.
+# With --api-server-count 2+ the workers are titled VLLM::APIServer_0, ...
+py-spy dump --pid $(pgrep -f 'VLLM::APIServer')  # the event loop</code></pre>
+</div>
+
+<p>Under load the engine dump sits in <code>execute_model</code> or <code>update_from_output</code>; the frontend in <code>epoll</code> or <code>process_outputs</code>. If the frontend is <em>ever</em> in <code>epoll</code> while requests are queued, $Bc &lt; T_{\text{step}}$ and the split is doing its job.</p>
+
+<p><b>2. Collapse the split and watch the arithmetic.</b> <code>VLLM_ENABLE_V1_MULTIPROCESSING=0</code> forces <code>InprocClient</code>, putting the scheduler and the detokeniser under one GIL:</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">shell</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code>python -c "
+from vllm import LLM, SamplingParams
+llm = LLM('meta-llama/Meta-Llama-3-8B-Instruct', max_model_len=2048)
+print(type(llm.llm_engine.engine_core).__name__)
+"
+# with VLLM_ENABLE_V1_MULTIPROCESSING=0 -&gt; InprocClient
+# default (=1)                          -&gt; SyncMPClient</code></pre>
+</div>
+
+<p>The offline <code>LLM</code> path makes the model executor directly reachable in-process (<code>vllm/v1/engine/llm_engine.py:L122-L125</code>), which is why every vLLM debugging recipe starts by setting this to 0. Prediction to test: at batch 1 the two settings should be near-identical, since $Bc$ is one token of host work. The gap opens with batch.</p>
+
+<p><b>3. Measure the wire, not the model.</b> Compare throughput at <code>VLLM_MSGPACK_ZERO_COPY_THRESHOLD=1</code> and <code>=1000000</code> on a workload with <code>logprobs=20</code>, which puts real tensors in <code>EngineCoreOutput.new_logprobs</code>. At 1 they ride as separate zero-copy frames; at 1000000 they are copied inline.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read and answer.</b> Open <code>vllm/v1/engine/core.py</code> and find <code>_process_input_queue</code>. Under what condition does it call <code>input_queue.get(block=True)</code>, and what would go wrong if it always blocked?</li>
+  <li><b>Read and answer.</b> <code>EngineCore.step()</code> calls <code>self._process_aborts_queue()</code> after <code>future.result()</code> but before <code>update_from_output</code>. Why not at the top of the loop instead? Name the specific saving.</li>
+  <li><b>Predict, then verify.</b> Derive the size of one <code>EngineCoreOutputs</code> at $B=64$ with <code>logprobs=5</code>, reading the real shapes off <code>LogprobsLists</code> at <code>vllm/v1/outputs.py:L30-L41</code> first &mdash; note it is <code>max_num_logprobs + 1</code> wide and carries a third array. Does each request's payload cross the 256-byte zero-copy threshold? Verify against <code>_encode_ndarray</code>.</li>
+  <li><b>Predict, then verify.</b> You launch with <code>--distributed-executor-backend external_launcher</code> under <code>torchrun --nproc_per_node 2</code> but leave <code>VLLM_ENABLE_V1_MULTIPROCESSING</code> at its default. What happens, at which line, and with what message?</li>
+  <li><b>Design.</b> You want the engine to emit trace spans with wall-clock timestamps comparable to the frontend's. Which existing field would mislead you, and what is the minimum wire-struct change that fixes it without breaking positional compatibility?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> <code>block</code> is <code>self.process_input_queue_block</code>, set <code>True</code> in <code>EngineCoreProc.__init__</code> (<code>vllm/v1/engine/core.py:L1070</code>) and overridden by the DP subclass. The guard <code>while not self.has_work() and self.is_running()</code> means it only blocks when there is genuinely nothing to do; an unconditional block would stall the loop with requests already in flight, because the next wake-up would wait on a client message rather than the GPU.</p>
+  <p><b>2.</b> The forward pass takes 4.48&nbsp;ms (derived), during which the input IO thread is free to receive aborts. Handling them at the top of the loop would defer an abort arriving at $t=0.1$&nbsp;ms to the <em>next</em> iteration &mdash; wasting a step of KV residency and letting <code>update_from_output</code> append a token to an abandoned request. The saving is one step of latency per abort.</p>
+  <p><b>3.</b> 5 float32 + 5 int32 = 40 bytes per request, well under the 256-byte threshold, so each is inlined as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, ...)</code> rather than becoming its own frame (<code>vllm/v1/serial_utils.py:L243-L250</code>). That is roughly 39 base bytes plus ~90 bytes of inlined payload and headers per request, about 8.3&nbsp;KB at $B=64$. Note the threshold is <em>per tensor</em>, and these tensors are per-request &mdash; so growing the batch never pushes one over it.</p>
+  <p><b>4.</b> Nothing fails &mdash; and that is the interesting part. The env var does default to <code>True</code> (<code>vllm/envs.py:L157</code>), and there <em>is</em> an <code>assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING</code> at <code>vllm/v1/executor/uniproc_executor.py:L180-L183</code> with the message "To get deterministic execution, please set VLLM_ENABLE_V1_MULTIPROCESSING=0". But <code>ParallelConfig</code> gets there first: selecting <code>external_launcher</code> makes it <code>os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"</code> and log "Disabling V1 multiprocessing for external launcher." (<code>vllm/config/parallel.py:L932-L934</code>). Because <code>vllm.envs</code> resolves lazily through <code>__getattr__</code>, by the time <code>_init_executor</code> reads it the value is already <code>False</code> and the assert passes. It is a backstop against someone re-setting the variable later, not the normal outcome. The assert exists because the design assumes every rank's scheduler makes identical decisions, and background-process scheduling adds non-determinism on top of what the <code>abstract.py:L79-L80</code> TODO already admits.</p>
+  <p><b>5.</b> Both <code>EngineCoreOutputs.timestamp</code> and <code>EngineCoreEvent.timestamp</code> mislead: they are <code>time.monotonic()</code> in the engine process, and the docstring at <code>vllm/v1/engine/__init__.py:L179-L183</code> warns they "should not be compared with timestamps from other processes." The minimum fix is to append a <code>time.time()</code>-based field at the <em>end</em> of the struct with a default, preserving positional compatibility. Better: send one clock-offset sample in <code>EngineCoreReadyResponse</code> &mdash; a plain dataclass, not <code>array_like</code>, so a field may go anywhere &mdash; and convert in the frontend, at zero per-step cost.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li><b>The process split turns addition into a maximum.</b> One process costs $T_{\text{step}} + Bc$ because of the GIL; two cost $\max(T_{\text{step}}, Bc)$. &sect;9.3's frontend budget &mdash; 140&nbsp;&micro;s at $B=32$ &mdash; is exactly the $c$ at which the split is worth 2&times;.</li>
+  <li><b>The boundary is crossed once per <em>step</em>, not once per token.</b> <code>EngineCoreOutputs</code> carries the whole batch, so at $B=128$ the cost is one encode and one decode per 128 tokens &mdash; about 41 wire bytes per token, several times smaller than the SSE frame the frontend produces from it. Batching is what makes the split affordable.</li>
+  <li><b>Field order in <code>EngineCoreRequest</code> and <code>EngineCoreOutput</code> is wire ABI.</b> <code>array_like=True</code> drops field names; <code>omit_defaults=True</code> trims trailing defaults; <code>gc=False</code> keeps these objects out of the cyclic collector. All three are deliberate and all three constrain how you may edit those classes.</li>
+  <li><b><code>Executor</code> has exactly one primitive:</b> <code>collective_rpc</code>, restricted by its own docstring to control messages. Every other method is a one-line wrapper over it, which is why adding a topology means implementing three abstract methods &mdash; <code>_init_executor</code>, <code>collective_rpc</code> and <code>check_health</code> (<code>vllm/v1/executor/abstract.py:L116-L117</code>, <code>:L200-L201</code>, <code>:L272-L273</code>) &mdash; and almost nothing else.</li>
+  <li><b><code>external_launcher</code> cannot be the default because vLLM says its own scheduler is not deterministic.</b> The <code># TODO</code> at <code>vllm/v1/executor/abstract.py:L79-L80</code> is why a broadcast <code>SchedulerOutput</code> beats a replicated scheduler: it costs a shared-memory write per step and needs no determinism guarantee at all.</li>
+  <li><b>Aborts have two owners with different clocks; death has one.</b> The frontend's <code>RequestState</code> dies synchronously, the engine's <code>Request</code> and its KV blocks up to one step later. Engine death inverts this: one sentinel frame fails every in-flight stream at once, because nothing in flight can complete. And the V2 model runner slots in below the <code>Worker</code> behind one <code>if</code> in <code>init_device</code> &mdash; the payoff of keeping that interface down to <code>execute_model</code> plus <code>sample_tokens</code>.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/vllm-project/vllm/issues/11400">vllm-project/vllm#11400</a> &mdash; the issue <code>ExecutorWithExternalLauncher</code>'s docstring points at, on running vLLM under torchrun-compatible launchers. Read it alongside the determinism TODO.</li>
+  <li><a href="https://blog.vllm.ai/2025/01/27/v1-alpha-release.html">vLLM V1 alpha release notes</a> &mdash; the project's own account of why the frontend and engine were separated, and what the isolated <code>EngineCore</code> loop was meant to buy.</li>
+  <li><a href="https://docs.vllm.ai/en/latest/design/arch_overview.html">vLLM architecture overview</a> &mdash; the maintained diagram of the same stack; a cross-check on which layers have moved since this SHA.</li>
+  <li><a href="https://jcristharif.com/msgspec/">msgspec documentation</a> &mdash; specifically the pages on <code>array_like</code>, <code>omit_defaults</code> and <code>gc=False</code>, which explain the three flags on the wire structs better than any comment in the vLLM tree.</li>
+  <li><a href="https://zguide.zeromq.org/docs/chapter3/">ZeroMQ Guide, chapter 3</a> &mdash; ROUTER/DEALER and PUSH/PULL semantics, including what a PUSH socket does when the puller is slow.</li>
+  <li><a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a> for the executor/worker boundary in depth, <a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> for one request across both engines, <a href="../09-serving-system/09-05-observability-and-failure.html">&sect;9.5</a> for the failure semantics, and <a href="11-03-the-v1-scheduler-in-code.html">&sect;11.3</a> for what happens inside <code>schedule()</code>.</li>
+</ul></div></section>
+<div class="pager"><a href="11-01-repo-map-and-v1.html"><div class="pager__k">← Previous</div><div class="pager__t">Repo map, and what V1 changed</div></a><a class="pager__next" href="11-03-the-v1-scheduler-in-code.html"><div class="pager__k">Next →</div><div class="pager__t">The V1 scheduler, in code</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: two clocks, one wire, N ranks</a>
+<a href="#first-principles">First principles: what a process boundary costs, and what it buys</a>
+<a href="#wire-format">What actually crosses the wire</a>
+<a href="#layers">The five layers, and what each owns exclusively</a>
+<a href="#executors">The Executor implementations, and why external_launcher cannot be the default</a>
+<a href="#startup">Worked trace: construction order at startup</a>
+<a href="#lifecycles">Lifecycles: who cleans up, and when</a>
+<a href="#v2-runner">Where the V2 model runner slots in</a>
+<a href="#reading-guide">Pitfalls, and a reading guide for contributors</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,1750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tokenization and incremental detokenization — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i is-current" href="09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 9 · The serving system around the engine · 09-02</div>
+<h1>Tokenization and incremental detokenization</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/detokenizer.py</code></li><li><code>vllm/tokenizers/detokenizer_utils.py</code></li><li><code>vllm/tokenizers/hf.py</code></li><li><code>python/sglang/srt/managers/detokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/async_dynamic_batch_tokenizer.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">The model emitted a perfectly good chilli-pepper emoji. Your user saw <code>&#65533;&#65533;</code>. Nothing in the engine logged an error, the token ids in the trace are correct, and the same request replayed with <code>stream=false</code> returns the right string. This chapter is about the gap between those two facts, and it is almost entirely a host-side problem &mdash; the GPU never sees a character.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Three bug reports, all from the same root cause.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">GARBLED</span><h4>Replacement characters mid-stream</h4><p>Non-ASCII output arrives as <code>&#65533;</code> at chunk boundaries. Setting <code>stream=false</code> makes it go away, which points the finger at the streaming path rather than the model.</p></div>
+  <div class="ve-card"><span class="ve-card__k">LEAKED</span><h4>Half a stop string appears</h4><p>You pass <code>stop=["&lt;/answer&gt;"]</code>. Generation stops correctly, but the client already received <code>&lt;/ans</code> and there is no way to un-send it over SSE.</p></div>
+  <div class="ve-card"><span class="ve-card__k">DIVERGENT</span><h4>Logs fine, client wrong</h4><p>The engine's own <code>RequestOutput.text</code> is correct. The concatenation of the streamed deltas is not. Two different code paths produced them.</p></div>
+</div>
+
+<p>These are not exotic. vLLM carries a dedicated recovery path for the first one, keyed off an error string that comes out of the Rust <code>tokenizers</code> crate:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L23-L28</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># Only tokenizers &gt;= 0.22.0 supports DecodeStream with native prefill
+# (ids parameter) used for FastIncrementalDetokenizer.
+USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) &gt;= version.parse("0.22.0")
+
+# Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
+INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"</code></pre>
+</div>
+
+<p>The comment attached to the handler for that error is the whole chapter in one sentence: "Recover from edge case where tokenizer can produce non-monotonic, invalid UTF-8 output, which breaks the internal state of tokenizers' <code>DecodeStream</code>" (<code>vllm/v1/engine/detokenizer.py:L235-L238</code>, referencing vLLM issue #17448). Detokenisation is stateful, and its state can go wrong in ways that only manifest as text.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: a token is a byte string, not a character</h2></div><div class="sec__body"><p>A BPE vocabulary maps integers to <em>byte sequences</em>, and nothing requires those bytes to be valid UTF-8 on their own. When the tokenizer meets a character whose bytes never earned a merge &mdash; most emoji, plenty of CJK, essentially all Burmese &mdash; it falls back to emitting raw bytes, one token per byte. vLLM's decoder names this: "utf-8 char at the end means it's a potential unfinished byte sequence from byte fallback tokenization" (<code>vllm/tokenizers/detokenizer_utils.py:L260-L264</code>). So the naive streaming algorithm &mdash; <code>for id in new_ids: emit(tokenizer.decode([id]))</code> &mdash; is wrong, and wrong only on the inputs your test suite lacks.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one character, four tokens, and what per-token decoding does to it.</b>
+    Byte values are exact UTF-8. Token ids are tokenizer-specific and elided; the boundaries are the point.</p>
+  <svg viewBox="0 0 780 380" width="100%" role="img" aria-label="A four-byte emoji split across four byte-fallback tokens, showing that decoding each token alone yields replacement characters while decoding the concatenation yields the emoji">
+    <text x="20" y="24" font-family="monospace" font-size="12" fill="currentColor">SOURCE TEXT      "URGENCY" + U+1F336 CHILLI PEPPER</text>
+    <text x="20" y="42" font-family="monospace" font-size="12" fill="currentColor">UTF-8 BYTES      55 52 47 45 4E 43 59 | F0 9F 8C B6</text>
+
+    <text x="20" y="76" font-family="monospace" font-size="12" fill="currentColor">TOKEN STREAM as a byte-fallback BPE emits it</text>
+    <rect x="20" y="88" width="150" height="34" rx="3" fill="#46586b" fill-opacity="0.16" stroke="#46586b" stroke-width="1"/>
+    <text x="30" y="103" font-family="monospace" font-size="11" fill="currentColor">t0  "URGEN"</text>
+    <text x="30" y="117" font-family="monospace" font-size="11" fill="currentColor">55 52 47 45 4E</text>
+    <rect x="178" y="88" width="92" height="34" rx="3" fill="#46586b" fill-opacity="0.16" stroke="#46586b" stroke-width="1"/>
+    <text x="188" y="103" font-family="monospace" font-size="11" fill="currentColor">t1  "CY"</text>
+    <text x="188" y="117" font-family="monospace" font-size="11" fill="currentColor">43 59</text>
+    <rect x="278" y="88" width="112" height="34" rx="3" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="288" y="103" font-family="monospace" font-size="11" fill="currentColor">t2 &lt;0xF0&gt;</text>
+    <text x="288" y="117" font-family="monospace" font-size="11" fill="currentColor">F0</text>
+    <rect x="398" y="88" width="112" height="34" rx="3" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="408" y="103" font-family="monospace" font-size="11" fill="currentColor">t3 &lt;0x9F&gt;</text>
+    <text x="408" y="117" font-family="monospace" font-size="11" fill="currentColor">9F</text>
+    <rect x="518" y="88" width="112" height="34" rx="3" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="528" y="103" font-family="monospace" font-size="11" fill="currentColor">t4 &lt;0x8C&gt;</text>
+    <text x="528" y="117" font-family="monospace" font-size="11" fill="currentColor">8C</text>
+    <rect x="638" y="88" width="112" height="34" rx="3" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="648" y="103" font-family="monospace" font-size="11" fill="currentColor">t5 &lt;0xB6&gt;</text>
+    <text x="648" y="117" font-family="monospace" font-size="11" fill="currentColor">B6</text>
+
+    <text x="20" y="158" font-family="monospace" font-size="12" fill="currentColor">NAIVE:  emit(decode([t])) for each t, then concatenate</text>
+    <text x="30" y="180" font-family="monospace" font-size="11" fill="currentColor">decode([t2]) -&gt; bytes F0 alone      -&gt; not a complete scalar -&gt; U+FFFD</text>
+    <text x="30" y="196" font-family="monospace" font-size="11" fill="currentColor">decode([t3]) -&gt; bytes 9F alone      -&gt; not a complete scalar -&gt; U+FFFD</text>
+    <text x="30" y="212" font-family="monospace" font-size="11" fill="currentColor">decode([t4]) -&gt; bytes 8C alone      -&gt; not a complete scalar -&gt; U+FFFD</text>
+    <text x="30" y="228" font-family="monospace" font-size="11" fill="currentColor">decode([t5]) -&gt; bytes B6 alone      -&gt; not a complete scalar -&gt; U+FFFD</text>
+    <rect x="20" y="240" width="470" height="24" rx="3" fill="#b8567a" fill-opacity="0.14" stroke="#b8567a" stroke-width="1"/>
+    <text x="30" y="256" font-family="monospace" font-size="11" fill="currentColor">CLIENT SEES  "URGENCY" + four replacement characters. 4 chars, 0 emoji.</text>
+
+    <text x="20" y="296" font-family="monospace" font-size="12" fill="currentColor">CORRECT: decode the CONCATENATION of the byte run</text>
+    <text x="30" y="318" font-family="monospace" font-size="11" fill="currentColor">decode([t2,t3,t4,t5]) -&gt; F0 9F 8C B6 -&gt; U+1F336 -&gt; one character</text>
+    <rect x="20" y="330" width="470" height="24" rx="3" fill="#2f9a94" fill-opacity="0.16" stroke="#2f9a94" stroke-width="1"/>
+    <text x="30" y="346" font-family="monospace" font-size="11" fill="currentColor">so the emitter must WITHHOLD t2, t3, t4 until t5 arrives.</text>
+    <text x="510" y="318" font-family="monospace" font-size="11" fill="currentColor">Same shape for CJK:</text>
+    <text x="510" y="334" font-family="monospace" font-size="11" fill="currentColor">U+6211 -&gt; E6 88 91</text>
+    <text x="510" y="350" font-family="monospace" font-size="11" fill="currentColor">three bytes, up to 3 tokens</text>
+  </svg>
+</div>
+
+<p>The <code>URGENCY</code> prefix is not decoration &mdash; it is lifted from vLLM's regression test, whose comment records the choice: <code># Using "URGENCY" since "CY" has token id 130282</code> (<code>tests/tokenizers_/test_detokenize.py:L108</code>), a Pixtral-12B id exercising the V3-Tekken edge case from PR #9625. The other fixture is Burmese, flagged as triggering "an edge-case where tokens may map to bytes with incomplete UTF-8 characters" (<code>tests/tokenizers_/test_detokenize.py:L105-L107</code>).</p>
+
+<p>The correct algorithm is therefore: keep a window of recent tokens, decode the <em>window</em>, emit only the suffix that is now stable. Everything below is bookkeeping for that one idea.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the prefix/read offset window</h2></div><div class="sec__body"><p>Let $I = [i_1, \dots, i_n]$ be all token ids so far (prompt plus output) and $S(\cdot)$ the tokenizer's many-tokens-to-one-string decode. The quantity to emit at step $n$ is</p>
+
+<div class="math-display">$$\Delta_n = S(I[p:n]) \setminus_{\text{prefix}} S(I[p:r])$$</div>
+
+<p>where $p$ is the <b>prefix offset</b>, $r$ the <b>read offset</b>, $p \le r \le n$, and $\setminus_{\text{prefix}}$ means "strip the left-hand string as a prefix". Two nested windows, decoded independently; the delta is the difference.</p>
+
+<p>Why two windows instead of one? Because $S$ is not a homomorphism. Decoding <code>["▁Hello"]</code> and <code>["▁Hello", "▁world"]</code> do not agree on whether a leading space survives &mdash; SentencePiece's <code>decode()</code> strips the dummy prefix, ByteLevel does not, BERT's post-processor inserts spaces around subwords. vLLM states the purpose flatly: the offsets exist "to defeat cleanup algorithms in the decode which decide to add a space or not depending on the surrounding ids" (<code>vllm/tokenizers/detokenizer_utils.py:L195-L197</code>). Decode both windows from the same left edge $p$ and whatever cleanup $S$ applies there cancels in the subtraction.</p>
+
+<p>$r$ is the frontier of what has been emitted; $p$ trails it by a fixed number of tokens of context. That constant is five in both engines, and both call it arbitrary:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/tokenizers/detokenizer_utils.py:L57-L59</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># 5 is an arbitrary value that should work for all
+# tokenizers (bigger = more conservative).
+INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5</code></pre>
+</div>
+
+<p>SGLang's is <code>INIT_INCREMENTAL_DETOKENIZATION_OFFSET = 5</code> at <code>python/sglang/srt/managers/schedule_batch.py:L144</code>, and the function using it credits the vLLM implementation it was ported from (<code>python/sglang/srt/managers/schedule_batch.py:L1427</code>). SGLang names its prefix offset <code>surr_offset</code>, for "surrounding"; same $p$.</p>
+
+<p>Here is the core, worth reading twice:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/tokenizers/detokenizer_utils.py:L238-L268</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # The prefix text is necessary only to defeat cleanup algorithms in
+    # the decode which decide to add a space or not depending on the
+    # surrounding ids.
+    if tokenizer.is_fast or not tokenizer.get_added_vocab():
+        prefix_text = tokenizer.convert_tokens_to_string(
+            output_tokens[prefix_offset:read_offset]
+        )
+        new_text = tokenizer.convert_tokens_to_string(output_tokens[prefix_offset:])
+    else:
+        # ...
+    if len(new_text) &lt;= len(prefix_text) or new_text.endswith("&#65533;"):
+        # utf-8 char at the end means it's a potential unfinished byte sequence
+        # from byte fallback tokenization.
+        # If it's in the middle, it's probably a real invalid id generated
+        # by the model
+        return new_tokens, "", prefix_offset, read_offset
+
+    new_text = new_text[len(prefix_text) :]
+    return new_tokens, new_text, read_offset, len(output_tokens)</code></pre>
+</div>
+
+<p>Read the two return statements as the two states of a latch. The <b>hold</b> return emits the empty string and returns <code>prefix_offset, read_offset</code> <em>unchanged</em>, so next step the same tokens are decoded again with one more token of context. The <b>commit</b> return emits the delta and slides the window one hop: the new $p$ is the old $r$, the new $r$ is the full length. Two conditions hold: the window got no longer, or it ends in U+FFFD.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the window over three decode steps, with one held step in the middle.</b>
+    Prompt "Say" has been tokenized to 3 ids; generation emits the four byte-fallback tokens of U+1F336.</p>
+  <svg viewBox="0 0 780 400" width="100%" role="img" aria-label="Three decode steps showing prefix offset and read offset advancing, with a hold step where the window does not move because the decoded text ends in a replacement character">
+    <text x="20" y="22" font-family="monospace" font-size="12" fill="currentColor">token array I, index:   0    1    2    3    4    5    6</text>
+    <text x="20" y="38" font-family="monospace" font-size="12" fill="currentColor">                      [BOS] Say  ":"  F0   9F   8C   B6</text>
+
+    <!-- step A -->
+    <text x="20" y="76" font-family="monospace" font-size="12" fill="currentColor">STEP n=4   token F0 arrives.  p=0  r=3</text>
+    <rect x="20" y="86" width="330" height="20" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="100" font-family="monospace" font-size="11" fill="currentColor">S(I[0:3]) = "Say:"          prefix_text, 4 chars</text>
+    <rect x="20" y="110" width="330" height="20" rx="2" fill="#b8567a" fill-opacity="0.14" stroke="#b8567a" stroke-width="1"/>
+    <text x="28" y="124" font-family="monospace" font-size="11" fill="currentColor">S(I[0:4]) = "Say:&#65533;"         new_text, ends U+FFFD</text>
+    <text x="368" y="100" font-family="monospace" font-size="11" fill="currentColor">HOLD. emit "".</text>
+    <text x="368" y="116" font-family="monospace" font-size="11" fill="currentColor">p,r unchanged -&gt; p=0 r=3</text>
+    <text x="368" y="132" font-family="monospace" font-size="11" fill="currentColor">the byte is buffered, not lost</text>
+
+    <!-- step B -->
+    <text x="20" y="172" font-family="monospace" font-size="12" fill="currentColor">STEP n=7   tokens 9F 8C B6 have arrived.  p=0  r=3 still</text>
+    <rect x="20" y="182" width="330" height="20" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="196" font-family="monospace" font-size="11" fill="currentColor">S(I[0:3]) = "Say:"          prefix_text, 4 chars</text>
+    <rect x="20" y="206" width="330" height="20" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="220" font-family="monospace" font-size="11" fill="currentColor">S(I[0:7]) = "Say:[chilli]"  longer, no U+FFFD</text>
+    <text x="368" y="196" font-family="monospace" font-size="11" fill="currentColor">COMMIT. emit new_text[4:]</text>
+    <text x="368" y="212" font-family="monospace" font-size="11" fill="currentColor">= the one emoji character</text>
+    <text x="368" y="228" font-family="monospace" font-size="11" fill="currentColor">p := old r = 3 ; r := 7</text>
+
+    <!-- step C -->
+    <text x="20" y="268" font-family="monospace" font-size="12" fill="currentColor">STEP n=8   token " ok" arrives.  p=3  r=7</text>
+    <rect x="20" y="278" width="330" height="20" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="292" font-family="monospace" font-size="11" fill="currentColor">S(I[3:7]) = "[chilli]"      prefix_text</text>
+    <rect x="20" y="302" width="330" height="20" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="316" font-family="monospace" font-size="11" fill="currentColor">S(I[3:8]) = "[chilli] ok"   longer</text>
+    <text x="368" y="292" font-family="monospace" font-size="11" fill="currentColor">COMMIT. emit " ok"</text>
+    <text x="368" y="308" font-family="monospace" font-size="11" fill="currentColor">p := 7 ; r := 8</text>
+
+    <text x="20" y="356" font-family="monospace" font-size="11" fill="currentColor">INVARIANT  p &lt;= r &lt;= n.  r is the emitted frontier. p trails r so the LEFT EDGE of both decodes</text>
+    <text x="20" y="372" font-family="monospace" font-size="11" fill="currentColor">           is identical and any decoder-side space cleanup cancels in the subtraction.</text>
+  </svg>
+</div>
+
+<p>Note what the hold costs: the window from $p$ grows while the latch is held. In practice it holds for at most three steps (the longest UTF-8 sequence is four bytes). A model emitting a genuinely invalid byte would grow it forever &mdash; which is why the guard is <code>new_text.endswith</code> and not <code>"&#65533;" in new_text</code>. A replacement character in the <em>middle</em> is treated as a real invalid id and emitted; only a trailing one is treated as incomplete. That distinction is the comment on lines 261&ndash;264, and it is load-bearing.</p>
+
+<p>The initial offsets come from the prompt, and only its tail is converted &mdash; you do not stringify 8,000 prompt tokens to stream the 8,001st:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/tokenizers/detokenizer_utils.py:L129-L140</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # We do not need to convert the whole prompt to tokens.
+    # Offset a little more in case we have special tokens.
+    new_tokens = tokenizer.convert_ids_to_tokens(
+        prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2 :],
+        skip_special_tokens=skip_special_tokens,
+    )
+    read_offset = len(new_tokens)
+    prefix_offset = max(read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)</code></pre>
+</div>
+
+<p>Seven tokens of prompt tail, five of them prefix context. For Llama-3-8B with its <b>128,256</b>-entry vocabulary that is seven <code>convert_ids_to_tokens</code> lookups per request at admission, not $n$.</p></div></section>
+<section class="sec" id="partial-utf8" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The partial-UTF-8 decision: replace, or buffer</h2></div><div class="sec__body"><p>A UTF-8 decoder handed <code>F0 9F</code> has two honest options. <b>Replace</b>: substitute U+FFFD and move on, which is what <code>bytes.decode("utf-8", "replace")</code> does and what every naive per-token decode does implicitly. <b>Buffer</b>: hold the incomplete bytes and wait, as Python's <code>codecs.getincrementaldecoder("utf-8")</code> does. For streaming only buffering is defensible, because replacement is <em>lossy and irreversible</em> &mdash; once U+FFFD is on the wire, the bytes that would have completed the character have nowhere to go. Holding costs latency on at most three decode steps; replacing costs correctness forever.</p>
+
+<p>Both engines buffer by refusing to advance state. vLLM's is the <code>endswith("&#65533;")</code> latch above; SGLang adds a refinement, emitting the <em>printable prefix</em> of the held text rather than nothing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L374-L395</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            new_text = read_texts[i][len(surr_texts[i]) :]
+            if recv_obj.finished_reasons[i] is None:
+                # Streaming. Invariant: sent_offset &gt;= decoded_text_len. The
+                # gap (`pending`) is "printable but uncommitted" text emitted
+                # in a prior "&#65533;" recovery step; we skip it from this step's
+                # emission so we don't double-send.
+                pending = s.sent_offset - s.decoded_text_len
+                if new_text and not new_text.endswith("&#65533;"):
+                    # Clean text: commit to decoded_text and advance offsets.
+                    s.append_decoded_text(new_text)
+                    s.surr_offset = s.read_offset
+                    s.read_offset = len(s.decode_ids)
+                    s.sent_offset = s.decoded_text_len
+                    output_strs.append(new_text[pending:] if pending else new_text)
+                else:
+                    # Incomplete UTF-8: emit the printable prefix only; do not
+                    # commit (token offsets stay so the next iteration retries
+                    # with more tokens).
+                    printable = find_printable_text(new_text)
+                    s.sent_offset = s.decoded_text_len + len(printable)
+                    output_strs.append(printable[pending:] if pending else printable)
+                continue</code></pre>
+</div>
+
+<p><code>new_text = read_texts[i][len(surr_texts[i]):]</code> is exactly the $\setminus_{\text{prefix}}$ of the formula. The else branch is the interesting part. SGLang keeps three offsets where vLLM keeps two: the token-space pair (<code>surr_offset</code>, <code>read_offset</code>) plus a character-space <code>sent_offset</code> tracking what went out on the wire. When the latch holds, token offsets freeze but <code>sent_offset</code> may still move, so the next successful step must skip the <code>pending</code> characters it already sent. That asymmetry between "committed" and "sent" is the price of emitting anything during a hold.</p>
+
+<p>What counts as printable is a heuristic borrowed from HuggingFace's <code>TextStreamer</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/utils.py:L354-L370</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def find_printable_text(text: str):
+    """Returns the longest printable substring of text that contains only entire words."""
+    # Borrowed from https://github.com/huggingface/transformers/blob/061580c82c2db1de9139528243e105953793f7a2/src/transformers/generation/streamers.py#L99
+
+    # After the symbol for a new line, we flush the cache.
+    if text.endswith("\n"):
+        return text
+    # If the last token is a CJK character, we print the characters.
+    elif len(text) &gt; 0 and _is_chinese_char(ord(text[-1])):
+        return text
+    # Otherwise if the penultimate token is a CJK character, we print the characters except for the last one.
+    elif len(text) &gt; 1 and _is_chinese_char(ord(text[-2])):
+        return text[:-1]
+    # Otherwise, prints until the last space char (simple heuristic to avoid printing incomplete words,
+    # which may change with the subsequent token -- there are probably smarter ways to do this!)
+    else:
+        return text[: text.rfind(" ") + 1]
+</code></pre>
+</div>
+
+<p>The last branch truncates at the final space, so a held chunk with no space emits nothing &mdash; the same behaviour as vLLM's latch. The CJK branches exist because Chinese has no spaces and would otherwise never flush. The comment admits this is a heuristic, and it is: a held chunk in a script with neither spaces nor CJK codepoints (Thai, Burmese, Lao) falls through to <code>rfind(" ")</code> and emits nothing until a space arrives. That is why the Burmese fixture keeps appearing in bug reports.</p></div></section>
+<section class="sec" id="where-it-runs" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Where detokenisation runs, and why the two answers differ</h2></div><div class="sec__body"><p>Neither engine detokenises on the GPU or inside the model-forward step. Both put it downstream of a process boundary &mdash; different boundaries, different consequences.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the two placements.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph V["vLLM -- 2 processes"]
+      V1["EngineCore process<br/>scheduler + GPUModelRunner<br/>emits EngineCoreOutput ids"]
+      V2["Frontend process, asyncio<br/>output_handler loop<br/>OutputProcessor.process_outputs<br/>IncrementalDetokenizer.update<br/>B calls per step, B=256 at batch 256<br/>SHARES the event loop with FastAPI<br/>yields every 128 requests"]
+      V1 -->|"ZMQ, token ids"| V2
+    end
+    subgraph S["SGLang -- 3 processes"]
+      S1["TokenizerManager<br/>text to ids on the way in"]
+      S2["Scheduler process<br/>forward pass<br/>ALSO decodes a stop-string<br/>tail window per request per step"]
+      S3["DetokenizerManager<br/>dedicated process<br/>2 batch_decode calls per step<br/>surr window and read window<br/>decode_status capped at 65536"]
+      S1 -->|"ZMQ ids"| S2
+      S2 -->|"ZMQ BatchTokenIDOutput"| S3
+      S3 -->|"ZMQ BatchStrOutput"| S1
+    end
+  </script>
+</div>
+
+<h3>vLLM: in the frontend process, on the API server's event loop</h3>
+
+<p><code class="c-vllm">OutputProcessor</code> is constructed by <code>AsyncLLM.__init__</code> at <code>vllm/v1/engine/async_llm.py:L140-L145</code>, in the same process as the FastAPI app; <code>EngineCore</code> is spawned separately on the next line. Detokenisation therefore overlaps GPU work by construction. What it does <em>not</em> overlap is HTTP serving, and vLLM has a knob for that:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L697-L707</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    # Split outputs into chunks of at most
+                    # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                    # event loop for too long.
+                    engine_core_outputs = outputs.outputs
+                    for start in range(0, num_outputs, chunk_size):
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
+                        # 2) Process EngineCoreOutputs.
+                        processed_outputs = output_processor.process_outputs(
+                            outputs_slice, outputs.timestamp, iteration_stats
+                        )</code></pre>
+</div>
+
+<p><code>VLLM_V1_OUTPUT_PROC_CHUNK_SIZE</code> defaults to <b>128</b> (<code>vllm/envs.py:L1430-L1432</code>), and the loop does <code>await asyncio.sleep(0)</code> between chunks. Above batch 128 one engine step's detokenisation is deliberately split so the event loop can serve HTTP in between. The existence of that flag is the tell that the work shares an event loop.</p>
+
+<p>vLLM has two detokeniser implementations, chosen at request admission:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L55-L66</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        assert request.sampling_params is not None
+
+        if tokenizer is None:
+            # No tokenizer =&gt; skipping detokenization.
+            return IncrementalDetokenizer()
+
+        if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
+            # Fast tokenizer =&gt; use tokenizers library DecodeStream.
+            return FastIncrementalDetokenizer(tokenizer, request)
+
+        # Fall back to slow python-based incremental detokenization.
+        return SlowIncrementalDetokenizer(tokenizer, request)</code></pre>
+</div>
+
+<p>The fast path does not do the offset dance in Python at all &mdash; it hands the problem to the Rust <code>tokenizers</code> crate's <code>DecodeStream</code>, primed with the prompt so the first generated token has left context:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L180-L187</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Use native prefill to prime the decode stream with prompt tokens.
+        # Look up DecodeStream on the module so backend patches (e.g. the
+        # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
+        # are honored regardless of import order.
+        self.stream = tokenizers.decoders.DecodeStream(
+            ids=request.prompt_token_ids,
+            skip_special_tokens=self.skip_special_tokens,
+        )</code></pre>
+</div>
+
+<p>One call per token, all state in Rust. The cost: when that Rust state goes wrong you cannot repair it in place &mdash; you throw the stream away and rebuild it (<code>vllm/v1/engine/detokenizer.py:L239-L247</code>), losing the left context and any leading-space decision the discarded prefix would have made.</p>
+
+<h3>SGLang: a dedicated process, decoding the batch at once</h3>
+
+<p>SGLang runs detokenisation in its own OS process with its own ZMQ sockets, tokenizer instance, and watchdog (<code>python/sglang/srt/managers/detokenizer_manager.py:L516-L533</code>, <code>setproctitle("sglang::detokenizer")</code>). The payoff is visible in the shape of the work: because a whole batch arrives in one <code>BatchTokenIDOutput</code>, SGLang can push the per-row loop into Rust:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L251-L267</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if not getattr(self.tokenizer, "is_fast", False):
+            decoded = [
+                decode_without_hf_kwargs(self.tokenizer, ids, skip)
+                for ids, skip in zip(ids_list, skip_list)
+            ]
+        else:
+            # fast path: all rows share the same (skip, space) flags.
+            first_skip, first_space = skip_list[0], space_list[0]
+            if all(
+                s == first_skip and sp == first_space
+                for s, sp in zip(skip_list, space_list)
+            ):
+                decoded = self.tokenizer.batch_decode(
+                    ids_list,
+                    skip_special_tokens=first_skip,
+                    spaces_between_special_tokens=first_space,
+                )</code></pre>
+</div>
+
+<p>Two <code>batch_decode</code> calls per step for the entire batch &mdash; one for the <code>surr_ids</code> windows, one for the <code>read_ids</code> windows (<code>python/sglang/srt/managers/detokenizer_manager.py:L325-L335</code>) &mdash; instead of $2B$ Python-level calls. Rows whose flags differ are grouped and decoded per group; rows with an empty span are filtered out and scattered back, because "under high-concurrency streaming this adds up" (<code>python/sglang/srt/managers/detokenizer_manager.py:L238-L241</code>). <code>--disable-tokenizer-batch-decode</code> turns it off to "prevent some detokenization edge cases (e.g., gpt-oss)" (<code>python/sglang/srt/managers/detokenizer_manager.py:L336-L337</code>).</p>
+
+<p>That process is stateful, and its state is capacity-bounded &mdash; which produces one of SGLang's more memorable error messages:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L363-L373</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            try:
+                s = self.decode_status[rid]
+            except KeyError:
+                raise RuntimeError(
+                    f"Decode status not found for request {rid}. "
+                    "It may be due to the request being evicted from the decode status due to memory pressure. "
+                    "Please increase the maximum number of requests by setting "
+                    "the SGLANG_DETOKENIZER_MAX_STATES environment variable to a bigger value than the default value. "
+                    f"The current value is {DETOKENIZER_MAX_STATES}. "
+                    "For more details, see: https://github.com/sgl-project/sglang/issues/2812"
+                )</code></pre>
+</div>
+
+<p><code>DETOKENIZER_MAX_STATES</code> defaults to <code>1 &lt;&lt; 16</code> = 65,536 (<code>python/sglang/srt/managers/detokenizer_manager.py:L57-L61</code>), evicted LRU-style. vLLM has no equivalent: its detokeniser state hangs off the <code>RequestState</code> the frontend already owns.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Connect to 1.2</span>
+  <p><a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a> found that vLLM's harness records one ITL sample per streamed <em>chunk</em> while SGLang's records one per <em>token</em>. Everything above is why that distinction has teeth. A chunk is whatever the detokeniser committed this step: a held UTF-8 step emits zero characters; a commit after a three-step hold emits one character built from four tokens; a stop-buffered step emits fewer characters than it decoded. Chunk boundaries equal token boundaries only for pure ASCII with no stop strings, and under speculative decoding they diverge further still, since one forward pass reaches the detokeniser as a single <code>update()</code> call with several ids.</p>
+</div></div></section>
+<section class="sec" id="stop-strings" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Stop strings, which straddle token boundaries</h2></div><div class="sec__body"><p>A stop string is defined over characters and generation happens over tokens, so a stop string can begin inside one token and end inside another. Matching on token ids is therefore not merely inefficient, it is wrong: <code>"&lt;/answer&gt;"</code> might be one token in one tokenizer and five in another, and might fuse with a preceding character to become a sixth. Both engines match on decoded text, and vLLM makes the dependency a hard validation error:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/sampling_params.py:L646-L650</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if self.stop and not self.detokenize:
+            raise VLLMValidationError(
+                "stop strings are only supported when detokenize is True. "
+                "Set detokenize=True to use stop."
+            )</code></pre>
+</div>
+
+<p>SGLang's equivalent fires when the tokenizer is absent: <code>"stop={stop_strs!r} is unavailable when skip_tokenizer_init=True (requires tokenizer to decode tokens to text for matching)"</code> (<code>python/sglang/srt/sampling/sampling_params.py:L318-L322</code>).</p>
+
+<p>Matching is the easy half. The hard half is that you may have already streamed part of the stop string before you knew it was one. The fix is a hold-back buffer sized to the worst case:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L85-L91</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Number of chars to hold back when stop strings are to be excluded
+        # from streamed output.
+        if self.stop and not self.include_stop_str_in_output:
+            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
+        else:
+            self.stop_buffer_length = 0
+        self._last_output_text_offset: int = 0</code></pre>
+</div>
+
+<p>Why $\max_s |s| - 1$ and not $\max_s |s|$? If the last $|s|$ characters were the stop string you would have detected it and truncated already. The dangerous case is a <em>proper prefix</em> at the tail, and the longest proper prefix has length $|s| - 1$. The hold is released the instant the request finishes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L149-L165</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_next_output_text(self, finished: bool, delta: bool) -&gt; str:
+        """If delta is True, only new text since the last call to
+        this method is returned"""
+
+        # We return the full output text if the sequence is finished.
+        buffer_length = 0 if finished else self.stop_buffer_length
+        if not delta:
+            if not buffer_length:
+                return self.output_text
+            return self.output_text[:-buffer_length]
+
+        length = len(self.output_text) - buffer_length
+        last_offset = self._last_output_text_offset
+        if last_offset &lt; length:
+            self._last_output_text_offset = length
+            return self.output_text[last_offset:length]
+        return ""</code></pre>
+</div>
+
+<p>Two consequences. <code>stop=["&lt;/answer&gt;"]</code> costs eight characters of streaming latency on every chunk for the whole generation &mdash; a long stop string is a latency knob you did not know you were turning. And <code>include_stop_str_in_output=True</code> sets <code>stop_buffer_length = 0</code>, so it does not merely change the last chunk, it removes the hold-back entirely. If you were going to keep the stop string anyway, say so.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; a stop string straddling a token boundary, with and without the hold-back buffer.</b>
+    stop=["&lt;/answer&gt;"], 9 characters, so stop_buffer_length = 8.</p>
+  <svg viewBox="0 0 780 400" width="100%" role="img" aria-label="A stop string split across three tokens, showing that without a hold-back buffer a prefix of the stop string is streamed to the client and cannot be retracted, and with the buffer nothing is streamed until the match is resolved">
+    <text x="20" y="22" font-family="monospace" font-size="12" fill="currentColor">TOKENS ARRIVING          ... "done" | "&lt;/" | "ans" | "wer" | "&gt;" ...</text>
+    <text x="20" y="38" font-family="monospace" font-size="12" fill="currentColor">output_text grows        "...done" "...done&lt;/" "...done&lt;/ans" "...&lt;/answer" "...&lt;/answer&gt;"</text>
+    <text x="20" y="54" font-family="monospace" font-size="12" fill="currentColor">step                        k         k+1        k+2           k+3          k+4</text>
+
+    <text x="20" y="92" font-family="monospace" font-size="12" fill="currentColor">WITHOUT HOLD-BACK  (stop_buffer_length = 0)</text>
+    <rect x="20" y="102" width="120" height="22" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="117" font-family="monospace" font-size="11" fill="currentColor">send "done"</text>
+    <rect x="150" y="102" width="120" height="22" rx="2" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="158" y="117" font-family="monospace" font-size="11" fill="currentColor">send "&lt;/"</text>
+    <rect x="280" y="102" width="120" height="22" rx="2" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="288" y="117" font-family="monospace" font-size="11" fill="currentColor">send "ans"</text>
+    <rect x="410" y="102" width="120" height="22" rx="2" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="418" y="117" font-family="monospace" font-size="11" fill="currentColor">send "wer"</text>
+    <rect x="540" y="102" width="200" height="22" rx="2" fill="#b8567a" fill-opacity="0.18" stroke="#b8567a" stroke-width="1"/>
+    <text x="548" y="117" font-family="monospace" font-size="11" fill="currentColor">MATCH. truncate to k. too late.</text>
+    <text x="20" y="146" font-family="monospace" font-size="11" fill="currentColor">CLIENT ALREADY HAS  "...done&lt;/answer"   -- SSE has no retraction. The bug ships.</text>
+
+    <text x="20" y="186" font-family="monospace" font-size="12" fill="currentColor">WITH HOLD-BACK  (stop_buffer_length = 9 - 1 = 8)</text>
+    <text x="20" y="204" font-family="monospace" font-size="11" fill="currentColor">emit window = output_text[last_offset : len(output_text) - 8]</text>
+    <rect x="20" y="214" width="120" height="22" rx="2" fill="#2f9a94" fill-opacity="0.14" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="229" font-family="monospace" font-size="11" fill="currentColor">send "...do"</text>
+    <rect x="150" y="214" width="120" height="22" rx="2" fill="#7a8f2a" fill-opacity="0.18" stroke="#7a8f2a" stroke-width="1"/>
+    <text x="158" y="229" font-family="monospace" font-size="11" fill="currentColor">send "ne"</text>
+    <rect x="280" y="214" width="120" height="22" rx="2" fill="#7a8f2a" fill-opacity="0.18" stroke="#7a8f2a" stroke-width="1"/>
+    <text x="288" y="229" font-family="monospace" font-size="11" fill="currentColor">send ""</text>
+    <rect x="410" y="214" width="120" height="22" rx="2" fill="#7a8f2a" fill-opacity="0.18" stroke="#7a8f2a" stroke-width="1"/>
+    <text x="418" y="229" font-family="monospace" font-size="11" fill="currentColor">send ""</text>
+    <rect x="540" y="214" width="200" height="22" rx="2" fill="#2f9a94" fill-opacity="0.16" stroke="#2f9a94" stroke-width="1"/>
+    <text x="548" y="229" font-family="monospace" font-size="11" fill="currentColor">MATCH at index i. truncate.</text>
+    <text x="20" y="258" font-family="monospace" font-size="11" fill="currentColor">check_stop_strings returns (stop_str, best_stop_index) ; caller does</text>
+    <text x="20" y="274" font-family="monospace" font-size="11" fill="currentColor">    self.output_text = self.output_text[:truncate_to]</text>
+    <text x="20" y="290" font-family="monospace" font-size="11" fill="currentColor">then get_next_output_text(finished=True) releases the buffer: buffer_length = 0.</text>
+    <rect x="20" y="302" width="560" height="24" rx="3" fill="#2f9a94" fill-opacity="0.16" stroke="#2f9a94" stroke-width="1"/>
+    <text x="28" y="318" font-family="monospace" font-size="11" fill="currentColor">CLIENT HAS  "...done"   -- the 8 held chars were never sent, so nothing to retract.</text>
+
+    <text x="20" y="356" font-family="monospace" font-size="11" fill="currentColor">include_stop_str_in_output=True  -&gt; stop_buffer_length = 0 -&gt; the top row, deliberately,</text>
+    <text x="20" y="372" font-family="monospace" font-size="11" fill="currentColor">and truncate_to = best_end instead of best_stop_index. No latency cost.</text>
+  </svg>
+</div>
+
+<p>The matcher itself is careful about two things a naive <code>find</code> would get wrong:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/detokenizer.py:L331-L349</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if not new_char_count or not stop:
+        return None
+
+    best_stop_str: str | None = None
+    best_stop_index = 0
+    best_end = sys.maxsize
+    for stop_str in stop:
+        stop_string_len = len(stop_str)
+        # Avoid searching already-searched text.
+        stop_index = output_text.find(stop_str, 1 - new_char_count - stop_string_len)
+        if stop_index == -1:
+            continue
+
+        # Prefer the stop string that completes earliest in the text.
+        end = stop_index + stop_string_len
+        if end &lt; best_end:
+            best_stop_str = stop_str
+            best_stop_index = stop_index
+            best_end = end</code></pre>
+</div>
+
+<p>The negative start index <code>1 - new_char_count - stop_string_len</code> is the smallest window that can contain a match involving at least one new character: you must look back <code>stop_string_len - 1</code> characters into already-searched text, because the match may have <em>started</em> there. The earliest-completing tie-break exists for speculative decoding, where several tokens land in one step &mdash; the docstring says the winner is chosen "so the result matches appending one token at a time" (<code>vllm/v1/engine/detokenizer.py:L326-L329</code>). Without it, stop-string semantics would depend on the draft model's acceptance rate.</p>
+
+<h3>SGLang splits the same job across two processes</h3>
+
+<p>SGLang does stop-string matching in the <b>scheduler</b> process, not the detokenizer, because the scheduler is what decides to stop generating. It decodes a token-space tail window per request per step:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_batch.py:L1459-L1469</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def tail_str(self, new_accepted_len: int = 1) -&gt; str:
+        # Check stop strings and stop regex patterns together
+        if (
+            len(self.sampling_params.stop_strs) == 0
+            and len(self.sampling_params.stop_regex_strs) == 0
+        ):
+            return ""
+
+        tail_len = self._stop_match_tail_len(new_accepted_len)
+        return self.tokenizer.decode(self.output_ids[-tail_len:])</code></pre>
+</div>
+
+<p>Note the unit difference. vLLM's buffer is in <em>characters</em>; SGLang's window is in <em>tokens</em>, sized from <code>stop_str_max_len</code>, which <code>normalize()</code> computes by encoding each stop string and taking the max <em>token</em> length (<code>python/sglang/srt/sampling/sampling_params.py:L221-L228</code>). Both bound the same quantity; the token-space one is looser.</p>
+
+<p>The streaming hold-back is separate, and it is suppression rather than truncation. <code>OutputStreamer.accept</code> declines to emit a chunk whose tail could still become a stop string:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/output_streamer.py:L381-L384</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                if should_output:
+                    # check_match_stop_str_prefix if  tail_str's suffix match stop_str prefix
+                    should_output &amp;= not req.check_match_stop_str_prefix()</code></pre>
+</div>
+
+<p>And <code>check_match_stop_str_prefix</code> does the explicit proper-prefix scan that vLLM's fixed-length buffer implies: <code>for i in range(1, min_len + 1): if tail_str[-i:] == stop_str[:i]: return True</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1488-L1492</code>). Precision costs a second <code>tokenizer.decode</code> per request per streaming step.</p>
+
+<p>Final truncation happens in the detokenizer process, which knows the matched string but not its character offset:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L189-L195</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Trim stop str.
+        if isinstance(matched, str) and isinstance(output, str):
+            pos = output.find(matched)
+            if pos == -1:
+                return output
+            end = pos + len(matched)
+            return output[:end] if no_stop_trim else output[:pos]</code></pre>
+</div>
+
+<p><code>no_stop_trim</code> is SGLang's <code>include_stop_str_in_output</code>, spelled inversely and defaulting to <code>False</code> (<code>python/sglang/srt/sampling/sampling_params.py:L78</code>). Note <code>output.find(matched)</code> &mdash; the <em>first</em> occurrence, not the one that triggered the stop. The comment three lines above is honest about the remaining gap: <code># TODO(lmzheng): handle the case where multiple stop strs are hit</code> (<code>python/sglang/srt/managers/detokenizer_manager.py:L187</code>). If your stop string legitimately appears earlier in the output and you are not trimming, the two engines will disagree.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Not this chapter</span>
+  <p>Retokenisation as a <em>correctness hazard</em> &mdash; forcing text into the sequence and re-encoding it, where the boundary token may fuse with what the KV cache already holds &mdash; belongs to <a href="../06-decoding-algorithms/06-05-structured-decoding.html">&sect;6.5</a>, which also shows that the jump-forward code carrying it is unreachable at these SHAs. The retokenisation in <em>this</em> chapter is benign by comparison: SGLang decodes a tail window to match stop strings, and never feeds the result back into the model.</p>
+</div></div></section>
+<section class="sec" id="cost" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">What it costs: host arithmetic against a 4.48 ms step</h2></div><div class="sec__body"><p>Everything above is Python and Rust on a CPU core. It is not free, and unlike the forward pass its cost is linear in batch size while the decode step's cost is nearly flat below the roofline ridge.</p>
+
+<p>Let $B$ be the number of sequences detokenised per step, $c$ the wall cost of one Python-to-tokenizer round trip on a short window, and $T_{\text{step}}$ the decode step time. For Llama-3-8B in bf16 on an H100 SXM, $T_{\text{step}} = 4.48$ ms at batch 1 (weight-streaming bound, book constant), and because arithmetic intensity at batch 256 is still below the ridge $I^* = 295$, the step at batch 256 is still roughly weight-bound &mdash; call it 4.5&ndash;6 ms. Detokenisation cost is $N_{\text{calls}} \cdot c$ where:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Python-level tokenizer calls per decode step, by path. Derived from the cited source, not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Path</th><th>Calls per step</th><th>At B = 256</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td><code class="c-vllm">FastIncrementalDetokenizer</code></td><td><code>B</code> &mdash; one <code>DecodeStream.step</code> per new token</td><td class="num">256</td><td>frontend process</td></tr>
+        <tr><td><code class="c-vllm">SlowIncrementalDetokenizer</code></td><td><code>3B</code> &mdash; <code>convert_ids_to_tokens</code> + 2&times; <code>convert_tokens_to_string</code></td><td class="num">768</td><td>frontend process</td></tr>
+        <tr><td><code class="c-sglang">DetokenizerManager</code>, batched</td><td><code>2</code> <code>batch_decode</code> calls, <code>2B</code> rows inside Rust</td><td class="num">2</td><td>dedicated process</td></tr>
+        <tr><td><code class="c-sglang">DetokenizerManager</code>, <code>--disable-tokenizer-batch-decode</code></td><td><code>2B</code></td><td class="num">512</td><td>dedicated process</td></tr>
+        <tr><td><code class="c-sglang">tail_str</code> for stop strings</td><td><code>B</code>, plus <code>B</code> more on streaming steps</td><td class="num">256&ndash;512</td><td><b>scheduler process</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Take $c = 10\ \mu\text{s}$ as a working assumption for a Python attribute lookup plus a PyO3 boundary crossing plus a short Rust decode. This is an <em>assumption</em>, not a measurement &mdash; measure it on your box before you act on it (the Hands-on section below tells you how). Under it:</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">2.56 ms</div><div class="kpi__l">vLLM fast path at B=256 &mdash; derived, 256 &times; 10 &micro;s</div></div>
+  <div class="kpi"><div class="kpi__n">7.68 ms</div><div class="kpi__l">vLLM slow path at B=256 &mdash; exceeds the step</div></div>
+  <div class="kpi"><div class="kpi__n">B* = 448</div><div class="kpi__l">where fast-path detok equals the 4.48 ms step</div></div>
+</div>
+
+<p>Three readings. (1) A slow tokenizer at batch 256 costs more host time than the GPU step costs GPU time &mdash; hence SGLang's blunt "Using a slow tokenizer. This might cause a significant slowdown" (<code>python/sglang/srt/utils/hf_transformers/tokenizer.py:L432-L435</code>). (2) Neither engine detokenises inside the step loop, so below $B^*$ the work hides behind GPU time. The failure mode is not "the step got slower" but "detokenisation stopped keeping up and the output queue grew" &mdash; rising ITL against a flat GPU utilisation graph. (3) The one piece that <em>is</em> on the critical path is SGLang's scheduler-side <code>tail_str</code>: at $B = 256$ with stop strings and streaming, up to 512 decodes &times; 10 &micro;s = 5.12 ms of scheduler Python per step, comparable to the step itself. Stop strings are not free in SGLang &mdash; though the no-stop-strings case is exactly zero.</p>
+
+<p>The mitigation follows the arithmetic. vLLM's <code>stream_interval</code> (default 1, <code>vllm/config/scheduler.py:L153-L157</code>) and SGLang's identically-named server arg (default 1, <code>python/sglang/srt/server_args.py:L1480-L1483</code>) amortise per-chunk overhead across $k$ tokens: "a larger value (e.g., 10) reduces host overhead and may increase throughput by batching multiple tokens before sending". Raising it divides emission cost by $k$ and multiplies ITL granularity by $k$ &mdash; see <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>.</p></div></section>
+<section class="sec" id="tokenizing-in" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">The way in: fast vs slow, special tokens, and tokenizing twice</h2></div><div class="sec__body"><p>Encoding is easier than decoding but has sharper edges.</p>
+
+<p><b>Fast vs slow.</b> "Fast" is the Rust <code>tokenizers</code> backend; "slow" is a pure-Python <code>PreTrainedTokenizer</code>. SGLang exposes the choice as <code>--tokenizer-mode</code> and refuses the contradictory combination:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/hf_transformers/tokenizer.py:L489-L498</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if tokenizer_mode == "slow":
+        if kwargs.get("use_fast", False):
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
+        kwargs["use_fast"] = False
+    elif tokenizer_mode == "auto":
+        # Transformers v5 AutoTokenizer ignores use_fast (always fast), but
+        # some code paths pass kwargs to non-AutoTokenizer loaders where
+        # use_fast still matters. Set explicitly for those fallback paths.
+        if "use_fast" not in kwargs:
+            kwargs["use_fast"] = True</code></pre>
+</div>
+
+<p>vLLM's choice is implicit: it loads via <code>AutoTokenizer.from_pretrained</code> and wraps the result in a caching proxy, because "transformers will recompute multiple tokenizer properties each time they are called, leading to a significant slowdown" (<code>vllm/tokenizers/hf.py:L107-L111</code>). The proxy memoises <code>all_special_ids</code>, <code>all_special_tokens</code>, <code>get_vocab()</code>, <code>__len__</code> and <code>is_fast</code> &mdash; every property the detokeniser touches per token. Write your own wrapper and skip this, and you pay a vocabulary rebuild per decoded token.</p>
+
+<p><b><code>add_special_tokens</code>, and the double-BOS bug.</b> vLLM's tokenize endpoints default it opposite ways, and say why:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/serve/tokenize/protocol.py:L78-L87</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."
+        ),
+    )</code></pre>
+</div>
+
+<p>For the completion endpoint the same field defaults to <code>True</code> (<code>vllm/entrypoints/serve/tokenize/protocol.py:L28-L33</code>). That is the whole double-tokenisation hazard in two defaults. A chat template renders <code>&lt;|begin_of_text|&gt;&lt;|start_header_id|&gt;user...</code> as <em>text</em>; encoding that text with <code>add_special_tokens=True</code> prepends a second BOS id. The model sees two, and the output degrades in a way no error message describes. Tokenize once for the template and once for the engine, and exactly one of those must add specials.</p>
+
+<p>The inverse trap is a tokenizer that ignores the flag: <code># tiktoken's encode adds no special tokens (add_special_tokens is ignored)</code> (<code>python/sglang/srt/tokenizer/tiktoken_tokenizer.py:L132</code>). Passing <code>False</code> there is a no-op that happens to be correct; passing <code>True</code> is a no-op that is silently wrong.</p>
+
+<p><b>The leading space.</b> SentencePiece-family tokenizers encode a word boundary as a literal marker character (<code>&#9601;</code>, U+2581) inside the vocabulary piece, and <code>decode()</code> strips the first one. vLLM undoes that when it needs per-token strings:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/tokenizers/detokenizer_utils.py:L66-L76</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def _get_leading_space_marker(tokenizer: TokenizerLike) -&gt; str | None:
+    """Read the space marker from the tokenizer's pre_tokenizer config.
+
+    Only Metaspace pre_tokenizers (used by SentencePiece-based models like
+    Llama, Mistral, T5) have a replacement character whose leading instance
+    gets stripped by decode(). ByteLevel (GPT-2), BertPreTokenizer (BERT),
+    and others do not have this issue.
+
+    Returns the marker character, or None if decode() is safe for single
+    tokens.
+    """</code></pre>
+</div>
+
+<p>It reads the marker out of the serialised pre-tokenizer JSON, handling both a bare <code>Metaspace</code> and a <code>Sequence</code> containing one, and caches it on the tokenizer. This is the mechanism behind "why did my logprobs table show <code>Hello</code> where the text says <code>&#160;Hello</code>": per-token strings and windowed decodes disagree about the space by construction, and only the windowed one is the truth.</p>
+
+<p><b>Batching the encode side.</b> Tokenising an 8k-token prompt is milliseconds of single-threaded Rust on the frontend's event loop. SGLang has an opt-in micro-batcher for it &mdash; a queue and a timeout, the same shape as continuous batching:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/async_dynamic_batch_tokenizer.py:L77-L101</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                # Check if there are more items immediately available in the queue
+                # If queue is empty, process single item immediately without timeout
+                if self._queue.empty():
+                    # No other requests waiting, process immediately
+                    pass
+                else:
+                    # There might be more requests, wait for dynamic batching opportunity
+                    start_time = asyncio.get_running_loop().time()
+
+                    # Collect more requests up to max_batch_size or batch_wait_timeout_s
+                    while len(prompts) &lt; self.max_batch_size:
+                        elapsed = asyncio.get_running_loop().time() - start_time
+                        if elapsed &gt;= self.batch_wait_timeout_s:
+                            break
+
+                        remaining_time = self.batch_wait_timeout_s - elapsed
+                        try:
+                            prompt, kwargs, result_future = await asyncio.wait_for(
+                                self._queue.get(), remaining_time
+                            )</code></pre>
+</div>
+
+<p>Three properties worth copying. It adds no latency when idle &mdash; the <code>self._queue.empty()</code> fast path skips the timeout, so a lone request pays nothing. It runs the blocking call on a <b>single-thread</b> <code>ThreadPoolExecutor</code> so the asyncio loop stays responsive (<code>python/sglang/srt/managers/async_dynamic_batch_tokenizer.py:L43-L44</code>). And it degrades loudly: requests with differing kwargs cannot share one <code>tokenizer(prompts, **kwargs)</code> call, so it logs "Dynamic batching disabled for batch of N requests due to differing kwargs" (<code>python/sglang/srt/managers/async_dynamic_batch_tokenizer.py:L143-L147</code>). Defaults: off, batch size 32, timeout 0.002 s (<code>python/sglang/srt/server_args.py:L3466-L3480</code>). Two milliseconds of TTFT is a real cost; buy it only when the tokenizer is the bottleneck.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I could not find an equivalent batched-encode path in vLLM at <code>a556f3f</code>. <code>vllm/tokenizers/hf.py:L25-L57</code> builds a deep-copied tokenizer <em>pool</em> for thread-safety (<code>maybe_make_thread_pool</code>), which is a different optimisation &mdash; concurrency, not batching. If a batched encode exists it would be under <code>vllm/renderers/inputs/</code>; <code>tokenize.py</code> there is 57 lines and does not contain one. Check before assuming parity.</p>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Worked trace: one token through vLLM</h2></div><div class="sec__body"><p>A request with <code>stop=["END"]</code>, <code>include_stop_str_in_output=False</code>, streaming, on a fast tokenizer. The engine has just sampled one token id.</p>
+
+<ol>
+  <li><code>EngineCore</code> (separate process) puts the id into <code>EngineCoreOutput.new_token_ids</code> and ZMQs it to the frontend.</li>
+  <li><code>AsyncLLM.output_handler</code> (<code>vllm/v1/engine/async_llm.py:L685-L691</code>) wakes on <code>engine_core.get_output_async()</code> and slices the batch into runs of 128.</li>
+  <li><code>OutputProcessor.process_outputs</code> (<code>vllm/v1/engine/output_processor.py:L603</code>) loops the slice &mdash; its docstring warns this is "the only function that should loop over EngineCoreOutputs".</li>
+  <li>Step 2 of that loop detokenises and folds stop strings into the finish reason in one shot:
+    <div class="code-file">
+      <div class="code-file__hd">
+        <span class="src">vllm/v1/engine/output_processor.py:L676-L682</span>
+        <span class="tag tag--vllm">vLLM</span>
+      </div>
+      <pre class="code-block"><code>                # 2) Detokenize the token ids into text and perform stop checks.
+                stop_string = req_state.detokenizer.update(
+                    new_token_ids, finish_reason == FinishReason.STOP
+                )
+                if stop_string:
+                    finish_reason = FinishReason.STOP
+                    stop_reason = stop_string</code></pre>
+    </div>
+  </li>
+  <li>Inside <code>BaseIncrementalDetokenizer.update</code> (<code>vllm/v1/engine/detokenizer.py:L96-L143</code>): if the engine stopped on a stop <em>token</em> and we exclude it, that id is popped before detokenising and pushed back onto <code>token_ids</code> after &mdash; <code>output_token_ids</code> stays complete while <code>output_text</code> omits it. Then <code>output_text += decode_next(id)</code> per id, then <code>check_stop_strings</code> over the newly added characters only.</li>
+  <li><code>decode_next</code> on the fast path is one <code>DecodeStream.step</code> (<code>vllm/v1/engine/detokenizer.py:L211-L222</code>), wrapped in <code>_protected_step</code>, which swallows <code>OverflowError</code>/<code>TypeError</code> for issue #21951 and rebuilds the stream on <code>"Invalid prefix encountered"</code> for issue #17448.</li>
+  <li>On a match, <code>output_text = output_text[:truncate_to]</code>, where <code>truncate_to</code> is <code>best_stop_index</code> (exclude) or <code>best_end</code> (include).</li>
+  <li><code>_new_completion_output</code> calls <code>get_next_output_text(finished, delta)</code> (<code>vllm/v1/engine/output_processor.py:L407</code>), applying the hold-back and advancing <code>_last_output_text_offset</code>.</li>
+  <li>The <code>RequestOutput</code> goes onto the per-request asyncio queue. If the detokeniser stopped a request the engine still thinks is running, its id joins <code>reqs_to_abort</code> and the handler sends <code>abort_requests_async</code> back over ZMQ (<code>vllm/v1/engine/output_processor.py:L716-L722</code>). <b>Stop-string detection is a frontend decision propagated backwards into the engine.</b></li>
+</ol>
+
+<p>SGLang's path has one more hop and one more tokenizer: <code>Req.update_finish_state</code> in the scheduler decodes a tail window and sets <code>finished_reason = FINISH_MATCHED_STR(matched=stop_str)</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1552-L1560</code>); <code>OutputStreamer.accept</code> gathers <code>init_incremental_detokenize()</code> windows into a <code>BatchTokenIDOutput</code> (<code>python/sglang/srt/managers/scheduler_components/output_streamer.py:L412-L423</code>); the DetokenizerManager decodes and trims; the TokenizerManager formats SSE. No backwards abort &mdash; the scheduler decided.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Replacement characters only at high load</h4><p>Under spec decoding or <code>stream_interval &gt; 1</code>, several tokens land per <code>update()</code>. A custom client that decodes <code>delta.token_ids</code> itself instead of using <code>delta.text</code> has reimplemented the naive algorithm from Figure 1. Use the text the engine gives you.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Concatenated deltas &ne; final text</h4><p>Expected in two cases: the hold-back means the final chunk carries characters no earlier chunk did, and stop-string truncation retroactively shortens <code>output_text</code>. Compare against the <code>finished=True</code> output, never a running concatenation.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Latency floor scaling with stop-string length</h4><p><code>stop=["\n\nHuman:"]</code> keeps 7 characters permanently in flight. On short answers the client can see nothing until the request finishes. Shorten the stop string or set <code>include_stop_str_in_output=True</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>RuntimeError: Decode status not found</h4><p>SGLang only. More than 65,536 live detokeniser states, so LRU eviction hit a streaming request. Raise <code>SGLANG_DETOKENIZER_MAX_STATES</code>, or find the leak &mdash; states are removed on finish, so an unbounded count means requests that never finished.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Quality dropped after a client refactor</h4><p>Double BOS. Someone moved from <code>/v1/chat/completions</code> to applying the template client-side and posting to <code>/v1/completions</code>, where <code>add_special_tokens</code> defaults to <code>True</code>. Diff the token ids, not the text.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Stop string leaked mid-output</h4><p>SGLang's <code>trim_matched_stop</code> uses <code>output.find(matched)</code> &mdash; the first occurrence. If the model legitimately emitted the stop string earlier, the trim lands in the wrong place. The <code>TODO(lmzheng)</code> above that function is the same gap.</p></div>
+</div>
+
+<p>The rule that resolves most of these: <b>get the token ids</b>. Use <code>--skip-tokenizer-init</code> (both engines support it, both then reject <code>stop</code> strings) or ask for <code>logprobs</code>, and diff against what your client tokenised. Text-level debugging cannot distinguish "the model produced the wrong tokens" from "the detokeniser rendered the right tokens wrongly", and those have different fixes.</p></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>First, measure the constant $c$ that the cost section assumed, on your own machine and tokenizer. No GPU needed &mdash; that is the point of the chapter.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">measure the per-call detokenisation cost</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 - &lt;&lt;'PY'
+import time, tokenizers
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+ids = tok("The quick brown fox jumps over the lazy dog. " * 20).input_ids
+stream = tokenizers.decoders.DecodeStream(ids=ids[:64], skip_special_tokens=True)
+t0 = time.perf_counter()
+for i in ids[64:]:
+    stream.step(tok.backend_tokenizer, i)
+dt = time.perf_counter() - t0
+n = len(ids) - 64
+print(f"{dt/n*1e6:.2f} us per DecodeStream.step over {n} tokens")
+PY</code></pre>
+</div>
+
+<p>Multiply by your batch size and compare against 4.48 ms. Then reproduce the split-character case end to end:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">watch the hold latch fire</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: stream a prompt that forces multi-byte output and count empty deltas
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --port 8000
+curl -N localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
+  "model":"meta-llama/Meta-Llama-3-8B-Instruct",
+  "prompt":"Repeat exactly, nothing else: 我很感谢你的热情",
+  "max_tokens":40,"stream":true}' | grep -c '"text":""'
+
+# same request with a long stop string; watch the deltas start late
+curl -N localhost:8000/v1/completions -H 'Content-Type: application/json' -d '{
+  "model":"meta-llama/Meta-Llama-3-8B-Instruct","prompt":"Count to twenty.",
+  "max_tokens":60,"stream":true,"stop":["\n\nHuman:"]}'
+
+# SGLang: same shape, then flip the batch-decode path off and diff the output
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --port 30000 --disable-tokenizer-batch-decode
+</code></pre>
+</div>
+
+<p>The empty-delta count in the first command is the hold latch. It should be non-zero for CJK output on a byte-fallback tokenizer and zero for pure ASCII.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Read <code>vllm/tokenizers/detokenizer_utils.py:L260-L268</code>. The guard is <code>new_text.endswith("&#65533;")</code>, not <code>"&#65533;" in new_text</code>. Construct a token sequence for which the two guards give different output, and say which output is correct.</li>
+  <li>vLLM sets <code>stop_buffer_length = max(len(s) for s in self.stop) - 1</code>. Prove that this is exactly tight: exhibit a case where holding one fewer character leaks, and argue no case requires holding one more.</li>
+  <li>Predict, then verify by reading <code>python/sglang/srt/managers/detokenizer_manager.py:L374-L395</code>: what does SGLang stream for a Burmese generation, one token per step, where the tokenizer emits three byte-fallback tokens per character and the text contains no spaces? Compare against what vLLM would stream for the same token sequence.</li>
+  <li>SGLang's <code>tail_str</code> decodes <code>self.output_ids[-tail_len:]</code> where <code>tail_len</code> is in tokens. vLLM matches over <code>output_text</code> with a character-space lower bound. Give a stop string and a tokenizer for which SGLang's window is more than 3&times; larger in characters than it needs to be, and estimate the extra host cost at batch 128.</li>
+  <li>Both engines special-case speculative decoding in stop-string matching (vLLM's earliest-completing tie-break, SGLang's <code>_stop_match_tail_len</code> widening by <code>new_accepted_len - 1</code>). Design a test that fails without the fix, using two stop strings and a 4-token accepted run.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> Any sequence where the model emits a genuinely invalid byte early and valid text after. With <code>in</code>, the latch holds forever &mdash; the mid-string U+FFFD never disappears, the window grows without bound, the request streams nothing. With <code>endswith</code>, the invalid byte is emitted as U+FFFD once and the stream continues. The source comment at L262-L264 says exactly this.</p>
+  <p><b>2.</b> Leak: stop <code>"END"</code> (buffer 2), output ends <code>"...EN"</code>. Holding 1 character emits <code>"...E"</code>; if the next token completes <code>"END"</code> the <code>E</code> is already gone. Sufficiency: any unsafe unsent suffix must be a <em>proper</em> prefix of some stop string, since a full match would have been truncated in the same <code>update()</code>. The longest proper prefix has length $|s|-1$.</p>
+  <p><b>3.</b> <code>find_printable_text</code> falls through the <code>\n</code> and CJK branches (Burmese is not in <code>_is_chinese_char</code>'s ranges) to <code>text[:text.rfind(" ")+1]</code>; with no spaces <code>rfind</code> returns &minus;1 and it emits <code>""</code>. SGLang streams nothing until a space arrives. vLLM's latch also emits <code>""</code> during the hold but commits on the character's last byte, so it emits one character per three steps. On space-free scripts vLLM streams more smoothly; SGLang's heuristic buys word-boundary aesthetics at the cost of latency on scripts it does not recognise.</p>
+  <p><b>4.</b> <code>"\n\nHuman:"</code> is 8 characters but 3&ndash;4 tokens on a Llama-3-class tokenizer, and <code>_stop_match_tail_len</code> uses <code>stop_str_max_len + 1</code> &asymp; 5 tokens &asymp; 15&ndash;20 characters decoded per request per step. At batch 128 with the assumed $c=10\ \mu$s that is 1.28 ms per step in the scheduler, doubled on streaming steps by <code>check_match_stop_str_prefix</code>. Derived, not measured.</p>
+  <p><b>5.</b> Stop list <code>["BB", "A"]</code>, one accepted run producing <code>"xABBy"</code>. In list order the matcher returns <code>"BB"</code> at index 2 (end 4); one token at a time would have stopped at <code>"A"</code>, index 1 (end 2). vLLM's <code>best_end</code> comparison picks <code>"A"</code>. Assert <code>stop_reason == "A"</code> and <code>text == "x"</code>: fails on a naive in-order matcher, passes on the shipped one.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>A token is a byte string. One character can span four tokens, so the only correct streaming algorithm decodes a <em>window</em> and emits the newly stable suffix &mdash; two nested decodes sharing a left edge, subtracted. Both engines implement literally this, with the same arbitrary 5-token prefix context.</li>
+  <li>The partial-UTF-8 latch makes it work, and its precise form matters: hold on a <em>trailing</em> replacement character (incomplete sequence, retry with more tokens), emit on a <em>mid-string</em> one (genuinely bad id). Backwards, you either garble output or hang the stream forever.</li>
+  <li>Stop strings force a hold-back of $\max_s|s|-1$ characters on every chunk for the whole generation, because SSE cannot retract. <code>include_stop_str_in_output=True</code> zeroes it, making it a latency knob as well as a semantic choice.</li>
+  <li>vLLM detokenises in the frontend process on the API server's event loop &mdash; hence <code>VLLM_V1_OUTPUT_PROC_CHUNK_SIZE=128</code> and the <code>await asyncio.sleep(0)</code> between chunks. SGLang gives it a whole process, buying one <code>batch_decode</code> over the batch instead of $B$ Python calls, and paying a ZMQ hop, a third tokenizer instance, and a bounded <code>decode_status</code> table that can evict a live request.</li>
+  <li>SGLang matches stop strings in the <b>scheduler</b>, decoding a tail window per request per step &mdash; the one piece of this work on the forward pass's critical path, and exactly zero when no stop strings are set. Derived at batch 256 with an assumed 10 &micro;s per call: 2.6&ndash;5.1 ms per step, comparable to the 4.48 ms decode floor.</li>
+  <li>Chunk boundaries are not token boundaries: held steps emit zero characters, commits emit several tokens' worth. That is the mechanism behind <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>'s finding that per-chunk and per-token ITL are different distributions over identical engine behaviour.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/vllm-project/vllm/pull/9625">vLLM PR #9625</a> &mdash; the V3-Tekken incomplete-UTF-8 fix. Its two fixtures (Burmese, and <code>URGENCY</code> plus a chilli emoji) are still the regression tests at <code>tests/tokenizers_/test_detokenize.py:L104-L110</code>.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/17448">vLLM issue #17448</a> &mdash; non-monotonic invalid UTF-8 corrupting <code>DecodeStream</code> state; the reason <code>_protected_step</code> exists. <a href="https://github.com/vllm-project/vllm/issues/21951">Issue #21951</a> is the still-undiagnosed <code>OverflowError</code> in the same function.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/22014">vLLM PR #22014</a> &mdash; <code>min_tokens</code> interacting with stop-string checking; cited inline at <code>vllm/v1/engine/detokenizer.py:L121</code>. It is why <code>stop_check_offset</code> is recomputed inside the per-token loop.</li>
+  <li><a href="https://github.com/sgl-project/sglang/issues/2812">SGLang issue #2812</a> &mdash; the detokeniser state table filling up, and where <code>SGLANG_DETOKENIZER_MAX_STATES</code> came from.</li>
+  <li><a href="https://github.com/huggingface/tokenizers">huggingface/tokenizers</a> &mdash; <code>DecodeStream</code> in <code>tokenizers/src/tokenizer/mod.rs</code>. vLLM pins the exact commit and line of the error string it matches on, which is the correct way to depend on someone else's message.</li>
+  <li>HuggingFace <code>TextStreamer</code> in <code>transformers/generation/streamers.py</code> &mdash; the origin of <code>find_printable_text</code>, and worth reading for how much simpler the single-sequence case is.</li>
+  <li><a href="../09-serving-system/09-01-openai-api-surface.html">&sect;9.1</a> for chat templates and the API surface that produces the ids; <a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> for the SSE plumbing that carries the deltas; <a href="../06-decoding-algorithms/06-05-structured-decoding.html">&sect;6.5</a> for the token-level grammar mask and the retokenisation hazard in jump-forward.</li>
+</ul></div></section>
+<div class="pager"><a href="09-01-openai-api-surface.html"><div class="pager__k">← Previous</div><div class="pager__t">The OpenAI-compatible API surface</div></a><a class="pager__next" href="09-03-request-lifecycle.html"><div class="pager__k">Next →</div><div class="pager__t">Streaming and the end-to-end request lifecycle</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: a token is a byte string, not a character</a>
+<a href="#first-principles">First principles: the prefix/read offset window</a>
+<a href="#partial-utf8">The partial-UTF-8 decision: replace, or buffer</a>
+<a href="#where-it-runs">Where detokenisation runs, and why the two answers differ</a>
+<a href="#stop-strings">Stop strings, which straddle token boundaries</a>
+<a href="#cost">What it costs: host arithmetic against a 4.48 ms step</a>
+<a href="#tokenizing-in">The way in: fast vs slow, special tokens, and tokenizing twice</a>
+<a href="#worked-trace">Worked trace: one token through vLLM</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

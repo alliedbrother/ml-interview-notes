@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reproducibility under batch invariance — The Inference Engineering Book</title>
+<meta name="description" content="Send one prompt at several batch sizes with temperature 0 and diff the outputs; then re-run with the determinism flag and measure what it costs. Uses the engines&#x27; own correctness harnesses, not the performance benchmark.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Lab 13 · for chapter 10-04</div>
+<h1>Reproducibility under batch invariance</h1>
+<p class="hd__sub">Send one prompt at several batch sizes with temperature 0 and diff the outputs; then re-run with the determinism flag and measure what it costs. Uses the engines' own correctness harnesses, not the performance benchmark.</p>
+
+</header>
+<div class="prose"><p class="lead">Send the same prompt at batch 1 and at batch 32, greedily, and read the two
+completions side by side. When they differ, nothing was random: the reduction order moved because
+the batch moved. This lab reproduces that, fixes it with the determinism flag, and prices the
+fix &mdash; using the engines' own <em>correctness</em> harnesses, not the performance benchmark
+that shares the name.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Hardware</span>
+  <p>One GPU that both engines will start on: SM80 (A100) or newer for vLLM's determinism suite
+  (<code>tests/v1/determinism/utils.py:L26-L36</code> gates on
+  <code>has_device_capability(80)</code>), and a card big enough for a small model &mdash; the
+  in-tree defaults are Qwen3-1.7B for vLLM and Qwen3-8B for SGLang, so a 24&nbsp;GB card runs both.
+  Nothing here needs 80&nbsp;GB. Where no GPU is available, the substituted figure is the overhead
+  of the flag, which this lab declines to guess at: chapter
+  <a href="../../10-benchmarking/10-04-batch-invariance.html">&sect;10.4</a> also refuses to, and
+  says so under an "Unmeasured" callout. There is no published number to cite that would apply to
+  your model, backend and TP degree, so <em>What to expect</em> asks you for four numbers rather
+  than handing you one.</p>
+  <p>The floor is worth stating precisely, because the tree disagrees with itself about it. The
+  comment above the environment variable reads "Requires NVIDIA GPU with compute capability
+  &gt;= 9.0" (<code>vllm/envs.py:L627-L629</code>), but
+  <code>enable_batch_invariant_mode()</code> has an explicit SM80 branch installing Triton
+  <code>mm</code>/<code>addmm</code>/<code>matmul</code>/<code>linear</code> overrides
+  (<code>vllm/model_executor/layers/batch_invariant.py:L916-L929</code>), and the test suite gates
+  on capability 80. Trust the code and the tests: an A100 runs this lab.</p>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Not executed here</span>
+  <p><code>run.py</code> was written against the request and response shapes cited below, and its
+  comparison arithmetic &mdash; ULP distance, first-divergence index, the bucket-straddling batch
+  ladder &mdash; was exercised offline, but it has <b>not</b> been run against a live engine; no GPU
+  was available while writing. Every expectation below is a prediction. In particular, the claim
+  that a given batch size diverges is a claim about <em>your</em> hardware, backend and graph
+  configuration, and the honest outcome of this lab is sometimes "it did not diverge, and here is
+  why".</p>
+</div></div>
+<section class="sec" id="what" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">What you measure</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Do not use the benchmark for this</span>
+  <p><code>benchmarks/benchmark_batch_invariance.py</code> looks like the right tool and is not. It
+  generates a baseline for a "needle" prompt, then inserts that prompt into random batches and
+  checks one thing:</p>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">benchmarks/benchmark_batch_invariance.py:L148-L152 and L190-L192</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Generate baseline
+        print("Generating baseline (warmup)...")
+        baseline_out = llm.generate([needle_prompt], sampling)
+        assert len(baseline_out) == 1
+        baseline_text = baseline_out[0].outputs[0].text
+            # Verify needle output still matches
+            needle_output = outputs[needle_pos]
+            assert needle_output.prompt == needle_prompt</code></pre>
+</div>
+
+<p><code>baseline_text</code> is computed and then never used. The assertion compares the
+<em>prompt</em> it sent against the prompt it got back &mdash; a check that the engine did not
+shuffle the batch, which is true by construction. It is a performance harness: it times the same
+workload with <code>VLLM_BATCH_INVARIANT</code> at 0 and 1 and prints an overhead percentage. Read
+its green output as a determinism result and you will conclude the property holds when you have not
+tested it. The correctness harnesses are elsewhere, and this lab drives those.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Where the correctness question is actually answered, at a556f3f / 7d89325</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Harness</th><th>Shape</th><th>What it asserts</th></tr></thead>
+    <tbody>
+      <tr><td><code>tests/v1/determinism/test_batch_invariance.py</code></td><td>in-process
+        <code>LLM()</code></td>
+        <td>Two mirror-image tests: one that the property <em>fails</em> with the flag off, one
+        that it holds with it on. 960 lines.</td></tr>
+      <tr><td><code>tests/v1/determinism/test_online_batch_invariance.py</code></td><td>HTTP,
+        against a real server</td>
+        <td>BS=1 versus BS=N over the OpenAI completions API, comparing token ids <em>and</em>
+        per-step logprobs bitwise. This is the one <code>run.py --mode sweep</code> imitates.</td></tr>
+      <tr><td><code>tests/v1/determinism/test_matmul_batch_invariant.py</code>,
+        <code>test_rms_norm_batch_invariant.py</code>, <code>test_cutlass_batch_invariance.py</code>,
+        <code>test_nvfp4_batch_invariant.py</code></td><td>op-level</td>
+        <td>Where to go when a model-level test fails and you need to localise it. 1,138 lines
+        between them.</td></tr>
+      <tr><td><code>python/sglang/test/test_deterministic.py</code></td><td>driver against a live
+        server</td>
+        <td>Four modes: <code>single</code>, <code>prefix</code>, <code>radix_cache</code>,
+        <code>p_vs_d</code>. Prints a unique-completion count.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Three measurements, in order:</p>
+
+<ol>
+  <li><b>Unique completions across batch sizes</b>, flag off. Greater than one is the bug,
+  reproduced.</li>
+  <li><b>The same count with the flag on.</b> It should be exactly one.</li>
+  <li><b>The overhead</b> the flag cost, for <em>your</em> model, backend and TP degree &mdash;
+  measured, because there is no meaningful number to cite.</li>
+</ol>
+
+<p>There is also a fourth thing worth watching, and <code>run.py</code> reports it separately: the
+maximum ULP distance between the baseline's per-step logprobs and each batch's. Token equality is
+the weaker claim. Two runs can emit identical tokens while every logprob differs in the last few
+bits &mdash; the argmax simply survived the perturbation this time. The logprob column is what tells
+you the arithmetic moved.</p></div></section>
+<section class="sec" id="run" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Running it</h2></div><div class="sec__body"><h3>Part A &mdash; the upstream harnesses, verbatim</h3>
+
+<p>Start here. <code>run.py --mode harness</code> prints these with no server and no GPU, so you can
+read them before installing anything.</p>
+
+<p>vLLM's suite has a detail that will confuse you if you skip it. A directory-scoped fixture turns
+invariance <em>on</em> for every test in it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/v1/determinism/conftest.py:L8-L12</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@pytest.fixture(autouse=True)
+def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
+    """Automatically enable batch invariant kernel overrides for all tests."""
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")</code></pre>
+</div>
+
+<p>So the test that proves the effect exists has to switch it back off itself, and its docstring is
+the clearest statement of the whole idea in either repository:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/v1/determinism/test_batch_invariance.py:L458-L470</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def test_logprobs_without_batch_invariance_should_fail(
+    backend, monkeypatch: pytest.MonkeyPatch
+):
+    """
+    This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.
+    It DISABLES batch invariance mode and expects to see non-deterministic behavior
+    between BS=1 and BS=N runs. This demonstrates that batch invariance is actually
+    doing something useful.
+
+    The test will PASS if we detect differences (proving batch invariance matters).
+    The test will FAIL if everything matches (suggesting batch invariance isn't needed).
+    """
+    # CRITICAL: Disable batch invariance for this test</code></pre>
+</div>
+
+<p>The model is an environment variable, not a flag, so you can point the whole suite at your own
+weights:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/v1/determinism/utils.py:L39-L40</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
+TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)</code></pre>
+</div>
+
+<p>SGLang's is a driver rather than a test: you start a server and run it against the live endpoint.
+Its <code>single</code> mode is the experiment in eleven lines &mdash; the same prompt at batch 1
+through <em>n</em>, and a count of distinct completions:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/test/test_deterministic.py:L460-L471</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def test_deterministic(args):
+    if args.test_mode == "single":
+        # In single mode, we test the deterministic behavior by sending the same prompt in batch sizes ranging from 1 to n_trials.
+        texts = []
+        for i in range(1, args.n_trials + 1):
+            batch_size = i
+            text = send_single(args, args.profile, prompt=[PROMPT_1] * batch_size)
+            text = text.replace("\n", " ")
+            print(f"Trial {i} with batch size {batch_size}: {text}")
+            texts.append(text)
+        print(f"Total samples: {len(texts)}, Unique samples: {len(set(texts))}")
+        return [len(set(texts))]</code></pre>
+</div>
+
+<p>Its in-tree test class fixes the server arguments, and one of them is not obvious:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/test/test_deterministic_utils.py:L12-L18</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>DEFAULT_MODEL = "Qwen/Qwen3-8B"
+COMMON_SERVER_ARGS = [
+    "--trust-remote-code",
+    "--cuda-graph-max-bs-decode",
+    "32",
+    "--enable-deterministic-inference",
+]</code></pre>
+</div>
+
+<p><code>--cuda-graph-max-bs-decode 32</code> caps the largest decode batch SGLang captures a
+graph for (<code>python/sglang/srt/server_args.py:L1906-L1910</code>, resolved at
+<code>:L4561-L4562</code>). The source does not say why the test class sets it, and I am not
+going to guess; what matters here is the consequence. It fixes the bucket ladder the sweep runs
+against, and above the cap there is no graph to pad into. That changes what a clean result means
+&mdash; see <em>What to expect</em>.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; the two arms, SGLang</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>$ python3 run.py --mode harness          # prints all of the below, offline
+
+# arm 1: flag off. Expect "Unique samples" &gt; 1.
+$ python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+    --attention-backend triton --cuda-graph-max-bs-decode 32
+$ python3 -m sglang.test.test_deterministic --n-trials 50 --test-mode single
+
+# arm 2: flag on. Expect exactly 1.
+$ python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+    --attention-backend triton --cuda-graph-max-bs-decode 32 \
+    --enable-deterministic-inference
+$ python3 -m sglang.test.test_deterministic --n-trials 50 --test-mode single</code></pre>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">The backend is chosen for you</span>
+  <p>Omit <code>--attention-backend</code> with determinism on and SGLang picks one and tells you;
+  pass an unsupported one and it refuses to start rather than degrading:</p>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/arg_groups/overrides.py:L2097-L2108</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        logger.warning(
+            f"Attention backend not specified. Falling back to '{backend}' for deterministic inference. "
+            f"You can explicitly set --attention-backend to one of {DETERMINISTIC_ATTENTION_BACKEND_CHOICES}."
+        )
+        return {"attention_backend": backend}
+    elif view.attention_backend not in DETERMINISTIC_ATTENTION_BACKEND_CHOICES:
+        # User explicitly specified an incompatible attention backend
+        raise ValueError(
+            f"Currently only {DETERMINISTIC_ATTENTION_BACKEND_CHOICES} attention backends are supported for deterministic inference, "
+            f"but you explicitly specified '{view.attention_backend}'."
+        )
+    return {}</code></pre>
+</div>
+
+<p>That is a comparison hazard, not a convenience: if the two arms of your experiment ran different
+attention backends, the difference you measured is not the difference you meant to measure. Pin
+<code>--attention-backend</code> explicitly in both arms.</p>
+
+<h3>Part B &mdash; the sweep, over plain HTTP</h3>
+
+<p>The upstream harnesses want pytest and a checkout. <code>run.py --mode sweep</code> does the same
+comparison against either engine over the wire, with nothing but the standard library. It sends
+<em>n</em> copies of one prompt in a single request &mdash; which is what the online test does, and
+what makes the engine schedule them together:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/v1/determinism/test_online_batch_invariance.py:L144-L161</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    sp_kwargs: dict[str, Any] = {
+        "temperature": 0.6,
+        "top_p": 1.0,
+        "max_tokens": 8,
+        "seed": 42,
+        "logprobs": 5,
+    }
+
+    tp_size = os.getenv("VLLM_TP_SIZE", "1")
+    server_args: list[str] = [
+        "--max-model-len=8192",
+        "--max-num-seqs=32",
+        f"--attention-backend={backend}",
+    ]
+    if tp_size:
+        server_args += ["-tp", tp_size]
+
+    with RemoteOpenAIServer(TEST_MODEL, server_args) as server:</code></pre>
+</div>
+
+<p>Note that the upstream test does <em>not</em> use <code>temperature=0</code>. It uses 0.6 with a
+fixed seed, which exercises more of the distribution while remaining reproducible by seed. Greedy is
+the sharper demonstration and is <code>run.py</code>'s default, because a greedy divergence is
+unarguable; seeded sampling is the more thorough test. Run both. And the comparison it makes is not
+on text:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/v1/determinism/test_online_batch_invariance.py:L126-L133</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+            if a != b:
+                diff = abs(a - b)
+                raise AssertionError(
+                    f"Prompt {i} Step {t}: Bitwise mismatch "
+                    f"(abs diff={diff:.6e}). "
+                    f"BS=1 tokens: {tokens_bs1} BS=N tokens: {tokens_bsN}"
+                )</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell &mdash; labs/13-batch-invariance</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>$ python3 run.py --mode sweep --engine vllm --url http://localhost:8000 \
+    --model Qwen/Qwen3-1.7B --max-batch 32 --save off.json
+
+$ python3 run.py --mode sweep --engine sglang --url http://localhost:30000 \
+    --sizes 1,15,16,17,23,24,25 --temperature 0.0
+
+$ python3 run.py --mode cost --url http://localhost:8000 \
+    --invariant http://localhost:8001 --batch 32 --trials 20
+
+$ python3 run.py --help          # every knob, all four modes</code></pre>
+</div>
+
+<p>The default batch ladder deliberately straddles vLLM's CUDA-graph bucket boundaries &mdash; 15,
+16, 17 and 23, 24, 25 &mdash; rather than sampling round numbers. The reason is in
+<em>What to expect</em>.</p></div></section>
+<section class="sec" id="expect" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What to expect</h2></div><div class="sec__body"><p><b>Flag off, a long sweep: several unique completions.</b> Not all of them different from each
+other; divergence is sporadic, because it needs a position where the top two logits are within a few
+ULP. Chapter <a href="../../10-benchmarking/10-04-batch-invariance.html">&sect;10.4</a> shows four
+fp32 partials rearranged differing by 1,746 ULP, which is a relative error of
+$1.5 \times 10^{-4}$ &mdash; enormous next to a near-tie and invisible next to a confident one.
+One flipped argmax at position 40 rewrites everything after it, which is why the effect looks
+bimodal: completions are either identical or wildly different, rarely close.</p>
+
+<p><b>Flag on: exactly one.</b> If it is not, you have found either a coverage gap or a bug, and the
+gaps are documented. &sect;10.4's coverage map names three: vLLM's fused-MoE kernels default to
+unsupported and must opt in; SGLang's routing top-<em>k</em> stays unsorted unless the model has
+fused shared experts; Mamba backends raise rather than degrade. Check your model against that list
+before filing anything.</p>
+
+<p><b>The result that surprises people: no divergence at all, flag off.</b> This is common and it is
+not a failed experiment. Three causes, in order of likelihood:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Why a sweep can come back clean with determinism off &mdash; predictions</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Cause</th><th>How to confirm it</th></tr></thead>
+    <tbody>
+      <tr><td>Every batch you tried landed in one CUDA-graph bucket. Replay pads to the nearest
+        captured size, so batches 9 through 16 run byte-identical launch geometry and agree
+        trivially.</td>
+        <td>Re-run with <code>--sizes 1,16,17</code>. If 16 and 17 differ but 15 and 16 do not, you
+        found a bucket riser, and the effect is a step function rather than a trend. Then re-run
+        with <code>--enforce-eager</code>: with no padding, every pair should be free to differ.</td></tr>
+      <tr><td>The prompt is too easy. A confident model has no near-ties to flip.</td>
+        <td>Raise <code>--max-tokens</code> &mdash; more positions, more chances &mdash; and watch
+        the ULP column rather than the token column. Moving logprobs with stable tokens is the
+        effect, just below the threshold where it becomes visible.</td></tr>
+      <tr><td>The adaptive split policy already decayed to one or two splits at your sequence
+        length, so pinning it changes nothing.</td>
+        <td>&sect;10.4's exercise 2 works this out: for Llama-3-70B at TP=8 and $s = 8192$, both
+        batch 1 and batch 32 clamp to <code>max_kv_splits = 8</code>, so that configuration is
+        already invariant across those two sizes by accident.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p><b>The cost.</b> This is the number nobody can hand you, and the reason is instructive. &sect;10.4
+argues the intuitive ranking is wrong: forcing one attention split and one fixed GEMM tile is nearly
+free at small batch, because those layers are bandwidth-bound and the padded arithmetic rides along
+in time the machine was already spending on memory. What you actually pay for is single-channel NCCL
+&mdash; <code>NCCL_MIN_NCHANNELS</code> and <code>NCCL_MAX_NCHANNELS</code> pinned to 1, with
+<code>NCCL_ALGO=allreduce:tree</code> and custom all-reduce off &mdash; and disabled prefix caching.
+Neither of those appears at TP=1 on a cold workload, which is exactly the configuration a quick
+benchmark uses. So:</p>
+
+<ul>
+  <li>Run <code>--mode cost</code> at TP=1 <em>and</em> at your real TP degree. The split between
+  attention, GEMM and collective cost inverts between them.</li>
+  <li>Run it on a shared-prefix workload <em>and</em> a cold one. Turning cache hits into full
+  prefills can cost more than every kernel change combined.</li>
+  <li>Report all four cells, or report none. One number with no configuration attached is what
+  &sect;10.3 spends a chapter arguing against.</li>
+</ul></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Run <code>--mode sweep</code> with <code>--sizes 1,15,16,17</code> on vLLM with default CUDA
+  graphs, then again with <code>--enforce-eager</code>. Predict which pairs differ in each case
+  <em>before</em> running, then explain the inversion.</li>
+
+  <li><b>Read the file.</b> Open <code>benchmarks/benchmark_batch_invariance.py</code> and find
+  every use of <code>baseline_text</code>. Then write the two-line change that would turn it into a
+  correctness harness. Why do you think it was written this way &mdash; what question was its author
+  actually asking?</li>
+
+  <li><b>Predict, then verify.</b> Run <code>--mode sweep</code> at
+  <code>--temperature 0.0</code> and again at <code>--temperature 0.6 --seed 42</code>, same
+  server, same sizes. Which finds more divergence, and why is the answer not obviously the greedy
+  one?</li>
+
+  <li>Run SGLang's <code>--test-mode prefix</code> with <code>--return-logprob</code>. It varies the
+  shared-prefix length across 1, 511, 2048 and 4097 tokens. Which of those four is the odd one out,
+  and what does that tell you about where SGLang's determinism reaches beyond the kernels?</li>
+
+  <li><b>Design.</b> Your eval suite must be bitwise reproducible, but production runs TP=8 and
+  cannot afford the NCCL pinning. Propose a configuration that gets reproducibility for evals
+  without touching production, and name the property of the harness it depends on.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <ol>
+    <li>vLLM's default ladder is <code>[1, 2, 4] + range(8, 256, 8)</code>, so with graphs on 15 and
+    16 both pad up to the batch-16 graph and replay byte-identical launch geometry &mdash; they
+    should agree. 17 pads to 24 and is free to differ; 1 has its own graph and is also free to
+    differ. So you expect one agreeing pair (15, 16) and divergence across the 16&rarr;17 riser. With
+    <code>--enforce-eager</code> there is no padding at all, so every size runs its true shape and
+    <em>any</em> pair may differ, including 15 versus 16. The inversion &mdash; graphs make more
+    pairs agree, not fewer &mdash; is the tell that you are looking at a bucket effect and not a
+    scheduling one.</li>
+
+    <li><code>baseline_text</code> is assigned once and printed once, truncated to 50 characters; it
+    is never compared. Two lines fix it: capture
+    <code>needle_output.outputs[0].text</code> and assert it equals <code>baseline_text</code>. The
+    author was asking "how much does the flag cost", which is a legitimate question, and the needle
+    is there to keep the batch composition realistic &mdash; a fixed prompt among random ones. The
+    name is the trap, not the code.</li>
+
+    <li>Greedy is the sharper <em>demonstration</em>, because any difference is unarguable. But
+    seeded sampling at 0.6 finds more, because it draws from the whole distribution: greedy only
+    diverges at a near-tie for first place, while a sampled draw is sensitive to perturbations
+    anywhere in the top of the distribution that move the cumulative mass across the sampled
+    threshold. That is why the upstream online test uses 0.6 with a seed rather than 0.</li>
+
+    <li>4097. SGLang snaps the chunked-prefill boundary to a multiple of the attention split tile
+    under determinism, and that value is 4096 for both the FlashInfer and Triton prefill paths, set
+    in <code>Scheduler.init_deterministic_inference_config</code>. A 4097-token prefix is the only
+    one of the four that must be split across chunks, so it is the only one that exercises the
+    alignment constraint at <code>python/sglang/srt/managers/schedule_policy.py:L1393-L1402</code>.
+    The lesson: batch invariance is not only a kernel property in SGLang, it is a scheduling
+    constraint.</li>
+
+    <li>Run a second engine process for evals at TP=1 with the flag on and leave production
+    untouched; the NCCL pinning is inert at world size 1, and SGLang gates it on TP&gt;1 explicitly.
+    The dependency is that the eval harness must fit the model on one GPU. If it cannot, fix the
+    batch instead of the kernels: send eval requests strictly serially at concurrency 1, so every
+    batch is a batch of one and therefore trivially reproducible &mdash; at the price of throughput,
+    and only as long as no other traffic shares the server.</li>
+  </ol>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The file named <code>benchmark_batch_invariance.py</code> does not test batch invariance. It
+  computes a baseline and discards it. Check what a harness asserts before you trust that it
+  passed &mdash; especially one whose name answers your question.</li>
+  <li>Compare logprobs, not text. Identical tokens with moving logprobs means the arithmetic changed
+  and the argmax happened to survive; it will not survive the next near-tie.</li>
+  <li>A clean sweep is a result, not a failure, and usually means CUDA-graph bucket padding made
+  every batch you tried run identical launch geometry. Straddle a riser, or turn graphs off, before
+  concluding the property holds.</li>
+  <li>Pin the attention backend in both arms. SGLang silently substitutes a
+  determinism-capable backend when the flag is on, which quietly makes the two halves of your
+  experiment incomparable.</li>
+  <li>There is no citable overhead number for the flag, and this lab does not invent one. The cost
+  lives in collectives and disabled prefix caching, both of which are invisible at TP=1 on a cold
+  workload &mdash; so measure at your real TP degree and your real prefix-sharing rate, or say
+  nothing.</li>
+</ul></div></section>
+
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#what">What you measure</a>
+<a href="#run">Running it</a>
+<a href="#expect">What to expect</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

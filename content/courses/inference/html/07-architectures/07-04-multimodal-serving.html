@@ -1,0 +1,2066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multimodal serving — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i is-current" href="07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 7 · Architectures that change the inference story · 07-04</div>
+<h1>Multimodal serving</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/multimodal/</code></li><li><code>vllm/v1/core/encoder_cache_manager.py</code></li><li><code>python/sglang/srt/multimodal/</code></li><li><code>python/sglang/srt/mem_cache/multimodal_cache.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A user pastes one 1024&times;1024 screenshot into a Qwen2-VL chat. Before a single word of
+their question is read, the engine has committed 1,369 KV slots &mdash; 171&nbsp;MiB at Llama-3-8B's
+cell size &mdash; and has run a second, entirely different model to produce them. Multimodal serving
+is the problem of scheduling two models with opposite bottlenecks inside one step loop, and paying
+for the token expansion that joins them.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Run a vision-language model under vLLM's defaults and the first thing that surprises you is not
+latency. It is that the engine refuses to schedule.</p>
+
+<p>vLLM's V1 scheduler owns a second budget besides the token budget. When it cannot satisfy that
+budget it does not queue the encoder work for later &mdash; it truncates the request's prefill to
+stop <em>before</em> the image:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L1648-L1667</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            if not self.encoder_cache_manager.can_allocate(
+                request, i, encoder_compute_budget, num_embeds_to_schedule
+            ):
+                # The encoder cache is full or the encoder budget is exhausted.
+                # NOTE(woosuk): We assume that the encoder input tokens should
+                # be processed altogether, as the encoder usually uses
+                # bidirectional attention.
+                if num_computed_tokens + shift_computed_tokens &lt; start_pos:
+                    # We only schedule the decoder tokens just before the
+                    # encoder input.
+                    num_new_tokens = start_pos - (
+                        num_computed_tokens + shift_computed_tokens
+                    )
+                else:
+                    # Because of prefix caching, num_computed_tokens is greater
+                    # than start_pos even though its encoder input is not
+                    # available. In this case, we can't schedule any token for
+                    # the request in this step.
+                    num_new_tokens = 0
+                break</code></pre>
+</div>
+
+<p><code>num_new_tokens = 0</code> means the request is skipped this step entirely. That path opens up
+because the encoder cache is a fixed, small pool that does not grow with the KV pool. It is sized in
+<em>embedding slots</em>, and its starting point is the batched-token budget &mdash; set
+unconditionally in <code>SchedulerConfig.__post_init__</code>, with no CLI flag behind it
+(both fields are <code>Field(init=False)</code>, <code>vllm/config/scheduler.py:L86-L97</code>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/scheduler.py:L238-L239</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.max_num_encoder_input_tokens = self.max_num_batched_tokens
+        self.encoder_cache_size = self.max_num_batched_tokens</code></pre>
+</div>
+
+<p>That value is then floored at one worst-case item &mdash; the effective size is
+<code>max(max_num_batched_tokens, max_tokens_per_mm_item)</code>, derived in
+&sect;4 &mdash; so the count of images the cache holds depends on both numbers. At
+<code>max_num_batched_tokens=8192</code> with a model whose per-item cap sits at or below that,
+the cache is 8,192 slots, which is <b>five</b> 1,369-token images (derived:
+$\lfloor 8192/1369 \rfloor = 5$). Raise the cap and the floor takes over: a Qwen2-VL whose processor allows 16,384 tokens
+per image gets a 16,384-slot cache, or eleven such images. Either way the number is small, fixed at
+startup, and counted in <em>images across the whole engine</em> rather than per request &mdash; and
+when every resident entry is still referenced by a running request, the next image's request does
+not advance.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">1,369</div><div class="kpi__l">LM tokens for one 1024&times;1024 image (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">171 MiB</div><div class="kpi__l">its KV at 128 KiB/token</div></div>
+  <div class="kpi"><div class="kpi__n">5</div><div class="kpi__l">such images in an 8,192-slot encoder cache (derived)</div></div>
+</div>
+
+<p>The second surprise is an error string. When the number of embeddings the encoder produced does
+not equal the number of placeholder positions the tokenizer emitted, the splice fails loudly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/utils.py:L701-L713</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    try:
+        # If is_multimodal is on CPU this avoids a D2H sync
+        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+    except RuntimeError as e:
+        num_actual_tokens = len(mm_embeds_flat)
+        num_expected_tokens = is_multimodal.sum().item()
+
+        if num_actual_tokens != num_expected_tokens:
+            expr = _embedding_count_expression(multimodal_embeddings)
+
+            raise ValueError(
+                f"Attempted to assign {expr} = {num_actual_tokens} "
+                f"multimodal tokens to {num_expected_tokens} placeholders"</code></pre>
+</div>
+
+<p>Both symptoms come from the same structural fact: a multimodal request is two models in one
+request, glued together by an exact-length contract on a token count that neither model owns.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A text request has one compute stage. A multimodal request has three: a CPU stage (decode the
+bytes, resize, tile, normalise), a GPU encoder stage (a vision transformer, run once per image), and
+the usual language-model prefill. The encoder is not a smaller version of the language model. It has
+fixed-size input, no KV cache, no incremental state, bidirectional attention, and it runs once per
+<em>image</em> rather than once per <em>token</em>. Its output &mdash; a dense
+<code>[N, d_model]</code> tensor &mdash; is not KV. It is a block of input embeddings, and it must be
+spliced into the language model's embedding sequence at exactly the positions the tokenizer reserved
+with placeholder token ids.</p>
+
+<p>Everything awkward in this chapter follows from that splice. The encoder output must be kept alive
+from the step that computed it until the step that consumes it (so it needs its own cache, with its
+own budget). It must be produced whole, because bidirectional attention cannot be chunked the way
+causal prefill can (so it fights chunked prefill, <a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>).
+And the KV blocks it eventually produces are only reusable by a later request if that request has the
+same image at the same offset (so it perturbs prefix caching,
+<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the full pipeline, bytes to prefill.</b> Shapes are
+  for one 1024&times;1024 image under Qwen2-VL tiling (patch 14, merge 2) with $d_{\text{model}}=4096$;
+  derived in &sect;3.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["HTTP body<br/>image_url or base64<br/>~400 KB JPEG"] --> B["CPU: decode + smart_resize<br/>1024x1024 to 1036x1036<br/>PIL / torchvision"]
+    B --> C["CPU: HF processor<br/>patchify + normalise<br/>pixel_values 5476 x 1176 fp32<br/>= 24.6 MiB"]
+    C --> D["mm_hash = blake3 of<br/>model_id + raw item + processor kwargs"]
+    D --> E["Prompt updates<br/>1 image token becomes<br/>1369 placeholder ids"]
+    E --> F{"encoder cache<br/>hit on mm_hash?"}
+    F -- hit --> H
+    F -- miss --> G["GPU: ViT encoder + projector<br/>5476 patches in<br/>1369 x 4096 bf16 out = 10.7 MiB<br/>COMPUTE BOUND"]
+    G --> H["encoder_cache keyed by mm_hash<br/>lives on GPU, own budget"]
+    H --> I["Splice via is_multimodal mask<br/>1369 rows overwritten"]
+    I --> J["GPU: language model prefill<br/>1369 + text tokens<br/>writes 171 MiB of KV"]
+    J --> K["Decode loop<br/>MEMORY BOUND"]
+  </script>
+</div>
+
+<p>Note where the two roofline regimes sit. The encoder reads its weights once and applies them to
+thousands of patches; the decode loop reads its weights once and applies them to a handful of tokens.
+They are on opposite sides of the ridge point, in the same engine, contending for the same SMs.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: how big is an image</h2></div><div class="sec__body"><p>Define the tiling. Qwen2-VL and Qwen2.5-VL use dynamic resolution: the image is resized so both
+dimensions are divisible by $f = p \cdot m$ where $p = 14$ is the ViT patch size and $m = 2$ is the
+spatial merge factor, subject to a pixel-count cap. vLLM computes the resulting token count directly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/qwen2_vl.py:L916-L923</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        grid_t = max(padded_num_frames // temporal_patch_size, 1)
+        grid_h = preprocessed_size.height // patch_size
+        grid_w = preprocessed_size.width // patch_size
+
+        num_patches = grid_t * grid_h * grid_w
+        num_vision_tokens = num_patches // (merge_size**2)
+
+        return preprocessed_size, num_vision_tokens</code></pre>
+</div>
+
+<p>The resize itself is <code>smart_resize</code>, which SGLang carries in tree so we can read the
+exact rounding rule:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/multimodal/processors/qwen_vl.py:L130-L140</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar &gt; max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar &lt; min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar</code></pre>
+</div>
+
+<p>with <code>IMAGE_FACTOR = 28</code>, <code>MIN_PIXELS = 4 * 28 * 28</code> and
+<code>MAX_PIXELS = envs.SGLANG_IMAGE_MAX_PIXELS.get()</code>
+(<code>python/sglang/srt/multimodal/processors/qwen_vl.py:L47-L50</code>), whose default is
+<code>16384 * 28 * 28 = 12,845,056</code> pixels
+(<code>python/sglang/srt/environ.py:L1159</code>). Since $28^2 = 784$ is exactly the pixel area of one
+merged vision token, that cap says plainly: <b>at most 16,384 tokens per image</b>. So:</p>
+
+<div class="math-display">$$N_{\text{img}} \;=\; \frac{\lfloor H'/p \rfloor \cdot \lfloor W'/p \rfloor}{m^{2}} \;=\; \frac{H' \, W'}{784}, \qquad H' = 28\left\lceil\!\!\left\lfloor \tfrac{H}{28} \right\rceil\!\!\right\rceil$$</div>
+
+<p>where $H, W$ are the input dimensions, $H', W'$ the resized ones, and
+$\lceil\lfloor \cdot \rceil\rfloor$ denotes round-to-nearest. Work it for real screen sizes:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; Qwen2-VL image token expansion from the two code paths above, and the resulting KV at Llama-3-8B's 128 KiB/token cell (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>). The KV column pairs a Qwen tiling scheme with a Llama cell size and is illustrative of the magnitude, not a specific deployment. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Input</th><th>Resized</th><th class="num">Patch grid</th><th class="num">LM tokens</th><th class="num">KV</th></tr></thead>
+      <tbody>
+        <tr><td>336 &times; 336 (CLIP-era thumbnail)</td><td>336 &times; 336</td><td class="num">24 &times; 24</td><td class="num">144</td><td class="num">18.0 MiB</td></tr>
+        <tr><td>512 &times; 512</td><td>504 &times; 504</td><td class="num">36 &times; 36</td><td class="num">324</td><td class="num">40.5 MiB</td></tr>
+        <tr><td>1024 &times; 1024 (pasted screenshot)</td><td>1036 &times; 1036</td><td class="num">74 &times; 74</td><td class="num">1,369</td><td class="num">171.1 MiB</td></tr>
+        <tr><td>1920 &times; 1080 (1080p frame)</td><td>1932 &times; 1092</td><td class="num">138 &times; 78</td><td class="num">2,691</td><td class="num">336.4 MiB</td></tr>
+        <tr><td>3840 &times; 2160 (4K screenshot)</td><td>3836 &times; 2156</td><td class="num">274 &times; 154</td><td class="num">10,549</td><td class="num">1,318.6 MiB</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>That last row is the practical headline. <b>One un-downscaled 4K screenshot costs 10,549 tokens
+and 1.29&nbsp;GiB of KV</b> &mdash; more than five copies of a 2,000-token system prompt, and enough
+to overflow an 8,192-token context on its own. Eight 1024&times;1024 images in a single conversation
+come to 10,952 tokens and 1,369&nbsp;MiB. A "few images" is not a few hundred tokens; it is a long
+document.</p>
+
+<h3>Why the encoder is the wrong shape for a decode engine</h3>
+
+<p>Take an encoder of $P_{\text{enc}}$ parameters in bf16 running one image of $N_p$ patches. A
+forward pass reads each weight once: $2 P_{\text{enc}}$ bytes of HBM traffic, and roughly
+$2 P_{\text{enc}} N_p$ FLOPs of GEMM work. Arithmetic intensity is therefore</p>
+
+<div class="math-display">$$I_{\text{enc}} \;\approx\; \frac{2 P_{\text{enc}} N_p}{2 P_{\text{enc}}} \;=\; N_p \;\;\text{FLOP/byte}$$</div>
+
+<p>For the 1024&times;1024 image, $N_p = 5{,}476$. Against the H100's ridge point $I^{*} = 295$
+(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>), that is
+<b>18.6&times; past the ridge at batch size one</b>. The encoder is compute-bound before you batch
+anything. Decode, by the same argument, has intensity $\approx B$ and needs a batch of ~295 to reach
+the ridge (<a href="../01-the-core-loop/01-01-prefill-vs-decode.html">&sect;1.1</a>). Two workloads,
+opposite regimes, one GPU &mdash; which is exactly why the scheduler needs a separate encoder budget
+rather than folding encoder work into the token budget.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; placeholder expansion and the embedding splice</b>
+  for the prompt <code>&lt;|im_start|&gt;user &lt;image&gt; what is this?</code> with a 1024&times;1024
+  image. The token strip is what the KV cache and the radix tree see; the embedding strip is what the
+  language model's first layer actually reads.</p>
+  <svg viewBox="0 0 960 330" width="100%" role="img" aria-label="Two aligned strips: a token-id sequence with 1369 placeholder ids in the middle, and an embedding matrix where those 1369 rows are overwritten by encoder output">
+    <g font-family="IBM Plex Mono, SF Mono, Consolas, monospace" font-size="12">
+      <text x="12" y="24" fill="var(--text-dim)">prompt_token_ids, length 1381</text>
+
+      <rect x="12" y="36" width="120" height="34" rx="4" fill="var(--surface2)" stroke="var(--border-bright)"/>
+      <text x="24" y="58" fill="var(--text)">6 text ids</text>
+
+      <rect x="136" y="36" width="620" height="34" rx="4" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.7"/>
+      <text x="200" y="58" fill="var(--copper)">1369 x placeholder id (151655)  &#8592; one &lt;image&gt; became this</text>
+
+      <rect x="760" y="36" width="188" height="34" rx="4" fill="var(--surface2)" stroke="var(--border-bright)"/>
+      <text x="772" y="58" fill="var(--text)">6 text ids</text>
+
+      <text x="12" y="96" fill="var(--text-dim)">offset = 6, length = 1369  (PlaceholderRange)</text>
+      <path d="M136 104 L136 116 L756 116 L756 104" fill="none" stroke="var(--copper)" stroke-opacity="0.6"/>
+      <text x="380" y="132" fill="var(--copper)">mm_position</text>
+
+      <text x="12" y="168" fill="var(--text-dim)">is_multimodal mask (bool, len 1381)</text>
+      <rect x="12" y="180" width="120" height="22" rx="3" fill="none" stroke="var(--border-bright)" stroke-dasharray="3 3"/>
+      <text x="52" y="196" fill="var(--text-dim)">False</text>
+      <rect x="136" y="180" width="620" height="22" rx="3" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.5"/>
+      <text x="420" y="196" fill="var(--copper)">True</text>
+      <rect x="760" y="180" width="188" height="22" rx="3" fill="none" stroke="var(--border-bright)" stroke-dasharray="3 3"/>
+      <text x="826" y="196" fill="var(--text-dim)">False</text>
+
+      <text x="12" y="240" fill="var(--text-dim)">inputs_embeds [1381, 4096] bf16 = 10.8 MiB</text>
+
+      <rect x="12" y="252" width="120" height="34" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/>
+      <text x="20" y="274" fill="var(--teal)">embed_tokens</text>
+
+      <rect x="136" y="252" width="620" height="34" rx="4" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.7"/>
+      <text x="228" y="274" fill="var(--plum)">encoder_cache[mm_hash][0:1369]  &#8592; 10.7 MiB overwritten</text>
+
+      <rect x="760" y="252" width="188" height="34" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/>
+      <text x="768" y="274" fill="var(--teal)">embed_tokens</text>
+
+      <text x="12" y="316" fill="var(--text-dim)">inputs_embeds[is_multimodal] = mm_embeds_flat   &#8212;  models/utils.py:L703</text>
+    </g>
+  </svg>
+</div>
+
+<p>The placeholder ids are never embedded in any meaningful sense &mdash; the text embedding table is
+applied to the whole sequence and then those rows are clobbered. That is why the count must match
+exactly, and why the placeholder id itself is free to be repurposed, as SGLang does in &sect;5.</p></div></section>
+<section class="sec" id="how-production-systems-do-it" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Encoder output caching: two budgets, two designs</h2></div><div class="sec__body"><p>The same image sent twice must not be encoded twice. Both engines cache encoder <em>outputs</em>,
+separately from the KV pool, and they make opposite choices about what a "budget" means.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the encoder cache and the KV cache are separate
+  budgets</b>, carved out of the same HBM at startup. Capacities are derived for 1,369-token images at
+  $d = 4096$ bf16 (10.7 MiB of embeddings, 171.1 MiB of KV each).</p>
+  <svg viewBox="0 0 960 300" width="100%" role="img" aria-label="Two separate memory budgets on one GPU: a small encoder embedding cache and a large KV block pool, with their capacities in images">
+    <g font-family="IBM Plex Mono, SF Mono, Consolas, monospace" font-size="12">
+      <text x="12" y="22" fill="var(--text-dim)">H100 80 GB &#8212; after weights and activations</text>
+
+      <rect x="12" y="38" width="450" height="112" rx="6" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/>
+      <text x="26" y="60" fill="var(--teal)">ENCODER CACHE</text>
+      <text x="26" y="80" fill="var(--text)">vLLM: dict[mm_hash] -&gt; Tensor, on GPU</text>
+      <text x="26" y="98" fill="var(--text)">budget in EMBEDDING SLOTS = 8192</text>
+      <text x="26" y="116" fill="var(--text)">refcounted; evict only unreferenced</text>
+      <text x="26" y="136" fill="var(--teal)">holds 5 images (5 x 1369 = 6845 slots)</text>
+
+      <rect x="498" y="38" width="450" height="112" rx="6" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.6"/>
+      <text x="512" y="60" fill="var(--copper)">EMBEDDING CACHE</text>
+      <text x="512" y="80" fill="var(--text)">SGLang: OrderedDict[hash] -&gt; EmbeddingResult</text>
+      <text x="512" y="98" fill="var(--text)">budget in BYTES = 100 MB (SGLANG_VLM_CACHE_SIZE_MB)</text>
+      <text x="512" y="116" fill="var(--text)">plain LRU; no refcount</text>
+      <text x="512" y="136" fill="var(--copper)">holds 9 images (9 x 11.2 MB = 101 MB)</text>
+
+      <rect x="12" y="170" width="936" height="106" rx="6" fill="var(--surface2)" stroke="var(--border-bright)"/>
+      <text x="26" y="192" fill="var(--text)">KV BLOCK POOL &#8212; the other budget (see 2.1, 2.2)</text>
+      <text x="26" y="214" fill="var(--text-dim)">e.g. 40 GiB at 128 KiB/token = 327,680 token slots</text>
+      <text x="26" y="236" fill="var(--text-dim)">one 1024x1024 image consumes 1369 of them = 171.1 MiB</text>
+      <text x="26" y="258" fill="var(--copper)">so the KV pool holds ~239 images; the encoder cache holds 5 to 9. They run out at different times.</text>
+    </g>
+  </svg>
+</div>
+
+<h3>vLLM: refcounted slots, deferred eviction</h3>
+
+<p><code class="c-vllm">EncoderCacheManager</code> tracks three structures: <code>cached</code>
+(hash &rarr; set of referencing request ids), <code>freeable</code> (an <code>OrderedDict</code> of
+hash &rarr; slot count for entries nobody references), and <code>freed</code> (hashes actually
+evicted, drained by the scheduler to tell the worker what to drop). A lookup both tests and
+un-frees:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/encoder_cache_manager.py:L117-L127</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        mm_hash = request.mm_features[input_id].identifier
+        # Not cached at all
+        if mm_hash not in self.cached:
+            return False
+
+        # Cached but currently not referenced by any request
+        if not self.cached[mm_hash]:
+            num_encoder_embeds = self.freeable.pop(mm_hash)
+            self.num_freeable_slots -= num_encoder_embeds
+
+        self.cached[mm_hash].add(request.request_id)</code></pre>
+</div>
+
+<p>Admission is where the compute budget and the space budget meet. Note that
+<code>can_allocate</code> checks the <em>compute</em> budget first, and evicts LRU-style from
+<code>freeable</code> only if the free slots alone are insufficient:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/encoder_cache_manager.py:L166-L187</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        num_embeds = request.get_num_encoder_embeds(input_id)
+
+        # Not enough compute budget
+        if num_embeds &gt; encoder_compute_budget:
+            return False
+
+        num_embeds += num_embeds_to_schedule
+
+        # Enough free slots
+        if num_embeds &lt;= self.num_free_slots:
+            return True
+
+        # Not enough reclaimable slots
+        if num_embeds &gt; self.num_freeable_slots:
+            return False
+
+        # Not enough free slots but enough reclaimable slots
+        # NOTE: Eviction takes place here, but physical memory is not freed
+        # until model runner is notified by the scheduler output.
+        while num_embeds &gt; self.num_free_slots:
+            mm_hash, num_free_embeds = self.freeable.popitem(last=False)
+            del self.cached[mm_hash]</code></pre>
+</div>
+
+<p>The split between "logical eviction now, physical free later" matters: the manager runs in the
+scheduler process, and the tensors live in the worker's <code>self.encoder_cache</code> dict. The
+scheduler ships <code>free_encoder_mm_hashes</code> in its output and the runner pops them at the top
+of the step. Both budgets come from one function:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/encoder_cache_manager.py:L322-L327</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    encoder_compute_budget = max(
+        scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
+    )
+    encoder_cache_size = max(
+        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    )</code></pre>
+</div>
+
+<p>The <code>max</code> with <code>max_tokens_per_mm_item</code> is a safety floor: whatever the worst
+image the model accepts costs, one of them must always fit, or no image could ever be scheduled. For
+a Qwen2-VL configured with a 16,384-token cap, that floor <em>is</em> the budget on a default
+2,048-token batch config &mdash; the encoder cache then holds exactly one worst-case image.</p>
+
+<h3>SGLang: a byte budget and a plain LRU</h3>
+
+<p>SGLang's <code class="c-sglang">MultiModalStaticCache</code> is a module-level singleton, sized in
+bytes rather than slots, with no reference counting at all:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/multimodal_cache.py:L102-L121</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def set(
+        self,
+        mm_hash: int,
+        embedding: EmbeddingResult,
+        loc: Optional[torch.Tensor] = None,
+    ) -&gt; bool:
+        assert isinstance(embedding, EmbeddingResult), embedding
+        if mm_hash in self.mm_cache:
+            self.mm_cache.move_to_end(mm_hash)
+            return True
+        data_size = _get_tensor_size(embedding.embedding)
+        while self.current_size + data_size &gt; self.max_size:
+            if not self.mm_cache:
+                return False
+            lru_hash, lru_embedding = self.mm_cache.popitem(last=False)
+            self.current_size -= _get_tensor_size(lru_embedding.embedding)
+
+        self.mm_cache[mm_hash] = embedding
+        self.current_size += data_size
+        return True</code></pre>
+</div>
+
+<p>Its capacity is <code>SGLANG_VLM_CACHE_SIZE_MB</code>, default <code>100</code>
+(<code>python/sglang/srt/environ.py:L1158</code>), converted at KV-pool build time
+(<code>python/sglang/srt/mem_cache/kv_cache_builder.py:L374-L375</code>). At 11.2&nbsp;MB per
+1,369-token image that is nine images.</p>
+
+<p><b>Why the designs differ.</b> vLLM's scheduler must decide, before the forward pass, whether the
+step is feasible; a slot budget in the same unit as the token budget lets it do that arithmetic
+without knowing $d_{\text{model}}$ or the dtype. Refcounting is then mandatory, because evicting an
+entry a scheduled request still needs would be a hard crash
+(<code>RuntimeError: Encoder cache miss</code>). SGLang caches inside the forward path instead: the
+lookup happens in <code>mm_schedule</code> during embedding assembly, after the batch is already
+committed, so eviction can never strand a scheduled request and a plain LRU suffices. The cost is
+that SGLang's scheduler has no encoder-cache signal to admission-control on; the cost on vLLM's side
+is a budget expressed in a unit that hides the actual byte cost.</p>
+
+<p>SGLang keys two ways, and which one you get is decided per request inside
+<code>mm_embedding_chunk</code>. A request whose every item occupies a single contiguous span
+(<code>is_per_image = all(len(item.offsets) == 1 ...)</code>,
+<code>python/sglang/srt/managers/mm_schedule.py:L512-L529</code>) takes the <b>per-image</b> path on
+CUDA &mdash; that is the default for ordinary image requests. The fallback, for items with several
+offsets and for EVS video results, hashes the whole request's item list together:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/mm_schedule.py:L229-L246</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    item_hashes = [item.hash for item in embedding_items_per_req]
+    embedding_items_hash = MultiModalStaticCache.combine_hashes(item_hashes)
+    embedding_per_req = embedding_cache.get(item_hashes)
+
+    if embedding_per_req is None:
+        # ...
+        embedding = data_embedding_func(embedding_items_per_req)
+        # ...
+        embedding_cache.set(embedding_items_hash, embedding_per_req)</code></pre>
+</div>
+
+<p>A combined key means a request that lands on that fallback with images <code>[A, B]</code> gets no
+reuse from a cached <code>[A]</code>. The per-image path
+(<code>_batch_encode_per_image_misses</code>,
+<code>python/sglang/srt/managers/mm_schedule.py:L285-L355</code>) does not have that problem: it uses
+<code>get_single(item.hash)</code> per item, collects the misses across every request in the batch,
+deduplicates by hash, and issues <b>one</b> ViT call for all of them. That is the batching win vLLM
+gets through <code>group_and_batch_mm_kwargs</code>. Note the platform split &mdash; HIP, NPU and XPU
+skip the cross-request batch and run a per-request variant instead
+(<code>_get_chunked_embedding_by_item</code>), with a source comment blaming a ROCm CI regression on
+"one large cross-request ViT batch". So the same request shape encodes three different ways
+depending on item layout and platform.</p></div></section>
+<section class="sec" id="prefix-caching-with-images" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Prefix caching when the prefix contains an image</h2></div><div class="sec__body"><p>Here is the sharp question. The KV blocks covering the 1,369 image-token positions are ordinary KV
+blocks. A naive block hash over token ids would find them identical for <em>any</em> two images,
+because every image expands to the same repeated placeholder id. Serve that cache hit and you answer
+about the wrong picture.</p>
+
+<p>This is not a hypothetical you can dodge by leaving prefix caching off, because it is on in both
+engines out of the box: vLLM's <code>enable_prefix_caching</code> defaults to <code>True</code> for
+generative decoder models (<code>vllm/config/cache.py:L107</code>, resolved via
+<code>ModelConfig.is_prefix_caching_supported</code>), and SGLang's radix cache is behind
+<code>disable_radix_cache</code>, default <code>False</code>
+(<code>python/sglang/srt/server_args.py:L952-L954</code>). Whatever each engine does about image
+identity, it is doing on every request you send it.</p>
+
+<p>vLLM's fix is the extra-keys mechanism established in
+<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a>. Each block that
+overlaps a multimodal item contributes a <code>(identifier, offset)</code> pair to the block's extra
+keys:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L513-L523</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if end_token_idx &gt; offset:
+            if start_token_idx &gt;= offset + length:
+                # This block has passed the current mm input.
+                curr_mm_idx += 1
+                continue
+
+            # The block contains the current mm input. Include its offset
+            # relative to the start of the block so prefix-cache keys stay
+            # distinct when the same MM item appears at different positions
+            # within otherwise-identical placeholder blocks.
+            extra_keys.append((mm_feature.identifier, offset - start_token_idx))</code></pre>
+</div>
+
+<p>Two things are in the key: <em>which</em> image, and <em>where in the block</em> it starts. The
+second half is not decoration. Consider two requests whose prompts differ by one text token before the
+image. The image is the same item, but it lands at a different in-block offset, so the placeholder
+blocks are genuinely different KV and must not alias. Those keys are concatenated into the block hash
+alongside LoRA id, cache salt, and prompt-embeds keys:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L608-L610</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    extra_keys: list[Any] = (
+        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+    )</code></pre>
+</div>
+
+<h3>What computes the identifier, and what breaks it</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/multimodal/processing/inputs.py:L67-L75</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                mm_hashes[modality] = [
+                    hasher.hash_kwargs(
+                        hash_algorithm,
+                        model_id=model_id,
+                        **{modality: item},
+                        **hf_processor_mm_kwargs,
+                    )
+                    for item in data_items.get_all_items_for_hash()
+                ]</code></pre>
+</div>
+
+<p>The digest (blake3 by default; sha256/sha512 for FIPS &mdash;
+<code>vllm/multimodal/hasher.py:L22-L47</code>) covers the model id, the item, and the per-request
+processor kwargs. The last term is the trap: pass <code>{"max_pixels": ...}</code> on one request and
+not the next and you get two identifiers for one image, two encoder-cache entries, and no prefix
+reuse. Serialisation of a PIL image goes through mode plus raw pixel array
+(<code>vllm/multimodal/hasher.py:L62-L76</code>), so re-encoding a JPEG at a different quality changes
+the hash even when the picture looks identical &mdash; but note the escape hatch above it: an EXIF
+<code>ImageID</code> UUID short-circuits the whole thing, which is how a caller supplies a stable
+identity for an image it knows it will send repeatedly.</p>
+
+<h3>SGLang: rewrite the placeholder ids themselves</h3>
+
+<p>SGLang reaches the same guarantee without touching the hash function. Because the placeholder ids
+are clobbered before they are ever embedded (Figure 2), SGLang is free to overwrite them with a
+per-image sentinel derived from the item hash:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_batch.py:L146-L149, L220-L222</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code># Constant used as the base offset for MM (multimodal) pad values.
+# This ensures pad_values don't overlap with valid text token IDs.
+MM_PAD_SHIFT_VALUE = 1_000_000
+_MM_HASH_MASK = (1 &lt;&lt; 64) - 1
+# ...
+def _compute_pad_value(hash: int) -&gt; int:
+    """Compute pad value from hash."""
+    return MM_PAD_SHIFT_VALUE + (hash % (1 &lt;&lt; 30))</code></pre>
+</div>
+
+<p>and the padding pass substitutes that value across the whole span:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/mm_utils.py:L314-L318</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            num_tokens = end_idx - start_idx - 1
+            pad_value = pad_values[data_idx]
+            padded_ids.extend([pad_value] * num_tokens)
+
+            last_idx = end_idx</code></pre>
+</div>
+
+<p>The radix tree (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a>) then
+needs no multimodal awareness whatsoever: two different images produce two different token sequences
+and diverge naturally at the first image token. Position sensitivity comes free, because a radix tree
+matches prefixes by construction.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Tradeoff</span>
+  <p>vLLM's extra keys keep <code>input_ids</code> honest &mdash; the ids the model sees are the ids
+  the tokenizer produced &mdash; at the price of a special case in the hashing path. SGLang's
+  sentinel keeps the caching path uniform at the price of out-of-vocabulary ids flowing through the
+  batch, which every downstream consumer must then know about. Two speculative-decoding heads carry
+  explicit comments about it (<code>python/sglang/srt/models/mimo_v2_nextn.py:L202</code>,
+  <code>python/sglang/srt/models/kimi_k25_eagle3.py:L265</code>), and there is a startup assertion
+  that no model's vocabulary reaches 1,000,000
+  (<code>python/sglang/srt/managers/schedule_batch.py:L196-L202</code>). That is the leak showing.</p>
+</div>
+
+<p>The two identities are computed from different things. SGLang hashes the <em>preprocessed feature
+tensor</em> (<code>hash_feature</code>, <code>python/sglang/srt/managers/mm_utils.py:L837-L862</code>
+&mdash; SHA-256 over the tensor bytes), namespaced by a processor fingerprint
+(<code>python/sglang/srt/multimodal/cache/identity.py:L327-L375</code>); vLLM hashes the raw input
+plus the kwargs. SGLang's is immune to a kwargs mismatch but pays SHA-256 over 24.6&nbsp;MiB of fp32
+pixels per image; vLLM's is cheaper but only as correct as the kwargs it was handed.</p></div></section>
+<section class="sec" id="scheduling" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Scheduling: an image cannot be split</h2></div><div class="sec__body"><p>Chunked prefill (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>) works
+because causal attention lets you compute tokens $[0,c)$ now and $[c, 2c)$ later. A ViT uses
+bidirectional attention, so patch 5,000 attends to patch 3 and the item must be encoded whole. The
+two engines land on opposite sides of the resulting conflict.</p>
+
+<p>vLLM's default <em>permits</em> a chunk boundary inside the placeholder span: the encoder runs
+whole, the embeddings sit in the encoder cache, and successive chunks slice them
+(<code>get_embeds_indices_in_range</code>, used in both
+<code>_try_schedule_encoder_inputs</code> and <code>_gather_mm_embeddings</code>). Setting
+<code>--disable-chunked-mm-input</code> instead forces the chunk to stop short of the image:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L1632-L1647</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # If no encoder input chunking is allowed, we do not want to
+            # partially schedule a multimodal item. If the scheduled range would
+            # only cover part of the mm input, roll back to before the mm item.
+            if (
+                self.scheduler_config.disable_chunked_mm_input
+                and num_computed_tokens &lt; start_pos
+                and (num_computed_tokens + num_new_tokens)
+                &lt; (start_pos + num_encoder_tokens)
+            ):
+                # Account for EAGLE shift when rolling back to avoid
+                # encoder cache miss. This ensures the scheduled range
+                # stops before start_pos even with the shift.
+                num_new_tokens = max(
+                    0, start_pos - (num_computed_tokens + shift_computed_tokens)
+                )
+                break</code></pre>
+</div>
+
+<p>That flag has a hard interaction with the token budget, enforced at startup:
+<code>compute_mm_encoder_budget</code> raises if <code>max_tokens_per_mm_item &gt;
+max_num_batched_tokens</code> while chunking is disabled
+(<code>vllm/v1/core/encoder_cache_manager.py:L310-L320</code>) &mdash; an unsplittable item that never
+fits in a batch would deadlock the scheduler. With a 16,384-token image cap you need
+<code>--max-num-batched-tokens 16384</code> at minimum, which is a real cost on the text side.</p>
+
+<p>SGLang does not schedule encoder work at all. <code>mm_schedule</code> runs <em>inside</em> the
+forward pass: it encodes whichever items overlap the current chunk, caches the full embedding, and
+slices out the chunk with <code>get_embedding_chunk</code>
+(<code>python/sglang/srt/managers/mm_schedule.py:L28-L70</code>). Chunk one pays the entire ViT cost
+and chunks two through $k$ hit the cache. Simpler, and no scheduler deadlock is possible &mdash; but
+the ViT cost lands unbudgeted inside one step, so a batch that happens to contain eight cache-missing
+images produces one very long step and a visible TPOT spike for every decode request riding along
+with it.</p>
+
+<p>vLLM's counter-move on the compute side is CUDA graphs for the encoder. Because ViT input shapes
+vary per image, <code class="c-vllm">EncoderCudaGraphManager</code> captures graphs at power-of-two
+<em>token budgets</em> and pads into the smallest one that fits:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/encoder_cudagraph.py:L190-L201</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @staticmethod
+    def _generate_budgets(min_budget: int, max_budget: int) -&gt; list[int]:
+        """Generate power-of-2 token budgets from min_budget to max_budget."""
+        budgets: list[int] = []
+        b = min_budget
+        while b &lt;= max_budget:
+            budgets.append(b)
+            b *= 2
+        # Always include max_budget if it's not already a power-of-2 boundary
+        if not budgets or budgets[-1] &lt; max_budget:
+            budgets.append(max_budget)
+        return budgets</code></pre>
+</div>
+
+<p>The floor for Qwen2.5-VL is 64 tokens &mdash; a 224&times;224 image, per the comment at
+<code>vllm/model_executor/models/qwen2_5_vl.py:L1758-L1762</code>. Padding waste is bounded at 2&times;
+by the power-of-two ladder, which is the usual bucket-vs-launch-overhead trade. It is off by default:
+the gate is <code>cudagraph_mm_encoder: bool = False</code>
+(<code>vllm/config/compilation.py:L543</code>), and the runner only constructs an
+<code>encoder_cudagraph_manager</code> when that flag is set and the model takes multimodal input
+(<code>vllm/v1/worker/gpu_model_runner.py:L6741</code>); with the manager <code>None</code>, the
+execute path falls straight through to <code>model.embed_multimodal(**mm_kwargs_batch)</code>. Do not
+read the empty <code>encoder_cudagraph_token_budgets</code> list as the off switch &mdash; its
+docstring says empty means <em>auto-infer</em> the ladder from the model architecture
+(<code>vllm/config/compilation.py:L548-L556</code>). SGLang's equivalent is off by default too:
+<code>SGLANG_VIT_ENABLE_CUDA_GRAPH = EnvBool(False)</code>
+(<code>python/sglang/srt/environ.py:L1163</code>). For large images the ViT launch overhead is
+negligible against the GEMMs, so neither project pays the capture cost by default.</p></div></section>
+<section class="sec" id="epd" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Encode-prefill disaggregation</h2></div><div class="sec__body"><p>P/D disaggregation (<a href="../01-the-core-loop/01-06-pd-disaggregation.html">&sect;1.6</a>) splits
+a request at the prefill/decode boundary and ships KV. Encode-prefill disaggregation splits it one
+stage earlier and ships <em>embeddings</em>. SGLang implements it in
+<code>python/sglang/srt/disaggregation/encoder/</code> &mdash; 8,131 lines across six modules at
+<code>7d89325</code> (<code>grpc_server.py</code>, <code>http_server.py</code>,
+<code>preprocessor.py</code>, <code>receiver.py</code>, <code>runtime.py</code>,
+<code>server.py</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; EPD topology.</b> Encoders are separate processes
+  with their own model load (<code>--encoder-only</code>); the language side loads no vision tower
+  (<code>--language-only</code>). Byte counts are derived for one 1024&times;1024 image at
+  $d = 4096$ bf16.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    U["client request<br/>text + image URLs"] --> LM["language-only server<br/>flag: language-only<br/>no vision tower loaded"]
+    LM --> RX["MMReceiver.encode<br/>splits mm items into parts<br/>one part per encoder URL"]
+    RX -- "POST /encode<br/>JSON: req_id, mm_items, embedding_port<br/>a few KB" --> E0["encoder 0<br/>flag: encoder-only<br/>EncoderPreprocessor CPU<br/>+ ViT GPU"]
+    RX -- "POST /encode" --> E1["encoder 1<br/>MMEncoder.mm_cache<br/>MultiModalStaticCache"]
+    E0 -- "ZmqDelivery or MooncakeDelivery<br/>1369 x 4096 bf16 = 10.7 MiB" --> POOL["EmbeddingPool on prefill GPU<br/>first-fit, 256B aligned<br/>RDMA-registered under mooncake"]
+    E1 --> POOL
+    POOL --> PF["prefill: splice + forward<br/>writes 171.1 MiB of KV"]
+    PF --> DEC["decode"]
+    REG["EncoderBootstrapServer<br/>port 8997<br/>encoders register on startup"] -.-> RX
+    E0 -.-> REG
+  </script>
+</div>
+
+<p>What actually crosses the wire in each direction is worth being precise about, because it is the
+whole economic argument.</p>
+
+<p><b>Outbound</b>: the language server sends media <em>references</em>, not pixels. The encoder does
+its own fetch, decode, resize and normalise &mdash; <code>EncoderPreprocessor</code> is documented as
+"Takes raw media URLs / base64 data and produces HF processor output dicts (CPU tensors). The GPU
+model is never touched here"
+(<code>python/sglang/srt/disaggregation/encoder/preprocessor.py:L92-L100</code>). So the expensive CPU
+preprocessing moves off the prefill box too, which is at least as valuable as moving the ViT.</p>
+
+<p><b>Inbound</b>: an <code>EmbeddingData</code> carrying <code>req_id</code>, <code>num_parts</code>,
+<code>part_idx</code>, <code>grid_dim</code>, <code>modality</code>, dtype/shape, and the tensor
+itself (<code>python/sglang/srt/disaggregation/encoder/receiver.py:L397-L432</code>). It lands in a
+preallocated GPU ring:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/encoder/receiver.py:L1493-L1503</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class EmbeddingPool:
+    """Persistent GPU buffer pool for received multimodal embeddings.
+
+    Allocator: first-fit on a free-segment list with 256-byte alignment.
+    `alloc()` blocks on a Condition when the pool is full and resumes once
+    a peer `release()`s a slot; `try_alloc()` is the non-blocking variant
+    for callers that re-poll (the zmq_to_scheduler tick). Each successful
+    alloc returns a slot_id that must be passed back to release() when the
+    consumer is done with the buffer. With `engine` set (mooncake), the
+    buffer is registered once so encoder RDMA writes land in pool slots.
+    """</code></pre>
+</div>
+
+<h3>Sizing it, and why the economics differ from P/D</h3>
+
+<p>For a language model with $L$ layers, $h_{kv}$ KV heads and head dim $d_h$ in bf16, one token's KV
+is $4 L h_{kv} d_h$ bytes and one token's embedding is $2 d$ bytes. The ratio is</p>
+
+<div class="math-display">$$\frac{\text{KV bytes}}{\text{embedding bytes}} \;=\; \frac{4 L h_{kv} d_h}{2 d} \;=\; \frac{2 L h_{kv} d_h}{d}$$</div>
+
+<p>For Llama-3-8B ($L=32$, $h_{kv}=8$, $d_h=128$, $d=4096$) that is $2 \cdot 32 \cdot 8 \cdot 128 /
+4096 = 16$. <b>EPD ships one-sixteenth the bytes that P/D ships for the same span.</b> One
+1024&times;1024 image is 10.7&nbsp;MiB (11,214,848&nbsp;B) of embeddings against 171.1&nbsp;MiB
+(179,437,568&nbsp;B) of KV; on a 25&nbsp;GB/s effective link that is 0.45&nbsp;ms against
+7.2&nbsp;ms (derived: bytes &divide; $25 \times 10^{9}$). The transfer is small enough that
+plain ZMQ over TCP is the default backend, with RDMA reserved for a specific case:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L336-L343</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def resolve_encoder_transfer_backend(
+    backend: str, model_arch: str, tp_size: int
+) -&gt; str:
+    if backend != "auto":
+        return backend
+    if model_arch == "KimiK3ForConditionalGeneration" and tp_size &gt; 1:
+        return "zmq_to_tokenizer"
+    return "zmq_to_scheduler"</code></pre>
+</div>
+
+<p>The second difference is hardware. A P/D prefill node and a decode node run the same weights and
+need comparable memory. An encoder pool runs only the vision tower &mdash; no KV cache, no long
+context &mdash; so it fits on cheaper, smaller cards while the language side keeps its H100s entirely
+for KV. The third is fan-out: the receiver splits one request's items across several encoder URLs
+(<code>MMReceiverHTTP.encode</code>, <code>python/sglang/srt/disaggregation/encoder/receiver.py:L2430-L2470</code>),
+so a ten-image request is encoded in parallel and reassembled by <code>part_idx</code>. P/D has no
+equivalent &mdash; a prefill is one sequence on one node. Encoders find their language servers by
+POSTing their URL to each <code>--encoder-register-urls</code> bootstrap endpoint on startup, default
+port 8997 (<code>python/sglang/srt/server_args.py:L3232-L3241</code>), and
+<code>--enable-prefix-mm-cache</code> (which the arg validator requires be paired with
+<code>--encoder-only</code>, <code>python/sglang/srt/server_args.py:L7809-L7812</code>) gives the pool
+a cross-request, cross-node embedding cache the single-process design cannot offer.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Scope</span>
+  <p>At <code>7d89325</code> the mode is gated to a fixed architecture allow-list &mdash; the Qwen2-VL
+  / Qwen2.5-VL / Qwen3-VL / Qwen3.5 family, Qwen3-Omni-MoE, Qwen2.5-Omni, Qwen2-Audio,
+  InternS2-preview, Kimi-VL, Kimi-K2.5, Kimi-K3 and MiMo-V2
+  (<code>python/sglang/srt/server_args.py:L7850-L7869</code>); anything else raises
+  <code>Model type ... is not supported for encoder disaggregation</code> at startup. This is not a
+  general VLM feature yet.</p>
+</div>
+
+<p>vLLM has the same idea, earlier: <code>ECConnectorBase</code>
+(<code>vllm/distributed/ec_transfer/ec_connector/base.py:L1-L24</code>) defines a scheduler-side /
+worker-side connector pair for "Distributed Encoder Cache &amp; P2P Encoder cache communication", and
+the scheduler already consults it &mdash; <code>has_cache_item(item_identifier)</code> routes an item
+to <code>external_load_encoder_input</code> instead of local compute
+(<code>vllm/v1/core/sched/scheduler.py:L1683-L1689</code>). That branch is dead unless you configure
+one: the guard is <code>self.ec_connector is not None</code>, and no connector is built without an
+explicit config. The shipped implementation is a CPU/shared-region connector
+(<code>vllm/distributed/ec_transfer/ec_connector/cpu/ec_shared_region.py</code>), not a remote
+encoder pool.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one image through vLLM</h2></div><div class="sec__body"><p>One request, <code>"&lt;image&gt; what is this?"</code>, 1024&times;1024 PNG, Qwen2-VL, chunked
+prefill on with <code>max_num_batched_tokens=8192</code>.</p>
+
+<ol>
+  <li><b>Front end.</b> <code>BaseMultiModalProcessor.apply</code>
+  (<code>vllm/multimodal/processing/processor.py:L1839-L1870</code>) runs the HF processor on text and
+  image together, producing <code>pixel_values</code> of shape <code>[5476, 1176]</code>. Then
+  <code>_maybe_apply_prompt_updates</code> replaces the single <code>&lt;image&gt;</code> token with
+  1,369 placeholder ids and records a <code>PlaceholderRange(offset=6, length=1369)</code>.</li>
+
+  <li><b>Hashing.</b> <code>ProcessorInputs.get_mm_hashes</code>
+  (<code>vllm/multimodal/processing/inputs.py:L67-L75</code>) computes the blake3 identifier over
+  <code>model_id</code>, the image and the processor kwargs. A CPU-side LRU keyed on that hash can
+  skip step 1 entirely on a repeat. Which LRU depends on topology, and the naming is easy to get
+  wrong: <code>MultiModalRegistry._get_cache_type</code>
+  (<code>vllm/multimodal/registry.py:L275-L299</code>) returns <code>None</code> when
+  <code>mm_processor_cache_gb &lt;= 0</code>, <code>"processor_only"</code> when IPC caching is
+  unavailable (more than one API-server process, or DP without an external load balancer), and
+  otherwise <code>mm_processor_cache_type</code>, whose default is <code>"lru"</code>
+  (<code>vllm/config/multimodal.py:L164</code>). A plain single-process <code>vllm serve</code>
+  therefore gets <code>MultiModalProcessorSenderCache</code>
+  (<code>vllm/multimodal/cache.py:L444-L458</code>), which stores only item <em>metadata</em> on P0 so
+  the eviction policy mirrors the engine-side cache without duplicating tensors, and clears the
+  payload from the input to avoid re-sending it over IPC.
+  <code>MultiModalProcessorOnlyCache</code> (<code>vllm/multimodal/cache.py:L392-L410</code>), which
+  does keep the processed tensors, is the no-IPC path. Both are sized by
+  <code>mm_processor_cache_gb</code>, default <code>4</code>
+  (<code>vllm/config/multimodal.py:L152</code>).</li>
+
+  <li><b>Scheduler, step $t$.</b> <code>Scheduler.schedule</code> reaches the encoder hook
+  (<code>vllm/v1/core/sched/scheduler.py:L592-L607</code>) and calls
+  <code>_try_schedule_encoder_inputs</code>. <code>get_mm_features_in_window</code> finds the item
+  overlapping <code>[0, 8192)</code>; <code>check_and_update_cache</code> misses;
+  <code>can_allocate</code> compares 1,369 against the compute budget and the free slots and returns
+  True. The item id is appended to <code>encoder_inputs_to_schedule</code>, and back in
+  <code>schedule()</code> the manager reserves the slots
+  (<code>vllm/v1/core/sched/scheduler.py:L730-L738</code>).</li>
+
+  <li><b>Worker, encode.</b> <code>_execute_mm_encoder</code>
+  (<code>vllm/v1/worker/gpu_model_runner.py:L3077-L3080</code>) batches by modality via
+  <code>group_and_batch_mm_kwargs</code>, optionally replays a captured encoder CUDA graph, calls
+  <code>model.embed_multimodal(**mm_kwargs_batch)</code>, then stores by hash:
+  <div class="code-file">
+    <div class="code-file__hd">
+      <span class="src">vllm/v1/worker/gpu_model_runner.py:L3283-L3291</span>
+      <span class="tag tag--vllm">vLLM</span>
+    </div>
+    <pre class="code-block"><code>        # Cache the encoder outputs by mm_hash
+        for mm_hash, output in zip(mm_hashes, encoder_outputs):
+            self._cache_encoder_output(
+                mm_hash,
+                output,
+                scheduler_output.ec_manager_metadata,
+                scheduler_output.free_encoder_mm_hashes,
+            )
+            logger.debug("Finish execute for mm hash %s", mm_hash)</code></pre>
+  </div></li>
+
+  <li><b>Worker, gather.</b> <code>_gather_mm_embeddings</code> walks the batch, clips each item's
+  range to the scheduled window, and builds a pinned CPU boolean mask:
+  <div class="code-file">
+    <div class="code-file__hd">
+      <span class="src">vllm/v1/worker/gpu_model_runner.py:L3352-L3363</span>
+      <span class="tag tag--vllm">vLLM</span>
+    </div>
+    <pre class="code-block"><code>                mm_hash = mm_feature.identifier
+                encoder_output = self._get_encoder_output_from_cache(mm_hash)
+                if encoder_output is None:
+                    # A feature starting at/after the processed boundary is only
+                    # reached via the drafter's +1 look-ahead and might not be
+                    # encoded yet; fall back to the token embedding for drafting.
+                    if (
+                        start_pos
+                        &gt;= req_state.num_computed_tokens + num_scheduled_tokens
+                    ):
+                        continue
+                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")</code></pre>
+  </div></li>
+
+  <li><b>Splice.</b> <code>SupportsMultiModal.embed_input_ids</code>
+  (<code>vllm/model_executor/models/interfaces.py:L453-L487</code>) embeds the text ids, then calls
+  <code>_merge_multimodal_embeddings</code> &mdash; the masked index-put shown in &sect;1. The
+  pinned-CPU mask is deliberate: indexing with a CPU boolean avoids a D2H sync in the hot path.</li>
+
+  <li><b>Prefill and block hashing.</b> The language model runs on
+  <code>inputs_embeds</code>. As blocks fill, <code>hash_request_tokens</code> calls
+  <code>generate_block_hash_extra_keys</code>, which threads <code>curr_mm_idx</code> through the
+  block loop so each block picks up the <code>(identifier, offset)</code> pairs for the items it
+  covers (<code>vllm/v1/core/kv_cache_utils.py:L745-L757</code>).</li>
+
+  <li><b>Release.</b> When the request's last token past the image is computed, the scheduler calls
+  <code>free_encoder_input</code>; the entry moves to <code>freeable</code> but its tensor stays
+  resident. Only a later <code>can_allocate</code> that needs the space calls
+  <code>popitem(last=False)</code> and appends the hash to <code>freed</code>, which reaches the worker
+  as <code>free_encoder_mm_hashes</code> and pops the tensor
+  (<code>vllm/v1/worker/gpu_model_runner.py:L1238-L1244</code>). Until then a second request with the
+  same image gets a free hit.</li>
+</ol></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--3">
+  <div class="ve-card ve-card--hero">
+    <span class="ve-card__k">count mismatch</span>
+    <h4>Embeddings vs placeholders</h4>
+    <p>vLLM raises <code>Attempted to assign N multimodal tokens to M placeholders</code>. SGLang
+    logs a warning and silently truncates from the end:
+    <code>embedding = embedding[-num_mm_tokens_in_input_ids:, :]</code>
+    (<code>python/sglang/srt/managers/mm_schedule.py:L615-L617</code>), which produces a wrong answer rather than a crash. Almost
+    always a processor-version drift between the token-count predictor and the actual ViT output.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">radix miss</span>
+    <h4>No data_token_pairs</h4>
+    <p><code>No data_token_pairs provided, RadixAttention might be influenced</code>
+    (<code>python/sglang/srt/managers/mm_utils.py:L286-L290</code>). The padding pass bailed, the placeholder ids were left
+    unrewritten, and every image now looks the same to the radix tree. Silent wrong-image cache
+    hits. Grep your logs for this on any new model integration.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">stall</span>
+    <h4>CPU preprocessing in the loop</h4>
+    <p>Decoding and resizing a 4K JPEG is tens of milliseconds of single-threaded PIL. SGLang builds
+    three pools in <code>BaseMultimodalProcessor.__init__</code>
+    (<code>python/sglang/srt/multimodal/processors/base_processor.py:L295-L355</code>), and only one
+    of them is a process pool. Fetch/decode goes to an I/O <code>ThreadPoolExecutor</code>
+    (<code>auto_mm_io_worker_num = 4</code> in the base class, 16 for the Qwen-VL and Kimi
+    processors). The HF processor call goes to <code>MultimodalProcessorExecutor</code>, a
+    <em>thread</em> pool over deep-copied processor clones
+    (<code>python/sglang/srt/multimodal/processors/executor.py:L15-L26</code>), sized
+    <code>auto_mm_processor_worker_num</code>: <b>1</b> in the base class &mdash; which means no
+    executor at all and fully synchronous processing &mdash; and 2 for the Qwen-VL family
+    (<code>python/sglang/srt/multimodal/processors/qwen_vl.py:L317-L323</code>). The
+    <code>ProcessPoolExecutor</code> sized by <code>SGLANG_CPU_WORKERS</code> (default
+    <code>os.cpu_count()</code>) is constructed for every processor but at <code>7d89325</code> only
+    the LLaVA processor submits to it
+    (<code>python/sglang/srt/multimodal/processors/llava.py:L138-L145</code>). If you see TTFT scale
+    with image size while GPU utilisation sits low, this is where to look &mdash; and
+    <code>--mm-processor-worker-num</code> is the knob, effective only on processors that declare
+    <code>supports_mm_processor_concurrency</code>.</p>
+  </div>
+</div>
+
+<p><b>Irregular batch shapes.</b> vLLM's <code>group_and_batch_mm_kwargs</code> only groups
+<em>contiguous runs of the same modality</em>, with an explicit apology in the source: "FIXME
+(ywang96): This is a hacky way to deal with multiple modalities in the same batch... The proper
+solution should be reordering the encoder outputs"
+(<code>vllm/v1/worker/gpu_model_runner.py:L3124-L3130</code>). Interleaving image and audio items in
+one request fragments the batch into many small ViT calls.</p>
+
+<p><b>Memory spike from many large images.</b> The pixel tensor for one 1024&times;1024 image is
+$5476 \times 1176 \times 4 = 25.8$&nbsp;MB in fp32 &mdash; more than twice its embedding output.
+Eight arriving in one step is ~206&nbsp;MB of transient activation on top of the ViT's own, none of it
+in the KV budget. vLLM is candid about the general problem: "Temporary hack to limit peak memory
+usage when processing multimodal data... Scheduler uses pruned vision tokens count to compare it
+versus compute budget which is incorrect"
+(<code>vllm/v1/worker/gpu_model_runner.py:L3211-L3224</code>). The encoder compute budget counts
+<em>output</em> embeddings; peak memory scales with <em>input</em> pixels. Only one of those is
+budgeted.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I could not find, at either SHA, a memory-profiling pass that reserves headroom for encoder
+  activations the way <code>determine_available_memory</code> does for the KV pool. Both engines
+  appear to leave that spike unmodelled and rely on <code>gpu_memory_utilization</code> headroom. The
+  likely locations to check are <code>vllm/v1/worker/gpu_worker.py</code> and
+  <code>python/sglang/srt/model_executor/model_runner.py</code>. Reader should verify before sizing a
+  deployment close to the memory limit.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Confirm the token expansion for yourself without a GPU &mdash; the arithmetic is pure Python:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">token count for a Qwen2-VL image, from the two cited code paths</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 -c '
+import math
+F, P, M = 28, 14, 2
+MAXPX = 16384 * 28 * 28
+def rbf(n, f): return round(n / f) * f
+def flr(n, f): return math.floor(n / f) * f
+def tokens(h, w):
+    hb, wb = max(F, rbf(h, F)), max(F, rbf(w, F))
+    if hb * wb &gt; MAXPX:
+        beta = math.sqrt((h * w) / MAXPX)
+        hb, wb = flr(h / beta, F), flr(w / beta, F)
+    return (hb // P) * (wb // P) // (M * M), (hb, wb)
+for hw in [(336,336),(512,512),(1024,1024),(1080,1920),(2160,3840)]:
+    n, sz = tokens(*hw)
+    print(f"{hw[1]}x{hw[0]} -&gt; resized {sz[1]}x{sz[0]}  {n:6d} tokens  "
+          f"{n*128/1024:8.1f} MiB KV @128KiB/token")'</code></pre>
+</div>
+
+<p>Then flip the two flags that matter, on a real server, and watch the scheduler:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">encoder budget experiment</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># baseline: encoder cache = max(8192, max_tokens_per_mm_item) slots.
+# Read the resolved value off the startup log, do not assume 8192.
+vllm serve Qwen/Qwen2-VL-7B-Instruct --max-num-batched-tokens 8192 \
+    --limit-mm-per-prompt '{"image": 4}'
+
+# forbid splitting an image across chunks; needs a batch big enough for the worst image
+vllm serve Qwen/Qwen2-VL-7B-Instruct --max-num-batched-tokens 16384 \
+    --disable-chunked-mm-input
+
+# SGLang: shrink the embedding cache to one image and watch the ViT re-run
+SGLANG_VLM_CACHE_SIZE_MB=12 python -m sglang.launch_server \
+    --model-path Qwen/Qwen2-VL-7B-Instruct --chunked-prefill-size 8192</code></pre>
+</div>
+
+<p>The measurement to take: send the <em>same</em> image twice, back to back, and compare TTFT.
+The second should skip the ViT entirely (vLLM: <code>check_and_update_cache</code> returns True;
+SGLang: <code>embedding_cache.get_single</code> hits). Then send it twice with different
+<code>max_pixels</code> in the request's <code>mm_processor_kwargs</code> and confirm both TTFTs are
+cold &mdash; that is the identifier including the processor kwargs, doing exactly what &sect;5 says.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the file.</b> In <code>vllm/v1/core/encoder_cache_manager.py</code>, why does
+  <code>get_freed_mm_hashes</code> filter with <code>if mm_hash not in self.cached</code> before
+  returning? What bug would you see without it?</li>
+
+  <li><b>Predict, then verify.</b> A request has two identical images. How many encoder forward passes
+  does vLLM run? How many entries does the encoder cache hold? Trace
+  <code>mm_hashes_to_schedule</code> in <code>_try_schedule_encoder_inputs</code> to check.</li>
+
+  <li><b>Arithmetic.</b> You serve Qwen2-VL with <code>--max-num-batched-tokens 4096</code> and a
+  processor capped at 16,384 tokens per image. What does <code>compute_mm_encoder_budget</code>
+  return for each of its two values, and what happens if you also pass
+  <code>--disable-chunked-mm-input</code>?</li>
+
+  <li><b>Cross-engine.</b> Two requests share a 500-token system prompt and then send different
+  images. How many blocks does each engine reuse from the other's KV? Now make the images identical
+  but put one extra text token before the image in request B. Answer again for both engines and
+  explain which mechanism is responsible.</li>
+
+  <li><b>Design.</b> You have 16 encoder-pool GPUs and 4 language GPUs, and traffic is 90% repeat
+  images from a fixed catalogue. Where do you put the embedding cache, and what does that do to the
+  bytes on the wire?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> A single scheduling pass can evict an entry inside <code>can_allocate</code> and then
+  re-allocate the same hash later in the same pass (a second request wanting the same image). Without
+  the filter the worker would be told to <code>pop</code> a tensor that the same
+  <code>SchedulerOutput</code> also expects it to keep, and the next
+  <code>_gather_mm_embeddings</code> would raise <code>Encoder cache miss</code>.</p>
+
+  <p><b>2.</b> One forward pass, one cache entry. Identical images produce identical
+  <code>mm_hash</code> values, and the loop skips the second via
+  <code>if item_identifier in mm_hashes_to_schedule: continue</code>
+  (<code>vllm/v1/core/sched/scheduler.py:L1622-L1625</code>). Both placeholder spans then gather from
+  the same tensor. The <em>KV</em> for the two spans is distinct, because their in-block offsets
+  differ.</p>
+
+  <p><b>3.</b> Both become 16,384: <code>encoder_compute_budget = max(4096, 16384)</code> and
+  <code>encoder_cache_size = max(4096, 16384)</code>. Adding
+  <code>--disable-chunked-mm-input</code> raises at startup, because
+  <code>max_tokens_per_mm_item (16384) &gt; max_num_batched_tokens (4096)</code> and an unsplittable
+  item that cannot fit a batch would never be schedulable.</p>
+
+  <p><b>4.</b> Different images: both reuse the shared 500-token text prefix and diverge at the first
+  block containing image tokens &mdash; vLLM because the <code>(identifier, offset)</code> extra key
+  differs, SGLang because the pad-value ids differ. Identical images with one extra text token in B:
+  both reuse only up to the last full block before the divergent token; beyond it vLLM's blocks
+  differ on the <code>offset - start_token_idx</code> component even though the identifier matches,
+  and SGLang's differ because the token sequence is shifted. Same outcome, two mechanisms.</p>
+
+  <p><b>5.</b> On the encoders, via <code>--enable-prefix-mm-cache</code>. A catalogue hit then costs
+  one <code>/encode</code> round trip and 10.7&nbsp;MiB on the wire but zero ViT FLOPs. On the
+  language side you would pay the same wire and pay it once per language replica instead of once per
+  pool.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="key-takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>Image-token expansion is the dominant cost and it is set by the processor's pixel cap, not the
+  model. Under SGLang's default <code>SGLANG_IMAGE_MAX_PIXELS</code> a 4K screenshot is 10,549 tokens
+  &mdash; 1.29&nbsp;GiB of KV at Llama-3-8B's cell size. Cap <code>max_pixels</code> at the API edge
+  or the KV pool is the thing that breaks first.</li>
+
+  <li>The encoder cache is a third budget, sized independently of the KV pool and holding a fixed
+  handful of images: <code>max(max_num_batched_tokens, max_tokens_per_mm_item)</code> slots in vLLM
+  &mdash; five 1,369-token images at an 8,192-slot budget, eleven once a 16,384-token per-item cap
+  lifts the floor &mdash; and nine in SGLang's 100&nbsp;MB. vLLM counts embedding slots and refcounts because its scheduler must
+  admission-control on it; SGLang counts bytes with a plain LRU because its lookup happens inside the
+  forward pass, after admission. Neither number scales with your KV pool.</li>
+
+  <li>Both engines make the cache key depend on <em>which</em> image and <em>where</em>, at different
+  layers: vLLM adds <code>(identifier, offset)</code> to the block hash's extra keys; SGLang
+  overwrites the placeholder ids with <code>1_000_000 + hash mod 2^30</code> so the radix tree needs
+  no special case at all &mdash; at the price of out-of-vocabulary ids leaking into every downstream
+  consumer.</li>
+
+  <li>That identifier includes the per-request processor kwargs. Inconsistent <code>max_pixels</code>
+  across otherwise identical requests silently doubles your encoder work and kills prefix reuse, with
+  no error anywhere.</li>
+
+  <li>A ViT on one image has arithmetic intensity $\approx N_p$ &mdash; 5,476 for a 1024&times;1024
+  image, 18.6&times; past the H100's ridge. Compute-bound at batch one, while decode is memory-bound
+  at batch 256. Every encoder-heavy step is a TPOT spike for everyone else in the batch.</li>
+
+  <li>Encode-prefill disaggregation ships $2 L h_{kv} d_h / d$ times fewer bytes than P/D &mdash;
+  16&times; for Llama-3-8B shapes &mdash; which is why SGLang's default transport is ZMQ over TCP, not
+  RDMA. The bigger win is not FLOPs: it is moving the CPU decode/resize pipeline and the encoder's
+  memory spikes off the box that owns the KV cache.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/vllm-project/vllm/pull/6613">vLLM PR #6613</a> &mdash; the original
+  V1 encoder cache manager and multimodal scheduling in the V1 engine.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/18334">vLLM issue #18334</a> &mdash; cited
+  in <code>vllm/multimodal/hasher.py:L35</code>; why blake3 is the default and sha256/sha512 exist as
+  FIPS alternatives for the multimodal hash.</li>
+  <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/disaggregation/encoder">SGLang <code>disaggregation/encoder/</code></a>
+  &mdash; read <code>server.py</code> (<code>MMEncoder</code>), <code>receiver.py</code>
+  (<code>EmbeddingPool</code>, <code>MMReceiverBase</code>) and <code>runtime.py</code>
+  (<code>EncoderScheduler</code>, <code>DPDispatcher</code>) in that order.</li>
+  <li><a href="https://arxiv.org/abs/2409.12191">Qwen2-VL: Enhancing Vision-Language Model's Perception
+  of the World at Any Resolution</a> &mdash; the naive dynamic resolution scheme whose
+  <code>smart_resize</code> both engines reimplement.</li>
+  <li><a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> for the extra-key
+  contract this chapter extends, and
+  <a href="../01-the-core-loop/01-06-pd-disaggregation.html">&sect;1.6</a> for the P/D economics that
+  &sect;7 compares against. The public API surface for image inputs is
+  <a href="../09-serving-system/09-01-openai-api-surface.html">&sect;9.1</a>.</li>
+</ul></div></section>
+<div class="pager"><a href="07-03-ssm-and-hybrids.html"><div class="pager__k">← Previous</div><div class="pager__t">Hybrid SSM / Mamba models and non-KV state</div></a><a class="pager__next" href="07-05-lora-and-pooling-models.html"><div class="pager__k">Next →</div><div class="pager__t">LoRA serving, embeddings, rerankers, pooling</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: how big is an image</a>
+<a href="#how-production-systems-do-it">Encoder output caching: two budgets, two designs</a>
+<a href="#prefix-caching-with-images">Prefix caching when the prefix contains an image</a>
+<a href="#scheduling">Scheduling: an image cannot be split</a>
+<a href="#epd">Encode-prefill disaggregation</a>
+<a href="#worked-trace">Worked trace: one image through vLLM</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#key-takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,2264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV cache quantization — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="loop">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i is-current" href="02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 2 · Memory and the KV cache · 02-05</div>
+<h1>KV cache quantization</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/kv_cache.py</code></li><li><code>vllm/model_executor/layers/quantization/turboquant/</code></li><li><code>vllm/v1/attention/backends/turboquant_attn.py</code></li><li><code>vllm/config/cache.py</code></li><li><code>python/sglang/srt/mem_cache/kv_cache_dtype.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Halving the KV cache buys you 0.9% of a decode step at batch 1. It also doubles how many
+sequences fit on the card. Those two sentences are the whole chapter: KV quantization is a
+capacity lever that becomes a latency lever only after you cross a line, and this chapter
+derives exactly where that line is.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Someone reads that FP8 KV cache &ldquo;halves KV memory bandwidth&rdquo;, flips
+<code>--kv-cache-dtype fp8</code> on a Llama-3-8B endpoint, measures TPOT at batch 1, and finds
+it unchanged. Then they file a bug.</p>
+
+<p>The bug is in the expectation. <a href="../00-foundations/00-02-decode-loop-and-kv-cache.html">&sect;0.2</a>
+already did this arithmetic: for Llama-3-8B at $s = 2304$ and batch 1, the cached decode step
+moves $1.606\times10^{10}$ bytes of weights and $3.02\times10^{8}$ bytes of KV. Halving the KV
+term moves total step bytes from $1.636\times10^{10}$ to $1.621\times10^{10}$ &mdash; a
+<b>0.9%</b> reduction. On a 3.35&nbsp;TB/s H100 that is roughly 45&nbsp;&micro;s off a 4.9&nbsp;ms
+step. It is not measurable through the noise of a real server.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">0.9%</div><div class="kpi__l">step bytes saved, 8B, batch 1, s=2304 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">2.00&times;</div><div class="kpi__l">resident tokens per byte of pool</div></div>
+  <div class="kpi"><div class="kpi__n">1.23e5</div><div class="kpi__l">resident tokens where 8B KV traffic = weight traffic</div></div>
+</div>
+
+<p>So what is it for? First, <b>capacity</b>: the same pool holds twice as many tokens, hence twice the
+concurrency at a given context length, and concurrency is what converts into throughput. Second, past a
+crossover point, <b>bandwidth</b>: once batch times context gets large enough, KV traffic overtakes
+weight traffic and halving it does show up in TPOT. Deriving that crossover is the most useful thing
+this chapter does; everything after it is about how far down you can push the KV term before the model
+notices.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Per decode step, a GPU moves two piles of bytes. The <b>weight pile</b> is fixed: every
+parameter, once, no matter how many sequences are in flight. The <b>KV pile</b> is linear in the
+total number of resident tokens $N = \sum_i s_i$ &mdash; batch size times mean context. Batching
+amortises the first and does nothing to the second. Quantizing the KV cache scales only the
+second. So the entire question is: which pile is bigger <em>at your operating point</em>?</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; KV traffic versus weight traffic per decode step, as resident tokens grow.</b>
+  All coordinates are <em>derived</em> from the byte formulas in <a href="../FORMULAS.html">FORMULAS</a>
+  plus published model shapes. Nothing here is measured. Below a crossover the step is weight-bound and
+  KV quantization is invisible; above it, the KV line is what you are paying for.</p>
+  <svg viewBox="0 0 800 440" width="100%" role="img" aria-labelledby="xoverTitle xoverDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="xoverTitle">Log-log plot of bytes moved per decode step against resident KV tokens</title>
+    <desc id="xoverDesc">A flat horizontal line at about 16 to 18 gigabytes marks weight traffic, identical for
+    Llama-3-8B on one GPU and Llama-3-70B per rank at tensor parallel 8. Three sloped lines mark KV traffic:
+    Llama-3-8B in bf16 crosses the weight line at 123 thousand resident tokens, Llama-3-8B in fp8 crosses at
+    245 thousand, and Llama-3-70B per rank in bf16 crosses at 431 thousand. Below the crossing the decode step
+    is dominated by weights.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.12" stroke-width="1">
+      <line x1="70" y1="40" x2="70" y2="360"/>
+      <line x1="235" y1="40" x2="235" y2="360"/>
+      <line x1="400" y1="40" x2="400" y2="360"/>
+      <line x1="565" y1="40" x2="565" y2="360"/>
+      <line x1="730" y1="40" x2="730" y2="360"/>
+      <line x1="70" y1="360" x2="730" y2="360"/>
+      <line x1="70" y1="288.9" x2="730" y2="288.9"/>
+      <line x1="70" y1="217.8" x2="730" y2="217.8"/>
+      <line x1="70" y1="146.7" x2="730" y2="146.7"/>
+      <line x1="70" y1="75.6" x2="730" y2="75.6"/>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.5" stroke-width="1.4">
+      <line x1="70" y1="360" x2="730" y2="360"/>
+      <line x1="70" y1="40" x2="70" y2="360"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="middle">
+      <text x="70" y="379">1e3</text>
+      <text x="235" y="379">1e4</text>
+      <text x="400" y="379">1e5</text>
+      <text x="565" y="379">1e6</text>
+      <text x="730" y="379">1e7</text>
+    </g>
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="end">
+      <text x="62" y="364">0.1 GB</text>
+      <text x="62" y="292.9">1 GB</text>
+      <text x="62" y="221.8">10 GB</text>
+      <text x="62" y="150.7">100 GB</text>
+      <text x="62" y="79.6">1 TB</text>
+    </g>
+    <text x="400" y="402" fill="currentColor" fill-opacity="0.8" font-size="12.5" text-anchor="middle">resident KV tokens N = batch &times; mean context (log scale)</text>
+    <text x="18" y="200" fill="currentColor" fill-opacity="0.8" font-size="12.5" text-anchor="middle" transform="rotate(-90 18 200)">bytes moved per decode step (log scale)</text>
+
+    <line x1="70" y1="201.5" x2="730" y2="201.5" stroke="var(--steel)" stroke-width="2.6"/>
+    <text x="78" y="194" fill="var(--steel)" font-size="12">weight traffic &mdash; 16.1 GB (8B, 1 GPU) and 17.7 GB (70B, per rank at TP=8): the same line</text>
+
+    <line x1="70" y1="351.6" x2="730" y2="67.2" stroke="var(--plum)" stroke-width="2.4"/>
+    <line x1="100" y1="360" x2="730" y2="88.6" stroke="var(--teal)" stroke-width="2.4" stroke-dasharray="7 4"/>
+    <line x1="134" y1="360" x2="730" y2="103.1" stroke="var(--copper)" stroke-width="2.2"/>
+
+    <g fill="none" stroke-width="2.6">
+      <circle cx="414.6" cy="201.5" r="7" stroke="var(--plum)"/>
+      <circle cx="464.2" cy="201.5" r="7" stroke="var(--teal)"/>
+      <circle cx="504.7" cy="201.5" r="7" stroke="var(--copper)"/>
+    </g>
+
+    <g font-size="12">
+      <text x="640" y="60" fill="var(--plum)" text-anchor="end">8B bf16 KV &mdash; 128 KiB/token</text>
+      <text x="700" y="118" fill="var(--teal)" text-anchor="end">8B fp8 KV &mdash; 64 KiB/token</text>
+      <text x="726" y="132" fill="var(--copper)" text-anchor="end">70B bf16 KV, per rank at TP=8 &mdash; 40 KiB/token</text>
+    </g>
+    <g fill="currentColor" font-size="11.5" text-anchor="middle">
+      <text x="414.6" y="234" fill="var(--plum)">1.23e5</text>
+      <text x="464.2" y="250" fill="var(--teal)">2.45e5</text>
+      <text x="504.7" y="266" fill="var(--copper)">4.31e5</text>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.45" stroke-width="1" stroke-dasharray="3 3">
+      <line x1="129.8" y1="40" x2="129.8" y2="360"/>
+      <line x1="469" y1="40" x2="469" y2="360"/>
+      <line x1="717.4" y1="40" x2="717.4" y2="360"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.65" font-size="11">
+      <text x="134" y="54">B=1, s=2304</text>
+      <text x="386" y="54">B=32, s=8192</text>
+      <text x="634" y="54">B=256, s=32768</text>
+    </g>
+  </svg>
+</div>
+
+<p>Read it as a diagnosis tool: find your operating point on the x-axis; left of the circle for your
+model and dtype the step is weight-bound and KV quantization is a capacity decision only, right of it the
+KV line is the tall pile. Note the structural surprise &mdash; <b>the weight line is the same for both
+models.</b> Llama-3-70B at TP=8 moves 17.7&nbsp;GB of weights per rank per step, Llama-3-8B on one GPU
+16.1&nbsp;GB. TP divides the weight pile by 8 and, because $h_{kv} = 8$ for both, divides the KV pile by
+8 too, so the crossover in <em>tokens</em> is invariant to TP for any $\text{TP} \le h_{kv}$. Reason
+about it once per model and forget the parallelism.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the crossover</h2></div><div class="sec__body"><p>Symbols, all from <a href="../FORMULAS.html">FORMULAS</a>: $L$ layers, $h_{kv}$ KV heads, $d_h$ head
+dimension, $b$ bytes per stored KV element, $b_w$ bytes per weight, $P$ parameters, $N = \sum_i s_i$
+resident tokens. Per decode step the machine reads every weight once and every cached K and V element
+once:</p>
+
+<div class="math-display">$$\text{bytes}_{\text{weights}} = P \, b_w, \qquad \text{bytes}_{\text{KV}} = 2 \, L \, h_{kv} \, d_h \, b \, N$$</div>
+
+<p>Set them equal and solve for the crossover $N^{*}$, where the two piles are the same size:</p>
+
+<div class="math-display">$$N^{*} \;=\; \frac{P \, b_w}{2 \, L \, h_{kv} \, d_h \, b}$$</div>
+
+<p><b>Llama-3-8B</b> ($L=32$, $h_{kv}=8$, $d_h=128$, $P = 8.03\times10^{9}$). Bytes per token at
+$b=2$: $2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072$ = 128&nbsp;KiB. Weights at $b_w = 2$:
+$1.606\times10^{10}$.</p>
+
+<div class="math-display">$$N^{*}_{\text{8B, bf16}} = \frac{1.606\times10^{10}}{131{,}072} = 1.225\times10^{5}\ \text{tokens}$$</div>
+
+<p><b>Llama-3-70B</b> ($L=80$, $h_{kv}=8$, $d_h=128$, $P = 70.6\times10^{9}$). Bytes per token:
+$2 \cdot 80 \cdot 8 \cdot 128 \cdot 2 = 327{,}680$ = 320&nbsp;KiB. Weights: $1.412\times10^{11}$.</p>
+
+<div class="math-display">$$N^{*}_{\text{70B, bf16}} = \frac{1.412\times10^{11}}{327{,}680} = 4.309\times10^{5}\ \text{tokens}$$</div>
+
+<p>The 70B crossover sits 3.5&times; further out, and that is not an accident: under GQA with a
+<em>fixed</em> $h_{kv} = 8$, scaling the model up grows $P$ by 8.8&times; but grows per-token KV by only
+2.5&times; (only $L$ moved). <b>Bigger GQA models are more weight-dominated, not less</b>, so KV
+quantization is a weaker latency lever for them &mdash; and an equally strong capacity lever.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Crossover batch size at four context lengths &mdash; <b>derived</b> arithmetic from
+  $N^{*}$ above divided by $s$. Below the entry, the decode step is weight-bound.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Context $s$</th><th>8B bf16 KV</th><th>8B fp8 KV</th><th>70B bf16 KV</th><th>70B fp8 KV</th></tr></thead>
+      <tbody>
+        <tr><td>2,304</td><td class="num">B = 53</td><td class="num">B = 106</td><td class="num">B = 187</td><td class="num">B = 374</td></tr>
+        <tr><td>8,192</td><td class="num">B = 15</td><td class="num">B = 30</td><td class="num">B = 53</td><td class="num">B = 105</td></tr>
+        <tr><td>32,768</td><td class="num">B = 3.7</td><td class="num">B = 7.5</td><td class="num">B = 13</td><td class="num">B = 26</td></tr>
+        <tr><td>131,072</td><td class="num">B = 0.9</td><td class="num">B = 1.9</td><td class="num">B = 3.3</td><td class="num">B = 6.6</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The bottom-left cell is the punchline. <b>A single Llama-3-8B request at 128k context is already past
+the crossover at batch 1.</b> $131{,}072 \times 131{,}072 = 1.72\times10^{10}$ bytes of KV against
+$1.606\times10^{10}$ of weights; fp8 KV then takes total step bytes from $3.33\times10^{10}$ to
+$2.46\times10^{10}$, a 26% reduction that <em>is</em> visible in TPOT. &ldquo;KV quantization is not a
+latency lever&rdquo; is true at 2k and false at 128k &mdash; the same arithmetic at different $N$.
+Quantizing moves the crossover right without removing it: fp8 doubles $N^{*}$, and a 4-bit rotated
+scheme at 3.8&times; pushes it to $4.7\times10^{5}$ tokens for the 8B model. Since the weight pile never
+shrinks, no KV format makes a batch-1, 2k-context step faster than about 0.9%.</p>
+
+<h3>The capacity win, in resident tokens</h3>
+
+<p>Take the budget <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> already
+derived for an 80&nbsp;GB H100 SXM: 79.65&nbsp;GiB of HBM at vLLM's default
+<code>gpu_memory_utilization</code> of 0.92 (<code>vllm/config/cache.py:L80</code>) is 73.28&nbsp;GiB
+requested, less the weights, less a 6.0&nbsp;GiB allowance for activations, CUDA graphs, NCCL buffers
+and the CUDA context &mdash;
+<a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> does that budget
+properly. That is a 52.32&nbsp;GiB pool for the 8B model and 50.85&nbsp;GiB per rank for 70B at TP=8.
+Only the bytes-per-token column changes below.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Resident tokens and concurrent 8k-context sequences per KV pool &mdash;
+  <b>derived</b> arithmetic on <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>'s
+  pool, single H100 80&nbsp;GB for 8B and per-rank at TP=8 for 70B.
+  Not measured; the engine's own startup estimate is the number to trust in practice.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Model / KV dtype</th><th>Bytes/token</th><th>Pool</th><th>Resident tokens</th><th>Sequences at s=8192</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3-8B, bf16</td><td class="num">131,072</td><td class="num">52.32 GiB</td><td class="num">428,569</td><td class="num">52</td></tr>
+        <tr><td>Llama-3-8B, fp8</td><td class="num">65,536</td><td class="num">52.32 GiB</td><td class="num">857,138</td><td class="num">104</td></tr>
+        <tr><td>Llama-3-8B, <code>turboquant_4bit_nc</code></td><td class="num">34,304</td><td class="num">52.32 GiB</td><td class="num">1,637,520</td><td class="num">199</td></tr>
+        <tr><td>Llama-3-70B TP=8, bf16 (per rank)</td><td class="num">40,960</td><td class="num">50.85 GiB</td><td class="num">1,332,954</td><td class="num">162</td></tr>
+        <tr><td>Llama-3-70B TP=8, fp8 (per rank)</td><td class="num">20,480</td><td class="num">50.85 GiB</td><td class="num">2,665,908</td><td class="num">325</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Concurrency amortises the weight read, and that is what turns into throughput. Doubling admitted
+sequences from 52 to 104 roughly doubles weight-GEMM arithmetic intensity &mdash; the move from the
+memory-bound floor toward the ridge that
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> plots. That is how
+fp8 KV increases tokens per second, and it has nothing to do with the KV bytes it saved.</p></div></section>
+<section class="sec" id="error-behaviour" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">An easier target, and a harder one</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">easier</span>
+    <h4>Errors do not accumulate across requests</h4>
+    <p>A quantized weight is wrong the same way for every token of every request, forever &mdash; which
+    is why weight quantization needs calibration and error-compensating algorithms (GPTQ, AWQ;
+    <a href="../04-quantization/04-02-gptq-awq-smoothquant.html">&sect;4.2</a>). A KV entry is written
+    once, read for the life of one sequence, then freed. Each entry takes exactly one rounding, never
+    a compounding chain of them.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">harder</span>
+    <h4>An early key perturbs every later step</h4>
+    <p>Key $k_t$ is written at step $t$ and read at every step $t' &gt; t$. In a 4k-token generation the
+    key from position 1 participates in 4,000 softmaxes, and a perturbed logit changes the layer
+    output, hence the hidden state that produces $k_{t+1}$. The cache never re-quantizes itself, but
+    the <em>trajectory</em> diverges.</p>
+  </div>
+</div>
+
+<p>Be precise about the second point. There is no numerical feedback loop: $\hat{k}_t = Q(k_t)$ is a
+single rounding, never re-quantized. What propagates is a <em>decision</em> &mdash; if perturbed logits
+change which token is sampled at step $t$, everything after $t$ is a different sequence. The failure
+mode is therefore bimodal: most generations are indistinguishable, a few diverge completely. That is why
+perplexity moves smoothly with bit-width while exact-match accuracy can fall off a cliff. Perplexity
+averages the perturbation; GSM8K counts the divergences. And a quantized prefix block in vLLM's hash
+cache or SGLang's radix tree
+(<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a>,
+<a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a>) is written once and shared,
+so one unlucky rounding is amortised across every request that hits it.</p>
+
+<p>The harder half is the <b>keys</b>, structurally: $K$ feeds a softmax, where a logit error is
+exponentiated, while $V$ feeds a convex combination $\sum_i p_i v_i$, where errors partly cancel. Every
+scheme below treats keys more carefully &mdash; vLLM's presets are named <code>turboquant_k8v4</code> and
+<code>turboquant_k3v4_nc</code>, key bits before value bits. On top of that sits the finding that made
+rotated quantization necessary: KIVI (<a href="https://arxiv.org/abs/2402.02750">arXiv:2402.02750</a>)
+and KVQuant (<a href="https://arxiv.org/abs/2401.18079">arXiv:2401.18079</a>) both report persistent
+<b>per-channel outliers in the key cache</b> &mdash; a handful of the $d_h$ coordinates consistently far
+larger than the rest across all tokens &mdash; and none in the value cache. KVQuant attributes much of
+the difficulty to RoPE, which mixes channel pairs by a position-dependent angle and smears the clean
+pre-RoPE structure; production engines cache post-RoPE keys, because that is what the kernel
+consumes.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Why this matters for serving, not just accuracy</span>
+  <p>The literature's answer to per-channel key outliers is per-channel scales &mdash; one scale per
+  coordinate, computed across tokens. That is <em>architecturally impossible</em> in a paged,
+  append-only cache: a per-channel scale needs the whole group of tokens, but a decode step writes one
+  token at a time into a block other sequences may already share. Hence the constraint that shapes every
+  production scheme: <b>scales must be computable from data the writer already has.</b> That leaves
+  per-tensor and per-head (calibrated offline) and per-token (computed on the fly) &mdash; and it is why
+  rotation, which converts a per-channel problem into a per-token one, is the production answer rather
+  than a research curiosity.</p>
+</div></div></section>
+<section class="sec" id="granularity" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Scale granularity</h2></div><div class="sec__body"><p>A quantized KV entry is reconstructed as $x \approx s\,(q - z)$ &mdash; the affine form
+<a href="../00-foundations/00-05-numerics.html">&sect;0.5</a> owns. The design question is how many
+distinct $(s, z)$ pairs, over what group of values. Every extra scale buys accuracy and costs bytes and
+a load.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Bytes per (token, KV head) for K and V together at $d_h = 128$ &mdash;
+  <b>derived</b> from the packing code cited in each row. &ldquo;Metadata&rdquo; is scale plus zero-point
+  plus norm bytes stored inline in the cache.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Scheme</th><th>Data</th><th>Metadata</th><th>Total</th><th>vs bf16</th><th>Metadata share</th></tr></thead>
+      <tbody>
+        <tr><td>bf16 (baseline)</td><td class="num">512</td><td class="num">0</td><td class="num">512</td><td class="num">1.00&times;</td><td class="num">0%</td></tr>
+        <tr><td>fp8 per-tensor</td><td class="num">256</td><td class="num">0</td><td class="num">256</td><td class="num">2.00&times;</td><td class="num">~0%</td></tr>
+        <tr><td>fp8 per-KV-head</td><td class="num">256</td><td class="num">0</td><td class="num">256</td><td class="num">2.00&times;</td><td class="num">~0%</td></tr>
+        <tr><td><code>int8_per_token_head</code></td><td class="num">256</td><td class="num">8</td><td class="num">264</td><td class="num">1.94&times;</td><td class="num">3.0%</td></tr>
+        <tr><td><code>int4_per_token_head</code></td><td class="num">128</td><td class="num">8</td><td class="num">136</td><td class="num">3.76&times;</td><td class="num">5.9%</td></tr>
+        <tr><td><code>nvfp4</code> (block of 16)</td><td class="num">128</td><td class="num">16</td><td class="num">144</td><td class="num">3.56&times;</td><td class="num">11.1%</td></tr>
+        <tr><td><code>turboquant_k8v4</code></td><td class="num">192</td><td class="num">4</td><td class="num">196</td><td class="num">2.61&times;</td><td class="num">2.0%</td></tr>
+        <tr><td><code>turboquant_4bit_nc</code></td><td class="num">128</td><td class="num">6</td><td class="num">134</td><td class="num">3.82&times;</td><td class="num">4.5%</td></tr>
+        <tr><td><code>turboquant_3bit_nc</code></td><td class="num">96</td><td class="num">6</td><td class="num">102</td><td class="num">5.02&times;</td><td class="num">5.9%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The per-tensor and per-KV-head rows carry no inline metadata: their scales are model weights loaded
+from the checkpoint, four per layer &mdash; $q$, $k$, $v$ and the softmax-output scale &mdash; each
+initialised to an invalid sentinel so an uncalibrated checkpoint is detectable:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/kv_cache.py:L57-L69</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def create_weights(self, layer: torch.nn.Module):
+        """
+        Create "weight" (aka q_scale, k_scale and v_scale)
+        for an attention layer.
+        """
+        # Initialize the Q and KV cache scales to -1.0, an invalid value.
+        # If the q and k/v_scales appear in the checkpoint, it will be
+        # overwritten when loading weights.
+        layer.q_scale = KVCacheScaleParameter()
+        layer.k_scale = KVCacheScaleParameter()
+        layer.v_scale = KVCacheScaleParameter()
+        # Initialize P = softmax(QK^T) scales
+        layer.prob_scale = KVCacheScaleParameter()</code></pre>
+</div>
+
+<p>That path is strictly per-tensor and says so: <code>kv_cache.py:L124-L127</code> raises
+<code>"Only support per-tensor scaling factor for fp8 KV cache"</code> if the loaded scale is not a
+scalar. Per-<em>head</em> scales arrive through a different loader &mdash; compressed-tensors'
+<code>ATTN_HEAD</code> strategy, which allocates <code>n_scales</code>-wide parameters, shards them
+TP-aware, and reduces $q$ scales from $h$ to $h_{kv}$ by taking the max within each GQA group
+(<code>compressed_tensors.py:L1129-L1167</code>). They work only with FlashAttention and require
+llm-compressor calibration (<code>docs/features/quantization/quantized_kvcache.md</code>).</p>
+
+<p>Per-<em>token</em> scales need no calibration &mdash; the writer has the whole vector in registers
+&mdash; but the scale must then live in the cache. vLLM's Triton backend widens the head dimension by
+exactly one fp32 and hides the scale in the pad:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/triton_attn.py:L277-L289</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -&gt; "AttentionSpec":
+        """Per-token-head modes pack inline fp32 scales after each head's
+        data, so the content is (data + one scale) per K/V side."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        hs_k, hs_v = spec.head_size, spec.head_size_v
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            hs_k, hs_v = hs_k // 2, hs_v // 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = (hs_k + hs_v) * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)</code></pre>
+</div>
+
+<p><code>state_content_bytes</code> flows straight into
+<code>page_size_bytes = num_heads * storage_block_size * state_content_size_bytes</code>
+(<code>vllm/v1/kv_cache_interface.py:L244-L260</code>) &mdash; that is the whole mechanism by which a
+KV dtype change changes how many blocks the engine allocates. The scale is recovered by
+<code>_ensure_scale_caches</code> (<code>triton_attn.py:L440-L500</code>) as a strided fp32 view over
+the pad bytes: a zero-copy reinterpretation of storage the block pool already owns, so
+<a href="../02-memory-and-kv-cache/02-02-pagedattention.html">&sect;2.2</a>'s allocator never has to
+know scales exist.</p>
+
+<p>Per-<em>block</em> is the fourth point on the axis, and NVFP4's: one fp8 e4m3 scale per 16
+consecutive values along the head dimension, over a per-layer fp32 global scale. SGLang names the block
+size explicitly (<code>SCALE_BLOCK_SIZE = 16</code>,
+<code>fp4_kv_cache_quant_method.py:L340</code>); vLLM computes the packed width as
+<code>head_size // 2 + head_size // 16</code>, 64 data bytes plus 8 scale bytes per side at $d_h = 128$
+(<code>vllm/utils/torch_utils.py:L531-L534</code>). Finest granularity of the four, highest metadata
+share in the table.</p></div></section>
+<section class="sec" id="dtypes" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">What the engines actually accept</h2></div><div class="sec__body"><p>vLLM's legal KV dtypes are a single <code>Literal</code>. As of <code>a556f3f</code> it has
+seventeen members, and reading it is the fastest way to see the whole design space at once:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/cache.py:L19-L37</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>CacheDType = Literal[
+    "auto",
+    "float16",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    "fp8_e5m2",
+    "fp8_inc",
+    "fp8_ds_mla",
+    "turboquant_k8v4",
+    "turboquant_4bit_nc",
+    "turboquant_k3v4_nc",
+    "turboquant_3bit_nc",
+    "int4_per_token_head",
+    "int8_per_token_head",
+    "fp8_per_token_head",
+    "nvfp4",
+    "nvfp4_4over6",
+]</code></pre>
+</div>
+
+<p>Four families. Plain floats (<code>auto</code>, <code>float16</code>, <code>bfloat16</code>) store
+the model dtype. The fp8 family adds <code>fp8_inc</code> for Intel Gaudi and <code>fp8_ds_mla</code>
+for DeepSeek's MLA latent (<a href="../07-architectures/07-02-mla-in-depth.html">&sect;7.2</a>). The
+per-token-head family is the dynamic-scale path just described. The NVFP4 pair is packed 4-bit float
+with block scales, and its second member is the exotic one: <code>nvfp4_4over6</code> &ldquo;uses the
+NVFP4 layout and selects between max/6 and max/4 scales per 16 values by minimizing squared
+reconstruction error&rdquo; (<code>cache.py:L95-L97</code>) &mdash; a per-block <em>search</em> over two
+scale conventions at write time, landed in
+<a href="https://github.com/vllm-project/vllm/pull/45187">PR #45187</a>.</p>
+
+<p>Storage is blunt: nearly everything narrower than fp16 is <code>torch.uint8</code>, because a byte
+array is the only thing every allocator, copy engine and offload path handles uniformly
+(<code>vllm/utils/torch_utils.py:L33-L54</code>). The <em>semantic</em> classification lives in an enum
+whose comments are the best one-line summary of each scheme in either repo:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/kv_cache_interface.py:L43-L53</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    NONE = 0
+    FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
+    INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
+    FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+    INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
+    NVFP4 = 5  # packed fp4 data + fp8 block scales
+    # Hadamard-rotated Lloyd-Max quant, packed K+V per slot.
+    TURBOQUANT_K8V4 = 6
+    TURBOQUANT_4BIT_NC = 7
+    TURBOQUANT_K3V4_NC = 8
+    TURBOQUANT_3BIT_NC = 9</code></pre>
+</div>
+
+<p>SGLang's surface is deliberately smaller: <code>configure_kv_cache_dtype</code> accepts
+<code>auto</code>, <code>bf16</code>, <code>fp8_e5m2</code>, <code>fp8_e4m3</code>, <code>mxfp8</code>,
+<code>nvfp4</code> and <code>fp4_mx_block16</code>, and raises on anything else
+(<code>python/sglang/srt/mem_cache/kv_cache_dtype.py:L37-L81</code>) &mdash; no integer per-token-head
+modes and no rotated schemes at this SHA. One thing it does that vLLM does not: <code>auto</code> reads
+<code>quant_config.kv_cache_quant_algo</code> off the checkpoint and silently enables fp8 if the
+checkpoint says so (<code>kv_cache_dtype.py:L37-L45</code>). Its storage rule matches vLLM's, one line
+in the pool constructor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L1649-L1653</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if dtype in (torch.float8_e5m2, torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            # NOTE: Store as torch.uint8 because Tensor.index_put is not implemented for torch.float8_e5m2
+            self.store_dtype = torch.uint8
+        else:
+            self.store_dtype = dtype</code></pre>
+</div></div></section>
+<section class="sec" id="dequant" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Where the dequantisation happens</h2></div><div class="sec__body"><p>This detail decides whether fp8 KV is a pure memory trick or also a compute trick. The cache holds a
+byte; between the load and the softmax that byte must become a number the attention math can use &mdash;
+or the math must be rewritten so it never does. There are four answers in these two repos.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; one decode step, showing where quantize-on-write and
+  dequantize-on-read sit relative to the attention kernel.</b> Byte counts are per (token, KV head)
+  at $d_h = 128$ for both K and V.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    QKV["q, k, v for 1 new token<br/>h_kv=8, d_h=128, bf16"] --> WR{"write path<br/>kv_cache_dtype"}
+    WR -->|auto| W0["reshape_and_cache_flash<br/>plain scatter, 512 B"]
+    WR -->|fp8 per-tensor| W1["scale by 1 over k_scale<br/>clamp, cast to e4m3, 256 B"]
+    WR -->|per-token-head| W2["absmax over the head<br/>store fp32 scale inline, 264 B"]
+    WR -->|int4_per_token_head| W3["RHT, per-token min-max<br/>pack 2 nibbles per byte, 136 B"]
+    W0 --> POOL[("paged KV cache<br/>block_size 16, uint8 storage")]
+    W1 --> POOL
+    W2 --> POOL
+    W3 --> POOL
+    POOL --> RD{"read path"}
+    RD -->|"A. bf16 query"| RA["dequant tile in registers<br/>tile to fp32 times k_scale"]
+    RD -->|"B. fp8 query, FA3 or FA4"| RB["no dequant at all<br/>fold q_scale times k_scale into score_scale"]
+    RD -->|"C. per-token-head"| RC["plain cast<br/>scales applied to S and to P"]
+    RD -->|"D. NVFP4 prefill, SGLang"| RD2["batch dequant into workspace<br/>extra read plus write of the whole KV"]
+    RA --> SM["softmax in fp32<br/>then P times V"]
+    RB --> SM
+    RC --> SM
+    RD2 --> SM
+    SM --> OUT["attention output<br/>h=32, d_h=128, bf16"]
+  </script>
+</div>
+
+<p><b>Strategy A &mdash; dequantize the tile in registers.</b> The general case. vLLM's unified Triton
+kernel has a helper whose docstring is a complete taxonomy of the modes it handles:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/triton_unified_attention.py:L38-L56</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@triton.jit
+def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+    """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
+
+    Modes handled inside the core kernel:
+
+    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
+      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+      their scales separately on S/P inside the loop.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+      tensor-wide scale, unless Q is also FP8 and the caller folds the scales
+      into the attention score and output accumulator.
+    """
+    if KV_QUANT_MODE == 1:
+        if Q.dtype.is_fp8():
+            return data.to(Q.dtype)
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    return data.to(Q.dtype)</code></pre>
+</div>
+
+<p>Three instructions on data already in registers. HBM traffic is halved; the matmul still runs at
+bf16 rates. This is the mode that produces the 0.9% at batch 1.</p>
+
+<p><b>Strategy B &mdash; never dequantize; fold the scales into the score.</b> With an fp8 query,
+$QK^\top$ runs on fp8 tensor cores and both scales collapse into one scalar on the pre-softmax score.
+Same kernel, twelve lines up:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/triton_unified_attention.py:L385-L386</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if USE_FP8_Q_DESCALE:
+        score_scale = scale * tl.load(q_scale) * tl.load(k_scale)</code></pre>
+</div>
+
+<p>FlashAttention takes the same route through a different door: it passes
+<code>k_descale = layer._k_scale.expand(descale_shape)</code>, shape
+<code>(num_seqs, num_kv_heads)</code>, into <code>flash_attn_varlen_func</code>
+(<code>flash_attn.py:L1016-L1023</code>), having first viewed the uint8 cache as a real fp8 tensor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/flash_attn.py:L1003-L1006</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if is_quantized_kv_cache(self.kv_cache_dtype):
+            # queries are quantized in the attention layer
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())</code></pre>
+</div>
+
+<p>This is the only path where fp8 KV buys compute as well as bytes, and vLLM's docs say so outright:
+&ldquo;When using the Flash Attention 3 backend with FP8 KV cache, attention operations are also
+performed in the quantized (FP8) domain&rdquo;
+(<code>docs/features/quantization/quantized_kvcache.md</code>). SGLang does the same at
+<code>flashattention_backend.py:L1288-L1293</code>.</p>
+
+<p><b>Strategy C &mdash; apply the scales to the score matrix, never to K or V.</b> For per-token-head
+modes the scale varies along the KV-tile axis, so folding it into the score matrix costs the same as
+multiplying it into the tile and fuses with the softmax scale you were applying anyway:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/triton_unified_attention.py:L537-L542</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if USE_PER_TOKEN_HEAD_SCALES:
+            # Per-token-head quant: fuse softmax_scale with per-head k_scale
+            # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
+            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
+        else:
+            S += score_scale * tl.dot(Q, K)</code></pre>
+</div>
+
+<p><b>Strategy D &mdash; dequantize the whole buffer into a scratch workspace first.</b> SGLang's FP4
+path formalises this as an access <em>kind</em>, declared per recipe and per phase:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/fp4_kv_cache_quant_method.py:L777-L791</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>KV_CACHE_ATTENTION_ACCESS_REGISTRY: dict[str, tuple[KVCacheAttentionAccess, ...]] = {
+    UnquantizedKVCacheMethod.name: (
+        _plain(_PREFILL, _ANY_BACKEND),
+        _plain(_DECODE, _ANY_BACKEND),
+    ),
+    NVFP4KVCacheMethod.name: (
+        _dq_workspace(_PREFILL, _NVFP4_PREFILL_BACKENDS, _NVFP4_SCALE, _FP8_E4M3),
+        _native_fp4(_DECODE, _NVFP4_DECODE_BACKENDS, _NVFP4_SCALE, _TORCH_FP4),
+    ),
+    FP4MXBlock16KVCacheMethod.name: (
+        _plain(_PREFILL, _FP4_MX_PREFILL_BACKENDS, _FP4_MX_SCALE, _BF16),
+        _plain(_DECODE, _FP4_MX_MHA_BACKENDS, _FP4_MX_SCALE, _BF16),
+    ),
+}</code></pre>
+</div>
+
+<p>NVFP4 uses a workspace for prefill and native packed FP4 for decode, which is the right call:
+prefill reads each entry once, so the extra pass is bounded overhead, while decode reads the whole
+cache every step, so a workspace pass would give back the traffic you just spent 4 bits to save. It is
+a registry rather than an <code>if</code> in each backend because
+<code>torch.float4_e2m1fn_x2</code> describes packed storage but &ldquo;does not say whether the recipe
+is NVFP4 or fp4_mx_block16, nor how scales are interpreted&rdquo;
+(<code>fp4_kv_cache_quant_method.py:L15-L34</code>).</p>
+
+<h3>Which backend accepts which dtype</h3>
+
+<p>Backends advertise a <code>supported_kv_cache_dtypes</code> class variable; the selector turns a
+mismatch into the reason string <code>"kv_cache_dtype not supported"</code>
+(<code>vllm/v1/attention/backend.py:L379-L380</code>). The gaps are the interesting part.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">vLLM V1 backend acceptance at <code>a556f3f</code>, read from each backend's
+  <code>supported_kv_cache_dtypes</code> and <code>supports_kv_cache_dtype</code>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Backend</th><th>fp8_e4m3</th><th>fp8_e5m2</th><th>per-token-head</th><th>nvfp4</th><th>turboquant</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>FLASH_ATTN</td><td>FA3 on SM90, FA4 on SM100 only</td><td>never</td><td>no</td><td>no</td><td>no</td><td><code>flash_attn.py:L81-L87</code></td></tr>
+        <tr><td>FLASHINFER</td><td>yes</td><td>yes</td><td>no</td><td>SM100 + trtllm</td><td>no</td><td><code>flashinfer.py:L411-L420</code></td></tr>
+        <tr><td>TRITON_ATTN</td><td>yes</td><td>yes</td><td>int4 / int8 / fp8</td><td>no</td><td>no</td><td><code>triton_attn.py:L296-L306</code></td></tr>
+        <tr><td>TURBOQUANT</td><td>no</td><td>no</td><td>no</td><td>no</td><td>all four presets</td><td><code>turboquant_attn.py:L133-L138</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Two constraints surprise people. First, FlashAttention refuses <code>fp8_e5m2</code> unconditionally
+and accepts <code>fp8_e4m3</code> only on a narrow set of architecture-plus-version combinations:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/fa_utils.py:L223-L243</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def flash_attn_supports_kv_cache_dtype(
+    kv_cache_dtype: str = "fp8_e4m3",
+    *,
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
+) -&gt; bool:
+    if kv_cache_dtype == "fp8_e5m2":
+        return False
+    if current_platform.is_xpu():
+        return True
+    fa_version = get_flash_attn_version(
+        requires_alibi=requires_alibi,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        has_sinks=has_sinks,
+    )
+    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
+        fa_version == 4 and current_platform.is_device_capability_family(100)
+    )</code></pre>
+</div>
+
+<p>Which is why <code>--kv-cache-dtype fp8</code> on an A100 silently routes you off FlashAttention onto
+FlashInfer or Triton rather than failing. Second, TurboQuant is not an option on an existing backend, it
+<em>is</em> a backend, because it changes the shape of the cache tensor: it drops the leading K/V
+dimension and stores one interleaved slot per head per position
+(<code>turboquant_attn.py:L180-L210</code>), safe only because it never shares cache tensors with any
+other backend.</p></div></section>
+<section class="sec" id="rotation" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Rotation: why a Hadamard makes outliers vanish</h2></div><div class="sec__body"><p>Below about 5 bits, per-token scaling stops being enough. If one coordinate of a 128-dimensional key
+is 20&times; the others, a uniform quantizer sized to that coordinate assigns every other coordinate to
+the bottom one or two codes: you spend 4 bits per coordinate and learn almost nothing about 127 of
+them.</p>
+
+<p>The fix is a change of basis. Let $H$ be orthonormal and $y = Hx$. Three facts, in increasing order
+of usefulness.</p>
+
+<p><b>1. Orthogonality preserves everything attention cares about.</b> $\|Hx\| = \|x\|$, and
+$(Hq)^\top(Hk) = q^\top H^\top H k = q^\top k$, so rotating <em>both</em> query and key leaves every
+logit numerically identical. Values are even nicer: the output is a convex combination
+$o = \sum_i p_i v_i$, so storing $Hv_i$ gives $\sum_i p_i (H v_i) = H o$ and one inverse rotation
+recovers $o$ exactly. Rotation does not change the function being computed.</p>
+
+<p><b>2. The Hadamard matrix spreads energy maximally and costs almost nothing.</b> Its entries are all
+$\pm 1/\sqrt{d}$, so $y_j = \tfrac{1}{\sqrt d}\sum_i \pm x_i$ is a signed sum of <em>every</em> input
+coordinate: a spike is smeared over all $d$ of them, each getting $1/\sqrt d$ of it &mdash; an
+11.3&times; reduction at $d_h = 128$. The transform is a butterfly of adds and subtracts,
+$O(d \log d)$, no multiplies, or as vLLM does it a single GEMM against a cached matrix.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/turboquant_attn.py:L105-L120</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def _build_hadamard(d: int, device_str: str) -&gt; torch.Tensor:
+    """Orthonormal Hadamard matrix (Sylvester construction), cached per (d, device).
+
+    Precomputed D×D matrix enables matmul-based WHT — single cuBLAS GEMM
+    instead of log2(D) butterfly kernel launches. 64KB for D=128.
+    """
+    # Normalize device string so "cuda" and "cuda:0" hit the same cache entry.
+    return _build_hadamard_cached(d, str(torch.device(device_str)))
+
+
+@functools.cache
+def _build_hadamard_cached(d: int, device_str: str) -&gt; torch.Tensor:
+    H = torch.tensor([[1.0]])
+    while H.shape[0] &lt; d:
+        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+    return (H / math.sqrt(d)).to(torch.device(device_str))</code></pre>
+</div>
+
+<p><b>3. After rotation the distribution is not just narrower, it is <em>known</em>.</b> This is the
+part that turns a heuristic into a design. For a unit-norm $x$ and a random orthogonal $H$, each
+coordinate of $y$ has mean 0 and variance exactly $1/d$, and for $d \gtrsim 64$ the marginal is
+close to Gaussian. vLLM states this as the premise of its centroid solver:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/turboquant/centroids.py:L3-L10</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>"""Lloyd-Max optimal scalar quantizer for TurboQuant.
+
+After rotating a d-dimensional unit vector by a random orthogonal matrix,
+each coordinate approximately follows N(0, 1/d) for d &gt;= 64.
+We solve the Lloyd-Max conditions to find optimal centroids.
+
+Based on: turboquant-pytorch/lloyd_max.py (Zandieh et al.)
+"""</code></pre>
+</div>
+
+<p>The consequence: before rotation the quantizer's range is $\max_i |x_i|$ &mdash; data-dependent,
+unbounded, needing a stored scale. After rotation it is about $3.5/\sqrt{d}$ &mdash; a constant, the
+same for every key in the model, needing <em>no stored scale at all</em>. Hence TurboQuant's key slot is
+<code>ceil(head_dim * key_mse_bits / 8) + 2</code> bytes (<code>turboquant/config.py:L128-L142</code>),
+the 2 being an fp16 copy of the pre-rotation norm $\|k\|$ and nothing else. Rotation has turned a
+per-channel scaling problem into a single scalar.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the same 128-dimensional unit vector before and after an
+  orthonormal Hadamard rotation, with the 4-bit uniform code cells drawn as horizontal bands.</b>
+  <b>Derived</b>: a synthetic vector (Gaussian background, two coordinates forced to 20$\sigma$)
+  quantized in CPU Python &mdash; a simulation of the quantizer, not a model evaluation. Each panel is
+  scaled to its own quantizer range, printed above it, so look at the flattening rather than the bar
+  heights. Over the full 128 coordinates, 97 land in the zero code cell before rotation and 24 after, and
+  mean squared reconstruction error drops 7.4&times;. The 24 plotted are a slice containing both
+  outliers.</p>
+  <svg viewBox="0 0 800 330" width="100%" role="img" aria-labelledby="hadTitle hadDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="hadTitle">Bar chart of vector coordinates before and after a Hadamard rotation</title>
+    <desc id="hadDesc">Left panel: one coordinate reaches the full plot height while the surrounding
+    twenty-three are barely visible above the axis, all falling inside the innermost quantizer code cell.
+    Right panel: after rotation no coordinate dominates and the twenty-four bars spread across several
+    code cells.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.13" stroke-width="1">
+      <line x1="40" y1="60" x2="370" y2="60"/><line x1="40" y1="90" x2="370" y2="90"/>
+      <line x1="40" y1="120" x2="370" y2="120"/><line x1="40" y1="150" x2="370" y2="150"/>
+      <line x1="40" y1="210" x2="370" y2="210"/><line x1="40" y1="240" x2="370" y2="240"/>
+      <line x1="40" y1="270" x2="370" y2="270"/><line x1="40" y1="300" x2="370" y2="300"/>
+      <line x1="430" y1="60" x2="760" y2="60"/><line x1="430" y1="90" x2="760" y2="90"/>
+      <line x1="430" y1="120" x2="760" y2="120"/><line x1="430" y1="150" x2="760" y2="150"/>
+      <line x1="430" y1="210" x2="760" y2="210"/><line x1="430" y1="240" x2="760" y2="240"/>
+      <line x1="430" y1="270" x2="760" y2="270"/><line x1="430" y1="300" x2="760" y2="300"/>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.3" stroke-width="1.6" stroke-dasharray="4 3">
+      <line x1="40" y1="172.3" x2="370" y2="172.3"/><line x1="40" y1="187.7" x2="370" y2="187.7"/>
+      <line x1="430" y1="172.3" x2="760" y2="172.3"/><line x1="430" y1="187.7" x2="760" y2="187.7"/>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.55" stroke-width="1.4">
+      <line x1="40" y1="180" x2="370" y2="180"/><line x1="430" y1="180" x2="760" y2="180"/>
+    </g>
+
+    <text x="205" y="30" fill="var(--plum)" font-size="13" text-anchor="middle">before rotation &mdash; max 0.650, step 0.0929</text>
+    <text x="595" y="30" fill="var(--teal)" font-size="13" text-anchor="middle">after rotation &mdash; max 0.225, step 0.0321</text>
+    <text x="205" y="322" fill="currentColor" fill-opacity="0.6" font-size="11" text-anchor="middle">coordinate index 10 to 33</text>
+    <text x="595" y="322" fill="currentColor" fill-opacity="0.6" font-size="11" text-anchor="middle">coordinate index 10 to 33</text>
+    <text x="46" y="176" fill="currentColor" fill-opacity="0.55" font-size="10">zero code cell</text>
+    <text x="436" y="176" fill="currentColor" fill-opacity="0.55" font-size="10">zero code cell</text>
+
+    <g fill="var(--plum)">
+      <rect x="42" y="180" width="9" height="2.6"/><rect x="55" y="180" width="9" height="8.1"/>
+      <rect x="68" y="176.2" width="9" height="3.8"/><rect x="81" y="180" width="9" height="9.7"/>
+      <rect x="94" y="180" width="9" height="4.4"/><rect x="107" y="175.3" width="9" height="4.7"/>
+      <rect x="120" y="180" width="9" height="0.6"/><rect x="133" y="72" width="9" height="108"/>
+      <rect x="146" y="176.9" width="9" height="3.1"/><rect x="159" y="179.5" width="9" height="0.5"/>
+      <rect x="172" y="177.5" width="9" height="2.5"/><rect x="185" y="180" width="9" height="4.1"/>
+      <rect x="198" y="180" width="9" height="0.9"/><rect x="211" y="177.4" width="9" height="2.6"/>
+      <rect x="224" y="180" width="9" height="108"/><rect x="237" y="170.2" width="9" height="9.8"/>
+      <rect x="250" y="165.2" width="9" height="14.8"/><rect x="263" y="175.2" width="9" height="4.8"/>
+      <rect x="276" y="180" width="9" height="3.9"/><rect x="289" y="180" width="9" height="1.3"/>
+      <rect x="302" y="168.9" width="9" height="11.1"/><rect x="315" y="178.9" width="9" height="1.1"/>
+      <rect x="328" y="180" width="9" height="10.1"/><rect x="341" y="171.6" width="9" height="8.4"/>
+    </g>
+    <g fill="var(--teal)">
+      <rect x="432" y="118" width="9" height="62"/><rect x="445" y="174.8" width="9" height="5.2"/>
+      <rect x="458" y="120.8" width="9" height="59.2"/><rect x="471" y="176.1" width="9" height="3.9"/>
+      <rect x="484" y="142.4" width="9" height="37.6"/><rect x="497" y="180" width="9" height="6.5"/>
+      <rect x="510" y="175.6" width="9" height="4.4"/><rect x="523" y="116.3" width="9" height="63.7"/>
+      <rect x="536" y="171.6" width="9" height="8.4"/><rect x="549" y="124" width="9" height="56"/>
+      <rect x="562" y="153.1" width="9" height="26.9"/><rect x="575" y="123.8" width="9" height="56.2"/>
+      <rect x="588" y="172.4" width="9" height="7.6"/><rect x="601" y="143.4" width="9" height="36.6"/>
+      <rect x="614" y="180" width="9" height="54.4"/><rect x="627" y="180" width="9" height="2.4"/>
+      <rect x="640" y="180" width="9" height="69.4"/><rect x="653" y="180" width="9" height="7"/>
+      <rect x="666" y="180" width="9" height="54.5"/><rect x="679" y="178" width="9" height="2"/>
+      <rect x="692" y="180" width="9" height="65.6"/><rect x="705" y="167.5" width="9" height="12.5"/>
+      <rect x="718" y="159.9" width="9" height="20.1"/><rect x="731" y="180" width="9" height="33.4"/>
+    </g>
+  </svg>
+</div>
+
+<p>Rotation does not make the vector smaller &mdash; the norm is identical by construction. It makes it
+<em>flat</em>, and flatness is what a scalar quantizer is good at.</p>
+
+<h3>Why &ldquo;random&rdquo;, and why TurboQuant dropped the randomness</h3>
+
+<p>A fixed Hadamard has one weakness: an input can align with one of its rows and come out as spiky as
+it went in. The fix is the <b>randomized</b> Hadamard transform $\text{RHT} = H D x$, with $D$ a
+diagonal of arbitrary $\pm 1$ signs. vLLM's INT4 path does this:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/int4_per_token_head.py:L1123-L1135</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># Randomized Hadamard Transform (used by INT4)
+# Deterministic ±1 signs for Randomized Hadamard Transform.
+# RHT = H × D × x  (sign flip + Hadamard).  Breaks residual structure
+# in KV vectors, improving quantization quality.
+_RHT_SIGNS_CACHE: dict[tuple[int, int, str], torch.Tensor] = {}
+
+
+def _get_rht_signs(d: int, round_idx: int, device: torch.device) -&gt; torch.Tensor:
+    """Return a cached deterministic ±1 sign vector of length *d*."""
+    key = (d, round_idx, str(device))
+    if key not in _RHT_SIGNS_CACHE:
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)</code></pre>
+</div>
+
+<p>The seed is a constant, so the signs are identical on every rank and every restart &mdash;
+&ldquo;random&rdquo; means decorrelated from the data, not varying. TurboQuant went the other way and
+<em>removed</em> its sign flips in
+<a href="https://github.com/vllm-project/vllm/pull/40194">PR #40194</a>, with a stated argument:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/turboquant_attn.py:L438-L445</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _ensure_on_device(self, layer, device):
+        """One-time derivation of TQ buffers (rotation matrix, midpoints).
+
+        The Hadamard rotation is shared across all layers: random sign
+        flips do not improve Lloyd-Max quantization quality because the
+        quantizer is symmetric around zero (sign-flipping a coordinate
+        maps it to the mirror centroid with identical distortion).
+        """</code></pre>
+</div>
+
+<p>Two payoffs from dropping $D$: the pure Sylvester Hadamard is symmetric, $H = H^\top$, so the inverse
+rotation is the same matmul (<code>turboquant_attn.py:L489-L491</code>), and the transform can be fused
+as a butterfly inside the decode kernel. Whether the accuracy argument fully holds is an empirical
+question the PR settled for these presets, not a theorem about rotated quantization in general.</p>
+
+<h3>What Lloyd-Max adds on top</h3>
+
+<p>Rotation hands you a source known to be $N(0, 1/d)$, and a uniform quantizer is not the best code for
+a Gaussian &mdash; you want levels packed near zero where the density is. The optimal $2^b$-level scalar
+quantizer satisfies two coupled conditions that Lloyd's algorithm alternates to a fixed point: each
+boundary is the midpoint of its neighbouring centroids, each centroid the conditional mean of the source
+over its own cell. vLLM solves them offline, once per $(d, b)$:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/turboquant/centroids.py:L59-L86</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    for _ in range(max_iter):
+        boundaries = [
+            (centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)
+        ]
+        edges = [lo * 3] + boundaries + [hi * 3]
+        new_centroids = []
+        for i in range(n_levels):
+            a, b = edges[i], edges[i + 1]
+            num = _trapz(lambda x: x * pdf(x), a, b)
+            den = _trapz(pdf, a, b)
+            new_centroids.append(num / den if den &gt; 1e-15 else centroids[i])
+
+        if max(abs(new_centroids[i] - centroids[i]) for i in range(n_levels)) &lt; tol:
+            break
+        centroids = new_centroids
+# ...
+@lru_cache(maxsize=32)
+def get_centroids(d: int, bits: int) -&gt; torch.Tensor:
+    """Get precomputed Lloyd-Max centroids (cached)."""
+    centroids, _ = solve_lloyd_max(d, bits)
+    return centroids</code></pre>
+</div>
+
+<p>This is one-dimensional k-means against a known density rather than a sample, and because the
+rotation fixes the density the result is a <em>compile-time constant</em>: the whole codebook for
+$d = 128$, $b = 4$ is sixteen fp32 numbers, shared by every layer and every request. Encoding is a
+binary search over the 15 midpoints, $b$ iterations, entirely in registers
+(<code>vllm/v1/attention/ops/triton_turboquant_store.py:L278-L292</code>). Rotation is the large win;
+Lloyd-Max harvests what is left. Skip the rotation and 4-bit keys collapse; use uniform levels instead
+of Lloyd-Max ones and you lose a fraction of a bit.</p></div></section>
+<section class="sec" id="rotated-schemes" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">The rotated schemes in vLLM</h2></div><div class="sec__body"><h3>TurboQuant</h3>
+
+<p>Four presets, frozen parameter sets rather than knobs:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/turboquant/config.py:L17-L41</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># Named TQ presets: each maps to frozen config parameters.
+# key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
+# value_quant_bits: 3-4 = uniform quantized values.
+TQ_PRESETS: dict[str, dict] = {
+    "turboquant_k8v4": {
+        "key_quant_bits": 8,
+        "value_quant_bits": 4,
+        "norm_correction": False,
+    },
+    "turboquant_4bit_nc": {
+        "key_quant_bits": 4,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "turboquant_k3v4_nc": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 4,
+        "norm_correction": True,
+    },
+    "turboquant_3bit_nc": {
+        "key_quant_bits": 3,
+        "value_quant_bits": 3,
+        "norm_correction": True,
+    },
+}</code></pre>
+</div>
+
+<p>Note what is <em>not</em> symmetric. Keys get rotation, Lloyd-Max centroids and a stored norm; values
+get plain asymmetric uniform quantization with a per-(token, head) fp16 scale and zero and no rotation,
+<code>value_packed_size = ceil(head_dim * bits / 8) + 4</code> (<code>config.py:L149-L156</code>). That
+is the K/V asymmetry of &sect;5 turned into a memory layout. In <code>k8v4</code> the keys are not even
+narrow: plain fp8, rotation machinery bypassed (<code>config.py:L94-L97</code>).</p>
+
+<p><code>norm_correction</code> is the third ingredient, and the one with no analogue in weight
+quantization. Each Lloyd-Max centroid is a conditional <em>mean</em>, and a mean is a contraction, so a
+rotated unit vector reconstructed coordinate-by-coordinate has norm systematically below 1. The fix is
+to renormalise the reconstructed direction before multiplying by the stored $\|k\|$; the docstring
+prices it at &ldquo;improving PPL by ~0.8% at 4-bit&rdquo; (<code>config.py:L83-L85</code>).</p>
+
+<p>The fourth ingredient is not an algorithm. Aggressive presets skip the first and last two attention
+layers, leaving them at native dtype:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/turboquant/config.py:L188-L192</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        For dense models, skips first N and last N attention layers.
+        Empirically required for aggressive presets (k3v4_nc, 3bit_nc)
+        — without it GSM8K drops ~30 points on Qwen3-4B.
+        """</code></pre>
+</div>
+
+<p>Thirty GSM8K points from four layers out of thirty-six. Sensitivity is not uniform across depth, and
+the mechanism is a first-class flag: <code>--kv-cache-dtype-skip-layers</code> takes layer indices or
+type names such as <code>sliding_window</code> (<code>vllm/config/cache.py:L134-L136</code>).</p>
+
+<h3>INT4 per-token-head</h3>
+
+<p>The other rotated scheme is smaller in scope and cleverer in the kernel. Its docstring is a complete
+specification:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/int4_per_token_head.py:L3-L11</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>"""Sub-byte packed (INT4) per-token-head KV cache mode.
+
+INT4 packs two 4-bit values per cache byte, pre-rotates with a single RHT,
+and hides a 4-bit zero-point in the scale's low mantissa bits — too
+different from the core kernel to share it. Owns the whole mode: nibble
+pack/unpack, the reshape (write) kernel, the split-dot attention (read)
+kernel, the RHT transform, and the public ``reshape_and_cache_int4`` /
+``unified_attention_int4`` entry points.
+"""</code></pre>
+</div>
+
+<p>Three details worth pulling out. <b>The zero-point is steganographed into the scale.</b> Rather
+than store a separate zero-point byte, the write kernel clears the bottom 4 mantissa bits of the
+fp32 scale and puts the 4-bit zero-point there:
+<code>k_scale_packed = ((k_scale_bits &amp; -16) | (k_zp_int &amp; 0xF))</code>
+(<code>int4_per_token_head.py:L157-L161</code>), and the read kernel splits them apart again
+(<code>L549-L553</code>). Cost: 4 bits of scale mantissa, leaving 19 &mdash; more precision than an
+fp16 scale would have. Benefit: the scale slot in the page stays exactly one fp32 wide, so INT4
+reuses the same inline-scale page layout as INT8 and FP8.</p>
+
+<p><b>The dequantisation is algebraic, not materialised.</b> With $\hat k = s(q_k - z_k)$,
+$\langle q, \hat k\rangle = s(\langle q, q_k\rangle - z_k \sum_j q_j)$. The kernel computes the raw
+integer dot product and then subtracts the correction term, never building a dequantized key:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/int4_per_token_head.py:L567-L574</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Score: split-dot across the 2 INT4 streams; fused
+        # softmax_scale * per-(token, head) k_scale in one mul.  INT4
+        # subtracts the ``zp * sum(Q)`` correction term.
+        S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
+        raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+        S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
+            scale * k_token_head_scales[None, :]
+        )</code></pre>
+</div>
+
+<p>The same trick on the value side subtracts $\sum_i p_i z_v$ from the accumulator once per tile
+(<code>L604-L608</code>). Two &ldquo;streams&rdquo; appear because the low and high nibbles are unpacked
+and dotted separately &mdash; a split-dot, which is why this could not fold into the shared
+unified-attention kernel.</p>
+
+<p><b>The rotation is applied to the query and undone on the output</b> &mdash; fact 1 above, cashed
+in:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/ops/int4_per_token_head.py:L909-L918</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    """Paged attention over the INT4 packed cache, writing into *out*.
+
+    The forward RHT has norm ``sqrt(head_size)``, so ``softmax_scale`` is
+    divided by ``head_size`` and the inverse RHT divides the output by
+    ``head_size`` as well.
+    """
+    q_orig_dtype = q.dtype
+    q = single_rht(q.float()).to(q_orig_dtype)
+    head_size = q.shape[2]
+    softmax_scale = softmax_scale / head_size</code></pre>
+</div>
+
+<p>The transform used here is the <em>unnormalised</em> Walsh-Hadamard (<code>L1073-L1074</code>),
+which scales by $\sqrt{d}$ rather than dividing by it. Two of those appear in $\langle Hq, Hk\rangle$,
+hence the $/\,d$ on <code>softmax_scale</code>, and one appears in the output, hence the second
+$/\,d$ at the end. Getting one of those two divisions wrong produces attention that looks plausible
+and is silently wrong &mdash; a good thing to know before you go reading the kernel.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Worked trace: one fp8 key from projection to logit</h2></div><div class="sec__body"><p>Llama-3-8B, layer 7, decode step, <code>--kv-cache-dtype fp8_e4m3</code>, FlashAttention on an
+H100. Follow one key vector, $d_h = 128$, KV head 3.</p>
+
+<ol>
+  <li><b>Startup.</b> <code>CacheConfig._validate_cache_dtype</code>
+  (<code>vllm/config/cache.py:L293-L311</code>) logs &ldquo;Using fp8_e4m3 data type to store kv
+  cache&hellip; it may cause accuracy drop without a proper scaling factor&rdquo;.</li>
+
+  <li><b>Weight load.</b> <code>BaseKVCacheMethod.process_weights_after_loading</code>
+  (<code>vllm/model_executor/layers/quantization/kv_cache.py:L74-L152</code>) finds
+  <code>layer.k_scale &lt; 0</code> because the checkpoint carries no calibrated scales, falls back to
+  1.0, and emits the warning that matters most in practice: &ldquo;Using KV cache scaling factor 1.0
+  for fp8_e4m3&hellip;&rdquo;. It copies the value into <code>layer._k_scale</code>, the fp32 device
+  tensor the kernels read, plus <code>_k_scale_float</code> and <code>_k_scale_cpu</code> mirrors.</li>
+
+  <li><b>Page sizing.</b> <code>AttentionSpec.page_size_bytes</code>
+  (<code>vllm/v1/kv_cache_interface.py:L254-L260</code>) evaluates
+  <code>num_heads * storage_block_size * state_content_size_bytes</code>. With
+  <code>kv_quant_mode = FP8_PER_TENSOR</code> the spec dtype is one byte, so
+  <code>state_content_size_bytes = (128 + 128) * 1 = 256</code> against 512 for bf16. The profiler
+  divides the same pool by half the page size and allocates twice the blocks. That is the entire
+  capacity win, and it lands before a single token is served.</li>
+
+  <li><b>Write.</b> After QKV projection and RoPE, the attention layer calls
+  <code>reshape_and_cache_flash</code> with <code>layer._k_scale</code>. The kernel divides by the
+  scale, clamps to the e4m3 range, casts, and scatters into the slot given by
+  <code>slot_mapping[token]</code> &mdash; a slot chosen by
+  <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">&sect;2.2</a>'s block allocator, which
+  is unaware the bytes are quantized.</li>
+
+  <li><b>Read.</b> <code>FlashAttentionImpl.forward</code> reinterprets the uint8 cache as fp8
+  (<code>flash_attn.py:L1003-L1006</code>), expands the scalar scale to
+  <code>(num_seqs, num_kv_heads)</code>, and passes <code>q_descale</code>, <code>k_descale</code>,
+  <code>v_descale</code> into <code>flash_attn_varlen_func</code>
+  (<code>flash_attn.py:L1016-L1023</code>). The query was already quantized to fp8 in the attention
+  layer, so no dequantisation happens anywhere: the $QK^\top$ MMA consumes fp8 operands and the
+  descales multiply the fp32 accumulator.</li>
+
+</ol>
+
+<p>Those same 128 bytes are then re-read at every subsequent decode step for the life of the sequence
+&mdash; the read amplification behind the crossover in &sect;3, and the reason a rounding applied once in
+step 4 is seen thousands of times.</p>
+
+<p>Swap FlashAttention for Triton and only step 5 changes: <code>_cast_kv_tile</code> multiplies the
+tile by the scale in registers and the MMA runs in bf16. Swap in <code>int8_per_token_head</code> and
+steps 2 and 4 change instead &mdash; no checkpoint scale to load (<code>kv_cache.py:L82-L91</code> sets
+both to 1.0 and deletes the parameters), and the write kernel computes
+<code>k_scale = max(abs(k_head)) / 127</code> per token per head and stores it inline
+(<code>triton_reshape_and_cache_flash.py:L207-L214</code>).</p></div></section>
+<section class="sec" id="accuracy" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">The accuracy question, honestly</h2></div><div class="sec__body"><p>I have no GPU, so there is no measured accuracy table here, and you should distrust any book that
+hands you one without a configuration. What exists is published work and the repositories' CI gates.</p>
+
+<p><b>Published.</b> KIVI (<a href="https://arxiv.org/abs/2402.02750">arXiv:2402.02750</a>) establishes
+the asymmetric treatment &mdash; per-channel keys, per-token values. KVQuant
+(<a href="https://arxiv.org/abs/2401.18079">arXiv:2401.18079</a>) analyses the RoPE interaction and the
+pre- versus post-RoPE choice. For the rotation line, vLLM's module docstring is unusually careful about
+attribution and hands you the reading list: DRIVE (Vargaftik et al., NeurIPS 2021), EDEN (Vargaftik et
+al., ICML 2022), HIGGS (<a href="https://arxiv.org/abs/2411.17525">arXiv:2411.17525</a>) and
+&ldquo;Cache Me If You Must&rdquo; (<a href="https://arxiv.org/abs/2501.19392">arXiv:2501.19392</a>),
+all of which predate the TurboQuant paper (Zandieh et al., ICLR 2026) the feature is named for
+(<code>turboquant/__init__.py:L3-L22</code>). The repository gives no arXiv identifier for TurboQuant
+itself.</p>
+
+<p><b>Repository CI gates.</b> Not measurements &mdash; the floor below which maintainers consider the
+feature broken &mdash; but the closest thing to a published number that ships with the code:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">GSM8K accuracy thresholds from vLLM's eval configs, Qwen3-4B, 1319 questions,
+  5-shot, <code>--max-model-len 4096</code>. <b>Cited</b> from
+  <code>tests/evals/gsm8k/configs/Qwen3-4B-TQ-*.yaml</code>. These are CI lower bounds, not measured
+  scores, and there is no bf16 baseline config for this model at this SHA.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Preset</th><th>Threshold</th><th>Slot compression (derived)</th><th>Config docstring claim</th></tr></thead>
+      <tbody>
+        <tr><td><code>turboquant_k8v4</code></td><td class="num">0.80</td><td class="num">2.61&times;</td><td>2.6&times;, +1.17% PPL</td></tr>
+        <tr><td><code>turboquant_4bit_nc</code></td><td class="num">0.80</td><td class="num">3.82&times;</td><td>3.8&times;, +2.71%</td></tr>
+        <tr><td><code>turboquant_k3v4_nc</code></td><td class="num">0.78</td><td class="num">4.34&times;</td><td>~3.5&times;, +10.63%</td></tr>
+        <tr><td><code>turboquant_3bit_nc</code></td><td class="num">0.75</td><td class="num">5.02&times;</td><td>4.9&times;, +20.59%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The rightmost column is quoted from <code>turboquant/config.py:L71-L75</code>. Three of the four
+ratios reproduce exactly from <code>slot_size_aligned</code> arithmetic; <code>k3v4_nc</code> does
+not.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>The docstring's &ldquo;~3.5&times;&rdquo; for <code>turboquant_k3v4_nc</code> disagrees with the slot
+  arithmetic the same file implements: at $d_h = 128$, <code>key_packed_size</code> is
+  $\lceil 128\cdot3/8\rceil + 2 = 50$ and <code>value_packed_size</code> is
+  $\lceil 128\cdot4/8\rceil + 4 = 68$, giving 118 bytes against bf16's 512, i.e. 4.34&times;. Boundary-skip
+  layers would lower an end-to-end ratio but they apply to <code>4bit_nc</code> and <code>3bit_nc</code>
+  too, and those rows match. I could not find a definition producing 3.5&times;. Likely places to
+  reconcile: <code>turboquant/config.py</code> and the discussion on
+  <a href="https://github.com/vllm-project/vllm/pull/39931">PR #39931</a>. Compute your own ratios from
+  <code>slot_size_aligned</code>.</p>
+</div>
+
+<p><b>What to measure yourself:</b> not perplexity. It averages away exactly the failure mode KV
+quantization produces, and will look fine while GSM8K falls thirty points. Measure an exact-match task
+at your real context length and sampling parameters, at the concurrency you will actually run, against
+the same engine with <code>--kv-cache-dtype auto</code>. Methodology in
+<a href="../04-quantization/04-04-when-quantization-pays.html">&sect;4.4</a>, harness in
+<a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Silent scale of 1.0</span>
+  <p><code>--kv-cache-dtype fp8</code> against a checkpoint with no calibrated scales does not fail.
+  It logs <code>"Using KV cache scaling factor 1.0 for fp8_e4m3. If this is unintended, verify that
+  k/v_scale scaling factors are properly set in the checkpoint."</code> once, at
+  <code>kv_cache.py:L145-L151</code>, and then runs with an uncalibrated quantizer for the life of
+  the server. e4m3's max finite value is 448, so a scale of 1.0 saturates any activation above it and
+  wastes most of the range on activations far below. The e5m2 path deliberately does not warn,
+  because its exponent range makes 1.0 defensible. If you did not use llm-compressor, grep your
+  startup log for that string.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Uncalibrated q_scale and prob_scale on FA3</span>
+  <p>A second warning fires separately: <code>"Using uncalibrated q_scale ... and/or prob_scale ...
+  with fp8 attention. This may cause accuracy issues."</code> (<code>kv_cache.py:L184-L190</code>).
+  Its guard is <code>layer.kv_cache_dtype == "fp8"</code>, but it only bites where the query and the
+  softmax output are also quantized. A companion warning names exactly where that is: &ldquo;Checkpoint
+  does not provide a q scaling factor. Setting it to k_scale. This only matters for FP8 Attention
+  backends (flash-attn or flashinfer).&rdquo; (<code>kv_cache.py:L130-L134</code>). This is the failure
+  that looks like &ldquo;fp8 KV is fine on my A100 but wrecks accuracy on my H100&rdquo; &mdash; the
+  A100 never entered the fp8-compute path at all.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Backend swap, not backend error</span>
+  <p>Setting a KV dtype a backend does not accept usually does not raise. The selector collects
+  <code>"kv_cache_dtype not supported"</code> as an invalidity reason
+  (<code>vllm/v1/attention/backend.py:L379-L380</code>) and picks a different backend, so your fp8 run on
+  an A100 silently leaves FlashAttention. You see <code>NotImplementedError: FlashAttention does not
+  support fp8_e4m3 kv-cache on this device.</code> only if you pinned the backend. Always log the
+  selected backend when changing KV dtype. Relatedly, if block accounting looks wrong after enabling
+  quantization, look at <code>skip_page_size_padded</code>, which pads layers left native by
+  <code>--kv-cache-dtype-skip-layers</code> &ldquo;up to the quantized primary's page&rdquo;
+  (<code>vllm/config/cache.py:L140-L144</code>).</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Speculative decoding and mixed KV dtypes</span>
+  <p>Speculative decoding (<a href="../06-decoding-algorithms/06-02-speculative-decoding.html">&sect;6.2</a>)
+  runs a small draft model that proposes tokens for the target to verify; the draft keeps its own KV
+  cache. An FA4 draft model cannot read the target's fp8 KV &mdash; the kernel requires
+  <code>K.dtype == Q.dtype</code> &mdash; so SGLang gives the draft worker its own compute-dtype KV pool
+  and resets the resolved dtype tag to <code>"auto"</code> so backends do not apply descales
+  (<code>kv_cache_dtype.py:L83-L99</code>). If fp8 KV plus speculation uses more memory than your
+  arithmetic predicts, this is why.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Watch the block count change &mdash; the capacity lever made visible. Run the same model twice and
+diff the startup line reporting GPU KV cache size:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">two runs, diff the reported KV cache blocks</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 8192 2&gt;&amp;1 | grep -i "KV cache"
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 8192 --kv-cache-dtype fp8 2&gt;&amp;1 | grep -i "KV cache"</code></pre>
+</div>
+
+<p>Predict the ratio first: 2.00&times; exactly, because fp8 halves
+<code>state_content_size_bytes</code> and nothing else in the page-size product moves. If you do not get
+2.00, something else changed &mdash; most likely a backend swap that also changed the block size. Then
+reproduce the latency non-result deliberately, at both ends of the crossover:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">the crossover, in two benchmark runs</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Left of the crossover: N = 2304 tokens. Expect TPOT unchanged to within noise.
+vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct --dataset-name random \
+  --random-input-len 2048 --random-output-len 256 --max-concurrency 1 --num-prompts 32
+
+# Right of it: N = 32 x 8192 = 262144 tokens, above the 1.23e5 bf16 crossover.
+vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct --dataset-name random \
+  --random-input-len 8000 --random-output-len 192 --max-concurrency 32 --num-prompts 256</code></pre>
+</div>
+
+<p>For accuracy, vLLM ships the exact eval the TurboQuant presets are gated on:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/evals/gsm8k/test_gsm8k_correctness.py:L8-L9</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
+    --config-list-file=configs/models-small.txt</code></pre>
+</div>
+
+<p>Point <code>--config-list-file</code> at a file listing <code>Qwen3-4B-TQ-t4nc.yaml</code> and its
+siblings to reproduce the thresholds in &sect;10. Lab
+<a href="../LABS.html"><code>06-quantization-tradeoff</code></a> is the fuller version of this
+exercise.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read this file and answer.</b> Open <code>vllm/v1/kv_cache_interface.py</code> and find
+  <code>get_kv_quant_mode</code>. The string <code>"fp8_ds_mla"</code> is a legal
+  <code>CacheDType</code>. Which <code>KVQuantMode</code> does it map to, and by which branch? What
+  does that imply about how much of the fp8 machinery in this chapter applies to it?</li>
+
+  <li><b>Compute.</b> Qwen3-32B has $L = 64$, $h_{kv} = 8$, $d_h = 128$, $P = 32.8\times10^{9}$. Find
+  the bf16 crossover $N^{*}$, then the batch size at which it is reached at $s = 16{,}384$. Is that
+  batch reachable inside a single 80&nbsp;GB H100's KV pool?</li>
+
+  <li><b>Predict, then verify.</b> You set <code>--kv-cache-dtype int4_per_token_head</code> with
+  $d_h = 128$ and <code>block_size = 16</code>. Predict <code>page_size_bytes</code> for a Llama-3-8B
+  layer, then verify by hand-evaluating <code>TritonAttentionBackend.customize_spec</code> followed by
+  <code>AttentionSpec.page_size_bytes</code>. How does it compare to the naive &ldquo;one quarter of
+  bf16&rdquo; guess?</li>
+
+  <li><b>Reason it through.</b> Attention logits are invariant under an orthonormal rotation applied
+  to both $q$ and $k$. Why, then, does TurboQuant's decode path inverse-rotate the reconstructed keys
+  back to the original space, while the INT4 path leaves everything rotated and inverse-rotates the
+  <em>output</em> instead? What does each choice cost per decode step?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> <code>get_kv_quant_mode</code> (<code>kv_cache_interface.py:L80-L94</code>) tests the
+    per-token-head strings, then <code>nvfp4</code>, then <code>turboquant_</code>, and only then falls
+    through to <code>startswith("fp8")</code> &mdash; so <code>"fp8_ds_mla"</code> lands on
+    <code>FP8_PER_TENSOR</code>. It inherits the per-tensor scale plumbing, but it is an MLA latent
+    layout rather than per-head K and V, so this chapter's byte arithmetic does not transfer; see
+    <a href="../07-architectures/07-02-mla-in-depth.html">&sect;7.2</a>.</p>
+
+    <p><b>2.</b> Bytes per token $= 2\cdot64\cdot8\cdot128\cdot2 = 262{,}144$; weights
+    $= 6.56\times10^{10}$; $N^{*} = 2.50\times10^{5}$ tokens, i.e. $B = 15.3$ at $s = 16{,}384$. But on
+    <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>'s budget the pool is
+    $73.28 - 61.02 - 6.0 = 6.26$&nbsp;GiB, holding ~25,600 tokens (&sect;2.1's table, carrying the
+    weights unrounded, gives 25,623) &mdash; one or two sequences at this length. Unreachable on one card; TP=2 or more leaves the per-rank
+    crossover at $2.50\times10^{5}$ tokens while growing the per-rank pool enough to reach it.</p>
+
+    <p><b>3.</b> <code>customize_spec</code> gives <code>hs_k = hs_v = 128//2 = 64</code>, dtype size
+    1, so <code>content = (64+64)*1 + 2*4 = 136</code> bytes. Then
+    <code>page_size_bytes = num_heads * block_size * content = 8 * 16 * 136 = 17{,}408</code> bytes,
+    against bf16's $8 \times 16 \times 512 = 65{,}536$. That is 3.76&times;, not 4&times;: the two
+    inline fp32 scales cost 5.9%. The naive guess overstates capacity by about 6%.</p>
+
+    <p><b>4.</b> TurboQuant reconstructs keys from centroids, multiplies by the stored norm and
+    optionally renormalises &mdash; all operations defined in the original space, the norm correction
+    especially. So it pays one inverse rotation per <em>key tile</em>. INT4 has no per-vector
+    reconstruction step: it works algebraically on integer dot products, stays rotated throughout, and
+    pays one forward rotation per <em>query</em> plus one inverse per <em>output</em> &mdash; both
+    independent of context length, so much cheaper at long context. The tradeoff: INT4 must rotate the
+    values too, and cannot apply a norm correction.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The crossover $N^{*} = P b_w / (2 L h_{kv} d_h b)$ is the number to carry: $1.23\times10^{5}$
+  resident tokens for Llama-3-8B in bf16, $4.31\times10^{5}$ for Llama-3-70B. Left of it KV quantization
+  is purely a capacity decision, right of it a bandwidth decision too, and both models cross at batch 1
+  somewhere between 32k and 128k context.</li>
+
+  <li>TP divides weights and KV by the same factor while $\text{TP} \le h_{kv}$, so the crossover in
+  <em>tokens</em> is TP-invariant. And because GQA fixes $h_{kv}$ as models scale, larger models are
+  <em>more</em> weight-dominated &mdash; a weaker latency lever, not a stronger one.</li>
+
+  <li>Per-channel key scales &mdash; what the accuracy literature wants &mdash; are impossible in an
+  append-only paged cache, because the writer has one token, not a column. That single constraint is
+  why production schemes are per-tensor, per-head, per-token or per-block, and why rotation is the
+  production answer to outliers: it converts a per-channel problem into a per-token one.</li>
+
+  <li>An orthonormal Hadamard leaves every logit numerically unchanged, costs one small GEMM, and turns
+  the quantizer's dynamic range from a data-dependent $\max_i|x_i|$ into a constant
+  $\approx 3.5/\sqrt{d}$ &mdash; which is what makes the scale disappear from TurboQuant's key slot,
+  leaving only a 2-byte norm. Lloyd-Max then harvests the residual against the now-known $N(0, 1/d)$
+  marginal.</li>
+
+  <li>Where dequantisation happens decides whether fp8 buys compute or only bytes: registers with a bf16
+  query buys bytes only; folding $q\_scale \times k\_scale$ into the score with an fp8 query on
+  FA3/SM90 or FA4/SM100 buys both; per-token-head modes never dequantize K at all; and a dequant
+  workspace, SGLang's choice for NVFP4 prefill, is right for a single-read phase and wrong for decode.</li>
+
+  <li>The failure mode is bimodal, not smooth: error does not compound numerically, but a changed
+  sampling decision forks the trajectory. Measure GSM8K or your real task, not perplexity, and expect
+  layer sensitivity &mdash; vLLM skips four of Qwen3-4B's thirty-six layers because leaving them in costs
+  thirty GSM8K points.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:15"><div class="sec__h"><span class="sec__n">§16</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><b>KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache</b> &mdash;
+  <a href="https://arxiv.org/abs/2402.02750">arXiv:2402.02750</a>. The per-channel-key /
+  per-token-value asymmetry, with the outlier analysis that motivates it.</li>
+  <li><b>KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization</b> &mdash;
+  <a href="https://arxiv.org/abs/2401.18079">arXiv:2401.18079</a>. Pre- versus post-RoPE key
+  quantization, and why RoPE makes the key cache hard.</li>
+  <li><b>Pushing the Limits of LLM Quantization via the Linearity Theorem (HIGGS)</b> &mdash;
+  <a href="https://arxiv.org/abs/2411.17525">arXiv:2411.17525</a>, named by vLLM's TurboQuant module
+  as mathematically equivalent to its scalar case.</li>
+  <li><b>Cache Me If You Must: Adaptive Key-Value Quantization</b> &mdash;
+  <a href="https://arxiv.org/abs/2501.19392">arXiv:2501.19392</a>, cited in
+  <code>turboquant/__init__.py</code> as the first application of rotation-plus-scalar-quantization to
+  the KV cache.</li>
+  <li><b>vLLM PR #38479</b> &mdash;
+  <a href="https://github.com/vllm-project/vllm/pull/38479">TurboQuant: KV cache compression with 4x
+  capacity</a>, the backend that owns its own cache shape.</li>
+  <li><b>vLLM PR #40194</b> &mdash;
+  <a href="https://github.com/vllm-project/vllm/pull/40194">TurboQuant: remove redundant random signs,
+  add prior art attribution</a>. Read this one for the argument about why the sign flips were dropped.</li>
+  <li><b>vLLM PRs #40835 and #38378</b> &mdash;
+  <a href="https://github.com/vllm-project/vllm/pull/40835">Triton INT4 per-token-head</a> and the
+  <a href="https://github.com/vllm-project/vllm/pull/38378">INT8/FP8 per-token-head</a> foundation it
+  builds on; <a href="https://github.com/vllm-project/vllm/pull/45187">#45187</a> for
+  <code>nvfp4_4over6</code>.</li>
+  <li><b>SGLang PRs #21954 and #21601</b> &mdash;
+  <a href="https://github.com/sgl-project/sglang/pull/21954">the NVFP4 quantization-strategy
+  abstraction</a> that introduced the access-kind registry, and
+  <a href="https://github.com/sgl-project/sglang/pull/21601">the FP4 KV design document</a>.</li>
+  <li><b>vLLM docs</b> &mdash; <code>docs/features/quantization/quantized_kvcache.md</code>, on which
+  scale granularities need llm-compressor and which backends accept them.</li>
+</ul></div></section>
+<div class="pager"><a href="02-04-radixattention.html"><div class="pager__k">← Previous</div><div class="pager__t">RadixAttention: the tree (SGLang)</div></a><a class="pager__next" href="02-06-offload-and-vram-budget.html"><div class="pager__k">Next →</div><div class="pager__t">Offload, hierarchical cache, and budgeting VRAM</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: the crossover</a>
+<a href="#error-behaviour">An easier target, and a harder one</a>
+<a href="#granularity">Scale granularity</a>
+<a href="#dtypes">What the engines actually accept</a>
+<a href="#dequant">Where the dequantisation happens</a>
+<a href="#rotation">Rotation: why a Hadamard makes outliers vanish</a>
+<a href="#rotated-schemes">The rotated schemes in vLLM</a>
+<a href="#worked-trace">Worked trace: one fp8 key from projection to logit</a>
+<a href="#accuracy">The accuracy question, honestly</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

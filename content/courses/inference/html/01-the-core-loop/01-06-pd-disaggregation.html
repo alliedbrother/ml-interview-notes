@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prefill–decode disaggregation — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="loop">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i is-current" href="01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 1 · The core serving loop · 01-06</div>
+<h1>Prefill–decode disaggregation</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>python/sglang/srt/disaggregation/prefill.py</code></li><li><code>python/sglang/srt/disaggregation/decode.py</code></li><li><code>python/sglang/srt/disaggregation/mooncake/</code></li><li><code>python/sglang/srt/disaggregation/nixl/</code></li><li><code>vllm/distributed/kv_transfer/</code></li><li><code>vllm/v1/core/sched/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Chunked prefill made the interference survivable. It did not make it go away: every chunk you admit still steals a decode step from every sequence in the running batch. Disaggregation is the structural answer — put prefill on one set of machines, decode on another, and pay for it by shipping the whole KV cache across a network. This chapter derives what that shipment costs, and reads the two very different subsystems vLLM and SGLang built to move it.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take a single H100 SXM serving Llama-3-8B in bf16, 64 sequences decoding, chunked prefill on with <code>max_num_batched_tokens = 2048</code>. A request arrives with an 8,192-token prompt. Four prefill chunks get interleaved into the decode stream. What does each one cost the sequences already in flight?</p>
+
+<p>A decode step at batch 64 is weight-bound: it reads 16 GB of bf16 weights out of HBM at 3.35 TB/s, so the floor is $16 / 3.35 \times 10^3 \approx 4.8$ ms &mdash; the round figure; <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> tightens it to 4.48 ms by excluding the gathered embedding table, which moves nothing in the comparison below. A 2,048-token prefill chunk is compute-bound: $2NS = 2 \times 8\times10^9 \times 2048 = 3.28 \times 10^{13}$ FLOPs, and at 50&nbsp;% MFU against the H100's 989 TFLOP/s dense bf16 that is 66 ms. The chunk does not replace the decode step, it is <em>added</em> to it.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">14&times;</div><div class="kpi__l">ITL spike from one 2048-token prefill chunk (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">4.8 ms</div><div class="kpi__l">clean decode step, Llama-3-8B, batch 64</div></div>
+  <div class="kpi"><div class="kpi__n">66 ms</div><div class="kpi__l">one 2048-token prefill chunk</div></div>
+</div>
+
+<p>Shrink the chunk and the spike shrinks with it — but TTFT grows linearly, and per-chunk kernel-launch and attention-metadata overhead starts to dominate. That is the whole of the chunked-prefill tuning problem from <a href="01-05-chunked-prefill.html">&sect;1.5</a>: one knob, two objectives pulling opposite ways.</p>
+
+<p>The deeper problem is that the two phases do not merely want different batch sizes, they want different <em>machines</em>. Take the roofline from <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>. The H100 SXM's ridge point is</p>
+
+<div class="math-display">$$ I^{*} = \frac{989 \times 10^{12}\ \text{FLOP/s}}{3.35 \times 10^{12}\ \text{byte/s}} \approx 295\ \text{FLOP/byte} $$</div>
+
+<p>For the weight GEMMs, decode at batch $B$ does $2B$ FLOPs per bf16 weight, which is 2 bytes, so its arithmetic intensity is $I_\text{decode} \approx B$ FLOP/byte. You need $B \approx 295$ concurrent sequences before decode stops being bandwidth-bound. Prefill on a chunk of $T$ tokens has $I_\text{prefill} \approx T$, so at $T = 2048$ it is already 7&times; past the ridge and firmly compute-bound. One machine, one memory system, two workloads sitting on opposite sides of the knee.</p>
+
+<p>Everything downstream inherits the compromise. Decode wants a high TP degree so the weight read is split across more HBM controllers; prefill gains little from TP past the point where the collectives cost more than the split saves. Decode wants every spare byte of VRAM as KV cache so $B$ can grow; prefill wants activation workspace. Colocated, you pick one number for each and both phases get a number that is wrong for them.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; What a prefill does to the decode stream, colocated vs disaggregated.</b> Derived: Llama-3-8B bf16, one H100 SXM, batch 64, chunk 2048, 8192-token prompt. Times in milliseconds.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+gantt
+    dateFormat x
+    axisFormat %L
+    section Colocated GPU
+    decode 4.8ms        :done, c1, 0, 5
+    prefill chunk 1     :crit, c2, 5, 71
+    decode 4.8ms        :done, c3, 71, 76
+    prefill chunk 2     :crit, c4, 76, 142
+    decode 4.8ms        :done, c5, 142, 147
+    prefill chunk 3     :crit, c6, 147, 213
+    decode 4.8ms        :done, c7, 213, 218
+    prefill chunk 4     :crit, c8, 218, 284
+    decode 4.8ms        :done, c9, 284, 289
+    section Disagg P worker
+    full prefill 8192 tok :crit, p1, 0, 265
+    KV transfer 1.07GB    :active, p2, 265, 287
+    section Disagg D worker
+    decode :done, d1, 0, 5
+    decode :done, d2, 5, 10
+    decode :done, d3, 10, 15
+    decode :done, d4, 15, 20
+    decode steady 4.8ms each :done, d5, 20, 287
+    new seq joins the batch  :active, d6, 287, 292
+</script>
+</div>
+
+<p>In the colocated lane, ITL for every already-running sequence goes 4.8 &rarr; 71 ms four times. In the disaggregated lane the decode worker never sees the prefill at all; the arriving sequence simply joins the batch at $t = 287$ ms. That is not a softening of the interference. It is its removal.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A disaggregated deployment is two independent inference clusters that share nothing except a rendezvous protocol and a fabric. A prefill pool (the <b>P</b> pool) runs engines configured for compute: whatever TP degree the model needs to fit, small KV pool, big token budget per batch. A decode pool (the <b>D</b> pool) runs engines configured for bandwidth and capacity: high TP, enormous KV pool, tiny token budget per step. A router in front of them picks one P worker and one D worker per request and hands both of them a shared correlation token. The KV cache produced on P is written directly into D's paged KV pool over RDMA, and only then does the request become schedulable on D.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; Deployment view. Two pools, one control plane, one RDMA fabric.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    CL["Client"] --> LB["Router / mini load balancer<br/>picks one P and one D<br/>injects shared bootstrap_room"]
+    LB -->|"POST /generate"| P1["P worker 0<br/>TP=4, chunk=8192<br/>KV pool small"]
+    LB -->|"POST /generate same room"| D1["D worker 0<br/>TP=8, 1 token per step<br/>KV pool huge"]
+    P1 --- BS["Bootstrap server<br/>aiohttp on prefill<br/>port 8998"]
+    D1 -->|"GET /route resolve rank"| BS
+    D1 -->|"ZMQ dst page indices"| P1
+    P1 ==>|"RDMA WRITE of KV pages<br/>1.07 GB for 8k Llama-3-8B"| D1
+    P1 --> PN["P pool scales with<br/>prompt tokens per second"]
+    D1 --> DN["D pool scales with<br/>concurrent sequences"]
+  </script>
+</div>
+
+<p>Two properties fall straight out of the picture. First, the pools scale independently: P capacity is a function of prompt tokens per second, D capacity is a function of concurrent sequences, and in a real workload those two numbers move for completely different reasons. Second, the arrow between them is the entire cost of the design. Everything else in this chapter is about that arrow.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: what the arrow costs</h2></div><div class="sec__body"><p>The KV cache for one token, in bytes, is the formula from <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>:</p>
+
+<div class="math-display">$$ \beta_\text{tok} = 2 \cdot L \cdot h_\text{kv} \cdot d_h \cdot b $$</div>
+
+<p>where $L$ is layer count, $h_\text{kv}$ the number of key/value heads (8 for both Llama-3 sizes, they are GQA), $d_h$ the head dimension (128), $b$ the bytes per element (2 for bf16), and the leading 2 counts K and V. The bytes that must cross the wire for a prompt of $S$ tokens is $\beta_\text{tok} \cdot S$ — the <em>whole</em> prompt, because the D worker has none of it.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; KV bytes on the wire, bf16, no KV quantization, no prefix reuse. Model shapes are the published Llama-3 configs.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Model</th><th class="num">L</th><th class="num">h_kv</th><th class="num">d_h</th><th class="num">bytes/token</th><th class="num">S = 2,048</th><th class="num">S = 8,192</th><th class="num">S = 32,768</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3-8B</td><td class="num">32</td><td class="num">8</td><td class="num">128</td><td class="num">131,072</td><td class="num">0.27 GB</td><td class="num">1.07 GB</td><td class="num">4.29 GB</td></tr>
+        <tr><td>Llama-3-70B</td><td class="num">80</td><td class="num">8</td><td class="num">128</td><td class="num">327,680</td><td class="num">0.67 GB</td><td class="num">2.68 GB</td><td class="num">10.7 GB</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Now divide by link bandwidth. Three fabrics, all quoted as marketing line rate so the numbers are optimistic on purpose — real achieved bandwidth is lower, which only strengthens the conclusion:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; time to move the KV cache of one 8,192-token prompt over one link. NVLink 4 is 900 GB/s aggregate per H100, halved for one direction. 400 Gb/s NDR InfiniBand is 50 GB/s; 100 Gb/s Ethernet is 12.5 GB/s. Bandwidths from the <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 product page</a>; the division is mine.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Fabric</th><th class="num">GB/s</th><th class="num">8B, 1.07 GB</th><th class="num">70B, 2.68 GB</th><th class="num">70B, TP=8 fan-out</th></tr></thead>
+      <tbody>
+        <tr><td>NVLink 4, intra-node</td><td class="num">450</td><td class="num">2.4 ms</td><td class="num">6.0 ms</td><td class="num">0.75 ms</td></tr>
+        <tr><td>400 Gb/s NDR InfiniBand</td><td class="num">50</td><td class="num">21.5 ms</td><td class="num">53.7 ms</td><td class="num">6.7 ms</td></tr>
+        <tr><td>100 Gb/s Ethernet</td><td class="num">12.5</td><td class="num">85.9 ms</td><td class="num">214.7 ms</td><td class="num">26.8 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The fourth column is the one that decides whether disaggregation is a good idea. Under tensor parallelism each rank holds only its shard of the KV heads. Llama-3-70B has $h_\text{kv} = 8$, so at TP=8 each rank owns exactly one KV head and therefore $2.68 / 8 = 0.335$ GB of the transfer — and every rank has its own NIC and sends concurrently. The transfer does not serialize across the fabric; it fans out across it. This is why the per-GPU InfiniBand device is a first-class configuration knob (<code>--disaggregation-ib-device</code>, which accepts a per-GPU JSON mapping in <code>python/sglang/srt/server_args.py:L3155-L3159</code>).</p>
+
+<p>Compare against the TTFT budget. Prefill of 8,192 tokens on Llama-3-8B, one H100 at 50&nbsp;% MFU, is $2 \times 8\times 10^9 \times 8192 / (0.5 \times 989\times10^{12}) = 265$ ms. For Llama-3-70B on 8&times;H100 at 40&nbsp;% MFU it is $2 \times 70\times10^9 \times 8192 / (0.4 \times 8 \times 989\times10^{12}) = 362$ ms. So:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">viable</span><h4>NDR IB, TP fan-out</h4><p>70B: 6.7 ms on a 362 ms prefill &mdash; <b>1.9&nbsp;%</b> TTFT overhead. 8B: 21.5 ms on 265 ms &mdash; <b>8.1&nbsp;%</b>. You are buying complete ITL isolation for single-digit percent TTFT.</p></div>
+  <div class="ve-card"><span class="ve-card__k">marginal</span><h4>100 GbE, TP fan-out</h4><p>70B: 26.8 ms, <b>7.4&nbsp;%</b>. 8B at TP=1: 85.9 ms on 265 ms, <b>32&nbsp;%</b>. A third of your TTFT budget spent on wire time; only worth it under hard ITL SLOs.</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">absurd</span><h4>100 GbE, short prompts</h4><p>512-token prompt on 8B: prefill is 16.6 ms, transfer is 5.4 ms &mdash; <b>32&nbsp;%</b> again, but now on an absolute budget so small that the handshake round trips dominate. Colocate.</p></div>
+</div>
+
+<p>The ratio $\beta_\text{tok} S / \text{BW}$ over $2NS / (\text{MFU} \cdot F)$ is independent of $S$ — the $S$ cancels. Disaggregation viability is a property of the <em>model and the fabric</em>, not of the prompt length:</p>
+
+<div class="math-display">$$ \frac{t_\text{xfer}}{t_\text{prefill}} = \frac{2 L h_\text{kv} d_h b}{\text{BW}} \cdot \frac{\text{MFU} \cdot F}{2N} $$</div>
+
+<p>with $N$ parameters and $F$ the device's dense FLOP/s. Long prompts do not make disaggregation worse; they make it exactly as good, on a bigger absolute budget. What <em>does</em> make it worse is a model with a fat KV cache relative to its parameter count — which is precisely why MLA models (<a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">&sect;3.5</a>), whose per-token KV is a fraction of a GQA model's, are the natural fit for disaggregated serving at scale.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Provenance</span>
+  <p>Every number above is arithmetic from published shapes and link bandwidths, not a measurement. Published end-to-end results exist and should be read for what the arithmetic cannot capture: <a href="https://arxiv.org/abs/2401.09670">DistServe (OSDI&nbsp;2024)</a> reports serving &ldquo;7.4x more requests or 12.6x tighter SLO&rdquo; than a colocated baseline, and <a href="https://arxiv.org/abs/2407.00079">Mooncake</a> reports &ldquo;up to a 525% increase in throughput in certain simulated scenarios&rdquo; and 75&nbsp;% more requests on Kimi's real workload.</p>
+</div></div></section>
+<section class="sec" id="how-production-systems-do-it" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>vLLM and SGLang arrived at genuinely different architectures here, and the difference is instructive because it is not an accident of taste — it follows from where each project put the abstraction boundary.</p>
+
+<h3>SGLang: a dedicated subsystem with its own event loops</h3>
+
+<p>SGLang treats P and D as two <em>different programs</em>. A server is launched in one of three modes, and the mode selects an entire scheduler event loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/utils.py:L100-L103</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class DisaggregationMode(Enum):
+    NULL = "null"
+    PREFILL = "prefill"
+    DECODE = "decode"</code></pre>
+</div>
+
+<p>The prefill server runs <code class="c-sglang">event_loop_normal_disagg_prefill</code> (<code>python/sglang/srt/disaggregation/prefill.py:L569-L604</code>), the decode server runs <code class="c-sglang">event_loop_normal_disagg_decode</code> (<code>python/sglang/srt/disaggregation/decode.py:L2428-L2463</code>). Neither is the unified loop from <a href="01-04-the-scheduler.html">&sect;1.4</a>. Each has its own queues: <code>PrefillBootstrapQueue</code> and <code>disagg_prefill_inflight_queue</code> on P, <code>DecodePreallocQueue</code> and <code>DecodeTransferQueue</code> on D.</p>
+
+<p>The transport is behind an abstract interface in <code>python/sglang/srt/disaggregation/base/conn.py</code>. A backend supplies four classes — manager, sender, receiver, bootstrap server — and the contract between them is a five-state poll:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/base/conn.py:L93-L98</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class KVPoll:
+    Failed = 0
+    Bootstrapping = 1
+    WaitingForInput = 2
+    Transferring = 3
+    Success = 4</code></pre>
+</div>
+
+<p>The two halves of the handshake are the sender's <code>init</code>/<code>send</code> and the receiver's <code>send_metadata</code>. Note the direction carefully — it is the <em>receiver</em> that pushes metadata:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/base/conn.py:L207-L217</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    @abstractmethod
+    def send_metadata(
+        self,
+        kv_indices: npt.NDArray[np.int32],
+        aux_index: Optional[int] = None,
+        state_indices: Optional[List] = None,
+        decode_prefix_len: Optional[int] = None,
+    ):
+        """
+        Notify the prefill server about the kv indices, aux index, and state_indices.
+        """</code></pre>
+</div>
+
+<p>D allocates its own KV pages first, then tells P the page indices to write into. The transfer is therefore an RDMA <b>WRITE</b> issued by P into memory D has already reserved. The state transition that unblocks P is explicit in the Mooncake manager's bootstrap thread:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/mooncake/conn.py:L1971-L1975</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def start_prefill_thread(self):
+        def bootstrap_thread():
+            """This thread recvs pre-alloc notification from the decode engine"""
+            # KVPoll.Bootstrapping -&gt; KVPoll.WaitingForInput
+            while True:</code></pre>
+</div>
+
+<p>This single line is the load-bearing fact of the whole design: <b>a prefill does not start until the decode side has reserved memory for its output.</b> Backpressure is structural, not advisory.</p>
+
+<h3>vLLM: the KV connector, and no P/D subsystem at all</h3>
+
+<p>vLLM has no <code>disaggregation/</code> directory. It has <code>vllm/distributed/kv_transfer/</code>, whose abstraction is a <em>connector</em>: an object with a scheduler-side half and a worker-side half that the ordinary V1 scheduler calls at fixed points in its ordinary loop. The base class docstring is the cleanest statement of the contract:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/kv_transfer/kv_connector/v1/base.py:L8-L38</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    Scheduler-side: runs in the scheduler, binds metadata, which
+    is used by the worker-side to load/save KV cache.
+        get_num_new_matched_tokens() - get number of new tokens
+            that exist in the remote KV cache. Might be called multiple
+            times for a given request and should be side-effect free.
+        update_state_after_alloc() - update KVConnector state after
+            temporary buffer alloc by the CacheManager.
+# ...
+        request_finished() - called once when a request is finished,
+            with the computed kv cache blocks for the request.
+            Returns whether KV cache should be freed now or if the
+            connector now assumes responsibility for freeing the
+            the blocks asynchronously. Also optionally returns KV
+            transfer params.
+# ...
+    Worker-side: runs in each worker, loads/saves KV cache to/from
+    the Connector based on the metadata.
+# ...
+        start_load_kv() - starts loading all KVs (maybe async)
+        wait_for_layer_load() - blocks until layer i load is done
+
+        save_kv_layer() - starts saving KV for layer i (maybe async)
+        wait_for_save() - blocks until all saves are done
+
+        get_finished() - called with ids of finished requests, returns
+            ids of requests that have completed async sending/recving.</code></pre>
+</div>
+
+<p>Disaggregation is then <em>expressed</em> in that interface rather than implemented alongside it. On the D node, the request arrives carrying <code>kv_transfer_params</code> set by an external proxy; the connector reports the whole prompt as &ldquo;already computed, remotely&rdquo;:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py:L60-L66</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if params is not None and params.get("do_remote_prefill"):
+            # Remote prefill: get all prompt blocks from remote.
+            token_ids = request.prompt_token_ids or []
+            actual = self._get_remote_prefill_token_count(len(token_ids))
+            count = actual - num_computed_tokens
+            if count &gt; 0:
+                return count, True</code></pre>
+</div>
+
+<p>The <code>True</code> is &ldquo;asynchronously&rdquo;. The scheduler allocates blocks, parks the request in <code>RequestStatus.WAITING_FOR_REMOTE_KVS</code> (<code>vllm/v1/request.py:L364-L371</code>), and the worker-side connector pulls the blocks over NIXL. On the P node, <code>request_finished()</code> returns <code>True</code> to say &ldquo;do not free my blocks yet, I own them now.&rdquo; Both sides converge in one function:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L2836-L2864</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
+        """
+        KV Connector: update the scheduler state based on the output.
+
+        The Worker side connectors add finished_recving and
+        finished_sending reqs to the output.
+        * if finished_sending: free the blocks
+        # if finished_recving: add to state so we can
+            schedule the request during the next step.
+        """
+# ...
+        for req_id in kv_connector_output.finished_recving or ():
+            logger.debug("Finished recving KV transfer for request %s", req_id)
+            assert req_id in self.requests
+            req = self.requests[req_id]
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                self.finished_recving_kv_req_ids.add(req_id)
+            else:
+                assert RequestStatus.is_finished(req.status)
+                self._free_blocks(self.requests[req_id])
+        for req_id in kv_connector_output.finished_sending or ():
+            logger.debug("Finished sending KV transfer for request %s", req_id)
+            assert req_id in self.requests
+            self._free_blocks(self.requests[req_id])</code></pre>
+</div>
+
+<p>Twenty-nine lines. That is vLLM's entire disaggregation state machine in the scheduler, because everything else lives in the connector. The tradeoff is stark and symmetric:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Architectural comparison at the pinned SHAs (vLLM <code>a556f3f</code>, SGLang <code>7d89325</code>).</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Dimension</th><th>vLLM &mdash; KV connector</th><th>SGLang &mdash; disaggregation subsystem</th></tr></thead>
+      <tbody>
+        <tr><td>Where P/D lives</td><td>Inside a connector plugin; scheduler is unmodified</td><td>Dedicated event loops selected by <code>--disaggregation-mode</code></td></tr>
+        <tr><td>Transfer direction</td><td>Pull (READ) by default; push (WRITE) available as <code>NixlPushConnector</code></td><td>Push (WRITE) &mdash; D pre-allocates, P writes</td></tr>
+        <tr><td>Rendezvous</td><td><code>kv_transfer_params</code> injected by an external proxy; NIXL agent handshake</td><td>HTTP bootstrap server on P, <code>bootstrap_room</code> injected by the router</td></tr>
+        <tr><td>Same interface reused for</td><td>CPU/disk offload, LMCache, HF3FS, Mooncake Store &mdash; one registry, 15+ connectors</td><td>Nothing; offload has separate code paths</td></tr>
+        <tr><td>Cost of the choice</td><td>P/D semantics smeared across connector implementations; each backend re-implements the state machine</td><td>Two more event loops to keep in sync with the unified one; every scheduler feature needs a disagg port</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The generality is real, not rhetorical: the same <code>KVConnectorBase_V1</code> that carries P/D also carries CPU offload and remote KV stores, all registered in one table (<code>vllm/distributed/kv_transfer/kv_connector/factory.py:L148-L242</code>). That is why <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> and this chapter are about the same file in vLLM and about different files in SGLang.</p>
+
+<h3>Layer-wise transfer: who actually overlaps</h3>
+
+<p>The prize is to start moving layer $\ell$'s KV while layer $\ell+1$ is still computing, so the transfer hides entirely inside prefill. vLLM has the hook wired directly into the attention layer as a decorator:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/kv_transfer_utils.py:L37-L59</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+            return func(*args, **kwargs)
+
+        layer_name = _resolve_layer_name(args[layer_name_index])
+
+        # Extract attention context (metadata, layer, kv_cache, layer_slot_mapping)
+        attn_metadata, _, kv_cache, _ = get_attention_context(layer_name)
+        connector = get_kv_transfer_group()
+        if attn_metadata is None or not connector.has_connector_metadata():
+            return func(*args, **kwargs)
+
+        # Wait for KV layer on entry
+        connector.wait_for_layer_load(layer_name)
+
+        # Execute the function
+        result = func(*args, **kwargs)
+
+        # Save KV cache layer on exit
+        connector.save_kv_layer(layer_name, kv_cache, attn_metadata)
+
+        return result</code></pre>
+</div>
+
+<p>But most connectors decline it. <code>NixlConnector.save_kv_layer</code> is a bare <code>pass</code> with the comment &ldquo;NixlConnector does not save explicitly&rdquo; (<code>vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py:L326-L334</code>), and so is <code>MooncakeConnector</code>'s (<code>vllm/distributed/kv_transfer/kv_connector/v1/mooncake/mooncake_connector.py:L580-L588</code>). The connector that <em>does</em> use it is MoRIIO in WRITE mode, which issues the RDMA write per layer as the layer finishes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_connector.py:L2035-L2058</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            return
+        if self.mode == MoRIIOMode.READ:
+            return
+        remote_engine_id = None
+
+        for req_id, meta in metadata.reqs_to_save.items():
+            # we only need to check if dp0 in rank
+            remote_engine_id = (
+                str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
+            )
+
+            meta.remote_engine_id = remote_engine_id
+
+            dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
+            if dp0_remote_engine_id not in self._remote_agents:
+                # Initiate handshake with remote engine to exchange metadata.
+                with self._handshake_lock:
+                    if remote_engine_id not in self._remote_agents:
+                        self._background_moriio_handshake(
+                            req_id, remote_engine_id, meta
+                        )
+
+                        continue
+            self._write_blocks_for_req(req_id, meta, layer_name, kv_layer)</code></pre>
+</div>
+
+<p>SGLang overlaps on a different axis: not per layer, but <b>per prefill chunk</b>. Because prefill is chunked anyway, the scheduler fires a transfer for each completed chunk from inside <code>process_prefill_chunk</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/prefill.py:L1059-L1066</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            elif self.enable_overlap:
+                # Delay KV transfer to process_batch_result_disagg_prefill when overlap is enabled to ensure results are resolved
+                req.tmp_end_idx = min(
+                    req.extend_range.end,
+                    len(req.origin_input_ids),
+                )
+            else:
+                self.send_kv_chunk(req)</code></pre>
+</div>
+
+<p>Chunk $k$'s KV flies while chunk $k+1$ computes. With a 2,048-token chunk on Llama-3-8B, each send is 268 MB, 5.4 ms over NDR IB against a 66 ms chunk — the transfer disappears into the compute completely except for the final chunk. Within a chunk, Mooncake batches all layers into a single RDMA call rather than one per layer, on the explicit grounds that it beats threading:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/mooncake/conn.py:L648-L655</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _transfer_data(self, mooncake_session_id, transfer_blocks):
+        if not transfer_blocks:
+            return 0
+
+        src_addrs, dst_addrs, lengths = zip(*transfer_blocks)
+        return self.engine.batch_transfer_sync(
+            mooncake_session_id, list(src_addrs), list(dst_addrs), list(lengths)
+        )</code></pre>
+</div>
+
+<p>There is a further optimisation gated behind <code>SGLANG_DISAGG_PREFILL_EARLY_SEND_CACHED_PREFIX</code>: if the P worker's radix cache already holds a device-resident prefix of this prompt, it ships those pages <em>before</em> the forward pass is even enqueued (<code>python/sglang/srt/disaggregation/prefill.py:L1082-L1120</code>). That path has to record a CUDA event on the forward stream first, because under overlap scheduling the previous step may still be writing those exact pages.</p>
+
+<h3>The backends</h3>
+
+<p>SGLang's registry names five, plus a test double:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/utils.py:L589-L594</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class TransferBackend(Enum):
+    MOONCAKE = "mooncake"
+    MORI = "mori"
+    NIXL = "nixl"
+    ASCEND = "ascend"
+    FAKE = "fake"</code></pre>
+</div>
+
+<div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">mooncake</span><h4>Transfer Engine, default</h4><p>Wraps the <a href="https://github.com/kvcache-ai/Mooncake">Mooncake</a> Transfer Engine. Buffers are registered once at startup via <code>engine.batch_register(ptrs, lens)</code>; transfers are <code>batch_transfer_sync</code> against a session id resolved through the bootstrap server. Can allocate the KV pool from an NVLink- or BAREX-backed <code>torch.cuda.MemPool</code> so intra-node transfers skip the NIC entirely (<code>python/sglang/srt/disaggregation/mooncake/utils.py:L29-L88</code>).</p></div>
+  <div class="ve-card"><span class="ve-card__k">nixl</span><h4>Agent + pluggable plugin</h4><p>Creates a <a href="https://github.com/ai-dynamo/nixl">NIXL</a> agent plus one backend plugin chosen by <code>SGLANG_DISAGGREGATION_NIXL_BACKEND</code> &mdash; UCX, GDS_MT, UCCL, OBJ handled by name. Memory is registered as typed regions (<code>"VRAM"</code> for KV, <code>"DRAM"</code> for aux); transfers are <code>make_prepped_xfer("WRITE", ...)</code> then <code>agent.transfer(handle)</code>. One level less concrete than the others, since NIXL is itself a transport abstraction.</p></div>
+  <div class="ve-card"><span class="ve-card__k">mori</span><h4>Raw RDMA verbs, AMD</h4><p><a href="https://github.com/ROCm/mori">MORI</a> (Modular RDMA Interface) is AMD's GPU-direct RDMA stack. SGLang builds an <code>IOEngine</code> and explicitly creates an RDMA backend with a tunable queue-pair count &mdash; the lowest-level of the three, with no transport abstraction between it and the verbs.</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">fake</span><h4>No transfer at all</h4><p>Every poll returns <code>Success</code> immediately (<code>python/sglang/srt/disaggregation/fake/conn.py:L50-L61</code>). Used for warm-up requests and for exercising both event loops with no fabric &mdash; the only way to run the P/D code paths on a laptop.</p></div>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/mori/conn.py:L362-L373</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        qp_per_transfer = envs.SGLANG_MORI_QP_PER_TRANSFER.get()
+        post_batch_size = envs.SGLANG_MORI_POST_BATCH_SIZE.get()
+        num_worker_threads = envs.SGLANG_MORI_NUM_WORKERS.get()
+
+        rdma_cfg = RdmaBackendConfig(
+            qp_per_transfer,
+            post_batch_size,
+            num_worker_threads,
+            poll_mode,
+            False,
+        )
+        engine.create_backend(BackendType.RDMA, rdma_cfg)</code></pre>
+</div>
+
+<p>vLLM's equivalents are registered as connectors rather than backends: <code>NixlConnector</code> / <code>NixlPullConnector</code> / <code>NixlPushConnector</code>, <code>MooncakeConnector</code>, <code>MoRIIOConnector</code>, all in <code>vllm/distributed/kv_transfer/kv_connector/factory.py:L176-L222</code>. The same three transports, wearing the shape of whichever engine they are plugged into.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I did not verify at which layer Mooncake's Transfer Engine chooses between RDMA verbs, TCP, and NVLink at run time &mdash; that decision lives in the external <code>mooncake</code> Python/C++ package, not in either engine's tree. The SGLang side only ever calls <code>batch_register</code> / <code>batch_transfer_sync</code>. Reader should check the Mooncake repository before relying on any claim about its protocol selection.</p>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one request across the boundary</h2></div><div class="sec__body"><p>Follow a single request through SGLang with the Mooncake backend, naming functions in order.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; One request crossing the P/D boundary, including the bootstrap handshake.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+sequenceDiagram
+    autonumber
+    participant LB as Router
+    participant P as P scheduler
+    participant B as Bootstrap server
+    participant D as D scheduler
+    Note over P,B: at startup, register_to_bootstrap PUT /route
+    LB->>P: POST /generate with bootstrap_room R
+    LB->>D: POST /generate with same room R
+    P->>P: bootstrap_queue.add creates MooncakeKVSender
+    D->>B: GET /route resolve prefill rank and ZMQ port
+    D->>D: prealloc KV pages for full prompt
+    D->>P: ZMQ send_metadata with dst page indices for room R
+    P->>P: poll flips Bootstrapping to WaitingForInput
+    P->>P: pop_bootstrapped moves req to waiting_queue
+    P->>P: run_batch prefill chunk 1
+    P-->>D: RDMA WRITE chunk 1 KV pages
+    P->>P: run_batch prefill chunk N, sample token 1
+    P-->>D: RDMA WRITE last chunk plus aux metadata buffer
+    P->>P: inflight queue poll returns Success, release_kv_cache
+    D->>D: pop_transferred commits req, enters waiting_queue
+    D->>D: decode steps stream tokens to client
+  </script>
+</div>
+
+<ol>
+<li><b>Router fan-out.</b> The load balancer picks a (P, D) pair, generates a 63-bit random <code>bootstrap_room</code>, and posts the <em>same</em> request body to both servers. The load balancer makes the intent explicit &mdash; <code>tasks = [session.post(prefill_server...), session.post(decode_server...)]</code>, with the comment &ldquo;Wait for both responses to complete. Prefill should end first.&rdquo; (<code>sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L135-L141</code>, room generation at <code>:L376-L382</code>).</li>
+
+<li><b>P side registration.</b> <code>PrefillBootstrapQueue.add</code> &rarr; <code>create_sender</code> constructs a <code>MooncakeKVSender</code> bound to <code>(bootstrap_addr, bootstrap_room)</code> and sets <code>max_new_tokens = 1</code> so the prefill adder's memory estimate is honest (<code>python/sglang/srt/disaggregation/prefill.py:L299-L324</code>, <code>:L377-L381</code>). The request now sits in the bootstrap queue polling <code>Bootstrapping</code>.</li>
+
+<li><b>D side registration and preallocation.</b> <code>DecodePreallocQueue.add</code> &rarr; <code>_create_receiver_and_enqueue</code> builds a <code>MooncakeKVReceiver</code> for the same room (<code>python/sglang/srt/disaggregation/decode.py:L662-L681</code>). Then <code>pop_preallocated</code> checks the token budget, allocates real KV pages for the entire prompt, and pushes their indices to P:</li>
+</ol>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/decode.py:L1490-L1495</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            decode_req.kv_receiver.send_metadata(
+                page_indices,
+                decode_req.metadata_buffer_index,
+                state_indices,
+                **metadata_kwargs,
+            )</code></pre>
+</div>
+
+<ol start="4">
+<li><b>P unblocks.</b> The Mooncake bootstrap thread receives that message, flips the room's status, and P's next <code>pop_bootstrapped()</code> sees <code>WaitingForInput</code>. It calls <code>finalize_bootstrap</code>, which allocates a metadata buffer slot and sizes the send:</li>
+</ol>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/prefill.py:L343-L356</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        req.time_stats.set_bootstrap_done_time()
+        decode_prefix_len = req.disagg_kv_sender.pop_decode_prefix_len()
+        num_kv_indices = len(req.origin_input_ids)
+        req.start_send_idx = decode_prefix_len
+        # Base of the staging chunk grid (suffix-relative send coordinates).
+        req.disagg_decode_prefix_len = decode_prefix_len
+        num_kv_indices_to_send = num_kv_indices - decode_prefix_len
+        num_pages = kv_to_page_num(
+            num_kv_indices_to_send,
+            self.scheduler.token_to_kv_pool_allocator.page_size,
+        )
+        req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
+        req.pending_bootstrap = False
+        return True</code></pre>
+</div>
+
+<p><code>decode_prefix_len</code> is the number of leading tokens D already has in its own radix cache. P skips those entirely — prefix caching on the decode side directly shrinks the wire transfer, which is the reason <code>--disaggregation-decode-enable-radix-cache</code> exists.</p>
+
+<ol start="5">
+<li><b>Prefill and streaming send.</b> The request enters <code>waiting_queue</code>, gets batched, and <code>process_prefill_chunk</code> calls <code>send_kv_chunk(req)</code> after each chunk. <code>send_kv_chunk</code> gathers <code>req_to_token[req_pool_idx, start:end]</code>, converts token indices to page indices, and calls <code>sender.send(page_indices, ...)</code>, which enqueues a <code>TransferKVChunk</code> onto a <code>FastQueue</code> drained by <code>MooncakeKVManager.transfer_worker</code> (<code>python/sglang/srt/disaggregation/mooncake/conn.py:L1617-L1640</code>). Non-final chunks are truncated to a page boundary so no partial page is ever written twice.</li>
+
+<li><b>Last chunk carries the sampled token.</b> On <code>last_chunk=True</code>, <code>self.disagg_metadata_buffers.set_buf(req)</code> packs the first sampled token id, logprobs and any hidden states into an aux buffer that rides along with the final RDMA write. This is why D can start decoding <em>immediately</em>: it receives the KV and token 1 together and never re-runs a forward pass over the prompt.</li>
+
+<li><b>P retires.</b> <code>process_disagg_prefill_inflight_queue</code> polls every in-flight sender; on <code>Success</code> it unlocks the tree cache and streams a zero-length completion to the client so the router's prefill leg returns.</li>
+
+<li><b>D admits.</b> <code>DecodeTransferQueue.pop_transferred</code> sees <code>Success</code>, calls <code>_commit_transfer_to_req</code>, and the request lands in D's ordinary <code>waiting_queue</code> — from here on it is an ordinary decode request and <a href="01-04-the-scheduler.html">&sect;1.4</a> takes over.</li>
+</ol></div></section>
+<section class="sec" id="pitfalls" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; The transfer state machine, and every way out of it.</b> States are <code>KVPoll</code> values; edges are the events that move a request between them.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    S["Request admitted<br/>sender created"] --> B["Bootstrapping<br/>parked in PrefillBootstrapQueue"]
+    B -->|"decode send_metadata arrives"| W["WaitingForInput<br/>finalize_bootstrap, real prefill starts"]
+    B -->|"decode pool full, no prealloc<br/>elapsed exceeds bootstrap_timeout"| F["Failed<br/>HTTP 500 to client"]
+    B -->|"optimistic_prefill_attempts greater than 0"| OPT["Compute without sending<br/>KV may be released and requeued"]
+    OPT -->|"bootstrap completes mid-prefill"| W
+    OPT -->|"attempts exhausted"| B
+    W -->|"send_kv_chunk per chunk"| T["Transferring<br/>RDMA writes in flight"]
+    T -->|"all chunks acked"| OK["Success<br/>P frees KV, D admits to decode"]
+    T -->|"remote session dead<br/>or decode sends ABORT"| F
+    W -->|"decode aborts the room"| F
+    F --> CL["release_kv_cache on both sides<br/>metadata buffer freed<br/>transfer_failed_reqs incremented"]
+  </script>
+</div>
+
+<h3>The decode pool is full when a prefill finishes</h3>
+
+<p>It cannot be, and that is the point. Because D preallocates <em>before</em> P is unblocked, a full decode pool means <code>pop_preallocated</code> never reaches the request, <code>send_metadata</code> is never sent, and P's sender stays in <code>Bootstrapping</code> — it never burns a single GPU-second on a prefill whose output has nowhere to land. The queue is on the P side, in the cheapest possible place.</p>
+
+<p>The escape hatch is <code>--optimistic-prefill-attempts</code>, which lets P start computing before bootstrap completes (<code>python/sglang/srt/server_args.py:L3198-L3202</code>). If a properly bootstrapped request shows up while an optimistic one is mid-flight, the optimistic one yields: <code>optimistic_release_and_requeue</code> releases its KV, resets <code>start_send_idx</code>, and pushes it back to the front of the waiting queue (<code>python/sglang/srt/disaggregation/prefill.py:L1310-L1343</code>). You are trading recomputation risk for latency.</p>
+
+<h3>Bootstrap timeouts, and the log line you will actually see</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/disaggregation/common/conn.py:L1282-L1299</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _check_bootstrap_timeout(self) -&gt; Optional[KVPoll]:
+        if self.init_time is None:
+            return None
+        elapsed = time.time() - self.init_time
+        if elapsed &lt; self.kv_mgr.bootstrap_timeout:
+            return None
+        logger.warning_once(
+            "Some requests timed out when bootstrapping, "
+            "which means prefill instances fail to receive the KV indices from the decode instance of this request. "
+            "If a greater mean TTFT is acceptable, you can 'export SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+        )
+        self.kv_mgr.record_failure(
+            self.bootstrap_room,
+            f"Request {self.bootstrap_room} timed out after {elapsed:.1f}s "
+            f"in KVPoll.Bootstrapping",
+        )
+        self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
+        return KVPoll.Failed</code></pre>
+</div>
+
+<p>This message means one of three things, in decreasing order of likelihood: the D pool is saturated and cannot preallocate; the router sent the two halves of the request to servers that disagree about the bootstrap port; or the ZMQ path from D to P is blocked by a firewall while the HTTP bootstrap path is not. Check <code>bootstrap_room</code> cardinality in the P and D logs first — if P sees rooms D never sees, it is the router.</p>
+
+<h3>The transfer fails mid-flight</h3>
+
+<p>Both sides tear down symmetrically. On P, <code>handle_inflight_transfer_failure</code> raises the backend's <code>failure_exception()</code> to get a real message, unlocks the tree cache, aborts with HTTP 500 and bumps <code>transfer_failed_reqs</code> (<code>python/sglang/srt/disaggregation/prefill.py:L937-L964</code>). The error string is <code>"Prefill transfer failed for request rank=... req.rid=... req.bootstrap_room=..."</code>. On D, <code>pop_transferred</code> does the same with <code>"Decode transfer failed for request rank=..."</code> and then must decide whether it is safe to reuse the pages:</p>
+
+<p>This is the subtlest correctness problem in the subsystem. If D initiated the abort, P may still have an RDMA write in flight targeting pages D is about to hand to another request. So D defers the release until P acknowledges that its writes have drained — <code>_defer_release</code>, an <code>ABORT</code> / <code>ABORT_ACK</code> exchange over ZMQ, and a timeout backstop (<code>python/sglang/srt/disaggregation/decode.py:L2283-L2295</code>; the P-side ack handling is at <code>python/sglang/srt/disaggregation/mooncake/conn.py:L1996-L2020</code>). If you see KV corruption under abort-heavy load, this is the machinery to look at.</p>
+
+<h3>Heterogeneous TP is supported, and it is not free</h3>
+
+<p>Running P at TP=4 and D at TP=8 means each P rank's KV shard must be split across two D ranks. Both engines implement the remapping — SGLang in <code>send_kvcache_slice</code> (<code>python/sglang/srt/disaggregation/mooncake/conn.py:L1003-L1122</code>), vLLM in a dedicated <code>TPMapping</code> computed once per remote engine during handshake (<code>vllm/distributed/kv_transfer/kv_connector/v1/nixl/tp_mapping.py:L38-L56</code>). The cost is that the transfer stops being one contiguous block per layer and becomes many strided sub-slices, which is exactly the access pattern RDMA is worst at. Measure before assuming hetero-TP is free.</p>
+
+<h3>Two neighbours this is constantly confused with</h3>
+
+<div class="callout callout--note">
+  <span class="callout__k">Not this chapter</span>
+  <p><b>KV offload</b> moves a KV cache from GPU to CPU or disk on the <em>same</em> machine to survive eviction &mdash; in vLLM it shares the connector interface (<code>vllm/v1/kv_offload/</code>, <code>OffloadingConnector</code>), which is why the two get conflated. It is a capacity mechanism, not a topology; <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> owns it. <b>KV-aware routing</b> picks <em>which replica</em> should serve a request based on whose prefix cache already holds the prompt; it is orthogonal to P/D and is owned by <a href="../09-serving-system/09-04-routers-and-load-balancing.html">&sect;9.4</a>. Disaggregation is about splitting <em>one</em> request across two machines, every time.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>You can exercise both event loops with no RDMA fabric and no second GPU by using the <code>fake</code> backend, which reports every transfer as instantly successful.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Two SGLang servers plus the mini load balancer</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># terminal 1 - prefill server, owns the bootstrap HTTP server on 8998
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --port 30000 --disaggregation-mode prefill \
+  --disaggregation-transfer-backend mooncake --disaggregation-bootstrap-port 8998
+
+# terminal 2 - decode server
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --port 30001 --disaggregation-mode decode \
+  --disaggregation-transfer-backend mooncake
+
+# terminal 3 - the router that injects bootstrap_room into both halves
+python -m sglang_router.launch_router --pd-disaggregation \
+  --prefill http://127.0.0.1:30000 8998 --decode http://127.0.0.1:30001 --port 8000</code></pre>
+</div>
+
+<p>Three things to measure, in order of what they teach you:</p>
+
+<ol>
+<li><b>Where the time goes.</b> SGLang records <code>bootstrap_done_time</code>, <code>decode_transfer_queue_entry_time</code> and <code>prefill_kv_transfer_finish_time</code> per request and exports <code>kv_transfer_latency_ms</code> and <code>kv_transfer_speed_gb_s</code> (<code>python/sglang/srt/disaggregation/prefill.py:L908-L928</code>). If <code>speed_gb_s</code> is under half your NIC's line rate, look at page size and at hetero-TP slicing.</li>
+<li><b>What backpressure looks like.</b> Push concurrency until the D pool saturates and watch the P-side bootstrap queue grow while P's GPU utilisation <em>falls</em>. That falling utilisation is the design working.</li>
+<li><b>The ITL distribution.</b> Run the same load colocated and disaggregated, and plot the ITL histogram, not the mean. Colocated is bimodal with a mode at the chunk cost; disaggregated should be unimodal. That difference is the entire product of this chapter.</li>
+</ol>
+
+<p>For vLLM the equivalent is a proxy plus two engines with a <code>--kv-transfer-config</code> naming the connector and its role; the shipped harness is <code>examples/disaggregated/disaggregated_serving/disagg_proxy_demo.py</code>, which documents an XpYd launch in its module docstring (<code>examples/disaggregated/disaggregated_serving/disagg_proxy_demo.py:L3-L15</code>).</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read and answer.</b> In <code>python/sglang/srt/disaggregation/prefill.py</code>, find <code>pop_bootstrapped</code>. Which single <code>KVPoll</code> value causes a request to move into the waiting queue by the normal path, and what happens to a request whose poll is <code>Bootstrapping</code> when <code>optimistic_prefill_attempts</code> is 0?</li>
+
+<li><b>Derive.</b> Compute the wire bytes and the NDR-InfiniBand transfer time for a 16,384-token prompt on DeepSeek-V3, whose MLA compressed KV is 576 elements per token per layer across 61 layers in bf16. Compare the ratio $t_\text{xfer}/t_\text{prefill}$ to Llama-3-70B's and explain the difference in one sentence.</li>
+
+<li><b>Predict, then verify.</b> You enable <code>--disaggregation-decode-enable-radix-cache</code> on a workload where 60&nbsp;% of every prompt is a shared system preamble. Predict the change in bytes transferred per request. Then read <code>finalize_bootstrap</code> in <code>prefill.py</code> and name the variable that makes your prediction true.</li>
+
+<li><b>Predict, then verify.</b> A request is aborted by the client while its KV transfer is in flight. Predict whether the decode worker can immediately reuse the preallocated pages. Then find <code>_defer_release</code> in <code>decode.py</code> and say what has to happen first.</li>
+
+<li><b>Compare architectures.</b> vLLM's <code>NixlConnector</code> pulls; SGLang pushes. Name one failure mode that is easier to handle in a pull design and one that is easier in a push design, using the two schedulers' code as evidence.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> Only <code>KVPoll.WaitingForInput</code> takes the normal path, and only after <code>finalize_bootstrap(req)</code> returns <code>True</code> — if no metadata buffer slot is free, the loop <code>continue</code>s and the request stays queued. With <code>optimistic_prefill_attempts == 0</code>, a <code>Bootstrapping</code> poll falls through the guard <code>req.prefill_attempt_count &lt; server_args.optimistic_prefill_attempts</code> and the request simply remains in the queue for the next iteration. See <code>python/sglang/srt/disaggregation/prefill.py:L438-L466</code>.</p>
+    <p><b>2.</b> MLA stores one compressed latent per token per layer, not K and V per head: $576 \times 61 \times 2 = 70{,}272$ bytes/token, so 16,384 tokens is 1.15 GB — <em>less</em> than Llama-3-70B at half the length. At 50 GB/s that is 23 ms. Because $N$ is huge (671 B total parameters) while $\beta_\text{tok}$ is small, the ratio in the section-3 formula is tiny: MLA models are the best case for disaggregation, and that is not a coincidence — Mooncake and DeepSeek's own serving stack were designed together.</p>
+    <p><b>3.</b> Bytes transferred drop by roughly 60&nbsp;%, because D matches the preamble in its own radix cache before preallocating and reports the match length back. The variable is <code>decode_prefix_len</code>, returned by <code>req.disagg_kv_sender.pop_decode_prefix_len()</code>; it becomes <code>req.start_send_idx</code>, so P's first chunk send starts past the shared prefix.</p>
+    <p><b>4.</b> No. A prefill-side RDMA write may still be targeting those exact pages. <code>_defer_release</code> parks the request until P acknowledges that its in-flight writes have drained (the <code>ABORT</code> / <code>ABORT_ACK</code> ZMQ exchange), or until a timeout fires. Releasing early is a silent cross-request KV corruption, not a crash.</p>
+    <p><b>5.</b> Pull is easier when the <em>producer</em> dies: the consumer initiated the transfer, so it observes the failure directly and can abort locally — vLLM's D-side simply never gets <code>finished_recving</code>. Push is easier for admission control: because the consumer must publish destination pages before the producer starts, a full decode pool exerts backpressure for free, which is exactly the <code>Bootstrapping</code> &rarr; <code>WaitingForInput</code> gate in SGLang. vLLM has to reconstruct that with an external proxy's routing decisions.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="key-takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>The colocation penalty is quantifiable and large: one 2,048-token prefill chunk adds ~66 ms to a ~4.8 ms decode step on an H100 running Llama-3-8B. Chunking spreads that cost; it does not remove it. Disaggregation removes it.</li>
+<li>Whether disaggregation is viable does not depend on prompt length — the $S$ cancels. It depends on $2Lh_\text{kv}d_hb$ over bandwidth, versus $2N$ over device FLOP/s. Fat-KV, small-parameter models are the bad case; MLA models are the good one.</li>
+<li>Tensor parallelism fans the transfer out across ranks and NICs. Llama-3-70B's 2.68 GB at 8k tokens becomes 335 MB per rank at TP=8, turning a 54 ms serialized transfer into a 6.7 ms parallel one. Never quote the aggregate figure without saying what TP degree it assumes.</li>
+<li>SGLang's push design makes backpressure structural: the decode worker preallocates and publishes destination pages <em>before</em> the prefill worker is allowed to start, so a saturated decode pool costs zero wasted prefill FLOPs. vLLM's pull design gets generality instead — the same connector interface carries P/D, CPU offload, and remote KV stores — and pays for it by pushing admission control out to an external proxy.</li>
+<li>Overlap happens on different axes: vLLM exposes per-layer <code>save_kv_layer</code> hooks inside the attention layer, but only MoRIIO in WRITE mode uses them; SGLang overlaps per prefill chunk, which hides the transfer inside compute for every chunk but the last.</li>
+<li>The dangerous failure is not a dropped transfer, it is an aborted one: pages the consumer wants to reuse may still be the target of an in-flight remote write. Both engines need an explicit drain acknowledgement, and both have one.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="https://arxiv.org/abs/2401.09670">DistServe: Disaggregating Prefill and Decoding for Goodput-optimized LLM Serving</a> (OSDI 2024) — the paper that established the goodput framing and the placement algorithm.</li>
+<li><a href="https://arxiv.org/abs/2407.00079">Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving</a> — the production system behind Kimi, and the origin of the Transfer Engine that is SGLang's default backend.</li>
+<li><a href="https://github.com/sgl-project/sglang/issues/4655">SGLang #4655 — [Roadmap] Prefill and Decoding Disaggregation</a>. The tracking issue for the entire subsystem: event loops, the Mooncake and NIXL integrations, fault tolerance, spec-decode support. The best documentation that exists for SGLang's design decisions.</li>
+<li><a href="https://github.com/vllm-project/vllm/pull/15343">vLLM #15343 — PDController and PDWorker Prototype (1p1d)</a>. Closed unmerged, and worth reading precisely for that: the discussion is where vLLM decided that P/D orchestration belongs outside the engine.</li>
+<li><a href="https://github.com/ai-dynamo/nixl">ai-dynamo/nixl</a> and <a href="https://github.com/ROCm/mori">ROCm/mori</a> — the two transport libraries both engines integrate. NIXL abstracts over transports (UCX, GDS, UCCL); MORI-IO is GPU-direct RDMA on AMD hardware with no abstraction layer in between.</li>
+<li><code>vllm/distributed/kv_transfer/README.md</code> — short, and the only prose in either tree describing why the connector abstraction is shaped the way it is.</li>
+</ul></div></section>
+<div class="pager"><a href="01-05-chunked-prefill.html"><div class="pager__k">← Previous</div><div class="pager__t">Chunked prefill</div></a><a class="pager__next" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><div class="pager__k">Next →</div><div class="pager__t">The KV cache size formula</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: what the arrow costs</a>
+<a href="#how-production-systems-do-it">How production systems do it</a>
+<a href="#worked-trace">Worked trace: one request across the boundary</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#key-takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

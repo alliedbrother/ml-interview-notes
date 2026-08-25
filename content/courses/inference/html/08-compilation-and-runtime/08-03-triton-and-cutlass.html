@@ -1,0 +1,2140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing a Triton kernel; CUTLASS at a glance — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i is-current" href="08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 8 · Compilation and runtime · 08-03</div>
+<h1>Writing a Triton kernel; CUTLASS at a glance</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/</code></li><li><code>csrc/cutlass_extensions/</code></li><li><code>python/sglang/kernels/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A fused RMSNorm moves 32 KiB per token. The eager PyTorch version moves 80 KiB.
+On a bandwidth-bound operation that ratio <em>is</em> the speedup, and it is 2.5&times; sitting on the
+floor waiting for someone to pick it up. The CUDA way to pick it up is 371 lines of templated
+kernel with hand-written warp reductions. The Triton way is twenty-six lines. This chapter writes
+those twenty-six lines, proves the bound they are chasing, and then reads enough CUTLASS to know
+when twenty-six lines are not enough.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the two lines every transformer block runs twice per layer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">PSEUDOCODE — the eager reference every fused norm is checked against</span>
+    <span class="tag tag--pseudo">pseudocode</span>
+  </div>
+  <pre class="code-block"><code>s = x + residual                       # pre-norm sum, handed to the next block
+v = s.float().pow(2).mean(dim=-1, keepdim=True)
+out = (s.float() * torch.rsqrt(v + eps) * weight).to(s.dtype)</code></pre>
+</div>
+
+<p>Eager PyTorch executes that as five kernels and materialises three intermediate tensors. Count
+the HBM traffic in units of one row &mdash; for Llama-3-8B, $d = 4096$ in bf16, that is
+$4096 \times 2 = 8192$ bytes:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">HBM traffic for one token of RMSNorm-with-residual, $d = 4096$, bf16.
+  <em>Derived</em> by counting compulsory reads and writes; one unit = 8 KiB.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Step</th><th>Reads</th><th>Writes</th><th class="num">Units</th></tr></thead>
+      <tbody>
+        <tr><td><code>s = x + residual</code></td><td>x, residual</td><td>s</td><td class="num">3</td></tr>
+        <tr><td><code>s.pow(2)</code></td><td>s</td><td>s&sup2;</td><td class="num">2</td></tr>
+        <tr><td><code>.mean(-1)</code></td><td>s&sup2;</td><td>&mdash;</td><td class="num">1</td></tr>
+        <tr><td><code>s * rsqrt(v)</code></td><td>s</td><td>t</td><td class="num">2</td></tr>
+        <tr><td><code>t * weight</code></td><td>t</td><td>out</td><td class="num">2</td></tr>
+        <tr><td><b>eager total</b></td><td></td><td></td><td class="num"><b>10 &rarr; 80 KiB</b></td></tr>
+        <tr><td><b>fused kernel</b></td><td>x, residual</td><td>s, out</td><td class="num"><b>4 &rarr; 32 KiB</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">Two counts, one operation</span>
+  <p>This table charges every intermediate at the bf16 row width, 8&nbsp;KiB, which is the count you
+  want when the question is "how much traffic can a fused kernel remove that is <em>structurally</em>
+  unavoidable in the split form". <a href="08-02-torch-compile.html">&sect;8.2</a> counts the same
+  operation against vLLM's actual PyTorch reference, which promotes to fp32 mid-chain, and gets
+  253,972&nbsp;B eager against 40,960&nbsp;B fused &mdash; 6.2&times; rather than 2.5&times;. Neither
+  is wrong: the extra factor is the fp32 intermediates the reference materialises, which are real
+  traffic on the eager path and vanish in <em>both</em> fused kernels. Use 2.5&times; as the floor on
+  what fusion is worth and 6.2&times; as what it is worth against the specific decomposition Dynamo
+  traces.</p>
+</div>
+
+<p>At an H100 SXM's 3.35 TB/s, a 2048-token prefill chunk costs $2048 \times 81920 / 3.35\times10^{12}
+= 50.1\ \mu\text{s}$ eager and $20.0\ \mu\text{s}$ fused. Llama-3-8B runs 65 normalisations per
+forward pass (two per layer for 32 layers, plus the final norm), so the gap is
+<b>3.26 ms against 1.30 ms</b> per chunk. Nearly two milliseconds of pure waste, per chunk, forever.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">2.5&times;</div><div class="kpi__l">traffic reduction from fusing — derived</div></div>
+  <div class="kpi"><div class="kpi__n">0.625</div><div class="kpi__l">FLOP/byte, arithmetic intensity</div></div>
+  <div class="kpi"><div class="kpi__n">472&times;</div><div class="kpi__l">below the H100 bf16 ridge of 295</div></div>
+</div>
+
+<p>SGLang's answer in CUDA is
+<code class="c-sglang">python/sglang/kernels/jit/csrc/elementwise/rmsnorm.cuh</code> &mdash; 371 lines
+holding four kernel variants, a warp-level path for $d \le 256$, a CTA path, a double-load path for
+pre-Blackwell, a wide path for Blackwell, hand-rolled two-level reductions, explicit
+<code>__shared__</code> staging, and packed 16-byte vector types. It is excellent code. It is also
+exactly the kind of code you will not write for the eleventh fused operation you need this quarter.
+Triton exists for the other ten.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: what Triton takes away</h2></div><div class="sec__body"><p>CUDA makes you name a <b>thread</b>. Everything else follows: you compute which elements that
+thread owns from <code>blockIdx</code> and <code>threadIdx</code>, you choose a vector width so the
+loads coalesce, you reduce inside a warp with shuffles, you stage the per-warp partials through
+<code>__shared__</code>, you place two <code>__syncthreads()</code> around that staging, and you get
+one of them wrong the first time.</p>
+
+<p>Triton makes you name a <b>block of elements</b>. You write <code>tl.arange(0, BLOCK_N)</code> and
+operate on the whole vector; the compiler decides how many threads back it, how to vectorise the
+loads, which lanes carry which elements, and how to lower <code>tl.sum</code> into a shuffle tree
+plus shared-memory staging plus the barriers. You still choose the parallel decomposition &mdash;
+what one program owns, and how many programs there are &mdash; because that is a modelling decision
+no compiler can make for you. You stop choosing everything below it.</p>
+
+<p>Here is the same reduction, both ways, from the two files this chapter reads.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one RMSNorm row reduction: CUDA threads versus a Triton block.</b>
+  Left is <code>rmsnorm_cta_double</code> at $d = 4096$ (512 threads, 16 warps, 16 elements each);
+  right is <code>_gemma_rmsnorm_kernel</code> with <code>BLOCK_N = 4096</code>. Both compute the same
+  sum of squares. The shaded band on the right is what the compiler generates.</p>
+  <svg viewBox="0 0 880 420" width="100%" role="img" aria-labelledby="f1t f1d" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="f1t">CUDA thread-level code versus Triton block-level code for one RMSNorm row</title>
+    <desc id="f1d">Two columns. The left column, labelled CUDA, shows a row of 4096 elements split
+    across 512 threads at 16 elements each, then a warp shuffle reduction, then a shared-memory
+    staging step with two syncthreads barriers, then a final warp reduction, all written by hand.
+    The right column, labelled Triton, shows the same row as a single block-valued vector, a single
+    tl.sum call, and a shaded band beneath indicating that the thread mapping, shuffle tree, shared
+    memory staging and barriers are all generated by the compiler.</desc>
+
+    <text x="20" y="26" font-size="13" font-weight="600" fill="var(--teal)">CUDA &mdash; you name a thread</text>
+    <text x="470" y="26" font-size="13" font-weight="600" fill="var(--copper)">Triton &mdash; you name a block</text>
+    <line x1="440" y1="10" x2="440" y2="410" stroke="currentColor" stroke-opacity="0.18"/>
+
+    <!-- CUDA side -->
+    <text x="20" y="52" font-size="11" fill="currentColor" fill-opacity="0.75">x[row, 0:4096] in HBM</text>
+    <g>
+      <rect x="20" y="60" width="400" height="26" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.5"/>
+      <text x="220" y="77" font-size="11" text-anchor="middle" fill="currentColor">4096 bf16 elements</text>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.35">
+      <line x1="70" y1="86" x2="70" y2="106"/><line x1="170" y1="86" x2="170" y2="106"/>
+      <line x1="270" y1="86" x2="270" y2="106"/><line x1="370" y1="86" x2="370" y2="106"/>
+    </g>
+    <g>
+      <rect x="20" y="106" width="400" height="30" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+      <text x="220" y="125" font-size="10.5" text-anchor="middle" fill="currentColor">threadIdx.x = 0 .. 511 &middot; 16 elements each &middot; two 16 B loads</text>
+    </g>
+    <text x="20" y="158" font-size="10.5" fill="currentColor" fill-opacity="0.8">1. per-thread partial: 8 fp32x2 unpacks, hand-unrolled</text>
+    <g>
+      <rect x="20" y="166" width="400" height="26" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+      <text x="220" y="183" font-size="10.5" text-anchor="middle" fill="currentColor">warp::reduce_sum &rarr; 16 warp partials</text>
+    </g>
+    <g>
+      <rect x="20" y="202" width="400" height="26" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.5"/>
+      <text x="220" y="219" font-size="10.5" text-anchor="middle" fill="currentColor">__shared__ float smem[32]; smem[warp_id] = partial</text>
+    </g>
+    <g>
+      <rect x="20" y="234" width="400" height="22" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.5"/>
+      <text x="220" y="249" font-size="10.5" text-anchor="middle" fill="currentColor">__syncthreads()</text>
+    </g>
+    <g>
+      <rect x="20" y="262" width="400" height="26" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+      <text x="220" y="279" font-size="10.5" text-anchor="middle" fill="currentColor">warp 0 reduces the 16 partials, writes rsqrt to smem</text>
+    </g>
+    <g>
+      <rect x="20" y="294" width="400" height="22" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.5"/>
+      <text x="220" y="309" font-size="10.5" text-anchor="middle" fill="currentColor">__syncthreads()</text>
+    </g>
+    <g>
+      <rect x="20" y="322" width="400" height="26" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+      <text x="220" y="339" font-size="10.5" text-anchor="middle" fill="currentColor">every thread reads norm_factor = smem[warp_id]</text>
+    </g>
+    <text x="20" y="372" font-size="11" fill="var(--teal)">all six boxes: written by you</text>
+    <text x="20" y="392" font-size="10.5" fill="currentColor" fill-opacity="0.7">rmsnorm.cuh, 371 lines, 4 kernel variants</text>
+
+    <!-- Triton side -->
+    <text x="470" y="52" font-size="11" fill="currentColor" fill-opacity="0.75">x_ptr + row*stride_row + cols*stride_col</text>
+    <g>
+      <rect x="470" y="60" width="390" height="26" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.5"/>
+      <text x="665" y="77" font-size="11" text-anchor="middle" fill="currentColor">cols = tl.arange(0, BLOCK_N) &mdash; one block value</text>
+    </g>
+    <g>
+      <rect x="470" y="106" width="390" height="30" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+      <text x="665" y="125" font-size="10.5" text-anchor="middle" fill="currentColor">x = tl.load(..., mask=cols &lt; n_cols, other=0.0).to(tl.float32)</text>
+    </g>
+    <g>
+      <rect x="470" y="166" width="390" height="26" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.5"/>
+      <text x="665" y="183" font-size="11" text-anchor="middle" fill="currentColor">var = tl.sum(x * x, axis=0) / n_cols</text>
+    </g>
+    <text x="470" y="158" font-size="10.5" fill="currentColor" fill-opacity="0.8">1. the whole reduction, one line</text>
+
+    <g>
+      <rect x="470" y="212" width="390" height="136" fill="currentColor" fill-opacity="0.045" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 3"/>
+      <text x="665" y="234" font-size="11" text-anchor="middle" fill="currentColor" fill-opacity="0.85">generated by the Triton compiler</text>
+      <text x="665" y="256" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.7">thread mapping for num_warps=16</text>
+      <text x="665" y="276" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.7">load vectorisation and coalescing</text>
+      <text x="665" y="296" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.7">warp shuffle reduction tree</text>
+      <text x="665" y="316" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.7">shared-memory staging of partials</text>
+      <text x="665" y="336" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.7">both barriers</text>
+    </g>
+    <text x="470" y="372" font-size="11" fill="var(--copper)">you write 26 lines and pick num_warps</text>
+    <text x="470" y="392" font-size="10.5" fill="currentColor" fill-opacity="0.7">minimax_m3_rmsnorm.py, 148 lines, 2 kernels</text>
+  </svg>
+</div>
+
+<p>The CUDA column is real code. Here is its reduction, verbatim:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/jit/csrc/elementwise/rmsnorm.cuh:L53-L103</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>__global__ __launch_bounds__(kDim / 16) void rmsnorm_cta_double(const RMSNormParams __grid_constant__ params) {
+  using namespace device;
+  using Float2 = packed_t&lt;Float&gt;;
+  using Storage = AlignedVector&lt;Float2, 4&gt;;
+
+  constexpr auto kNumThreads = kDim / 16;
+  constexpr auto kNumWarps = kNumThreads / kWarpThreads;
+
+  const auto&amp; [input, weight_ptr, output, input_stride, output_stride, num_tokens, eps] = params;
+  const auto gmem = tile::Memory&lt;Storage&gt;::cta(kNumThreads);
+  __shared__ float smem[32];
+// ...
+  float sum_of_squares = 0.0f;
+#pragma unroll
+  for (auto j = 0u; j &lt; 4u; ++j) {
+    const auto [x, y] = cast&lt;fp32x2_t&gt;(input_first[j]);
+    sum_of_squares += x * x + y * y;
+  }
+#pragma unroll
+  for (auto j = 0u; j &lt; 4u; ++j) {
+    const auto [x, y] = cast&lt;fp32x2_t&gt;(input_second[j]);
+    sum_of_squares += x * x + y * y;
+  }
+
+  sum_of_squares = warp::reduce_sum(sum_of_squares);
+  float norm_factor;
+  if constexpr (kNumWarps == 1) {
+    norm_factor = math::rsqrt(sum_of_squares / kDim + eps);
+  } else {
+    const auto warp_id = threadIdx.x / kWarpThreads;
+    smem[warp_id] = sum_of_squares;
+    __syncthreads();
+    if (warp_id == 0) {
+      const auto tx = threadIdx.x;
+      const auto local_sum = tx &lt; kNumWarps ? smem[tx] : 0.0f;
+      sum_of_squares = warp::reduce_sum(local_sum);
+      smem[tx] = math::rsqrt(sum_of_squares / kDim + eps);
+    }
+    __syncthreads();
+    norm_factor = smem[warp_id];
+  }</code></pre>
+</div>
+
+<p>Every construct there was introduced in
+<a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a>: warp shuffles, shared memory,
+barriers, packed vector loads, <code>__launch_bounds__</code>. Nothing is gratuitous. Note
+<code>kDim / 16</code> &mdash; the thread count is a compile-time function of the hidden size, which
+is why this kernel is a template instantiated per shape, and why
+<code class="c-sglang">python/sglang/kernels/ops/layernorm/norm.py:L129-L144</code> raises
+<code>"jit rmsnorm: unsupported hidden_size=..."</code> for shapes nobody instantiated.</p></div></section>
+<section class="sec" id="writing-the-kernel" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">Writing the kernel</h2></div><div class="sec__body"><p>Now the Triton version of the same operation. This is not illustrative code &mdash; it is in-tree,
+tested, and shipping:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py:L18-L43</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@triton.jit
+def _gemma_rmsnorm_kernel(
+    x_ptr,
+    w_ptr,
+    out_ptr,
+    n_cols,
+    stride_row,
+    stride_col,
+    eps,
+    BLOCK_N: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_N)
+    mask = cols &lt; n_cols
+    x = tl.load(x_ptr + row * stride_row + cols * stride_col, mask=mask, other=0.0).to(
+        tl.float32
+    )
+    var = tl.sum(x * x, axis=0) / n_cols
+    rstd = 1.0 / tl.sqrt(var + eps)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    out = x * rstd * (1.0 + w)
+    tl.store(
+        out_ptr + row * n_cols + cols,
+        out.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )</code></pre>
+</div>
+
+<p>Nine constructs, in order:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">@triton.jit</span><h4>Not a Python function</h4><p>The body is never executed by CPython. Triton parses the AST and compiles it. Consequences: no Python objects, no <code>print</code>, no data-dependent Python control flow &mdash; only what the language defines.</p></div>
+  <div class="ve-card"><span class="ve-card__k">tl.program_id(0)</span><h4>Which program am I</h4><p>The index of this instance in the launch grid. Here the grid is one-dimensional over rows, so <code>row</code> is the token index. Roughly a thread block, but you never say how many threads.</p></div>
+  <div class="ve-card"><span class="ve-card__k">tl.arange</span><h4>A block value</h4><p><code>tl.arange(0, BLOCK_N)</code> is a vector of <code>BLOCK_N</code> integers living in registers across the whole program. Every arithmetic op on it is elementwise over all lanes at once.</p></div>
+  <div class="ve-card"><span class="ve-card__k">mask + other</span><h4>The bounds guard</h4><p><code>cols &lt; n_cols</code> is a block of booleans. Masked lanes issue no memory transaction on load and no write on store, and take <code>other=0.0</code> as their value.</p></div>
+  <div class="ve-card"><span class="ve-card__k">tl.constexpr</span><h4>Compiled per value</h4><p><code>BLOCK_N</code> is baked into the generated code. Two different <code>BLOCK_N</code> values are two different compiled kernels. That is what lets <code>tl.arange</code> have a static shape.</p></div>
+  <div class="ve-card"><span class="ve-card__k">.to(tl.float32)</span><h4>Accumulate wide</h4><p>bf16 has 8 mantissa bits. Summing 4096 squares in bf16 loses the tail entirely. Upcast on load, downcast on store &mdash; the same discipline <a href="../00-foundations/00-05-numerics.html">&sect;0.5</a> derives.</p></div>
+  <div class="ve-card"><span class="ve-card__k">tl.sum(axis=0)</span><h4>The reduction</h4><p>One call replaces the entire right half of Figure 1. The compiler picks the shuffle tree, the shared-memory staging and the barriers from <code>num_warps</code> and <code>BLOCK_N</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">strides as arguments</span><h4>Not shapes</h4><p><code>stride_row</code> and <code>stride_col</code> are passed in, so the kernel reads non-contiguous views &mdash; the file's docstring says exactly why: per-head q/k norms over <code>qkv.split</code> views.</p></div>
+  <div class="ve-card"><span class="ve-card__k">element_ty</span><h4>Output dtype from the pointer</h4><p><code>out_ptr.dtype.element_ty</code> makes one kernel body work for fp16 and bf16 without a dtype flag. Triton specialises on the pointer type at compile time.</p></div>
+</div>
+
+<h3>The launch</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py:L88-L115</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _num_warps(block_n: int) -&gt; int:
+    if block_n &gt;= 4096:
+        return 16
+    if block_n &gt;= 1024:
+        return 8
+    return 4
+
+
+def gemma_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -&gt; torch.Tensor:
+    """Gemma RMSNorm = normalize(x) * (1 + weight), fp32 math, single pass."""
+    orig_shape = x.shape
+    n = orig_shape[-1]
+    x2 = x.reshape(-1, n)
+    m = x2.shape[0]
+    out = torch.empty((m, n), dtype=x.dtype, device=x.device)
+    block_n = triton.next_power_of_2(n)
+    _gemma_rmsnorm_kernel[(m,)](
+        x2,
+        weight,
+        out,
+        n,
+        x2.stride(0),
+        x2.stride(1),
+        eps,
+        BLOCK_N=block_n,
+        num_warps=_num_warps(block_n),
+    )
+    return out.reshape(orig_shape)</code></pre>
+</div>
+
+<p><code>kernel[(m,)](args...)</code> is the whole launch API. The subscript is the grid; the call is
+the arguments. <code>num_warps</code> is a reserved keyword Triton consumes rather than passing to
+your kernel &mdash; it is how you tell the compiler how many threads to spend on one program, and it
+is the one occupancy knob you keep from CUDA.</p>
+
+<h3>The masking idiom, with numbers</h3>
+
+<p><code>tl.arange</code> requires a power-of-two length, so the launcher rounds the hidden size up
+with <code>triton.next_power_of_2(n)</code> and the kernel masks the excess. This is the thing
+everyone gets wrong first, in two ways: forgetting <code>other=0.0</code> (masked lanes then hold
+garbage and poison the sum), and dividing by <code>BLOCK_N</code> instead of <code>n_cols</code>
+(the mean is then wrong by a constant factor that looks like a bad epsilon). Notice line 35 divides
+by <code>n_cols</code>, the true width.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the grid, the block and the mask over a real tensor.</b>
+  Input <code>[257, 6144]</code> bf16 &mdash; the exact shape SGLang's test parametrises. The grid is
+  257 programs; each holds a 8192-lane block over a 6144-wide row, so 2048 lanes are masked.</p>
+  <svg viewBox="0 0 880 400" width="100%" role="img" aria-labelledby="f2t f2d" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="f2t">Triton grid and mask structure over a 257 by 6144 tensor</title>
+    <desc id="f2d">A tall tensor of 257 rows and 6144 columns. The launch grid has 257 programs, one
+    per row. Program 0 is expanded to show a block of 8192 lanes: lanes 0 to 6143 are active and
+    loaded, lanes 6144 to 8191 are masked and take the value zero. The masked quarter costs registers
+    and reduction work but no HBM traffic. Below, 257 programs are shown mapping onto 132 streaming
+    multiprocessors, giving roughly two waves.</desc>
+
+    <text x="20" y="24" font-size="12" font-weight="600" fill="currentColor">x2 = x.reshape(-1, 6144)  &rarr;  grid = (257,)</text>
+
+    <!-- tensor -->
+    <rect x="20" y="40" width="200" height="200" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.55"/>
+    <g stroke="currentColor" stroke-opacity="0.2">
+      <line x1="20" y1="58" x2="220" y2="58"/><line x1="20" y1="76" x2="220" y2="76"/>
+      <line x1="20" y1="94" x2="220" y2="94"/><line x1="20" y1="222" x2="220" y2="222"/>
+    </g>
+    <text x="120" y="52" font-size="10" text-anchor="middle" fill="currentColor">row 0</text>
+    <text x="120" y="70" font-size="10" text-anchor="middle" fill="currentColor">row 1</text>
+    <text x="120" y="88" font-size="10" text-anchor="middle" fill="currentColor">row 2</text>
+    <text x="120" y="160" font-size="11" text-anchor="middle" fill="currentColor" fill-opacity="0.55">...</text>
+    <text x="120" y="236" font-size="10" text-anchor="middle" fill="currentColor">row 256</text>
+    <text x="120" y="258" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.8">257 rows &times; 6144 cols &middot; bf16</text>
+
+    <path d="M 224 49 L 300 49" stroke="var(--copper)" stroke-width="1.2" marker-end="url(#a2)"/>
+    <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="var(--copper)"/></marker></defs>
+    <text x="262" y="42" font-size="10" text-anchor="middle" fill="currentColor" fill-opacity="0.8">program 0</text>
+
+    <!-- block expansion -->
+    <text x="310" y="30" font-size="11" fill="currentColor">cols = tl.arange(0, BLOCK_N)  with BLOCK_N = next_power_of_2(6144) = 8192</text>
+    <rect x="310" y="40" width="412" height="34" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/>
+    <rect x="722" y="40" width="138" height="34" fill="currentColor" fill-opacity="0.06" stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+    <text x="516" y="62" font-size="11" text-anchor="middle" fill="currentColor">lanes 0 .. 6143 &mdash; mask true, loaded</text>
+    <text x="791" y="62" font-size="10.5" text-anchor="middle" fill="currentColor" fill-opacity="0.75">6144 .. 8191</text>
+    <text x="791" y="90" font-size="10" text-anchor="middle" fill="currentColor" fill-opacity="0.75">other=0.0</text>
+    <text x="516" y="90" font-size="10" text-anchor="middle" fill="currentColor" fill-opacity="0.75">12 KiB read per row</text>
+
+    <text x="310" y="122" font-size="11" fill="currentColor">var = tl.sum(x * x, axis=0) / n_cols  &mdash; the tree spans all 8192 lanes</text>
+    <rect x="310" y="132" width="550" height="26" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
+    <text x="585" y="149" font-size="10.5" text-anchor="middle" fill="currentColor">reduction cost 8192/6144 = 1.33&times; &middot; HBM cost 1.00&times; &middot; divide by 6144, not 8192</text>
+
+    <!-- SMs -->
+    <text x="310" y="196" font-size="11" fill="currentColor">257 programs dispatched over 132 SMs</text>
+    <g>
+      <rect x="310" y="206" width="270" height="26" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.5"/>
+      <text x="445" y="223" font-size="10.5" text-anchor="middle" fill="currentColor">wave 1: programs 0..131</text>
+      <rect x="586" y="206" width="270" height="26" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.5"/>
+      <text x="721" y="223" font-size="10.5" text-anchor="middle" fill="currentColor">wave 2: programs 132..256 (125 SMs busy)</text>
+    </g>
+    <text x="310" y="256" font-size="10.5" fill="currentColor" fill-opacity="0.8">num_warps = 16 &rarr; 512 threads per program &rarr; 32 KiB of fp32 block value in registers</text>
+
+    <!-- decode contrast -->
+    <rect x="20" y="292" width="840" height="88" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.45"/>
+    <text x="36" y="314" font-size="11.5" font-weight="600" fill="var(--plum)">the decode failure mode</text>
+    <text x="36" y="336" font-size="10.5" fill="currentColor">batch 1 decode: m = 1  &rarr;  grid = (1,)  &rarr;  ONE program  &rarr;  1 of 132 SMs busy  &rarr;  0.76% of the machine</text>
+    <text x="36" y="356" font-size="10.5" fill="currentColor">the bandwidth bound says 9.8 ns for 32 KiB; one SM cannot come near it, and the launch alone costs microseconds</text>
+    <text x="36" y="374" font-size="10.5" fill="currentColor" fill-opacity="0.8">this is why the CUDA kernel uses a grid-stride loop with num_blocks = min(num_tokens, occupancy &times; 132), and why decode runs inside a CUDA graph</text>
+  </svg>
+</div>
+
+<p>The fused-add variant, <code>_gemma_fused_add_rmsnorm_kernel</code> at
+<code class="c-sglang">python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py:L46-L85</code>, is the
+same kernel with a second input pointer, a second stride pair, and one extra store. That store is
+the whole point of fusing: it emits the pre-norm sum for the next block's residual add, so the sum
+is never re-read from HBM by a separate kernel.</p></div></section>
+<section class="sec" id="is-it-good" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How to know if the kernel is good</h2></div><div class="sec__body"><p>You now have a kernel. Is it any good? The procedure is three steps and it does not require a
+profiler.</p>
+
+<ol>
+<li><b>Count compulsory bytes.</b> Every input element that must be read, every output element that
+must be written, once. For fused RMSNorm-with-residual at $d = 4096$ bf16 that is
+$Q = 4 \times 4096 \times 2 = 32768$ bytes per token. Weight is $8$ KiB per launch and stays in
+L2, so it rounds away.</li>
+<li><b>Count FLOPs.</b> One add for the residual, one multiply and one add for the sum of squares,
+one multiply by <code>rstd</code>, one by the weight: $F \approx 5d = 20480$ FLOP per token.</li>
+<li><b>Divide, and place it on the roofline.</b>
+$I = F/Q = 20480/32768 = 0.625$ FLOP/byte.</li>
+</ol>
+
+<p>The H100 SXM bf16 ridge is $I^{*} = 295$ FLOP/byte
+(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>). At
+$0.625$ you are 472&times; to the left of it. There is no version of this kernel where tensor cores,
+<code>tl.dot</code>, or more arithmetic helps. The <em>only</em> lever is bytes, which is why fusion
+&mdash; and nothing else &mdash; is the optimisation.</p>
+
+<div class="math-display">$$t_{\min} = \frac{Q}{\beta} = \frac{32768\ \text{B}}{3.35\times10^{12}\ \text{B/s}} = 9.78\ \text{ns per token}$$</div>
+
+<p>Multiply by the token count for the real bound: $20.0\ \mu\text{s}$ for a 2048-token chunk,
+$0.64\ \mu\text{s}$ for all 65 norms of a batch-1 decode step whose total floor is 4.48 ms. Then
+compare against what you measure. The ratio $t_{\min}/t_{\text{measured}}$ is your achieved fraction
+of peak bandwidth, and it is the only number that matters for a kernel on this side of the ridge.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">No GPU here</span>
+  <p>This book derives bounds; it does not measure achievement. Every figure above is arithmetic
+  from the H100 SXM spec sheet and the model shapes &mdash; none of it was run. A real kernel on real
+  silicon will land somewhere below the bound, and how far below depends on grid size, occupancy,
+  L2 behaviour and launch overhead. Measuring that gap is
+  <a href="../LABS.html">the lab's</a> job, with <code>triton.testing.do_bench</code> and Nsight
+  Compute. Never quote a bound as a measurement.</p>
+</div>
+
+<p>The bound also tells you when to <em>stop</em>. If you measure 24 &micro;s against a 20 &micro;s
+bound you are at 83% of peak bandwidth and there is at most 17% left in the entire kernel; go find
+a different bottleneck. That is a far more useful answer than "it got 8% faster when I changed
+<code>BLOCK_N</code>".</p></div></section>
+<section class="sec" id="autotuning" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Autotuning: three strategies, all in these repos</h2></div><div class="sec__body"><p><code>BLOCK_N</code>, <code>num_warps</code> and <code>num_stages</code> trade off against each
+other in ways that depend on the shape, the dtype and the architecture, and nobody can predict the
+winner. All three strategies for dealing with that are in these trees.</p>
+
+<h3>1. Online autotuning</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/attention/dsa/triton_sparse_mla.py:L27-L41</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code># The best (BLOCK_N, num_warps, num_stages) is shape- and arch-sensitive, so
+# autotune over a grid keyed on the attention shape. Benchmarked once per key
+# (a one-time stall on the first prefill of each new shape), then cached.
+_AUTOTUNE_CONFIGS = [
+    triton.Config({"BLOCK_N": bn}, num_warps=w, num_stages=ns)
+    for bn in (32, 64, 128)
+    for w in (1, 2, 4)
+    for ns in (1, 2)
+]
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=["topk", "H", "DIM"],
+    prune_configs_by={"early_config_prune": _prune_configs},</code></pre>
+</div>
+
+<p>Three things to take from this. <b>The config list</b> is a Cartesian product &mdash;
+$3 \times 3 \times 2 = 18$ configs &mdash; each of which must be separately compiled and separately
+timed the first time a new key appears. <b>The key</b> is the tuple of runtime arguments whose
+values change the right answer: <code>["topk", "H", "DIM"]</code>. Change <code>topk</code> and
+Triton re-benchmarks; change the batch size, which is not in the key, and it reuses the cached
+choice. Picking the key is a modelling decision: too narrow and you tune for a shape that behaves
+differently, too wide and you stall on every new request shape. <b><code>prune_configs_by</code></b>
+lets you drop configs that cannot work &mdash; a config needing more shared memory than the SM's
+228 KB, for instance &mdash; before they are compiled.</p>
+
+<p>vLLM's Mamba kernels use the explicit form, nine hand-written configs:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/mamba/ops/ssd_bmm.py:L14-L63, L56-L62</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@triton.autotune(
+    configs=[
+        triton.Config(
+            {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
+            num_stages=3,
+            num_warps=8,
+        ),
+        triton.Config(
+            {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32},
+            num_stages=4,
+            num_warps=4,
+        ),
+# ... seven more, down to BLOCK_SIZE_M=64, BLOCK_SIZE_N=64, num_stages=4, num_warps=2
+    ],
+    key=["chunk_size", "K", "IS_CAUSAL"],
+)</code></pre>
+</div>
+
+<p>The shape of that list is itself instructive: big M&times;N tiles get more warps and fewer
+pipeline stages, small tiles get two warps and five stages. <code>num_stages</code> is the depth of
+the software pipeline over the K-loop &mdash; how many <code>BLOCK_K</code> slabs are in flight in
+shared memory at once. More stages hides more latency and costs more shared memory, which is why
+the small-tile configs can afford five.</p>
+
+<h3>2. Offline tuning, checked into the repo</h3>
+
+<p>Autotuning at serving time is a latency spike on the critical path. vLLM's MoE kernel dodges it
+entirely: it ships <b>330 JSON files</b> of pre-tuned configs under
+<code>vllm/model_executor/layers/fused_moe/configs/</code>, one per (expert count, intermediate
+size, device, dtype), each mapping a batch size to a config.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">configs/E=8,N=14336,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8.json — first 17 lines</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>{
+    "1": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 64,
+        "num_warps": 8,
+        "num_stages": 5
+    },
+    "2": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 64,
+        "num_warps": 4,
+        "num_stages": 3
+    },</code></pre>
+</div>
+
+<p>Read the keys as batch sizes. At $M = 1$ the tuner chose a 64&times;64 tile with 5 stages; by
+$M = 2$ it wants 64&times;128&times;256 with 3. The tile that is right for one token is not the tile
+that is right for two, which is the entire reason this file exists. <code>get_moe_configs</code>
+(<code>vllm/model_executor/layers/fused_moe/fused_moe.py:L1110-L1122</code>) looks the file up by
+name, and when it misses:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L1165-L1171</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # If no optimized configuration is available, we will use the default
+    # configuration
+    logger.warning_once(
+        "Using default MoE config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+    )</code></pre>
+</div>
+
+<p>If you see that line in a production log, you are running an untuned MoE. The mechanism is
+credited in-source to <a href="https://github.com/sgl-project/sglang/pull/2628">SGLang PR #2628</a>
+(<code>vllm/model_executor/layers/fused_moe/fused_moe.py:L1109</code>) &mdash; a rare, explicit
+cross-pollination between the two projects.</p>
+
+<h3>3. Cache the tuning, and shout when it happens late</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/env_override.py:L107-L113</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># Enable Triton autotuning result caching to disk by default.
+# Without this, Triton re-runs autotuning on every process restart,
+# adding significant latency to the first inference request.
+# This writes autotuning results to TRITON_CACHE_DIR.
+# It can still be overridden by setting TRITON_CACHE_AUTOTUNING=0
+# in the environment.
+os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")</code></pre>
+</div>
+
+<p>And after warmup, vLLM installs hooks so that any compile or autotune during serving is an
+incident: <code>vllm/utils/jit_monitor.py:L119-L141</code> raises or logs
+<code>"Triton kernel JIT compilation during inference: &lt;name&gt;. This causes a latency spike;
+consider extending warmup to cover this shape/config."</code>. Run with
+<code>--jit-monitor-mode=error</code> to make it fatal. For benchmarking, the opposite knob exists:
+<code>VLLM_TRITON_FORCE_FIRST_CONFIG=1</code> monkey-patches the autotuner to take the first valid
+config, "to eliminate autotuning variability when measuring kernel performance"
+(<code>vllm/envs.py:L1177-L1184</code>).</p></div></section>
+<section class="sec" id="production-kernel" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Reading a production kernel: fused_moe_kernel</h2></div><div class="sec__body"><p>Everything above appears at scale in vLLM's Triton MoE GEMM,
+<code>vllm/model_executor/layers/fused_moe/fused_moe.py:L298-L610</code>. It is a grouped GEMM: each
+block of rows belongs to one expert, and the block must fetch that expert's weight matrix. Read it
+in five moves.</p>
+
+<p><b>Move 1 &mdash; a one-dimensional grid, decoded into a 2-D tile index, deliberately out of
+order.</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L385-L396</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse.
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m</code></pre>
+</div>
+
+<p>The naive mapping <code>pid_m = pid // num_pid_n</code> sweeps a whole row of output tiles before
+moving down, so consecutive concurrent blocks share A rows but touch every column of B. The grouped
+ordering walks a <code>GROUP_SIZE_M</code>-tall column of tiles instead, so the blocks resident at
+any moment share both a small set of A rows and a small set of B columns, and both stay in L2.
+<code>GROUP_SIZE_M</code> is in the tuned JSON above &mdash; 64 at batch 1, 1 at batch 4. This is a
+pure Triton-level optimisation with no CUDA analogue in the source; it is scheduling, and Triton
+lets you express scheduling because you own the grid.</p>
+
+<p><b>Move 2 &mdash; the gather, and the early exit.</b> The row indices are not
+<code>pid_m * BLOCK + arange</code>; they are <em>loaded</em> from the alignment tensor that
+<code>moe_align_block_size</code> (<code>vllm/model_executor/layers/fused_moe/moe_align_block_size.py:L11-L103</code>)
+produced, so that each block's rows all belong to one expert:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L404-L421, L419-L421</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_SIZE_M &gt;= num_tokens_post_padded:
+        return
+    if not naive_block_assignment:
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+# ...
+    offs_token = offs_token.to(tl.int64)
+
+    token_mask = offs_token &lt; num_valid_tokens</code></pre>
+</div>
+
+<p>Three idioms in ten lines. The grid is sized for the worst case and <em>programs return early</em>
+when the actual token count is smaller &mdash; a device-side bound that avoids relaunching with a
+different grid. <code>offs_token</code> is a block of indices read from memory, which is how you
+write a gather in Triton: use a block value as an offset. And <code>token_mask</code> &mdash; the
+padding tokens the aligner inserted carry an out-of-range index, so the same mask that guards the
+loads also silently drops them from the store at the end. Below, at L423-L440, a block whose expert
+is <code>-1</code> (not on this rank) writes zeros and returns.</p>
+
+<p><b>Move 3 &mdash; the K-loop with a 2-D mask.</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L519-L537</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the
+        # K dimension.
+# ...
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] &amp; (offs_k[None, :] &lt; K - k * BLOCK_SIZE_K),
+                other=0.0,
+            )
+            b = tl.load(b_ptrs, mask=offs_k[:, None] &lt; K - k * BLOCK_SIZE_K, other=0.0)</code></pre>
+</div>
+
+<p><code>token_mask[:, None] &amp; (offs_k[None, :] &lt; ...)</code> is the RMSNorm mask idiom in two
+dimensions: <code>[:, None]</code> and <code>[None, :]</code> broadcast two 1-D block values into a
+<code>[BLOCK_SIZE_M, BLOCK_SIZE_K]</code> boolean. The row mask handles padded tokens, the column
+mask handles a K that is not a multiple of <code>BLOCK_SIZE_K</code>. The accumulator is fp32
+regardless of input dtype &mdash; the same discipline as the <code>.to(tl.float32)</code> in the
+norm kernel, for the same reason.</p>
+
+<p><b>Move 4 &mdash; the epilogue, all of it before a single store.</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L577-L610</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if use_int8_w8a16:
+        accumulator = accumulator * b_scale
+    elif (use_fp8_w8a8 or use_int8_w8a8) and not (group_k &gt; 0 and group_n &gt; 0):
+        accumulator = accumulator * a_scale * b_scale
+# ...
+    if HAS_BIAS:
+        accumulator += bias[None, :]
+
+    # Router (MoE) weight multiplication:
+    # This multiplication MUST be performed in float32 before any precision
+    # conversion to ensure numerical stability, which is especially critical
+    # on ROCm platforms.
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(
+            topk_weights_ptr + offs_token,
+            mask=token_mask,
+            other=0,
+        )
+        accumulator *= moe_weight[:, None]
+
+    # Final precision conversion:
+    # Cast once at the end to the desired compute/output dtype.
+    accumulator = accumulator.to(compute_type)
+
+    # -----------------------------------------------------------
+    # Write back the block of the output
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = token_mask[:, None] &amp; (offs_cn[None, :] &lt; N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)</code></pre>
+</div>
+
+<p>Dequantisation, bias and the router weight are all applied to the fp32 accumulator <em>in
+registers</em>, and the tile touches HBM exactly once. This is epilogue fusion, hand-written. Hold
+on to it &mdash; it is the concept CUTLASS turns into a type system in the next section.</p>
+
+<p><b>Move 5 &mdash; the launch.</b> All the <code>if use_fp8_w8a8</code> and <code>if HAS_BIAS</code>
+branches you just read are <code>tl.constexpr</code>, so each combination compiles to a separate
+kernel with the dead branches gone. The grid is a lambda over the chosen config, because the grid
+depends on the block sizes the tuner picked:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/fused_moe.py:L836-L839</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    grid = lambda META: (
+        triton.cdiv(EM, META["BLOCK_SIZE_M"])
+        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+    )</code></pre>
+</div>
+
+<p>Everything in this kernel maps back to the twenty-six-line norm: <code>program_id</code>,
+<code>arange</code>, masked <code>load</code>/<code>store</code>, <code>constexpr</code>
+specialisation, an fp32 accumulator, and a grid you compute yourself. The only genuinely new
+primitive is <code>tl.dot</code>, which lowers to <code>wgmma</code> on Hopper.</p></div></section>
+<section class="sec" id="dispatch" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Compiled or Triton: how each engine decides</h2></div><div class="sec__body"><p><a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> left this pair for here.
+SGLang's split-KV merge exists twice &mdash; a compiled op in the external <code>sgl_kernel</code>
+wheel and a Triton kernel in-tree &mdash; and the wrapper picks:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/attention/merge_state.py:L12-L46, L34-L46</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code># Automatically fallback to the Triton kernel in some cases
+# (e.g., for AMD GPUs, when the head dimension is not a multiple
+# of 4 or 8, and in FP8 precision)
+def _supported_dtypes(o: torch.Tensor) -&gt; bool:
+    return o.dtype in [torch.float32, torch.half, torch.bfloat16]
+
+
+def _supported_headdim(o: torch.Tensor) -&gt; bool:
+    headdim = o.shape[2]  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
+    if o.dtype == torch.float32:
+        return headdim % 4 == 0
+    return headdim % 8 == 0
+# ...
+    if (
+        _is_cuda
+        and _supported_dtypes(prefix_output)
+        and _supported_headdim(prefix_output)
+    ):
+        return merge_state_v2(
+            prefix_output, prefix_lse, suffix_output, suffix_lse, output, output_lse
+        )
+    else:
+        # Fallback to Triton kernel
+        return merge_state_triton(
+            prefix_output, prefix_lse, suffix_output, suffix_lse, output, output_lse
+        )</code></pre>
+</div>
+
+<p>The CUDA kernel wins on CUDA with an aligned head dim, because it can assume a 16-byte packed
+load. The Triton kernel wins everywhere else, because
+<code>head_mask = head_arange &lt; HEAD_SIZE</code>
+(<code>python/sglang/kernels/ops/attention/merge_state.py:L39-L40</code>) makes alignment somebody
+else's problem and the same source compiles for ROCm. That is the tradeoff in one function:
+<b>hand-written CUDA buys you the last increment of memory-system control on the shapes you
+enumerated; Triton buys you every shape and every backend you did not.</b></p>
+
+<p>SGLang has generalised this into a registry. <code>python/sglang/kernels/spec.py:L29-L51</code>
+enumerates provenance as an enum &mdash; <code>TORCH</code>, <code>TORCH_COMPILE</code>,
+<code>TRITON</code>, <code>JIT</code>, <code>AOT</code>, <code>CUTE_DSL</code>,
+<code>FLASHINFER</code>, <code>DEEPGEMM</code>, <code>AITER</code>, <code>TORCH_NPU</code> and more
+&mdash; and <code>python/sglang/kernels/README.md:L39-L64</code> describes the contract: registration
+records metadata only, and no Triton compile or JIT build happens until a kernel is actually called.
+Every operator carries a required <code>forward_native</code>, "the pure-<code>torch</code>
+correctness reference every other implementation is checked against"
+(<code>python/sglang/kernels/README.md:L75-L76</code>). If you write a Triton kernel for either
+engine, that is the shape of the contract you are joining.</p></div></section>
+<section class="sec" id="cutlass" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">CUTLASS at a glance</h2></div><div class="sec__body"><p>Triton's abstraction has a ceiling. It gives you a block of elements and a grid; it does not give
+you a warp-specialised producer/consumer pipeline with TMA descriptors, a persistent stream-K tile
+scheduler, and an epilogue that fuses an arbitrary expression tree while writing through the same
+shared-memory buffers the mainloop just drained. On a dense GEMM at large M, those things are the
+last 20%, and 20% of the GEMM is most of prefill. That is CUTLASS's territory.</p>
+
+<p>CUTLASS is a C++ template library, not a compiler. Its organising idea is a <b>hierarchy of
+tiles</b>, each level a template parameter you instantiate rather than a runtime argument you pass.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the CUTLASS tile hierarchy, with vLLM's actual SM90 FP8 configuration.</b>
+  Shapes are read from <code>scaled_mm_sm90_fp8_dispatch.cuh</code>; the instruction level is
+  Hopper's warpgroup MMA, selected by the collective builder rather than named in vLLM's source.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["DEVICE<br/>GemmUniversalAdapter over the full problem<br/>Shape int,int,int,int at runtime<br/>PersistentScheduler assigns tiles to SMs"]
+    A --> B["CLUSTER<br/>ClusterShape 2,1,1<br/>two threadblocks co-scheduled<br/>multicast the same B tile over TMA"]
+    B --> C["THREADBLOCK / CTA TILE<br/>TileShape 128,128,128 at M above 128<br/>TileShape 64,16,256 at M in 17..64<br/>chosen by C++ dispatch on M, N, K"]
+    C --> D["WARPGROUP<br/>128 threads, warp-specialised<br/>producer warps issue TMA copies<br/>consumer warps issue MMA"]
+    D --> E["INSTRUCTION TILE<br/>wgmma.mma_async on the tensor cores<br/>fp32 accumulator in registers"]
+    C --> F["COLLECTIVE EPILOGUE<br/>Sm90EVT expression tree<br/>scale, bias, cast, then one store"]
+    E --> F
+  </script>
+</div>
+
+<p>The composition is explicit in vLLM's own code. A GEMM is a mainloop plus an epilogue, both built
+from the same tile shape:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh:L57-L84</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder&lt;
+          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
+          ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+          ElementAcc, float, ElementC, StrideC, AlignmentCD, ElementD, StrideD,
+          AlignmentCD, EpilogueSchedule, EVTCompute&gt;::CollectiveOp;
+
+  static constexpr size_t CEStorageSize =
+      sizeof(typename CollectiveEpilogue::SharedStorage);
+  using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout&lt;
+      static_cast&lt;int&gt;(CEStorageSize)&gt;;
+
+  // clang-format off
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder&lt;
+          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+          ElementAB, cutlass::layout::RowMajor, AlignmentAB,
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentAB,
+          ElementAcc, TileShape, ClusterShape,
+          Stages,
+          KernelSchedule&gt;::CollectiveOp;
+  // clang-format on
+
+  using KernelType = enable_sm90_or_later&lt;cutlass::gemm::kernel::GemmUniversal&lt;
+      cute::Shape&lt;int, int, int, int&gt;, CollectiveMainloop, CollectiveEpilogue,
+      cutlass::gemm::PersistentScheduler&gt;&gt;;</code></pre>
+</div>
+
+<p><code>StageCountAutoCarveout&lt;sizeof(CollectiveEpilogue::SharedStorage)&gt;</code> is the whole
+philosophy in one line: the pipeline depth of the mainloop is computed <em>at compile time</em> from
+how much of the SM's 228 KB of shared memory the epilogue already claimed. Triton's
+<code>num_stages</code> is a number you guess and then autotune; CUTLASS's is a number the type
+system solves for. That is the trade &mdash; less exploration, more compile time, and a much steeper
+authoring curve.</p>
+
+<p>The tile shapes are selected by C++ dispatch on the problem geometry rather than by benchmarking.
+The SM90 FP8 path has seven configurations; at $M &gt; 128$ it takes
+<code>TileShape = Shape&lt;_128, _128, _128&gt;</code> with a Ping-Pong schedule, at $M \ge 8192$ and
+$K \ge 6144$ it takes <code>Shape&lt;_256, _128, _128&gt;</code> Cooperative, and for
+$M \in (16, 64]$ with $N \le 1280$ it takes <code>Shape&lt;_64, _16, _256&gt;</code> with
+<code>ClusterShape = Shape&lt;_1, _4, _1&gt;</code> and operands swapped
+(<code>csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm90_fp8_dispatch.cuh:L102-L110, L122-L130, L148-L166</code>).
+A 16-wide N tile is a decode-shaped GEMM: almost no rows, so what matters is streaming B.</p>
+
+<h3>Epilogue fusion as a type</h3>
+
+<p>The MoE kernel fused its epilogue by writing the arithmetic before the store. CUTLASS makes the
+epilogue a compile-time expression tree &mdash; an <em>epilogue visitor tree</em>,
+<code>Sm90EVT</code> &mdash; so any composition of broadcasts, elementwise ops and casts is a type.
+<a href="../04-quantization/04-03-formats-and-kernels.html">&sect;4.3</a> owns the scaled-GEMM
+epilogue and quotes the tree; what matters here is what fusion buys, stated by the vendored loader
+itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/cutlass_extensions/epilogue/broadcast_load_epilogue_c3x.hpp:L33-L48</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>//
+// This file is a modified excerpt of
+// include/cutlass/epilogue/fusion/sm90_visitor_load_tma_warpspecialized.hpp
+// from https://github.com/NVIDIA/cutlass v3.5.0
+// It has been modified to support either row/column or scalar broadcasting
+// where the tensor being loaded from is always passed in via a device pointer.
+// This lets one compiled kernel handle all cases of per-tensor or
+// per-channel/per-token quantization.
+//
+// This interface also allows the scales to be passed in as tensors that
+// consistently reside on the device, which avoids an issue with a previous
+// implementation where scalars needed to be on the CPU since they
+// were passed in via float values. This created a potential performance hazard
+// if scales were initially on the device, and caused torch.compile graphs
+// breaks when moving scales to the CPU.
+//</code></pre>
+</div>
+
+<p>One compiled kernel covering per-tensor, per-channel and per-token scaling &mdash; and note the
+last clause: the naive alternative moved a scalar to the CPU and broke the
+<a href="08-02-torch-compile.html">&sect;8.2</a> graph. Kernel design and compiler behaviour are the
+same problem.</p>
+
+<h3>CuTe: layouts as algebra</h3>
+
+<p>Underneath sits CuTe, whose one idea is that a tensor's shape and stride form a
+<code>Layout</code> object you can compose, permute and coalesce at compile time. vLLM's helpers are
+a clean miniature:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/cutlass_extensions/cute_utils.cuh:L13-L56, L51-L61</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;size_t... I, typename Layout&gt;
+CUTE_HOST_DEVICE static constexpr auto permute_layout(Layout l) {
+  static_assert(rank(l) == sizeof...(I), "Invalid permutation, rank mismatch");
+  return cute::make_layout(cute::get&lt;I&gt;(l)...);
+}
+
+// is the layout f(x) = x
+template &lt;typename Layout&gt;
+CUTE_HOST_DEVICE static constexpr bool is_identity_layout() {
+  if constexpr (std::is_same_v&lt;Layout, void&gt;) {
+    return true;
+  } else {
+    constexpr auto coalesced_layout = coalesce(Layout{});
+    if constexpr (rank(coalesced_layout) == 1 &amp;&amp;
+                  stride&lt;0&gt;(coalesced_layout) == 1) {
+      return true;
+    }
+    return false;
+  }
+}
+// ...
+template &lt;typename T, typename Elements&gt;
+CUTE_HOST_DEVICE static constexpr auto create_auto_vectorizing_copy() {
+  constexpr auto bits = sizeof_bits_v&lt;T&gt; * Elements{};
+  if constexpr (bits % 128 == 0) {
+    return AutoVectorizingCopyWithAssumedAlignment&lt;128&gt;{};
+  } else if constexpr (bits % 64 == 0) {</code></pre>
+</div>
+
+<p>Read the last function against SGLang's dispatch on <code>headdim % 8 == 0</code>. Same decision
+&mdash; how wide a vector can I legally load &mdash; but resolved by <code>if constexpr</code> at
+compile time from a layout, so the wrong branch does not exist in the binary. That is what "templates
+rather than a JIT" buys: full specialisation with zero runtime dispatch, paid for in compile time and
+binary size.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>CUTLASS itself is not in either tree at these SHAs. vLLM fetches it at build time &mdash;
+  <code>set(CUTLASS_REVISION "v4.4.2")</code> and a <code>FetchContent_Declare</code> from
+  <code>github.com/nvidia/cutlass</code> at <code>CMakeLists.txt:L485-L513</code> &mdash; so
+  <code>CollectiveBuilder</code>, <code>Sm90EVT</code>, the warp-specialised mainloop and the exact
+  <code>wgmma</code> atom the builder selects cannot be read here. Everything above is read from
+  vLLM's own extensions and instantiations; the builder internals should be checked against CUTLASS
+  v4.4.2 before you rely on them. SGLang's compiled kernels are similarly out of tree (the
+  <code>sgl_kernel</code> wheel), which is why this chapter reads SGLang's JIT CUDA under
+  <code>python/sglang/kernels/jit/csrc/</code> instead.</p>
+</div>
+
+<p>Machete is the worked example of all of this: a mixed-precision W4A16 GEMM built on CUTLASS,
+"a spiritual successor to the Marlin kernel but optimized for Hopper architectures"
+(<code>csrc/libtorch_stable/quantization/machete/Readme.md:L1-L3</code>), whose type pairs and tile
+schedules are code-generated by <code>generate.py</code> so that "we can generate multiple type
+pairs and different tile shapes using the same kernel template"
+(<code>csrc/libtorch_stable/quantization/machete/Readme.md:L41-L43</code>). Its static
+shape-to-schedule heuristic and its prepacked weight layout are
+<a href="../04-quantization/04-03-formats-and-kernels.html">&sect;4.3</a>'s to explain, and it
+explains them there.</p></div></section>
+<section class="sec" id="the-map" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Which file do I open</h2></div><div class="sec__body"><div class="table-wrap">
+  <div class="table-wrap__cap">Where each technology lives, at the pinned SHAs. File counts are
+  <em>measured by grep over the checkouts</em>, not benchmarks.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>You want</th><th>Open</th><th class="num">Files</th></tr></thead>
+      <tbody>
+        <tr><td>A Triton kernel to copy, vLLM</td><td><code>vllm/v1/attention/ops/</code> (attention variants), <code>vllm/model_executor/layers/fused_moe/</code>, <code>vllm/model_executor/layers/mamba/ops/</code></td><td class="num">196 total with <code>@triton.jit</code></td></tr>
+        <tr><td>A Triton kernel to copy, SGLang</td><td><code>python/sglang/kernels/ops/</code> — 77 attention, 21 moe, 7 quantization, 3 layernorm, 3 sampling</td><td class="num">203 under <code>kernels/ops/</code>, 239 across <code>python/</code></td></tr>
+        <tr><td>The simplest complete Triton kernel</td><td><code>python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py</code></td><td class="num">148 lines</td></tr>
+        <tr><td>A production Triton GEMM</td><td><code>vllm/model_executor/layers/fused_moe/fused_moe.py:L298-L610</code></td><td class="num">1</td></tr>
+        <tr><td>CUTLASS FP8 / INT8 GEMMs</td><td><code>csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/</code></td><td class="num">19</td></tr>
+        <tr><td>CUTLASS mixed-precision (Machete)</td><td><code>csrc/libtorch_stable/quantization/machete/</code></td><td class="num">9 sources + <code>generate.py</code> + Readme</td></tr>
+        <tr><td>vLLM's own CUTLASS extensions</td><td><code>csrc/cutlass_extensions/</code>, <code>csrc/libtorch_stable/cutlass_extensions/</code></td><td class="num">6 + 8</td></tr>
+        <tr><td>Readable CUDA in SGLang</td><td><code>python/sglang/kernels/jit/csrc/</code> — 25 subtrees</td><td class="num">25</td></tr>
+        <tr><td>Triton you did not write</td><td>whatever Inductor emits — <a href="08-02-torch-compile.html">&sect;8.2</a></td><td class="num">&mdash;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Worked trace: from decorator to cubin</h2></div><div class="sec__body"><p>Follow one call to <code>gemma_rmsnorm(x, weight, eps)</code> with <code>x</code> of shape
+<code>[257, 6144]</code>, bf16.</p>
+
+<ol>
+<li><b><code>gemma_rmsnorm</code></b> reshapes to <code>[257, 6144]</code>, allocates
+<code>out</code>, computes <code>block_n = triton.next_power_of_2(6144) = 8192</code> and
+<code>num_warps = _num_warps(8192) = 16</code>.</li>
+<li><b>The subscript</b> <code>_gemma_rmsnorm_kernel[(257,)]</code> binds the grid and returns a
+launcher.</li>
+<li><b>Specialisation.</b> Triton builds a key from everything that changes the generated code: the
+<code>tl.constexpr</code> values (<code>BLOCK_N=8192</code>), the pointer dtypes (bf16 in, bf16 out,
+fp32 weight), <code>num_warps</code> and <code>num_stages</code>, and divisibility properties of the
+integer arguments &mdash; a stride divisible by 16 licenses wider vector loads than one that is not.
+Two calls that differ only in <code>m</code> share a compiled kernel; two calls that differ in
+hidden size do not.</li>
+<li><b>Cache lookup</b> in <code>TRITON_CACHE_DIR</code>. vLLM redirects this into
+<code>VLLM_CACHE_ROOT</code> when compile caching is on and otherwise Triton uses
+<code>~/.triton/cache</code> (<code>docs/usage/security.md:L376</code>); SGLang sets it under its own
+cache root at <code>python/sglang/srt/environ.py:L1658</code>. A hit skips everything below.</li>
+<li><b>Compilation</b> on a miss: Python AST &rarr; Triton IR &rarr; TritonGPU IR (where the layout
+assignment that decides which lane holds which element happens) &rarr; LLVM IR &rarr; PTX &rarr;
+cubin via <code>ptxas</code>. All stages land in the cache directory next to the cubin.</li>
+<li><b>Launch</b> of 257 blocks &times; 512 threads. On a warm cache the Python-side cost is a dict
+lookup and a driver call; that residual cost is what <a href="08-01-cuda-graphs.html">&sect;8.1</a>
+removes.</li>
+</ol>
+
+<p>To see the output of step 5, the reliable route is to read the cache directory. Each compiled
+kernel gets a hashed subdirectory holding the IR at every stage:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell — inspect a compiled Triton kernel</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># run your kernel once with a private, empty cache
+export TRITON_CACHE_DIR=/tmp/tritoncache
+rm -rf $TRITON_CACHE_DIR
+python -c "import torch, sglang.kernels.ops.layernorm.minimax_m3_rmsnorm as m; \
+  x=torch.randn(257,6144,device='cuda',dtype=torch.bfloat16); \
+  w=torch.randn(6144,device='cuda',dtype=torch.float32); m.gemma_rmsnorm(x,w,1e-6)"
+
+# every stage of the pipeline is on disk, one directory per specialisation
+find $TRITON_CACHE_DIR -type f | sed 's|.*/||' | sort | uniq -c
+#   .ttir   Triton IR            .ttgir  TritonGPU IR (layouts assigned)
+#   .llir   LLVM IR              .ptx    PTX          .cubin  the binary
+#   .json   metadata: num_warps, shared bytes, register count
+
+# SASS, the actual machine code, needs the CUDA toolkit
+nvdisasm -c $TRITON_CACHE_DIR/*/*.cubin | head -60</code></pre>
+</div>
+
+<p>The <code>.json</code> is the file to read first: it carries the shared-memory bytes and the
+register count per thread, which is what decides how many of your blocks fit concurrently on an SM.
+The Python object also exposes the same artefacts &mdash; a compiled kernel handle carries an
+<code>asm</code> mapping with <code>"ttir"</code>, <code>"ttgir"</code>, <code>"llir"</code> and
+<code>"ptx"</code> keys &mdash; but the exact attribute names move between Triton releases, so the
+cache directory is the stable interface.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">the classic</span><h4>Dividing by BLOCK_N</h4><p><code>tl.sum(x*x, axis=0) / BLOCK_N</code> instead of <code>/ n_cols</code>. At $d = 4096$ they are equal and every test passes; at $d = 6144$ the variance is 25% low and the model degrades subtly. The masking bug that survives your unit test is the one that hurts.</p></div>
+  <div class="ve-card"><span class="ve-card__k">the silent one</span><h4>Forgetting <code>other=</code></h4><p>A masked <code>tl.load</code> without <code>other</code> leaves those lanes undefined. Elementwise output is fine — the store masks them — but any reduction over the block inherits garbage. Symptom: correct at power-of-two widths, NaN elsewhere.</p></div>
+  <div class="ve-card"><span class="ve-card__k">int32 overflow</span><h4>Strides times offsets</h4><p>vLLM casts explicitly: <em>"Cast to int64 to prevent overflow in stride*offset products (e.g. stride_cm * offs_token can exceed int32 for large token counts)"</em> — <code>fused_moe.py:L417-L419</code>. Symptom is a wild-pointer write at large batch that vanishes when you shrink the test.</p></div>
+  <div class="ve-card"><span class="ve-card__k">compiler bugs</span><h4>They are real</h4><p><em>"TD gather/load feeding tl.dot with a non-block-aligned K miscompiles (~74% of output elements wrong) on real HW; this is a compiler-codegen issue, not a Python-maskable boundary gap"</em> — <code>fused_moe.py:L847-L859</code>. vLLM guards it and logs a fallback. Always diff against a torch reference on the shape you actually run.</p></div>
+  <div class="ve-card"><span class="ve-card__k">latency spikes</span><h4>Compiling during serving</h4><p><code>"Triton kernel JIT compilation during inference: ... This causes a latency spike; consider extending warmup to cover this shape/config."</code> — <code>vllm/utils/jit_monitor.py:L119-L141</code>. A new sequence length reaching an unspecialised kernel stalls a live request.</p></div>
+  <div class="ve-card"><span class="ve-card__k">benchmark hygiene</span><h4>L2 lies to you</h4><p>SGLang's norm benchmark sets <code>NUM_LAYERS = 4  # avoid L2 effect</code> (<code>test/registered/kernels/benchmark/layernorm/bench_norm.py:L34</code>) and cycles distinct tensors. Time one 32 KiB tensor in a loop and you will measure L2, not HBM, and beat your own bandwidth bound.</p></div>
+</div>
+
+<p>One more, structural: a one-program-per-row grid is right for prefill and wrong for decode. At
+$m = 1$ the grid is <code>(1,)</code> and 131 of 132 SMs idle. SGLang's CUDA kernel handles it with a
+grid-stride loop and an occupancy-derived block count &mdash;
+<code>const auto num_blocks = std::min&lt;uint32_t&gt;(num_tokens, max_occupancy * kNumSM);</code>
+at <code>python/sglang/kernels/jit/csrc/elementwise/rmsnorm.cuh:L307-L311</code>. The Triton kernel
+does not, because at decode the norm is 0.014% of a 4.48 ms step floor and the launch overhead
+dominates anyway. Knowing which of those two facts applies to <em>your</em> kernel is the judgement
+this chapter is trying to build.</p></div></section>
+<section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. Check correctness against a torch reference before anything else.</b> SGLang's test for the
+kernel this chapter read is the template:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">test/registered/kernels/ops/layernorm/test_minimax_m3_rmsnorm.py:L29-L50</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _gemma_rmsnorm_ref(x: torch.Tensor, weight: torch.Tensor) -&gt; torch.Tensor:
+    orig_dtype = x.dtype
+    x_f = x.float()
+    variance = x_f.pow(2).mean(dim=-1, keepdim=True)
+    out = x_f * torch.rsqrt(variance + EPS)
+    out = out * (1.0 + weight.float())
+    return out.to(orig_dtype)
+
+
+@pytest.mark.parametrize("shape", [(1, 512), (64, 6144), (257, 6144)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_rmsnorm_matches_reference(shape, dtype):
+    torch.manual_seed(0)
+    x = torch.randn(*shape, device=DEVICE, dtype=dtype)
+    weight = torch.randn(shape[-1], device=DEVICE, dtype=torch.float32)
+
+    got = gemma_rmsnorm(x, weight, EPS)
+    ref = _gemma_rmsnorm_ref(x, weight)
+
+    torch.testing.assert_close(got, ref, atol=2e-2, rtol=2e-2)</code></pre>
+</div>
+
+<p>Read the parametrisation as a checklist: <code>(1, 512)</code> is the degenerate one-program grid,
+<code>(64, 6144)</code> exercises the mask, <code>(257, 6144)</code> makes the grid non-uniform across
+SMs, and a separate test at L52-L65 feeds <code>base[:, ::2]</code> to prove the stride arguments are
+real. Copy this shape set for anything you write.</p>
+
+<p><b>2. Time it against the bound.</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell — run the norm kernel benchmark, then compute achieved bandwidth</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>cd ~/sglang &amp;&amp; python test/registered/kernels/benchmark/layernorm/bench_norm.py
+# sweeps batch 1..8192 x hidden 1024..8192, prints microseconds per layer
+# achieved GB/s = (4 * batch * hidden * 2) / (us * 1e-6) / 1e9
+# compare against 3350 GB/s; anything above ~80% means stop optimising
+
+# vLLM side: tune the MoE configs for your own model and device
+python benchmarks/kernels/benchmark_moe.py --help</code></pre>
+</div>
+
+<p>Note that <code>run_benchmark</code> in
+<code>python/sglang/kernels/jit/benchmark/utils.py:L81-L98</code> uses
+<code>triton.testing.do_bench_cudagraph</code>, not <code>do_bench</code> &mdash; it captures the
+launch into a graph so the measurement is kernel time, not launch time. Which of the two you want
+depends on the question you are asking; <a href="08-01-cuda-graphs.html">&sect;8.1</a> explains the
+difference.</p>
+
+<p><b>3. Flip one flag and watch the cost move.</b> Run a server with
+<code>VLLM_TRITON_FORCE_FIRST_CONFIG=1</code> and compare first-request latency against the default;
+the delta is your autotuning bill. Then delete <code>$TRITON_CACHE_DIR</code> and restart to see what
+<code>TRITON_CACHE_AUTOTUNING=1</code> is buying you.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read and answer.</b> Open
+<code>python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py</code>. The store in
+<code>_gemma_rmsnorm_kernel</code> uses <code>out_ptr + row * n_cols + cols</code> while the load uses
+<code>x_ptr + row * stride_row + cols * stride_col</code>. Why is the asymmetry correct, and what
+would break if a caller passed a non-contiguous <code>out</code>?
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>The output is always freshly allocated by the launcher &mdash; <code>torch.empty((m, n), ...)</code> at L102 &mdash; so it is contiguous by construction and its row stride is exactly <code>n_cols</code>. The input may be a strided view (the docstring names <code>qkv.split</code> views and the test feeds <code>base[:, ::2]</code>), so it needs real stride arguments. A caller who passed a non-contiguous <code>out</code> would have their data scattered to the wrong addresses with no error; the kernel has no way to detect it. The fused-add variant has the same asymmetry on <code>res_out_ptr</code>.</p></div></details>
+</li>
+<li><b>Derive.</b> Compute the arithmetic intensity and bandwidth-bound time for a fused
+SiLU-and-multiply over Llama-3-8B's MLP intermediate ($d_{\text{ff}} = 14336$, bf16) for a
+2048-token chunk. Then say whether autotuning <code>BLOCK_SIZE</code> could plausibly give you 2&times;.
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>SiLU-and-mul reads two <code>[T, 14336]</code> halves of the gate/up projection and writes one: $Q = 3 \times 2048 \times 14336 \times 2 = 176.2$ MB. FLOPs are roughly one exp, one add, one divide and two multiplies per output element, call it $6 \times 2048 \times 14336 = 1.76\times10^{8}$, so $I \approx 1.0$ FLOP/byte &mdash; 295&times; left of the ridge, same regime as the norm. $t_{\min} = 176.2\times10^{6}/3.35\times10^{12} = 52.6\ \mu\text{s}$. No block size can give 2&times; unless the kernel is currently below 50% of peak bandwidth, and 2&times; over the <em>bound</em> is impossible. The only structural 2&times; here is fusing the store away entirely, by folding SiLU into the down-projection GEMM's prologue &mdash; which is a CUTLASS-shaped problem, not a Triton one.</p></div></details>
+</li>
+<li><b>Predict, then verify.</b> <code>_num_warps</code> returns 16 for <code>BLOCK_N &gt;= 4096</code>.
+Predict what happens to correctness and to performance if you force <code>num_warps=1</code> for
+<code>BLOCK_N=8192</code>. Then check your prediction against the Triton IR by dumping
+<code>.ttgir</code> for both.
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>Correctness is unaffected &mdash; <code>num_warps</code> changes the thread mapping, not the semantics, and <code>tl.sum</code> lowers to whatever reduction the layout requires (with one warp there is no cross-warp stage and no <code>__syncthreads</code> at all). Performance collapses: 8192 fp32 elements now live in 32 threads' registers, 256 values each, which is 1024 bytes per thread. That will not fit the register budget, so Triton spills to local memory, which is HBM-backed. Expect an order of magnitude. The <code>.ttgir</code> shows it directly in the <code>#blocked</code> layout attribute, where the per-thread element count jumps by 16&times;; the <code>.json</code> metadata shows the register count and any spill.</p></div></details>
+</li>
+<li><b>Read and answer.</b> In <code>fused_moe_kernel</code>, <code>GROUP_SIZE_M</code> is 64 in the
+tuned config for batch 1 and 1 for batch 4
+(<code>configs/E=8,N=14336,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8.json</code>). Explain the
+reversal.
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>GROUP_SIZE_M</code> controls how many M-tiles are visited before advancing in N, and it exists to keep the working set of concurrent blocks in L2. At batch 1 there are very few M-tiles in total and an enormous number of N-tiles, so a large group means concurrent blocks share the same handful of A rows while sweeping B &mdash; A stays hot. At batch 4 there is enough M work that the naive row-major order already gives reuse, and a group of 1 keeps the N sweep contiguous, which is better for the B stream. The general rule: grouped ordering pays when one of the two dimensions is much smaller than the other.</p></div></details>
+</li>
+<li><b>Design.</b> You need a fused kernel that reads the KV cache, dequantises FP8 to bf16, and
+writes a contiguous bf16 buffer for an attention backend that cannot read FP8. Triton or CUTLASS?
+Justify with an intensity calculation.
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>Triton. The operation reads $N$ bytes of FP8 and writes $2N$ bytes of bf16 with about one multiply per element, so $I \approx 1/3$ FLOP/byte &mdash; three orders of magnitude below the ridge, with no matrix multiply anywhere in it. There is nothing for a tensor core to do, so CUTLASS's entire value proposition (mainloop pipelining feeding an MMA atom) is inapplicable, while its costs (compile time, authoring difficulty) are not. The addressing is paged and irregular, which is exactly what Triton's block-of-indices gather handles well &mdash; see the <code>offs_token = tl.load(sorted_token_ids_ptr + ...)</code> idiom. Reach for CUTLASS when there is a dense GEMM in the middle and the last 20% of its FLOP/s matters.</p></div></details>
+</li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li><b>Triton moves the unit of work from a thread to a block of elements.</b> You keep the two
+decisions that need domain knowledge &mdash; what one program owns, and how many programs there are
+&mdash; and give up the six that need hardware bookkeeping: thread mapping, vectorisation, shuffle
+trees, shared-memory staging, and both barriers.</li>
+<li><b>The mask is the API for shapes that are not powers of two,</b> and it costs registers and
+reduction width, not bandwidth. At $d = 6144$ with <code>BLOCK_N = 8192</code> you pay 1.33&times; the
+in-register reduction and 1.00&times; the HBM traffic. Divide by the real width, and always pass
+<code>other=0.0</code> when the block feeds a reduction.</li>
+<li><b>Judge a kernel against a bound you derived, not against its previous version.</b> Compulsory
+bytes over achieved bandwidth is a number you can compute before writing code; for fused
+RMSNorm-with-residual on Llama-3-8B it is 9.78 ns per token, $I = 0.625$ FLOP/byte, and 472&times;
+left of the H100 ridge &mdash; which settles in advance that only fusion can help.</li>
+<li><b>The three autotuning strategies are all live in these repos and they solve different
+problems.</b> <code>@triton.autotune</code> with a cache key adapts online and stalls on new keys;
+vLLM's 330 checked-in JSON configs adapt offline and never stall; <code>TRITON_CACHE_AUTOTUNING</code>
+plus the JIT monitor make the remaining stalls visible instead of mysterious.</li>
+<li><b>Reach for CUTLASS when there is a dense GEMM in the middle, the last 20% of its FLOP/s
+matters, and the epilogue must fuse.</b> Its tile hierarchy and expression-tree epilogues are
+compile-time types, which buys full specialisation with no runtime dispatch and costs compile time,
+binary size, and a much harder authoring experience. For anything memory-bound or irregularly
+addressed, the answer is Triton.</li>
+<li><b>Both engines treat compiled CUDA and Triton as interchangeable backends behind one
+signature,</b> with a pure-torch reference as the correctness oracle. SGLang makes this explicit in
+<code>KernelBackend</code> and <code>forward_native</code>; vLLM does it per call site. Writing a
+kernel means joining that contract, not just producing a fast function.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="https://triton-lang.org/main/getting-started/tutorials/index.html">Triton tutorials</a>
+&mdash; vector add, fused softmax, matrix multiplication, layer norm. The fused-softmax and layer-norm
+lessons are the same shape as the kernel in &sect;3 and take under an hour.</li>
+<li>Tillet, Kung and Cox, <a href="https://dl.acm.org/doi/10.1145/3315508.3329973">"Triton: An
+Intermediate Language and Compiler for Tiled Neural Network Computations"</a> (MAPL 2019) &mdash; the
+original paper. The block abstraction and the layout-assignment pass are the durable parts; the
+surface syntax has moved on.</li>
+<li><a href="https://github.com/NVIDIA/cutlass">NVIDIA/CUTLASS</a>, pinned to <code>v4.4.2</code> by
+<code>CMakeLists.txt:L486</code>. Start with the CuTe quickstart under
+<code>media</code> for layouts, then the repository's own examples for the collective-builder
+pattern you saw in <code>scaled_mm.cuh</code>.</li>
+<li><a href="https://github.com/sgl-project/sglang/issues/29630">SGLang RFC #29630</a> and its
+finale <a href="https://github.com/sgl-project/sglang/pull/32072">PR #32072</a> &mdash; the
+reorganisation that produced <code>python/sglang/kernels/</code>, the <code>KernelBackend</code>
+enum, and the JIT/AOT split this chapter reads.</li>
+<li><a href="https://github.com/sgl-project/sglang/pull/2628">SGLang PR #2628</a> &mdash; the tuned
+MoE config mechanism, credited in vLLM's own source at
+<code>vllm/model_executor/layers/fused_moe/fused_moe.py:L1109</code>. Worth reading for the
+methodology of producing the JSON files.</li>
+<li>Neighbours: <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> for every CUDA
+construct in Figure 1, <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>
+for the roofline this chapter places kernels on,
+<a href="../03-attention-kernels/03-03-decode-attention.html">&sect;3.3</a> for a Triton attention
+kernel read line by line, <a href="../04-quantization/04-03-formats-and-kernels.html">&sect;4.3</a> for
+Marlin, Machete and the scaled-GEMM epilogue, and <a href="08-02-torch-compile.html">&sect;8.2</a> for
+the Triton you never see because Inductor wrote it.</li>
+</ul></div></section>
+<div class="pager"><a href="08-02-torch-compile.html"><div class="pager__k">← Previous</div><div class="pager__t">torch.compile, Inductor, piecewise capture</div></a><a class="pager__next" href="08-04-weight-loading-and-adding-a-model.html"><div class="pager__k">Next →</div><div class="pager__t">Weight loading, sharded loaders, adding a model</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: what Triton takes away</a>
+<a href="#writing-the-kernel">Writing the kernel</a>
+<a href="#is-it-good">How to know if the kernel is good</a>
+<a href="#autotuning">Autotuning: three strategies, all in these repos</a>
+<a href="#production-kernel">Reading a production kernel: fused_moe_kernel</a>
+<a href="#dispatch">Compiled or Triton: how each engine decides</a>
+<a href="#cutlass">CUTLASS at a glance</a>
+<a href="#the-map">Which file do I open</a>
+<a href="#worked-trace">Worked trace: from decorator to cubin</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

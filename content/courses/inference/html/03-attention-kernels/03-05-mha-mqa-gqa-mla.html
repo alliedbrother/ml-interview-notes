@@ -1,0 +1,2000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MHA → MQA → GQA → MLA — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="kernels">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i is-current" href="03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 3 · Attention kernels · 03-05</div>
+<h1>MHA → MQA → GQA → MLA</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mla/</code></li><li><code>vllm/model_executor/layers/</code></li><li><code>python/sglang/srt/layers/radix_attention.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Four attention variants, one question: the KV cache is too big and decode is
+bandwidth-bound, so how few bytes per token can you get away with? MHA, MQA and GQA answer by
+deleting KV heads; MLA answers by refusing to store heads at all. The first three are the same
+trade at three points on a line. The fourth is a different trade, and it behaves differently
+the moment you add a second GPU.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">64&times;</div><div class="kpi__l">KV bytes MQA saves on Llama-3-70B geometry (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">8&times;</div><div class="kpi__l">What GQA-8 actually takes — and it raises decode intensity 8&times;</div></div>
+  <div class="kpi"><div class="kpi__n">TP=5</div><div class="kpi__l">Where MLA's cluster KV advantage over GQA-8 runs out (derived)</div></div>
+</div></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take Llama-3-70B's attention geometry — $L = 80$ layers, $h = 64$ query heads, head
+dimension $d_h = 128$ — and store keys and values the way the original Transformer did, one K
+and one V per query head. Feed the cell-size formula from
+<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>:</p>
+
+<div class="math-display">$$c_{\text{MHA}} = 2 \cdot 80 \cdot 64 \cdot 128 \cdot 2 = 2{,}621{,}440 \text{ bytes} = 2.5 \text{ MiB per token}$$</div>
+
+<p>One 8,192-token conversation would need <b>20&nbsp;GiB</b> of KV cache. On an 80&nbsp;GB
+H100 running the model at TP=8 with roughly 50&nbsp;GiB of pool per card
+(<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>, derived), the whole
+eight-GPU node would hold <b>twenty</b> concurrent 8k requests — exactly one eighth of the 162
+the shipped model manages, because MHA's per-rank cell is eight times GQA-8's. Twenty. On half a
+million dollars of hardware.</p>
+
+<p>The shipped Llama-3-70B does not do that. It declares
+<code>num_key_value_heads: 8</code>, and the same arithmetic gives 320&nbsp;KiB per token,
+2.5&nbsp;GiB at 8k, and 162 concurrent requests. Nothing about the FLOPs changed — all 64
+query heads still attend over the full context. What changed is how many <em>distinct</em> K/V
+vectors have to exist in HBM, and therefore how many bytes the decode kernel drags across the
+memory bus on every single step.</p>
+
+<p>That single config field is the whole subject of this chapter. Its four settings — $h_{kv}
+= h$, $h_{kv} = 1$, $h_{kv} = h/g$, and "there is no $h_{kv}$, cache a latent instead" — are
+MHA, MQA, GQA and MLA.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Attention has two head counts that people habitually conflate. The <em>query</em> head count
+$h$ decides how many independent attention patterns the layer can express — it is a capacity
+knob, and it costs FLOPs and query-projection parameters. The <em>KV</em> head count $h_{kv}$
+decides how many distinct key/value vectors must be written to and re-read from the cache — it
+is a bandwidth knob, and it costs bytes on every decode step forever. The variants in this
+chapter all hold $h$ fixed and shrink $h_{kv}$. Query heads are broadcast against whatever KV
+heads exist; the broadcast is free in memory, which is exactly the point.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — query heads fanning onto KV heads, cache strips drawn to scale.</b>
+    One drawn cell = 4 attention heads, so the strips are in true 64 : 16 : 8 : 1 proportion for
+    Llama-3-70B's geometry ($h = 64$). Byte and intensity figures are <em>derived</em> from
+    $L=80$, $d_h=128$, bf16.</p>
+  <svg viewBox="0 0 900 250" width="100%" role="img" aria-labelledby="fanTitle fanDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="fanTitle">Query-to-KV head mapping for MHA, GQA-4, GQA-8 and MQA</title>
+    <desc id="fanDesc">Four panels. Each shows sixteen drawn query cells above a key-value strip.
+    MHA's strip is sixteen cells wide, GQA with group size four is four cells, GQA with group
+    size eight is two cells, and MQA is a quarter-cell sliver. Per-token cache costs are
+    2560, 640, 320 and 40 kibibytes respectively.</desc>
+
+    <g font-size="12" fill="currentColor" text-anchor="middle">
+      <text x="116" y="24">MHA</text>
+      <text x="336" y="24">GQA, g = 4</text>
+      <text x="556" y="24">GQA, g = 8</text>
+      <text x="776" y="24">MQA</text>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.55" text-anchor="middle">
+      <text x="116" y="40">h_kv = h</text>
+      <text x="336" y="40">h_kv = h/4</text>
+      <text x="556" y="40">h_kv = h/8</text>
+      <text x="776" y="40">h_kv = 1</text>
+    </g>
+
+    <g fill="var(--steel)" fill-opacity="0.8" stroke="var(--bg)" stroke-width="1">
+      <rect x="20"  y="54" width="192" height="16"/>
+      <rect x="240" y="54" width="192" height="16"/>
+      <rect x="460" y="54" width="192" height="16"/>
+      <rect x="680" y="54" width="192" height="16"/>
+    </g>
+    <g stroke="var(--bg)" stroke-width="1" stroke-opacity="0.7">
+      <path d="M32 54v16M44 54v16M56 54v16M68 54v16M80 54v16M92 54v16M104 54v16M116 54v16M128 54v16M140 54v16M152 54v16M164 54v16M176 54v16M188 54v16M200 54v16"/>
+      <path d="M252 54v16M264 54v16M276 54v16M288 54v16M300 54v16M312 54v16M324 54v16M336 54v16M348 54v16M360 54v16M372 54v16M384 54v16M396 54v16M408 54v16M420 54v16"/>
+      <path d="M472 54v16M484 54v16M496 54v16M508 54v16M520 54v16M532 54v16M544 54v16M556 54v16M568 54v16M580 54v16M592 54v16M604 54v16M616 54v16M628 54v16M640 54v16"/>
+      <path d="M692 54v16M704 54v16M716 54v16M728 54v16M740 54v16M752 54v16M764 54v16M776 54v16M788 54v16M800 54v16M812 54v16M824 54v16M836 54v16M848 54v16M860 54v16"/>
+    </g>
+    <text x="14" y="66" font-size="9" fill="currentColor" fill-opacity="0.6" text-anchor="end">Q</text>
+
+    <g stroke="var(--teal)" stroke-opacity="0.45" stroke-width="1" fill="none">
+      <path d="M26 70v42M38 70v42M50 70v42M62 70v42M74 70v42M86 70v42M98 70v42M110 70v42M122 70v42M134 70v42M146 70v42M158 70v42M170 70v42M182 70v42M194 70v42M206 70v42"/>
+      <path d="M246 70L246 112M258 70L246 112M270 70L246 112M282 70L246 112M294 70L258 112M306 70L258 112M318 70L258 112M330 70L258 112M342 70L270 112M354 70L270 112M366 70L270 112M378 70L270 112M390 70L282 112M402 70L282 112M414 70L282 112M426 70L282 112"/>
+      <path d="M466 70L466 112M478 70L466 112M490 70L466 112M502 70L466 112M514 70L466 112M526 70L466 112M538 70L466 112M550 70L466 112M562 70L478 112M574 70L478 112M586 70L478 112M598 70L478 112M610 70L478 112M622 70L478 112M634 70L478 112M646 70L478 112"/>
+      <path d="M686 70L681 112M698 70L681 112M710 70L681 112M722 70L681 112M734 70L681 112M746 70L681 112M758 70L681 112M770 70L681 112M782 70L681 112M794 70L681 112M806 70L681 112M818 70L681 112M830 70L681 112M842 70L681 112M854 70L681 112M866 70L681 112"/>
+    </g>
+
+    <g fill="var(--copper)" fill-opacity="0.9" stroke="var(--bg)" stroke-width="1">
+      <rect x="20"  y="112" width="192" height="18"/>
+      <rect x="240" y="112" width="48"  height="18"/>
+      <rect x="460" y="112" width="24"  height="18"/>
+      <rect x="680" y="112" width="3"   height="18"/>
+    </g>
+    <g stroke="var(--bg)" stroke-width="1" stroke-opacity="0.7">
+      <path d="M32 112v18M44 112v18M56 112v18M68 112v18M80 112v18M92 112v18M104 112v18M116 112v18M128 112v18M140 112v18M152 112v18M164 112v18M176 112v18M188 112v18M200 112v18"/>
+      <path d="M252 112v18M264 112v18M276 112v18"/>
+      <path d="M472 112v18"/>
+    </g>
+    <text x="14" y="125" font-size="9" fill="currentColor" fill-opacity="0.6" text-anchor="end">KV</text>
+
+    <g font-size="12" fill="currentColor" text-anchor="middle">
+      <text x="116" y="154">h_kv = 64</text>
+      <text x="336" y="154">h_kv = 16</text>
+      <text x="556" y="154">h_kv = 8</text>
+      <text x="776" y="154">h_kv = 1</text>
+    </g>
+    <g font-size="13" fill="var(--copper)" text-anchor="middle">
+      <text x="116" y="176">2,560 KiB/tok</text>
+      <text x="336" y="176">640 KiB/tok</text>
+      <text x="556" y="176">320 KiB/tok</text>
+      <text x="776" y="176">40 KiB/tok</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.7" text-anchor="middle">
+      <text x="116" y="196">I = 1 FLOP/byte</text>
+      <text x="336" y="196">I = 4</text>
+      <text x="556" y="196">I = 8</text>
+      <text x="776" y="196">I = 64</text>
+      <text x="116" y="212">20.0 GiB at 8k</text>
+      <text x="336" y="212">5.0 GiB at 8k</text>
+      <text x="556" y="212">2.5 GiB at 8k</text>
+      <text x="776" y="212">0.31 GiB at 8k</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.55" text-anchor="middle">
+      <text x="450" y="240">Llama-3-70B ships the third panel. The first is what the 2017 Transformer would have done.</text>
+    </g>
+  </svg>
+</div>
+
+<p>Read the strips, not the fans. Every doubling of the group size $g = h/h_{kv}$ halves the
+copper strip. That is the entire mechanism, and it is why the progression is a line and not a
+set of unrelated ideas.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: one knob, two effects</h2></div><div class="sec__body"><p>Two results already derived elsewhere in this book meet here, and they move in the same
+direction. From <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>, the
+per-token cell size:</p>
+
+<div class="math-display">$$c \;=\; 2 \cdot L \cdot h_{kv} \cdot d_h \cdot b \;=\; \frac{2 \cdot L \cdot h \cdot d_h \cdot b}{g}, \qquad g \equiv \frac{h}{h_{kv}}$$</div>
+
+<p>with $L$ layers, $h$ query heads, $h_{kv}$ KV heads, head dimension $d_h$, $b$ bytes per
+stored element, and $g$ the <em>group size</em> — how many query heads share one KV head. From
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>, the decode
+attention kernel's arithmetic intensity:</p>
+
+<div class="math-display">$$I \;=\; \frac{4\,h\,s\,d_h}{2\,s\,h_{kv}\,d_h\,b} \;=\; \frac{2h}{b\,h_{kv}} \;=\; \frac{2g}{b}$$</div>
+
+<p>Context length $s$ cancelled. Head dimension cancelled. What survives is $g$ and the dtype.
+So one knob buys two things at once, and this is the sentence to remember:</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">The GQA identity</span>
+  <p>Each doubling of the group size $g$ <b>halves</b> the KV bytes per token <b>and doubles</b>
+  the decode-attention arithmetic intensity. It is the same doubling: you moved half as many
+  bytes for the same FLOPs. For bf16 ($b = 2$) the intensity is numerically just $g$.</p>
+</div>
+
+<p>On an H100 SXM the ridge point is $I^{*} = 295$ FLOP/byte
+(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>), so every
+one of these variants is still deep in the bandwidth-bound region — GQA-8 at $I = 8$ reaches
+about 2.7% of the card's bf16 peak. Nobody escapes the roofline by picking a group size. What
+they buy is a factor, and factors of 8 are worth having.</p>
+
+<h3>What each variant costs in weights, too</h3>
+
+<p>The KV projections shrink with $h_{kv}$ as well, which is often forgotten. For Llama-3-70B
+($d = 8192$, $h \cdot d_h = 8192$), MHA would need $W_K$ and $W_V$ of $8192 \times 8192$ each,
+134.2M parameters per layer; GQA-8 needs $8192 \times 1024$ each, 16.8M per layer. Over 80
+layers that is <b>9.4B parameters</b> saved — 17.5&nbsp;GiB of bf16 weights, or roughly one
+whole H100's worth of the eight-card node. GQA is a weight optimisation that happens to be a
+bandwidth optimisation, which is part of why it was cheap for model builders to adopt.</p>
+
+<h3>The four variants, arithmetically</h3>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">All four on Llama-3-70B's geometry ($L=80$, $h=64$, $d_h=128$, bf16 KV), plus DeepSeek-V3's real MLA shape. Every byte and intensity figure is <em>derived</em> arithmetic from the formulas above; quality columns are <em>cited</em>, never measured here.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Variant</th><th class="num">h_kv</th><th class="num">g</th><th class="num">KiB/token</th><th class="num">GiB @ 8k</th><th class="num">decode I</th><th>Quality evidence</th></tr></thead>
+    <tbody>
+      <tr><td>MHA</td><td class="num">64</td><td class="num">1</td><td class="num">2,560</td><td class="num">20.00</td><td class="num">1</td><td>Baseline by definition</td></tr>
+      <tr><td>GQA, g=2</td><td class="num">32</td><td class="num">2</td><td class="num">1,280</td><td class="num">10.00</td><td class="num">2</td><td>&mdash;</td></tr>
+      <tr><td>GQA, g=4</td><td class="num">16</td><td class="num">4</td><td class="num">640</td><td class="num">5.00</td><td class="num">4</td><td>Llama-3-8B's setting</td></tr>
+      <tr><td>GQA, g=8 <span class="pill pill--verified">shipped</span></td><td class="num">8</td><td class="num">8</td><td class="num">320</td><td class="num">2.50</td><td class="num">8</td><td>GQA paper Table 1: 47.1 avg vs MHA 47.2</td></tr>
+      <tr><td>GQA, g=16</td><td class="num">4</td><td class="num">16</td><td class="num">160</td><td class="num">1.25</td><td class="num">16</td><td>&mdash;</td></tr>
+      <tr><td>MQA</td><td class="num">1</td><td class="num">64</td><td class="num">40</td><td class="num">0.31</td><td class="num">64</td><td>GQA paper Table 1: 46.6 avg; &ldquo;can lead to quality degradation&rdquo;</td></tr>
+      <tr><td>MLA (DeepSeek-V3) <span class="pill pill--new">different trade</span></td><td class="num">1*</td><td class="num">&mdash;</td><td class="num">68.6</td><td class="num">0.54</td><td class="num">242*</td><td>DeepSeek-V2 abstract: 93.3% KV reduction, 5.76&times; max generation throughput</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>*MLA's row is DeepSeek-V3's own shape ($L = 61$, $r_{kv} = 512$, $d_{\text{rope}} = 64$,
+$h = 128$), not Llama-3-70B's — the architectures are not interchangeable. Its "$h_{kv} = 1$"
+is what the engines allocate, not what the config declares; see §5. Its intensity is derived
+below and is a genuinely different number from anything in the GQA family.</p>
+
+<h3>MQA: correct, and too aggressive</h3>
+
+<p>Shazeer's 2019 paper proposed exactly the extreme: one KV head, shared by every query head.
+The abstract's claim is the honest one — <em>"We verify experimentally that the resulting models
+can indeed be much faster to decode, and incur only minor quality degradation from the
+baseline"</em>
+(<a href="https://arxiv.org/abs/1911.02150">arXiv:1911.02150</a>). Four years later the GQA
+paper opens by naming the two problems that stopped MQA from becoming the default:
+<em>"MQA can lead to quality degradation, and moreover it may not be desirable to train a
+separate model just for faster inference"</em>
+(<a href="https://arxiv.org/abs/2305.13245">arXiv:2305.13245</a>). Its introduction adds
+training instability to the charge sheet. On the paper's T5-XXL comparison, MQA scores 46.6
+average against MHA's 47.2 — small, but consistently down, and one KV head across 64 query
+heads is a very thin channel through which every attention pattern in the layer must be
+expressed.</p>
+
+<p>The second objection is the practical one. A 70B checkpoint is not retrained because a
+serving team wants a smaller cache. The GQA paper's contribution is as much a
+<em>conversion recipe</em> as an architecture: mean-pool the existing KV heads within each group
+and uptrain with <em>"5% of original pre-training compute"</em>. That is what made the switch
+tractable for everyone shipping models.</p>
+
+<h3>Why g = 4 or 8 and not 32</h3>
+
+<p>The GQA paper's own numbers show the shape of the curve: MHA-XXL takes 1.51&nbsp;s per sample
+at 47.2 average, MQA-XXL takes 0.24&nbsp;s at 46.6, and GQA-8-XXL takes 0.28&nbsp;s at 47.1
+(<a href="https://arxiv.org/abs/2305.13245">Table 1</a>). GQA-8 recovers essentially all of
+MQA's speed and essentially all of MHA's quality. The speed axis has already saturated by
+$g = 8$ because, past that point, KV traffic is no longer what the decode step is waiting
+for — the weights are. Halving KV bytes again when KV is 10% of the step's traffic buys 5%.</p>
+
+<p>But there is a second, purely mechanical reason $h_{kv} = 8$ is the near-universal choice,
+and it is written in the serving code rather than the paper. Tensor parallelism shards KV heads
+across ranks by integer division, and once $h_{kv}$ drops below the TP size the heads get
+<em>replicated</em> instead of sharded — you pay the full cell size on every rank and gain
+nothing. Eight is the number of GPUs in a node. Setting $h_{kv} = 8$ makes TP=8 the exact point
+where each rank owns precisely one KV head, which is the largest useful $g$ for the standard
+deployment shape.</p>
+
+<p>The sharpest form of that argument: at TP=8, a GQA-8 model and an MQA model have <em>the same
+per-rank cache</em>. Both give <code>max(1, h_kv // 8) = 1</code> KV head per GPU, and both cost
+40&nbsp;KiB per token per rank on Llama-3-70B's geometry. MQA's entire remaining byte advantage
+over GQA-8 evaporates at the deployment shape everyone actually uses — while its quality cost
+does not. Choosing $h_{kv} = 8$ is choosing the smallest KV cache that TP=8 can still shard.
+§6 makes this quantitative.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — bytes per resident token, log-2 axis.</b>
+    On a doubling axis, every step of $g$ removes a constant slab, which is what makes the GQA
+    family a straight line. <em>Derived</em> from $L=80$, $h=64$, $d_h=128$, bf16; the MLA bar is
+    DeepSeek-V3's own shape and is shown for magnitude, not as a drop-in swap.</p>
+  <svg viewBox="0 0 900 320" width="100%" role="img" aria-labelledby="bytesTitle bytesDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="bytesTitle">KV bytes per token across attention variants on a log-2 axis</title>
+    <desc id="bytesDesc">Horizontal bars on a logarithmic axis from 32 to 4096 kibibytes per token.
+    MHA 2560, GQA-2 1280, GQA-4 640, GQA-8 320, GQA-16 160, MQA 40, and DeepSeek-V3 MLA 68.6.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.12" stroke-width="1">
+      <line x1="200" y1="44" x2="200" y2="276"/>
+      <line x1="297" y1="44" x2="297" y2="276"/>
+      <line x1="394" y1="44" x2="394" y2="276"/>
+      <line x1="491" y1="44" x2="491" y2="276"/>
+      <line x1="589" y1="44" x2="589" y2="276"/>
+      <line x1="686" y1="44" x2="686" y2="276"/>
+      <line x1="783" y1="44" x2="783" y2="276"/>
+      <line x1="880" y1="44" x2="880" y2="276"/>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.6" text-anchor="middle">
+      <text x="200" y="292">32</text>
+      <text x="297" y="292">64</text>
+      <text x="394" y="292">128</text>
+      <text x="491" y="292">256</text>
+      <text x="589" y="292">512</text>
+      <text x="686" y="292">1024</text>
+      <text x="783" y="292">2048</text>
+      <text x="880" y="292">4096</text>
+      <text x="540" y="312">KiB per resident token, bf16 KV (log-2 scale)</text>
+    </g>
+
+    <g font-size="12" fill="currentColor" text-anchor="end">
+      <text x="192" y="62">MHA, h_kv=64</text>
+      <text x="192" y="94">GQA g=2</text>
+      <text x="192" y="126">GQA g=4</text>
+      <text x="192" y="158">GQA g=8</text>
+      <text x="192" y="190">GQA g=16</text>
+      <text x="192" y="222">MQA, h_kv=1</text>
+      <text x="192" y="262">MLA (DS-V3)</text>
+    </g>
+
+    <g fill="var(--teal)" fill-opacity="0.85">
+      <rect x="200" y="48" width="614" height="18"/>
+      <rect x="200" y="80" width="517" height="18"/>
+      <rect x="200" y="112" width="420" height="18"/>
+      <rect x="200" y="176" width="226" height="18"/>
+      <rect x="200" y="208" width="31" height="18"/>
+    </g>
+    <rect x="200" y="144" width="323" height="18" fill="var(--accent)" fill-opacity="0.9"/>
+    <rect x="200" y="248" width="107" height="18" fill="var(--copper)" fill-opacity="0.9"/>
+
+    <g font-size="11" fill="currentColor">
+      <text x="822" y="62">2,560</text>
+      <text x="725" y="94">1,280</text>
+      <text x="628" y="126">640</text>
+      <text x="531" y="158">320 &mdash; shipped</text>
+      <text x="434" y="190">160</text>
+      <text x="239" y="222">40</text>
+      <text x="315" y="262">68.6 &mdash; and no factor of 2</text>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.25" stroke-width="1" stroke-dasharray="3 3">
+      <line x1="200" y1="238" x2="880" y2="238"/>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.55">
+      <text x="200" y="36">one drop per doubling of g &mdash; constant width on this axis</text>
+    </g>
+  </svg>
+</div>
+
+<h3>MLA: not another point on the line</h3>
+
+<p>MLA does not choose an $h_{kv}$. It stores, per token per layer, a single compressed latent
+of width $r_{kv} + d_{\text{rope}}$ and reconstructs per-head keys and values inside the
+kernel. <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a> derived the
+resulting cell size, which has neither a head count nor a factor of two:</p>
+
+<div class="math-display">$$c_{\text{MLA}} = L \cdot (r_{kv} + d_{\text{rope}}) \cdot b \;=\; 61 \times 576 \times 2 \;=\; 70{,}272 \text{ bytes} = 68.6 \text{ KiB per token}$$</div>
+
+<p>The mechanism — the absorbed-weight trick, and why prefill and decode use different
+formulations — is <a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>'s subject, and
+this chapter deliberately does not go there. What belongs here is the shape of the trade, and
+it is visible in the intensity. At decode, all $h$ query heads attend over one shared latent:
+each head computes scores against $r_{kv} + d_{\text{rope}} = 576$ dimensions and an output
+over $r_{kv} = 512$ dimensions, while the bytes read are one 576-wide latent per position:</p>
+
+<div class="math-display">$$I_{\text{MLA}} = \frac{2h\,s\,(r_{kv} + d_{\text{rope}}) + 2h\,s\,r_{kv}}{s\,(r_{kv}+d_{\text{rope}})\,b} = \frac{2h\,(2r_{kv} + d_{\text{rope}})}{b\,(r_{kv} + d_{\text{rope}})} = \frac{2 \times 128 \times 1088}{2 \times 576} \approx 242 \text{ FLOP/byte}$$</div>
+
+<p>Against the H100's ridge of 295, DeepSeek-V3's decode attention at TP=1 sits at 82% of the
+way to compute-bound — a place no GQA model gets near. That is the honest description of MLA:
+it did not find a cheaper way to store attention state, it found a way to <em>pay in FLOPs
+instead of bytes</em>. GQA moves you along the roofline's bandwidth ramp; MLA moves you off it.
+Which is better depends entirely on which resource you are short of, and — as §6 shows — on how
+many GPUs you have.</p></div></section>
+<section class="sec" id="in-code" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How each variant appears in code</h2></div><div class="sec__body"><p>Neither engine has an "attention variant" enum with four members. MHA, MQA and GQA are all
+the same code path with a different integer; MLA is a separate layer class. SGLang states this
+in its type system with a two-member enum — there is no GQA member because GQA is not a
+different architecture, just a different head count:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/configs/model_config.py:L85-L87</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class AttentionArch(IntEnum):
+    MLA = auto()
+    MHA = auto()</code></pre>
+</div>
+
+<h3>Where h_kv comes from</h3>
+
+<p>vLLM resolves the total KV head count by trying a list of config aliases and falling back to
+the query head count — that fallback <em>is</em> the MHA case, and it is why a pre-2023
+checkpoint with no <code>num_key_value_heads</code> field simply behaves as MHA:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/transformers_utils/model_arch_config_convertor.py:L147-L164</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_total_num_kv_heads(self) -&gt; int:
+        attributes = [
+            # For Falcon:
+            "n_head_kv",
+            "num_kv_heads",
+            # For LLaMA-2:
+            "num_key_value_heads",
+            # For ChatGLM:
+            "multi_query_group_num",
+            # For Step3p5:
+            "num_attention_groups",
+        ]
+        # For non-grouped-query attention models, the number of KV heads is
+        # equal to the number of attention heads.
+        default_factory = self.get_total_num_attention_heads
+        return getattr_iter(
+            self.hf_text_config, attributes, default_factory=default_factory
+        )</code></pre>
+</div>
+
+<p>SGLang's equivalent carries a fossil of the MQA era: a boolean <code>multi_query</code> flag,
+used by Falcon and GPTBigCode, that short-circuits to one KV head — with a comment recording
+that this path never got TP support:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/configs/model_config.py:L1106-L1111</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if not new_decoder_arch_falcon and getattr(
+            self.hf_text_config, "multi_query", False
+        ):
+            # Multi-query attention, only one KV head.
+            # Currently, tensor parallelism is not supported in this case.
+            return 1</code></pre>
+</div>
+
+<h3>Where TP divides it</h3>
+
+<p>vLLM performs the division on the config object, and the MLA early-return is the first
+appearance of this chapter's punchline — MLA returns 1 <em>before</em> the TP division exists:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L1517-L1537</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_num_kv_heads(
+        self,
+        parallel_config: ParallelConfig,
+        arch_config: ModelArchitectureConfig | None = None,
+    ) -&gt; int:
+        """Returns the number of KV heads per GPU.
+
+        Pass ``arch_config`` (from ``model_arch_config[layer_idx]``) to size a
+        single layer of a heterogeneous model rather than the model as a whole.
+        """
+        if self.use_mla:
+            # When using MLA during decode it becomes MQA
+            return 1
+
+        arch_config = arch_config or self.model_arch_config
+        total_num_kv_heads = arch_config.total_num_kv_heads
+        # If tensor parallelism is used, we divide the number of KV heads by
+        # the tensor parallel size. We will replicate the KV heads in the
+        # case where the number of KV heads is smaller than the tensor
+        # parallel size so each GPU has at least one KV head.
+        return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)</code></pre>
+</div>
+
+<p>The <code>max(1, ...)</code> is the replication clause, spelled out in the comment. Past
+$\text{TP} = h_{kv}$ the division saturates and extra ranks duplicate rather than shard.</p>
+
+<p>A GQA model repeats the same division locally. Llama's attention module divides both head
+counts, asserts the two divisibility regimes explicitly, and — critically — resolves
+<code>head_dim</code> from the config with a fallback, not by assumption:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L140-L158</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads &gt;= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+
+        head_dim = getattr(config, "head_dim", None)
+        self.head_dim = head_dim or self.hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim</code></pre>
+</div>
+
+<p>Note that <code>self.num_heads</code> and <code>self.num_kv_heads</code> are divided by the
+<em>same</em> $\text{TP}$, so $g$ is invariant under tensor parallelism as long as
+$h_{kv} \geq \text{TP}$. Llama-3-70B at TP=8 has 8 query heads and 1 KV head per rank: still
+$g = 8$, still $I = 8$. Intensity is a per-rank property that TP does not change.</p>
+
+<p>The per-rank counts go straight into the generic <code>Attention</code> layer, whose only
+statement about variants is a default and an assertion:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/attention.py:L317-L328</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, (
+            f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
+        )
+        self.quant_config = quant_config
+        self.layer_name = prefix
+
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.head_size_v = self.head_size if head_size_v is None else head_size_v
+        self.num_kv_heads = num_kv_heads</code></pre>
+</div>
+
+<p>SGLang's layer names the same thing more honestly — the <code>tp_</code> prefixes say out
+loud that these are already per-rank counts:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/radix_attention.py:L114-L120</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        super().__init__()
+        self.tp_q_head_num = num_heads
+        self.tp_k_head_num = num_kv_heads
+        self.tp_v_head_num = num_kv_heads
+        self.head_dim = head_dim
+        self.qk_head_dim = head_dim
+        self.v_head_dim = v_head_dim if v_head_dim != -1 else head_dim</code></pre>
+</div>
+
+<h3>Where the head count becomes bytes</h3>
+
+<p>In vLLM the layer publishes a cache spec, and the spec's page arithmetic is where $h_{kv}$
+finally turns into memory. The factor of two is written as a <em>sum</em> of K and V head sizes
+rather than a multiplication, which is precisely the hook MLA needs:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/kv_cache_interface.py:L233-L248</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def __post_init__(self):
+        if self.head_size_v is None:
+            object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def num_heads(self) -&gt; int:
+        if self.num_head_slots is not None:
+            return self.num_head_slots
+        return self.num_kv_heads
+
+    @property
+    def state_content_size_bytes(self) -&gt; int:
+        """Bytes per (head slot, stored state) cell of the page."""
+        if self.state_content_bytes is not None:
+            return self.state_content_bytes
+        return (self.head_size + self.head_size_v) * get_dtype_size(self.dtype)</code></pre>
+</div>
+
+<p>A GQA layer returns a <code>FullAttentionSpec</code> carrying its per-rank
+<code>num_kv_heads</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/attention.py:L648-L655</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            return FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
+            )</code></pre>
+</div>
+
+<p>An MLA layer is a different class entirely, and pins both fields as literals. Note
+<code>self.num_kv_heads = 1</code> and <code>head_size = kv_lora_rank + qk_rope_head_dim</code>
+— no TP anywhere in either:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/mla_attention.py:L427-L444</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.num_heads = num_heads
+        self.scale = scale
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.kv_b_proj = kv_b_proj
+        self.dcp_q_replicate = dcp_q_replicate
+        self.W_UK_T_dcp_qrep: torch.Tensor | None = None
+        self.head_size = kv_lora_rank + qk_rope_head_dim
+        self.layer_name = prefix
+        self.indexer = indexer
+        self.non_causal_multi_token_decode = non_causal_multi_token_decode
+        self.sliding_window = sliding_window
+        self.num_kv_heads = 1
+        self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/mla_attention.py:L1190-L1204</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_kv_cache_spec(self, vllm_config: VllmConfig) -&gt; KVCacheSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        common_kwargs = dict(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            cache_dtype_str=self.kv_cache_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+        )</code></pre>
+</div>
+
+<p><code>MLAAttentionSpec</code> then sets <code>head_size_v = 0</code>
+(<code>vllm/v1/kv_cache_interface.py:L392</code>, quoted in
+<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>), which deletes the
+factor of two from <code>state_content_size_bytes</code> above. Two literals — a 1 and a 0 —
+convert the general formula into $c_{\text{MLA}}$.</p>
+
+<p>SGLang says the same thing at the model level, and its naming is the clearest statement in
+either codebase of what MLA is at decode time: DeepSeek's layer builds two
+<code>RadixAttention</code> objects, one literally called <code>attn_mqa</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/deepseek_v2.py:L1896-L1928 and L1919-L1928</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        self.attn_mqa = RadixAttention(
+            self.num_local_heads,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            self.scaling,
+            num_kv_heads=1,
+            layer_id=layer_id,
+            v_head_dim=self.kv_lora_rank,
+            quant_config=quant_config,
+            prefix=add_prefix("attn_mqa", prefix),
+        )
+# ...
+        self.attn_mha = RadixAttention(
+            self.num_local_heads,
+            self.qk_nope_head_dim + self.qk_rope_head_dim,
+            self.scaling,
+            num_kv_heads=self.num_local_heads,
+            layer_id=layer_id,
+            v_head_dim=self.v_head_dim,
+            quant_config=quant_config,
+            prefix=add_prefix("attn_mha", prefix),
+        )</code></pre>
+</div>
+
+<p>The query head count <em>is</em> sharded — <code>self.num_local_heads = num_heads //
+attn_tp_size</code> (<code>python/sglang/srt/models/deepseek_v2.py:L1773</code>) — but
+<code>num_kv_heads=1</code> is a literal, at every TP size. Which layer runs when, and why
+prefill wants a different one, is <a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — from a config field to bytes on the card, both branches.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    CFG["config.json<br/>num_key_value_heads 8, head_dim 128"] --> Q{"MLA architecture?"}
+    Q -- "no" --> G1["get_total_num_kv_heads<br/>alias list, default = num_attention_heads"]
+    G1 --> G2["divide by TP<br/>max(1, 8 // tp_size)"]
+    G2 --> G3["Attention / RadixAttention<br/>num_kv_heads = 1 at TP=8"]
+    G3 --> G4["FullAttentionSpec<br/>page = 1 x 16 x 256 x 2 = 8192 B"]
+    G4 --> OUT1["per-rank cell 40 KiB<br/>cluster cell 320 KiB"]
+
+    Q -- "yes" --> M1["get_num_kv_heads returns 1<br/>before any TP division"]
+    M1 --> M2["MLAAttention<br/>head_size = 512 + 64 = 576"]
+    M2 --> M3["MLAAttentionSpec<br/>head_size_v = 0, no factor of 2"]
+    M3 --> OUT2["per-rank cell 68.6 KiB<br/>cluster cell 68.6 x TP"]
+  </script>
+</div></div></section>
+<section class="sec" id="tp-asymmetry" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The uncomfortable part: TP shrinks GQA's cache, not MLA's</h2></div><div class="sec__body"><p>SGLang computes one scalar cell size per model and divides the pool by it. The function has
+two branches, and the difference between them is the whole argument of this section. First the
+GQA branch:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/pool_configurator.py:L326-L333</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        else:
+            n = model_config.get_num_kv_heads(tp_size, dcp_size)
+            cell_size = (
+                n
+                * (model_config.head_dim + model_config.v_head_dim)
+                * effective_num_layers
+                * kv_size
+            )</code></pre>
+</div>
+
+<p>Now the MLA branch, from earlier in the same function. <code>tp_size</code> and
+<code>dcp_size</code> are bound at the top of the function and then never referenced here:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/pool_configurator.py:L248-L265</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        kv_size = torch._utils._element_size(kv_cache_dtype)
+        tp_size = get_parallel().attn_tp_size
+        dcp_size = get_parallel().attn_dcp_size
+
+        if kvc.use_mla_backend:
+            from sglang.srt.mem_cache.kv_cache_configurator import (
+                calculate_mla_kv_cache_dim,
+            )
+
+            cell_size = (
+                calculate_mla_kv_cache_dim(
+                    model_config=model_config,
+                    kv_cache_dtype=kv_cache_dtype,
+                    server_args=kvc.server_args,
+                )
+                * effective_num_layers
+                * kv_size
+            )</code></pre>
+</div>
+
+<p>Confirmed at <code>7d89325</code>: the MLA cell size is a pure function of the checkpoint's
+latent width, the layer count and the dtype. It is identical at TP=1 and TP=16. vLLM says the
+same thing differently, with the <code>if self.use_mla: return 1</code> early return quoted in
+§5. <b>MLA KV caches are replicated on every tensor-parallel rank.</b></p>
+
+<p>The consequence is a capacity law. Let $P$ be the per-GPU KV pool in bytes. For a GQA model,
+each rank stores $c / \min(\text{TP}, h_{kv})$ bytes per token, so the cluster holds</p>
+
+<div class="math-display">$$N_{\text{GQA}} = \frac{P \cdot \min(\text{TP},\, h_{kv})}{c}, \qquad N_{\text{MLA}} = \frac{P}{c_{\text{MLA}}}$$</div>
+
+<p>The GQA cluster capacity grows linearly in TP until TP reaches $h_{kv}$, then flattens — the
+replication clause in <code>max(1, ...)</code> is exactly this saturation. The MLA cluster
+capacity is a constant. Work it with $P = 40$&nbsp;GiB, Llama-3-70B ($c = 320$&nbsp;KiB,
+$h_{kv} = 8$) against DeepSeek-V3 ($c_{\text{MLA}} = 68.6$&nbsp;KiB):</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Cluster-wide resident tokens at a fixed 40 GiB KV pool per GPU. All <em>derived</em> from the two formulas above; no measurement, and the two models' weight footprints are deliberately factored out so the KV term is visible on its own.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>TP</th><th class="num">Llama-3-70B per-rank cell</th><th class="num">Llama-3-70B cluster tokens</th><th class="num">DeepSeek-V3 per-rank cell</th><th class="num">DeepSeek-V3 cluster tokens</th><th>Winner</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="num">320 KiB</td><td class="num">131,072</td><td class="num">68.6 KiB</td><td class="num">611,192</td><td>MLA, 4.7&times;</td></tr>
+      <tr><td class="num">2</td><td class="num">160 KiB</td><td class="num">262,144</td><td class="num">68.6 KiB</td><td class="num">611,192</td><td>MLA, 2.3&times;</td></tr>
+      <tr><td class="num">4</td><td class="num">80 KiB</td><td class="num">524,288</td><td class="num">68.6 KiB</td><td class="num">611,192</td><td>MLA, 1.17&times;</td></tr>
+      <tr><td class="num">8</td><td class="num">40 KiB</td><td class="num">1,048,576</td><td class="num">68.6 KiB</td><td class="num">611,192</td><td>GQA, 1.72&times;</td></tr>
+      <tr><td class="num">16</td><td class="num">40 KiB <span class="pill pill--blocked">saturated</span></td><td class="num">1,048,576</td><td class="num">68.6 KiB</td><td class="num">611,192</td><td>GQA, 1.72&times;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>MLA's per-token cell is 4.7&times; smaller and it still loses at TP=8. The crossover is where
+$\min(\text{TP}, h_{kv})$ passes $c / c_{\text{MLA}} = 320/68.6 = 4.66$, so <b>MLA's
+cluster-KV advantage over a GQA-8 model is spent by TP=5</b>. Every additional rank you give a
+GQA model buys KV capacity; every additional rank you give an MLA model buys FLOP/s and weight
+room and nothing else.</p>
+
+<p>The same asymmetry shows up in the intensity. GQA's $I = 2g/b$ is TP-invariant because both
+head counts shard together. MLA's is not: the query heads shard and the latent does not, so
+per-rank intensity is $2h_{\text{local}}(2r_{kv}+d_{\text{rope}})/(b(r_{kv}+d_{\text{rope}}))$
+and falls linearly with TP — 242 at TP=1, 30 at TP=8, 15 at TP=16 (derived). MLA's spectacular
+roofline position is a TP=1 property that tensor parallelism spends.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — cluster KV capacity against tensor-parallel size.</b>
+    <em>Derived</em> at a fixed 40 GiB KV pool per GPU. GQA doubles per rank doubling until it
+    saturates at TP = h_kv = 8; MLA is flat because every rank keeps a full copy of the latent.</p>
+  <svg viewBox="0 0 900 300" width="100%" role="img" aria-labelledby="tpTitle tpDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="tpTitle">Cluster resident-token capacity versus tensor-parallel size</title>
+    <desc id="tpDesc">Two lines against TP of 1, 2, 4, 8, 16. The GQA line rises from 131 thousand
+    tokens to 1.05 million at TP 8 and then flattens. The MLA line is flat at 611 thousand tokens
+    at every TP. They cross between TP 4 and TP 8.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.12" stroke-width="1">
+      <line x1="120" y1="50" x2="120" y2="250"/>
+      <line x1="120" y1="250" x2="800" y2="250"/>
+      <line x1="120" y1="59" x2="800" y2="59" stroke-dasharray="2 4"/>
+      <line x1="120" y1="155" x2="800" y2="155" stroke-dasharray="2 4"/>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.6" text-anchor="end">
+      <text x="112" y="63">1.05M</text>
+      <text x="112" y="159">524k</text>
+      <text x="112" y="254">0</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.7" text-anchor="middle">
+      <text x="160" y="270">TP = 1</text>
+      <text x="300" y="270">2</text>
+      <text x="440" y="270">4</text>
+      <text x="580" y="270">8</text>
+      <text x="720" y="270">16</text>
+      <text x="460" y="292">tensor-parallel size (same total KV pool per GPU)</text>
+    </g>
+    <text x="40" y="150" font-size="11" fill="currentColor" fill-opacity="0.7" transform="rotate(-90 40 150)" text-anchor="middle">cluster resident tokens</text>
+
+    <polyline points="160,226 300,202 440,155 580,59 720,59" fill="none" stroke="var(--teal)" stroke-width="2.5"/>
+    <polyline points="160,139 300,139 440,139 580,139 720,139" fill="none" stroke="var(--copper)" stroke-width="2.5" stroke-dasharray="6 4"/>
+    <g fill="var(--teal)">
+      <circle cx="160" cy="226" r="4"/><circle cx="300" cy="202" r="4"/><circle cx="440" cy="155" r="4"/><circle cx="580" cy="59" r="4"/><circle cx="720" cy="59" r="4"/>
+    </g>
+    <g fill="var(--copper)">
+      <circle cx="160" cy="139" r="4"/><circle cx="300" cy="139" r="4"/><circle cx="440" cy="139" r="4"/><circle cx="580" cy="139" r="4"/><circle cx="720" cy="139" r="4"/>
+    </g>
+
+    <g font-size="12">
+      <text x="740" y="55" fill="var(--teal)">Llama-3-70B, GQA-8</text>
+      <text x="740" y="135" fill="var(--copper)">DeepSeek-V3, MLA</text>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.65">
+      <text x="596" y="80">saturates: h_kv = 8</text>
+      <text x="452" y="120">crossover near TP = 4.7</text>
+      <text x="164" y="216">131k</text>
+      <text x="164" y="132">611k &mdash; flat at every TP</text>
+    </g>
+    <line x1="497" y1="100" x2="497" y2="250" stroke="var(--plum)" stroke-width="1" stroke-dasharray="3 3"/>
+  </svg>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The escape hatch</span>
+  <p>Nobody actually deploys DeepSeek-V3 with plain TP attention, and this table is why. The fix
+  is data-parallel attention: each rank owns a <em>different</em> sub-batch, so the replicated
+  caches are no longer duplicates of each other. SGLang's flag documents the split exactly —
+  <em>"Enabling data parallelism for attention and tensor parallelism for FFN"</em>
+  (<code>python/sglang/srt/server_args.py:L1163-L1170</code>). With <code>dp_size == tp_size ==
+  8</code> the cluster holds 8&nbsp;&times;&nbsp;611,192 tokens again. The reason this is
+  affordable for MLA-plus-MoE models and not for dense ones is that replicating the attention
+  weights is cheap when the parameters live in the experts; that mechanism belongs to
+  <a href="../05-parallelism/05-03-data-and-expert-parallelism.html">§5.3</a>.</p>
+</div>
+
+<p>The other escape hatch is decode context parallelism, which shards along the <em>sequence</em>
+axis rather than the head axis — vLLM implements it by dividing the per-request length,
+<code>max_model_len = cdiv(max_model_len, dcp_world_size)</code>
+(<code>vllm/v1/kv_cache_interface.py:L300-L305</code>), not by touching the cell size. That is
+why DCP works for MLA at all: there are no heads left to split.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: Llama-3-70B at TP=8, one layer</h2></div><div class="sec__body"><p>Follow the number 8 from the checkpoint to a page of HBM, in vLLM, function by function.</p>
+
+<ol>
+  <li><code>config.json</code> declares <code>num_attention_heads: 64</code>,
+  <code>num_key_value_heads: 8</code>, <code>hidden_size: 8192</code>, <code>num_hidden_layers:
+  80</code>. No <code>head_dim</code> field.</li>
+  <li><code>ModelArchConfigConvertor.get_total_num_kv_heads</code>
+  (<code>model_arch_config_convertor.py:L147-L164</code>) scans the alias list, hits
+  <code>num_key_value_heads</code>, returns <b>8</b>.</li>
+  <li><code>get_head_size</code> (<code>model_arch_config_convertor.py:L99-L113</code>) finds no
+  <code>head_dim</code>, no <code>hidden_size_per_head</code>, and falls through to
+  $8192 / 64 = $ <b>128</b>.</li>
+  <li><code>LlamaAttention.__init__</code> (<code>llama.py:L140-L158</code>) divides:
+  <code>num_heads = 64 // 8 = 8</code>, <code>num_kv_heads = max(1, 8 // 8) = 1</code>. The
+  <code>total_num_kv_heads &gt;= tp_size</code> assertion passes on equality.</li>
+  <li><code>Attention.__init__</code> (<code>attention.py:L317-L328</code>) asserts
+  <code>8 % 1 == 0</code>, stores <code>num_kv_heads = 1</code>,
+  <code>head_size = head_size_v = 128</code>.</li>
+  <li><code>Attention.get_kv_cache_spec</code> (<code>attention.py:L648-L655</code>) returns
+  <code>FullAttentionSpec(num_kv_heads=1, head_size=128, head_size_v=128, block_size=16)</code>.</li>
+  <li><code>AttentionSpec.state_content_size_bytes</code>
+  (<code>kv_cache_interface.py:L245-L248</code>) computes $(128 + 128) \times 2 = 512$ bytes per
+  token per head slot; <code>unpadded_page_size_bytes</code> multiplies by
+  <code>num_heads = 1</code> and <code>storage_block_size = 16</code> to give <b>8,192 bytes per
+  page</b>.</li>
+  <li><code>get_num_blocks</code> (<code>vllm/v1/core/kv_cache_utils.py:L1038-L1040</code>)
+  divides the measured pool by the page size and then by 80 layers. Per-rank cell size:
+  $8192 / 16 \times 80 = 40{,}960$ bytes = <b>40&nbsp;KiB</b>.</li>
+  <li>The engine logs it (<code>vllm/v1/core/kv_cache_utils.py:L1925-L1931</code>):
+  <code>"GPU KV cache size: %s tokens, Maximum concurrency for %s tokens per request:
+  %.2fx"</code>.</li>
+</ol>
+
+<p>The same trace on DeepSeek-V3 diverges at step 2: <code>ModelConfig.get_num_kv_heads</code>
+returns 1 at the <code>use_mla</code> branch without ever reading
+<code>parallel_config.tensor_parallel_size</code>, and steps 4–8 run through
+<code>MLAAttention</code> and <code>MLAAttentionSpec</code> instead, with
+<code>head_size = 576</code>, <code>head_size_v = 0</code>, giving
+$576 \times 2 \times 61 = 70{,}272$ bytes per token <em>on every rank</em>.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">trap 1</span><h4>head_dim is not hidden_size / num_heads</h4>
+  <p>Qwen3-32B declares <code>hidden_size: 5120</code>, <code>num_attention_heads: 64</code> —
+  and <code>head_dim: 128</code>. The division gives 80. Both engines read the declared field
+  first and only fall back to the division, and vLLM's fallback carries a
+  <code># FIXME(woosuk): This may not be true for all models.</code> right above it. Compute
+  Qwen3-32B's cell size from the division and you get 160&nbsp;KiB instead of 256&nbsp;KiB — a
+  37.5% under-count, and a server that OOMs at the concurrency your capacity plan promised.</p></div>
+  <div class="ve-card"><span class="ve-card__k">trap 2</span><h4>Sizing MLA with the GQA formula</h4>
+  <p>DeepSeek-V3's config says <code>num_key_value_heads: 128</code>. Feed that to
+  $2 L h_{kv} d_h b$ and you get 4.77&nbsp;MiB per token instead of 68.6&nbsp;KiB — a 71&times;
+  over-estimate (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>). The
+  declared heads are the <em>logical</em> attention shape; nothing stores them.</p></div>
+  <div class="ve-card"><span class="ve-card__k">trap 3</span><h4>Raising TP past h_kv buys no KV</h4>
+  <p><code>max(1, total_num_kv_heads // tensor_parallel_size)</code> saturates at 1. Going from
+  TP=8 to TP=16 on Llama-3-70B halves the weight footprint per card but leaves the per-rank cell
+  size at 40&nbsp;KiB — the extra ranks hold duplicate KV heads. If your concurrency did not
+  improve after doubling TP, this is why, and it is the same clause that makes MLA replicate.</p></div>
+  <div class="ve-card"><span class="ve-card__k">trap 4</span><h4>DCP on a GQA model needs TP &gt; h_kv</h4>
+  <p>vLLM refuses the configuration outright, with a message that reads as a summary of this
+  chapter: <code>"Decode context parallelism for GQA/MQA requires `--tensor-parallel-size` (N) to
+  be greater than the model's total number of KV heads (M)."</code>
+  (<code>vllm/config/model.py:L1436-L1442</code>). Sequence-axis sharding only helps once the
+  head axis is exhausted.</p></div>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L1432-L1442</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        decode_context_parallel_size = parallel_config.decode_context_parallel_size
+        if decode_context_parallel_size &gt; 1 and not self.use_mla:
+            total_num_kv_heads = self.get_total_num_kv_heads()
+            if tensor_parallel_size &lt;= total_num_kv_heads:
+                raise ValueError(
+                    "Decode context parallelism for GQA/MQA requires "
+                    f"`--tensor-parallel-size` ({tensor_parallel_size}) to be "
+                    "greater than the model's total number of KV heads "
+                    f"({total_num_kv_heads}). Increase `--tensor-parallel-size` "
+                    "or set `--decode-context-parallel-size 1`."
+                )</code></pre>
+</div>
+
+<p>A fifth failure mode is subtler and has no error message. Because $I = 2g/b$ is TP-invariant
+for GQA but MLA's per-rank intensity falls as $1/\text{TP}$, an MLA model that profiled
+beautifully on one card can look ordinary on eight — the attention kernel that was near the
+roofline ridge is now four to eight times further from it, and it is also reading a replicated
+cache. If you benchmark MLA at TP=1 and extrapolate, you will be wrong in a direction that
+flatters the architecture.</p></div></section>
+<section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>First, resolve the shapes the way the engines do, from the config rather than from
+arithmetic:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">read a checkpoint's attention shape the way both engines do</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 - &lt;&lt;'PY'
+import json, urllib.request
+for repo in ["NousResearch/Meta-Llama-3-70B", "Qwen/Qwen3-32B"]:
+    u = f"https://huggingface.co/{repo}/raw/main/config.json"
+    c = json.load(urllib.request.urlopen(u))
+    L  = c["num_hidden_layers"]
+    h  = c["num_attention_heads"]
+    hk = c.get("num_key_value_heads", h)          # MHA fallback, as in vLLM
+    dh = c.get("head_dim") or c["hidden_size"] // h   # declared first, THEN divide
+    cell = 2 * L * hk * dh * 2
+    print(f"{repo:34s} L={L:3d} h={h:3d} h_kv={hk:3d} d_h={dh:3d} "
+          f"g={h//hk:2d}  {cell/1024:7.1f} KiB/tok  I={h//hk} FLOP/byte")
+PY</code></pre>
+</div>
+
+<p>Then watch the TP division move the number. Launch the same model twice and read the KV log
+line; the token count should roughly double from TP=1 to TP=2 for a GQA model, because both the
+weights and the cell size halved:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">observe the per-rank cell size change with TP</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: grep the capacity line emitted by kv_cache_utils.py:L1925
+vllm serve NousResearch/Meta-Llama-3-8B --tensor-parallel-size 1 --max-model-len 8192 2&gt;&amp;1 | grep "GPU KV cache size"
+vllm serve NousResearch/Meta-Llama-3-8B --tensor-parallel-size 2 --max-model-len 8192 2&gt;&amp;1 | grep "GPU KV cache size"
+
+# SGLang: the scheduler logs max_total_num_tokens (scheduler.py:L1096)
+python3 -m sglang.launch_server --model-path NousResearch/Meta-Llama-3-8B --tp 1 2&gt;&amp;1 | grep max_total_num_tokens
+python3 -m sglang.launch_server --model-path NousResearch/Meta-Llama-3-8B --tp 2 2&gt;&amp;1 | grep max_total_num_tokens
+
+# Now do it at --tp 16 on a model with h_kv=8 and watch the token count NOT double.</code></pre>
+</div>
+
+<p>The last line is the experiment worth doing. Llama-3-8B has $h_{kv} = 8$; at TP=16 the cell
+size stops shrinking, so the only remaining gain is the weight footprint, and the resident-token
+count will grow by far less than 2&times;.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Mistral-7B has $L=32$, $h=32$, $h_{kv}=8$, $d_h=128$. Compute (a) its bf16 cell size,
+  (b) its decode-attention intensity, (c) what both become if you set
+  <code>--kv-cache-dtype fp8</code>. Which of the two changes, and which does not?</li>
+
+  <li>Read <code>vllm/config/model.py</code> around <code>get_num_kv_heads</code> and
+  <code>vllm/model_executor/models/llama.py</code> around line 145. Both compute a per-rank KV
+  head count; one of them asserts something the other does not. What, and what breaks silently
+  in the version without the assertion?</li>
+
+  <li>A colleague proposes serving DeepSeek-V3 at TP=8 without DP attention and reports that
+  &ldquo;MLA has a 4.7&times; smaller cache than Llama-3-70B so we will get 4.7&times; the
+  concurrency.&rdquo; Using only §6's two formulas, compute the actual ratio and name the exact
+  line of SGLang source that makes the claim wrong.</li>
+
+  <li>Predict, then verify by reading
+  <code>python/sglang/srt/model_executor/pool_configurator.py</code>: if you launch an
+  MLA model with <code>--tp 8 --dcp-size 2</code>, does SGLang's <code>_compute_cell_size</code>
+  return a smaller number than at <code>--dcp-size 1</code>? If not, where must the sharding
+  happen instead for DCP to mean anything?</li>
+
+  <li>Suppose you could retrain Llama-3-70B with any $h_{kv}$, and serve it at TP=1 on a
+  hypothetical card large enough to hold it. A decode step at batch 64 and 8k context reads
+  131.4&nbsp;GiB of bf16 weights. Using $c = 2Lh_{kv}d_hb$, compute the fraction of total HBM
+  traffic that is KV at $h_{kv} \in \{64, 8, 1\}$. At which setting does further shrinking stop
+  mattering? Then say what happens to the $h_{kv}=1$ answer at TP=8, and why.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> (a) $2 \times 32 \times 8 \times 128 \times 2 = 131{,}072$ bytes = 128&nbsp;KiB —
+  identical to Llama-3-8B, which has the same four numbers. (b) $g = 4$, so $I = 2 \times 4 / 2 =
+  4$ FLOP/byte. (c) At $b = 1$ the cell size halves to 64&nbsp;KiB, and the intensity
+  <em>doubles</em> to $2g/b = 8$. Both change, in the same direction as a group-size doubling —
+  KV quantisation and GQA are the same lever applied to different factors of the same product.
+  See <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">§2.5</a>.</p>
+
+  <p><b>2.</b> <code>llama.py:L145-L152</code> asserts both regimes: <code>total_num_kv_heads %
+  tp_size == 0</code> when heads exceed ranks, and <code>tp_size % total_num_kv_heads == 0</code>
+  when they do not. <code>ModelConfig.get_num_kv_heads</code> has no assertion at all — it just
+  computes <code>max(1, total // tp)</code>. With, say, $h_{kv} = 6$ and TP=4, the config-level
+  helper silently returns 1 while the true sharding is ill-defined; the model-level assertion is
+  what turns that into a startup failure instead of a wrong capacity estimate.</p>
+
+  <p><b>3.</b> Cluster tokens are $P \cdot \min(\text{TP}, h_{kv}) / c$ for GQA and $P /
+  c_{\text{MLA}}$ for MLA. At TP=8: $8P/320\text{KiB}$ versus $P/68.6\text{KiB}$, a ratio of
+  $8 \times 68.6 / 320 = 1.72$ in <em>GQA's</em> favour. The line is
+  <code>python/sglang/srt/model_executor/pool_configurator.py:L257-L265</code> — the MLA branch
+  of <code>_compute_cell_size</code>, which never references the <code>tp_size</code> bound two
+  lines above it.</p>
+
+  <p><b>4.</b> No. At <code>7d89325</code> the MLA branch takes neither <code>tp_size</code> nor
+  <code>dcp_size</code>, so the cell size is unchanged. DCP shards along the sequence axis: vLLM
+  makes this explicit in <code>FullAttentionSpec.max_memory_usage_bytes</code>
+  (<code>vllm/v1/kv_cache_interface.py:L300-L305</code>), which divides
+  <code>max_model_len</code> by <code>dcp_world_size</code> rather than dividing the page size.
+  Each rank holds a slice of the <em>context</em>, not a slice of the heads.</p>
+
+  <p><b>5.</b> KV traffic is $c \times 64 \times 8192 = c \times 524{,}288$. At $h_{kv} = 64$:
+  $2.5\,\text{MiB} \times 524{,}288 = 1{,}280$&nbsp;GiB, so KV is $1280/1411.4 = 90.7\%$ of
+  traffic. At $h_{kv} = 8$: 160&nbsp;GiB, $54.9\%$. At $h_{kv} = 1$: 20&nbsp;GiB, $13.2\%$.
+  Shrinking below MQA would be pointless — you are paying for weights by then — but note that
+  even at the shipped $h_{kv} = 8$, KV is still the majority of the traffic at this batch and
+  context. The GQA paper's "GQA-8 is as fast as MQA" result (0.28&nbsp;s vs 0.24&nbsp;s) is a
+  statement about its own workload, not a universal one; at long context with large batches
+  there is real headroom left, which is why long-context serving keeps reaching for KV
+  quantisation and MLA rather than declaring GQA-8 sufficient. At TP=8 the $h_{kv}=1$ answer
+  gets worse in a specific way: <code>max(1, 1 // 8) = 1</code>, so every rank holds the same
+  single KV head and the per-rank cell is 40&nbsp;KiB — identical to $h_{kv}=8$. Under tensor
+  parallelism, MQA and GQA-8 are the same deployment.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>MHA, MQA and GQA are one parameter at three settings. The group size $g = h/h_{kv}$ divides
+  the KV cell size and multiplies decode arithmetic intensity by exactly the same factor —
+  $c = 2Lhd_hb/g$ and $I = 2g/b$ are the same statement written twice.</li>
+
+  <li>$h_{kv} = 8$ is not a quality result, it is a topology result. The GQA paper shows quality
+  is already recovered by $g = 8$; the reason nobody ships $h_{kv} = 4$ is that
+  <code>max(1, total_num_kv_heads // tensor_parallel_size)</code> saturates, and 8 is the number
+  of GPUs in a node.</li>
+
+  <li>MLA is not the endpoint of the same line. It has no group size; its intensity formula is
+  different, and at TP=1 DeepSeek-V3's decode attention sits at $I \approx 242$ against an H100
+  ridge of 295 — it trades bytes for FLOPs rather than heads for bytes.</li>
+
+  <li>MLA caches are replicated per tensor-parallel rank. Verified at <code>7d89325</code>: the
+  MLA branch of SGLang's <code>_compute_cell_size</code> ignores the <code>tp_size</code> bound
+  two lines above it, and vLLM's <code>get_num_kv_heads</code> returns 1 before the division. At
+  a fixed pool per GPU, GQA's cluster capacity grows with TP and MLA's does not; the crossover
+  against a GQA-8 model is at TP&nbsp;&asymp;&nbsp;4.7, so at TP=8 the GQA model holds
+  1.72&times; more context despite a 4.7&times; larger cell.</li>
+
+  <li>Two literals turn the general cache formula into MLA's: <code>num_kv_heads = 1</code> and
+  <code>head_size_v = 0</code>. The second is what deletes the factor of two, and it works only
+  because both engines write that factor as <code>head_size + head_size_v</code> rather than
+  <code>2 * head_size</code>.</li>
+
+  <li>Always read <code>head_dim</code> from the config before dividing. The division is a
+  fallback in both engines, and vLLM annotates it <code># FIXME(woosuk): This may not be true for
+  all models.</code> Qwen3-32B is the model that proves the FIXME right.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Shazeer, <a href="https://arxiv.org/abs/1911.02150"><em>Fast Transformer Decoding: One
+  Write-Head is All You Need</em></a> (2019) — the MQA paper. Short, and the framing of
+  incremental decoding as a memory-bandwidth problem is the origin of half this book.</li>
+
+  <li>Ainslie et al., <a href="https://arxiv.org/abs/2305.13245"><em>GQA: Training Generalized
+  Multi-Query Transformer Models from Multi-Head Checkpoints</em></a> (2023) — Table 1 is the
+  quality/speed evidence quoted above; §3 is the mean-pooling uptraining recipe that made
+  conversion of existing checkpoints practical.</li>
+
+  <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2405.04434"><em>DeepSeek-V2</em></a> (2024) —
+  where MLA is introduced, with the 93.3% KV reduction and 5.76&times; throughput claims. The
+  MHA-vs-MLA ablation is in its architecture section; the serving consequences are
+  <a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>.</li>
+
+  <li>vLLM PRs <a href="https://github.com/vllm-project/vllm/pull/10927">#10927</a> (DeepSeek-V2
+  MLA, the first version to store the latent rather than per-head K/V) and
+  <a href="https://github.com/vllm-project/vllm/pull/12601">#12601</a> (DeepSeek-V3 MLA with fp8
+  compute) — the discussions are where the <code>num_kv_heads = 1</code> /
+  <code>head_size_v = 0</code> encoding gets argued out.</li>
+
+  <li>SGLang PR <a href="https://github.com/sgl-project/sglang/pull/4521">#4521</a> — "Reduce
+  computation and communication in DP attention", part of the data-parallel-attention line of
+  work that is the direct engineering response to the replication problem in §6.</li>
+
+  <li>Pope et al., <a href="https://arxiv.org/abs/2211.05102"><em>Efficiently Scaling Transformer
+  Inference</em></a> (2022) — the partitioning analysis that explains why the KV-head count and
+  the accelerator count want to be the same number.</li>
+</ul></div></section>
+<div class="pager"><a href="03-04-flashinfer-and-backends.html"><div class="pager__k">← Previous</div><div class="pager__t">FlashInfer and the attention-backend abstraction</div></a><a class="pager__next" href="03-06-positional-encoding-and-long-context.html"><div class="pager__k">Next →</div><div class="pager__t">RoPE, scaling, sliding window, attention sinks</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: one knob, two effects</a>
+<a href="#in-code">How each variant appears in code</a>
+<a href="#tp-asymmetry">The uncomfortable part: TP shrinks GQA's cache, not MLA's</a>
+<a href="#worked-trace">Worked trace: Llama-3-70B at TP=8, one layer</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

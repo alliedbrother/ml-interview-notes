@@ -1,0 +1,2080 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>torch.compile, Inductor, piecewise capture — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i is-current" href="08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 8 · Compilation and runtime · 08-02</div>
+<h1>torch.compile, Inductor, piecewise capture</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/compilation/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A Llama-3-8B decode step at batch 1 has 4.48 ms of weight traffic to hide and about a
+thousand kernel launches to hide it behind. Eager PyTorch spends that budget on Python dispatch and
+on writing fp32 intermediates to HBM that nothing outside the next kernel will ever read. The
+compiler's job is to delete both. The interesting part is that neither vLLM nor SGLang compiles the
+model — they compile the <em>gaps between the attention calls</em>.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Start a vLLM server and watch the log. Somewhere between weight loading and the first token you
+get a line that costs you real money:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/monitor.py:L17-L22</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@contextlib.contextmanager
+def monitor_torch_compile(
+    vllm_config: VllmConfig,
+    message: str = "torch.compile took %.2f s in total",
+    is_encoder: bool = False,
+) -&gt; Generator[None, None, None]:</code></pre>
+</div>
+
+<p>On a cold cache that number is minutes, not seconds, and it is paid before the server binds its
+port. Autoscaling a fleet on this is a real operational problem &mdash; see
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> for what that does to
+tail latency during a scale-out.</p>
+
+<p>So the question that opens the chapter is not "what is <code>torch.compile</code>". It is: what
+does an inference engine buy for those minutes, and why is it worth it? The honest answer has two
+halves, and they point in different directions depending on batch size. Here is the first half,
+made concrete.</p>
+
+<p>vLLM's RMSNorm is a <code>CustomOp</code>: it carries a hand-written CUDA kernel <em>and</em> a
+pure-PyTorch reference. When Inductor is in play, the custom kernel is switched off by default and
+Dynamo traces the reference:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/custom_op.py:L296-L311</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def default_on() -&gt; bool:
+        """
+        Behavior controlled by `CompilationConfig.custom_ops`: On by default if
+        'all', off by default if 'none'.
+        When PyTorch Inductor is used, 'none' is the default value,
+        otherwise 'all'.
+        """
+        compilation_config = get_cached_compilation_config()
+        count_none = compilation_config.custom_ops.count("none")
+        count_all = compilation_config.custom_ops.count("all")
+        if count_none + count_all != 1:
+            raise ValueError(
+                "custom_ops must contain exactly one base mode: 'all' or 'none'"
+            )
+
+        return not count_none &gt; 0 or count_all &gt; 0</code></pre>
+</div>
+
+<p>And the reference that Dynamo sees is this:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/ir/ops/layernorm.py:L43-L62</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@register_op(allow_inplace=True)
+def fused_add_rms_norm(
+    x: Tensor,
+    x_residual: Tensor,
+    weight: Tensor | None,
+    epsilon: float,
+    variance_size: int | None = None,
+) -&gt; tuple[Tensor, Tensor]:
+    """Fused add and weighted root-mean-square layer normalization"""
+    orig_dtype = x.dtype
+    x = x.to(torch.float32)
+    x = x + x_residual.to(torch.float32)
+    x_residual = x.to(orig_dtype)
+
+    x_var = x if variance_size is None else x[..., :variance_size]
+    variance = x_var.pow(2).mean(dim=-1, keepdim=True)
+    x = x * torch.rsqrt(variance + epsilon)
+    if weight is not None:
+        x = x.to(weight.dtype) * weight
+    return x.to(orig_dtype), x_residual</code></pre>
+</div>
+
+<p>Ten tensor operations. Run eagerly, every one of them is a separate CUDA kernel with a separate
+Python dispatch, and every one materialises its output in HBM. Llama-3-8B calls this 64 times per
+forward pass. That is the bottleneck the compiler exists to remove, and §3 prices it exactly.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p><code>torch.compile</code> is three programs wearing one name. <b>Dynamo</b> is a bytecode
+interpreter: it runs your Python frame symbolically and emits an FX graph of tensor operations plus
+a set of <b>guards</b> &mdash; predicates on the inputs that must hold for the graph to be reused.
+Anything Dynamo cannot represent as a tensor op (a print, a data-dependent branch, an unsupported
+builtin) causes a <b>graph break</b>: the traced region ends there and Python resumes. <b>AOTAutograd</b>
+functionalises the graph, turning mutations into pure operations so a compiler can reason about it.
+<b>Inductor</b> lowers the functional graph to Triton source, schedules it into as few kernels as
+the dependence structure allows, and compiles that Triton to PTX.</p>
+
+<p>The serving-relevant consequence: fusion happens at the Inductor scheduling step, and it can only
+fuse ops that are <em>in the same graph</em>. Everything else in this chapter follows from that one
+sentence.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; what each stage of the pipeline produces.</b>
+    Shapes and counts are for one <code>LlamaModel.forward</code> at Llama-3-8B (L=32).
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Python bytecode<br/>LlamaModel.forward<br/>input_ids [num_tokens] dynamic on dim 0"] --> B
+    B["TorchDynamo<br/>symbolic bytecode eval"] --> C["One FX graph<br/>fullgraph=True, so a graph break is an ERROR<br/>+ guards, which vLLM then DROPS"]
+    C --> D["VllmBackend.__call__<br/>split_graph on splitting_ops"]
+    D --> E["65 subgraphs for L=32<br/>33 compilable + 32 opaque attention regions"]
+    E --> F["AOTAutograd per subgraph<br/>functionalise, decompose to aten"]
+    F --> G["PostGradPassManager<br/>vLLM custom FX passes run HERE"]
+    G --> H["TorchInductor<br/>lowering + scheduling + Triton codegen"]
+    H --> I["Triton kernels on disk<br/>cached under VLLM_CACHE_ROOT/torch_compile_cache"]
+    I --> J["33 PiecewiseBackend callables<br/>each optionally wrapped in a CUDAGraph"]
+  </script>
+</div>
+
+<p>The last box is where this chapter hands off to
+<a href="08-01-cuda-graphs.html">§8.1</a>. Compilation <em>produces the pieces</em>; CUDA graph
+capture <em>freezes the pieces</em>. They are separate mechanisms with separate configuration, and
+the reason they are usually discussed together is that the split points serve both.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: pricing one fusion</h2></div><div class="sec__body"><p>Take one <code>fused_add_rms_norm</code> call on Llama-3-8B, hidden size $d = 4096$, activations
+in bf16, at one token. Write $b_{16} = 2d = 8{,}192$ bytes for a bf16 row and $b_{32} = 4d = 16{,}384$
+bytes for an fp32 row. Every eager op reads its inputs from HBM and writes its output back.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">HBM traffic for the eager decomposition of one <code>fused_add_rms_norm</code>,
+    d=4096, bf16 activations, one token. <b>Derived</b> by counting the tensor ops in
+    <code>vllm/ir/ops/layernorm.py:L43-L62</code> and multiplying by element sizes. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Tensor op</th><th>Reads (B)</th><th>Writes (B)</th><th>Total (B)</th></tr></thead>
+      <tbody>
+        <tr><td><code>x.to(float32)</code></td><td class="num">8,192</td><td class="num">16,384</td><td class="num">24,576</td></tr>
+        <tr><td><code>x_residual.to(float32)</code></td><td class="num">8,192</td><td class="num">16,384</td><td class="num">24,576</td></tr>
+        <tr><td><code>x + x_residual</code></td><td class="num">32,768</td><td class="num">16,384</td><td class="num">49,152</td></tr>
+        <tr><td><code>x.to(bf16)</code> &rarr; residual out</td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
+        <tr><td><code>x.pow(2)</code></td><td class="num">16,384</td><td class="num">16,384</td><td class="num">32,768</td></tr>
+        <tr><td><code>.mean(dim=-1)</code></td><td class="num">16,384</td><td class="num">4</td><td class="num">16,388</td></tr>
+        <tr><td><code>rsqrt(var + eps)</code></td><td class="num">8</td><td class="num">4</td><td class="num">12</td></tr>
+        <tr><td><code>x * rsqrt</code></td><td class="num">16,388</td><td class="num">16,384</td><td class="num">32,772</td></tr>
+        <tr><td><code>x.to(bf16)</code></td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
+        <tr><td><code>x * weight</code></td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
+        <tr><td><b>Eager total</b></td><td class="num">147,468</td><td class="num">106,504</td><td class="num"><b>253,972</b></td></tr>
+        <tr><td><b>One fused kernel</b> (x, residual, weight in; normed, residual out)</td><td class="num">24,576</td><td class="num">16,384</td><td class="num"><b>40,960</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Fusing the chain into a single Triton kernel removes 213,012 bytes per call &mdash; a 6.2&times;
+reduction in traffic for that operation, all of it intermediates that never leave the fused region.
+Llama-3-8B has two of these per decoder layer (pre-attention and pre-MLP), so 64 per forward pass:</p>
+
+<div class="math-display">$$ \Delta B_{\text{norm}} = 64 \times 213{,}012\ \text{B} = 13.63\ \text{MB per token} $$</div>
+
+<p>Now the punchline, which is not the one you expect. The book's H100 constant is 3.35 TB/s of HBM
+bandwidth and a 4.48 ms Llama-3-8B decode-step floor at batch 1 &mdash; that floor is 15.0 GB of weight
+traffic. At batch 1:</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="kpi__n">4.07 &micro;s</div><div class="kpi__l">HBM time saved, batch 1 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">0.09%</div><div class="kpi__l">of the 4.48 ms decode floor</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">~576</div><div class="kpi__l">kernel launches removed per step</div></div>
+</div>
+
+<p>At batch 1 the <em>bytes</em> saved are noise. Nine of the ten ops collapse into one at each of 64
+sites, so roughly 576 kernel launches disappear from the step &mdash; and <em>that</em> is the batch-1
+win. It is a launch-overhead win, not a bandwidth win, which is precisely why compilation alone does
+not fix small-batch decode and why <a href="08-01-cuda-graphs.html">§8.1</a> exists: CUDA graphs remove
+the residual per-launch CPU cost of the launches that remain.</p>
+
+<p>Scale the batch and the arithmetic inverts. Elementwise traffic is proportional to token count;
+weight traffic is not. At 256 tokens in flight:</p>
+
+<div class="math-display">$$ 256 \times 13.63\ \text{MB} = 3.49\ \text{GB} \quad\Longrightarrow\quad 1.04\ \text{ms at }3.35\ \text{TB/s} $$</div>
+
+<p>against the same 15.0 GB of weights. Leaving those norms unfused would add <b>23%</b> to the step's
+bandwidth floor. So compilation's bandwidth payoff is a large-batch phenomenon and its launch payoff
+is a small-batch phenomenon, and a chapter that claims one number for "the speedup from
+<code>torch.compile</code>" is lying about at least one of them.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; eager chain vs. fused kernel for one <code>fused_add_rms_norm</code>
+    at d=4096, bf16, one token.</b> Each eager arrow crossing the HBM line is a real round trip.
+    Bytes are <em>derived</em> from the op count in <code>vllm/ir/ops/layernorm.py:L43-L62</code>.</p>
+  <svg viewBox="0 0 900 400" width="100%" role="img" aria-labelledby="fuseTitle fuseDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="fuseTitle">Eager versus fused HBM traffic for fused add RMS norm</title>
+    <desc id="fuseDesc">Top half shows ten separate kernels, each reading from and writing to HBM,
+    totalling 253,972 bytes. Bottom half shows a single fused Triton kernel that reads three tensors
+    and writes two, totalling 40,960 bytes, a 6.2 times reduction.</desc>
+
+    <text x="20" y="24" font-size="13" fill="currentColor" font-weight="600">EAGER &mdash; 10 kernels, 10 dispatches, 253,972 B</text>
+    <line x1="20" y1="40" x2="880" y2="40" stroke="currentColor" stroke-opacity="0.18"/>
+    <text x="20" y="56" font-size="10" fill="currentColor" fill-opacity="0.6">HBM</text>
+
+    <g font-size="9" fill="currentColor">
+      <rect x="60"  y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="70" y="101">to f32</text>
+      <rect x="140" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="150" y="101">to f32</text>
+      <rect x="220" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="238" y="101">add</text>
+      <rect x="300" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="312" y="101">to bf16</text>
+      <rect x="380" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="398" y="101">pow2</text>
+      <rect x="460" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="478" y="101">mean</text>
+      <rect x="540" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="556" y="101">rsqrt</text>
+      <rect x="620" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="644" y="101">mul</text>
+      <rect x="700" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="712" y="101">to bf16</text>
+      <rect x="780" y="80" width="70" height="34" fill="var(--plum-dim)" stroke="var(--plum)"/><text x="796" y="101">mul w</text>
+    </g>
+
+    <g stroke="var(--plum)" stroke-width="1" fill="none" stroke-opacity="0.75">
+      <path d="M75 80 L75 40"/><path d="M110 40 L110 80"/>
+      <path d="M155 80 L155 40"/><path d="M190 40 L190 80"/>
+      <path d="M235 80 L235 40"/><path d="M270 40 L270 80"/>
+      <path d="M315 80 L315 40"/><path d="M350 40 L350 80"/>
+      <path d="M395 80 L395 40"/><path d="M430 40 L430 80"/>
+      <path d="M475 80 L475 40"/><path d="M510 40 L510 80"/>
+      <path d="M555 80 L555 40"/><path d="M590 40 L590 80"/>
+      <path d="M635 80 L635 40"/><path d="M670 40 L670 80"/>
+      <path d="M715 80 L715 40"/><path d="M750 40 L750 80"/>
+      <path d="M795 80 L795 40"/><path d="M830 40 L830 80"/>
+    </g>
+    <text x="60" y="132" font-size="10" fill="currentColor" fill-opacity="0.75">20 HBM crossings &middot; 8 fp32 intermediate rows of 16,384 B each never read outside the chain</text>
+
+    <text x="20" y="196" font-size="13" fill="currentColor" font-weight="600">FUSED &mdash; 1 Triton kernel, 1 dispatch, 40,960 B</text>
+    <line x1="20" y1="212" x2="880" y2="212" stroke="currentColor" stroke-opacity="0.18"/>
+    <text x="20" y="228" font-size="10" fill="currentColor" fill-opacity="0.6">HBM</text>
+
+    <rect x="300" y="262" width="300" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1.5"/>
+    <text x="330" y="285" font-size="11" fill="currentColor" font-weight="600">triton_poi_fused_add_rms_norm</text>
+    <text x="330" y="302" font-size="9" fill="currentColor" fill-opacity="0.75">registers hold every intermediate</text>
+
+    <g stroke="var(--teal)" stroke-width="1.2" fill="none">
+      <path d="M330 262 L330 212"/><path d="M380 262 L380 212"/><path d="M430 262 L430 212"/>
+      <path d="M520 212 L520 262"/><path d="M570 212 L570 262"/>
+    </g>
+    <g font-size="9" fill="currentColor" fill-opacity="0.8">
+      <text x="300" y="248">x 8,192</text>
+      <text x="352" y="236">res 8,192</text>
+      <text x="410" y="248">w 8,192</text>
+      <text x="492" y="236">out 8,192</text>
+      <text x="546" y="248">res 8,192</text>
+    </g>
+
+    <text x="300" y="352" font-size="12" fill="currentColor" font-weight="600">213,012 B removed per call &middot; 6.2&times; less traffic &middot; 9 fewer launches</text>
+    <text x="300" y="372" font-size="10" fill="currentColor" fill-opacity="0.7">&times; 64 call sites = 13.63 MB per token on Llama-3-8B</text>
+  </svg>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">Why not just call the CUDA kernel</span>
+  <p>vLLM ships a hand-written fused RMSNorm; at <code>-O0</code> that is exactly what runs, because
+  <code>custom_ops</code> defaults to <code>all</code> without Inductor. The value of routing through
+  Inductor instead is that the <em>fusion boundary can move</em>: a Triton kernel generated from the
+  graph can additionally absorb the following FP8 quantisation, or a reshape, which a fixed CUDA
+  kernel cannot. vLLM encodes exactly this decision &mdash; <code>vllm/config/vllm.py</code>'s
+  <code>enable_norm_fusion</code> turns on the explicit norm+quant pattern-matching pass only when a
+  custom op is active, on the comment "otherwise Inductor handles fusion".</p>
+</div></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>Why attention cannot be in the graph</h3>
+
+<p>vLLM registers attention as an opaque custom operator. Dynamo does not trace into custom
+operators, by design:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/attention.py:L743-L772</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@eager_break_during_capture
+@maybe_transfer_kv_layer
+def unified_attention_with_output(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: LayerNameType,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
+) -&gt; None:
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
+    attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
+
+    self.impl.forward(
+        self,
+        query,
+        key,
+        value,
+        kv_cache,
+        attn_metadata,
+        output=output,
+        output_scale=output_scale,
+        output_block_scale=output_block_scale,
+    )</code></pre>
+</div>
+
+<p>Three reasons the opacity is load-bearing. <code>get_attention_context(layer_name)</code> pulls
+<code>attn_metadata</code> and the KV cache out of a global forward context &mdash; Python state that
+changes every step and that Dynamo would have to guard on. <code>self.impl.forward</code> dispatches
+into an external backend (FlashAttention, FlashInfer, Triton;
+<a href="../03-attention-kernels/03-04-flashinfer-and-backends.html">§3.4</a>) whose kernels Inductor
+has no lowering for and could not improve on. And attention writes into a paged KV cache whose
+addresses are chosen at runtime; a compiler that thought it understood that aliasing would reorder
+loads across it.</p>
+
+<h3>Splitting the graph</h3>
+
+<p>Given an opaque op you cannot compile, the choice is between compiling nothing and compiling
+around it. Both engines chose the second. vLLM enumerates the split ops centrally:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/compilation.py:L763-L779</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Use PyTorch operator format: "namespace::name"
+    _attention_ops: ClassVar[list[str]] = [
+        "vllm::unified_attention_with_output",
+        "vllm::unified_mla_attention_with_output",
+        "vllm::mamba_mixer2",
+        "vllm::mamba_mixer",
+        "vllm::short_conv",
+        "vllm::linear_attention",
+        "vllm::qwen_gdn_attention_core",
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
+        "vllm::gdn_attention_core_xpu",
+        "vllm::olmo_hybrid_gdn_full_forward",
+        "vllm::sparse_attn_indexer",
+        "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::deepseek_v4_attention",
+        "vllm::hpc_rope_norm_forward",
+    ]</code></pre>
+</div>
+
+<p><code>set_splitting_ops_for_v1</code> installs that list when the user has not overridden it,
+additionally appending <code>vllm::unified_kv_cache_update</code> and
+<code>vllm::unified_mla_kv_cache_update</code> in the Dynamo-split path
+(<code>vllm/config/compilation.py:L1134-L1147, L1184-L1185</code>). The split itself is a linear scan assigning
+every FX node a subgraph id, bumping the id at each splitting op:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/backends.py:L577-L592</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if should_split(node, splitting_ops):
+            subgraph_id += 1
+            node_to_subgraph_id[node] = subgraph_id
+            split_op_graphs.append(subgraph_id)
+
+            # keep consecutive splitting ops together
+            # (we know node.next exists because node isn't the last (output) node)
+            if should_split(node.next, splitting_ops):
+                # this will get incremented by the next node
+                subgraph_id -= 1
+            else:
+                subgraph_id += 1
+        else:
+            node_to_subgraph_id[node] = subgraph_id</code></pre>
+</div>
+
+<p>The "keep consecutive splitting ops together" branch matters for the count: in
+<code>Attention.forward</code> the KV-cache update op is emitted immediately before the attention op,
+so the pair collapses into one opaque region rather than two. Read the right branch of that method:
+<code>Attention.forward</code> has two, selected by <code>use_direct_call = not
+current_platform.opaque_attention_op()</code> (<code>attention.py:L430</code>), and CUDA returns
+<code>True</code> there (<code>vllm/platforms/cuda.py:L577-L579</code>), so on an NVIDIA box
+<code>use_direct_call</code> is <b>False</b> and the live path is the
+<code>torch.ops.vllm.*</code> branch at
+<code>vllm/model_executor/layers/attention/attention.py:L550-L569</code> &mdash; the direct-call branch
+just above it never runs. Both emit the same two ops in the same order, so the split arithmetic is
+unchanged; the citation is not.
+<code>should_split</code> matches on the qualified operator name
+(<code>vllm/compilation/partition_rules.py:L14-L38</code>). For Llama-3-8B, L=32, that gives
+<b>32 opaque regions and 33 compilable ones</b> &mdash; 65 subgraphs from one FX graph.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; one Llama-3-8B decoder layer, with the piecewise split points.</b>
+    Shaded regions are compiled by Inductor into fused Triton kernels and are individually
+    CUDA-graph-capturable. The unshaded region is opaque to the compiler and runs eagerly.
+    Shapes for a single token, d=4096, h=32, h_kv=8, d_h=128.</p>
+  <svg viewBox="0 0 900 470" width="100%" role="img" aria-labelledby="splitTitle splitDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="splitTitle">Piecewise split points around attention in a transformer block</title>
+    <desc id="splitDesc">A decoder layer drawn top to bottom. A shaded compiled region contains the
+    input RMS norm, the QKV projection and rotary embedding. An unshaded opaque region contains the
+    KV cache update and the unified attention op. A second shaded compiled region contains the output
+    projection, the residual add and post-attention norm, and the whole gated MLP, and it continues
+    into the next layer's pre-attention work.</desc>
+
+    <rect x="40" y="30" width="420" height="150" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1.5"/>
+    <text x="56" y="52" font-size="11" fill="currentColor" font-weight="600">submod_2k &mdash; COMPILED PIECE</text>
+    <g font-size="10" fill="currentColor">
+      <text x="56" y="76">fused_add_rms_norm(x, residual, w)   [1, 4096]</text>
+      <text x="56" y="96">qkv_proj  mm [1,4096] x [4096, 6144]</text>
+      <text x="56" y="116">split -&gt; q[1,32,128]  k[1,8,128]  v[1,8,128]</text>
+      <text x="56" y="136">rotary_embedding(q, k, positions)</text>
+      <text x="56" y="160" fill-opacity="0.7">Inductor emits ~3 Triton kernels + 1 cuBLAS GEMM</text>
+    </g>
+
+    <path d="M250 180 L250 208" stroke="currentColor" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L6,3 z" fill="currentColor"/></marker></defs>
+
+    <rect x="40" y="210" width="420" height="86" fill="none" stroke="var(--plum)" stroke-width="1.5" stroke-dasharray="5 3"/>
+    <text x="56" y="232" font-size="11" fill="var(--plum)" font-weight="600">SPLITTING REGION &mdash; OPAQUE, NOT COMPILED</text>
+    <g font-size="10" fill="currentColor">
+      <text x="56" y="256">vllm::unified_kv_cache_update(k, v, layer)</text>
+      <text x="56" y="276">vllm::unified_attention_with_output(q, k, v, out)</text>
+    </g>
+
+    <path d="M250 296 L250 324" stroke="currentColor" stroke-width="1.5" fill="none" marker-end="url(#ar)"/>
+
+    <rect x="40" y="326" width="420" height="126" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1.5"/>
+    <text x="56" y="348" font-size="11" fill="currentColor" font-weight="600">submod_2k+2 &mdash; COMPILED PIECE</text>
+    <g font-size="10" fill="currentColor">
+      <text x="56" y="372">o_proj  mm [1,4096] x [4096, 4096]</text>
+      <text x="56" y="392">fused_add_rms_norm(x, residual, w)</text>
+      <text x="56" y="412">gate_up_proj -&gt; silu(g) * u   [1, 14336]</text>
+      <text x="56" y="432">down_proj &rarr; continues into layer k+1</text>
+    </g>
+
+    <g font-size="10" fill="currentColor">
+      <text x="500" y="52" font-weight="600" font-size="11">What the split buys</text>
+      <text x="500" y="78">Attention gets its own metadata, its own</text>
+      <text x="500" y="94">backend, its own launch &mdash; unchanged.</text>
+      <text x="500" y="118">Everything else is one FX graph per gap,</text>
+      <text x="500" y="134">so Inductor can fuse freely inside a gap.</text>
+      <text x="500" y="164" font-weight="600" font-size="11">What it costs</text>
+      <text x="500" y="190">No fusion can cross an attention boundary.</text>
+      <text x="500" y="206">A pass that rewrites the residual stream</text>
+      <text x="500" y="222">across layers (SequenceParallelismPass)</text>
+      <text x="500" y="238">is therefore INCOMPATIBLE with this mode.</text>
+      <text x="500" y="268" font-weight="600" font-size="11">Llama-3-8B, L = 32</text>
+      <text x="500" y="294">33 compiled pieces</text>
+      <text x="500" y="310">32 opaque attention regions</text>
+      <text x="500" y="326">65 subgraphs total</text>
+      <text x="500" y="356" font-weight="600" font-size="11">Handoff to &sect;8.1</text>
+      <text x="500" y="382">Each shaded box is wrapped by</text>
+      <text x="500" y="398">CUDAGraphWrapper with runtime_mode</text>
+      <text x="500" y="414">PIECEWISE, one graph per piece per</text>
+      <text x="500" y="430">bucket in the capture ladder.</text>
+    </g>
+  </svg>
+</div>
+
+<p>The handoff to CUDA graphs is one function, called once the interpreter has built a
+<code>PiecewiseBackend</code> for a compilable submodule:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/backends.py:L655-L684</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if (
+        not compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+        or compilation_config.use_inductor_graph_partition
+    ):
+        return piecewise_backend
+
+    # We're using Dynamo-based piecewise splitting, so we wrap
+    # the whole subgraph with a static graph wrapper.
+    from .cuda_graph import CUDAGraphOptions
+
+    # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
+    # class) as platform dependent.
+    static_graph_wrapper_class = resolve_obj_by_qualname(
+        current_platform.get_static_graph_wrapper_cls()
+    )
+
+    # Always assign PIECEWISE runtime mode to the
+    # CUDAGraphWrapper for piecewise_backend, to distinguish
+    # it from the FULL cudagraph runtime mode, no matter it
+    # is wrapped on a full or piecewise fx graph.
+    return static_graph_wrapper_class(
+        runnable=piecewise_backend,
+        vllm_config=vllm_config,
+        runtime_mode=CUDAGraphMode.PIECEWISE,
+        cudagraph_options=CUDAGraphOptions(
+            debug_log_enable=is_first_graph,
+            gc_disable=not is_first_graph,
+            weak_ref_output=is_last_graph,
+        ),
+    )</code></pre>
+</div>
+
+<p>Everything downstream of that call &mdash; capture, the bucket ladder, address pinning,
+<code>AttentionCGSupport</code> &mdash; is <a href="08-01-cuda-graphs.html">§8.1</a>'s.</p>
+
+<h3>How a model opts in</h3>
+
+<p>A model class declares itself compilable, and declares which argument dimensions vary:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L334-L343</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@support_torch_compile(
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
+)</code></pre>
+</div>
+
+<p>The shared shape id <code>"b"</code> tells Dynamo that all four dimensions are the <em>same</em>
+symbol. Before the first trace, <code>_mark_dynamic_inputs</code> walks the bound arguments and calls
+<code>torch._dynamo.mark_dynamic</code> &mdash; or <code>mark_unbacked</code>, under
+<code>DynamicShapesType.UNBACKED</code> &mdash; on each of them
+(<code>vllm/compilation/decorators.py:L414-L446</code>). Without this, Dynamo specialises on the
+first batch size it sees, and since a serving batch changes every step you would recompile forever.</p>
+
+<p>vLLM then goes further than stock <code>torch.compile</code> and throws the guards away:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/wrapper.py:L105-L125</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if mode != CompilationMode.STOCK_TORCH_COMPILE:
+            # Drop all the guards.
+            if self.evaluate_guards:
+                assert not envs.VLLM_USE_BYTECODE_HOOK, (
+                    "compilation_config.dynamic_shapes_config.evaluate_guards "
+                    "requires VLLM_USE_BYTECODE_HOOK=0. "
+                )
+                assert ds_type != DynamicShapesType.UNBACKED, (
+                    "UNBACKED dynamic shapes do not add guards"
+                )
+
+                options["guard_filter_fn"] = lambda x: [
+                    entry.guard_type == "SHAPE_ENV" for entry in x
+                ]
+            else:
+                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
+                    # Torch 2.10+ provides skip_all_guards_unsafe
+                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                else:
+                    # Equivalent fallback for older PyTorch: skip all guards
+                    options["guard_filter_fn"] = lambda x: [False for _ in x]</code></pre>
+</div>
+
+<p>and compiles with <code>fullgraph=True, dynamic=False</code>
+(<code>vllm/compilation/wrapper.py:L147-L154</code>). Together those define the contract: a graph break
+is a hard error, and the single compiled artefact is reused for every shape without checking. The cost
+is in <code>docs/design/debug_vllm_compile.md:L148-L176</code> &mdash; if model code branches on the
+token count you get "silent incorrectness, loud errors, or CUDA illegal memory accesses", and the
+prescribed fix is to hide the branch inside a custom operator.</p>
+
+<h3>SGLang: the same skeleton, a narrower deployment</h3>
+
+<p>SGLang's <code>python/sglang/srt/compilation/</code> is a lineal descendant of vLLM's &mdash; the
+file header says so &mdash; and <code>split_graph</code> is the same scan, minus the consecutive-op
+merge:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/compilation/backend.py:L231-L241</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    split_op_graphs = []
+    for node in graph.graph.nodes:
+        if node.op in ("output", "placeholder"):
+            continue
+        if node.op == "call_function" and str(node.target) in ops:
+            subgraph_id += 1
+            node_to_subgraph_id[node] = subgraph_id
+            split_op_graphs.append(subgraph_id)
+            subgraph_id += 1
+        else:
+            node_to_subgraph_id[node] = subgraph_id</code></pre>
+</div>
+
+<p>The divergence is <em>where the split list comes from</em>. vLLM keeps a central allowlist in
+config; SGLang registers split ops at the definition site:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/compilation/compilation_config.py:L10-L16</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def register_split_op(op_name: Optional[str] = None):
+    def decorator(op_func: Callable):
+        name = op_name or op_func.__name__
+        SPLIT_OPS.append(f"sglang.{name}")
+        return op_func
+
+    return decorator</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/radix_attention.py:L403-L405</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@register_custom_op(mutates_args=["output"])
+@register_split_op()
+def unified_attention_with_output(</code></pre>
+</div>
+
+<p>Decentralised registration means a new attention variant becomes a split point by adding one
+decorator &mdash; no config edit, no forgotten entry &mdash; but there is then no single place to read
+the full split set, and it depends on which modules got imported. vLLM's list is greppable and must be
+maintained by hand, which is why it has fourteen entries with names like
+<code>vllm::olmo_hybrid_gdn_full_forward</code>.</p>
+
+<p>The larger difference is deployment surface. In SGLang the piecewise-compile machinery is one
+CUDA-graph <em>backend</em>, selected per phase, whose compiler defaults to eager:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/cuda_graph_config.py:L87-L95</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@dataclass
+class PhaseConfig:
+    """Per-phase CUDA graph settings."""
+
+    backend: str = Backend.DISABLED
+    max_bs: Optional[int] = None
+    bs: Optional[List[int]] = None
+    # Only meaningful when backend == tc_piecewise; ignored otherwise.
+    tc_compiler: str = "eager"</code></pre>
+</div>
+
+<p>and at <code>7d89325</code> the default prefill backend on CUDA is not <code>tc_piecewise</code>
+at all: <code>default_prefill_backend()</code> returns <code>Backend.BREAKABLE</code> on CUDA,
+<code>Backend.TC_PIECEWISE</code> elsewhere
+(<code>python/sglang/srt/model_executor/cuda_graph_config.py:L110-L119</code>). On a stock CUDA SGLang
+server, Dynamo does not run. Turning it on is <code>--cuda-graph-backend-prefill=tc_piecewise
+--cuda-graph-tc-compiler=inductor</code>, and even then it covers prefill only &mdash; the flag's own
+comment says "currently only the prefill phase consumes it"
+(<code>python/sglang/srt/server_args.py:L1926-L1930</code>).</p>
+
+<p>SGLang's second, older <code>torch.compile</code> path is unrelated to the piecewise backend: it
+compiles the <em>whole</em> model forward as a black box, inside the decode CUDA-graph capture loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/compilation/torch_compile_decoration.py:L53-L62</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if enable_compile:
+            _to_torch(model, reverse=False, num_tokens=num_tokens)
+            backup_ca_comm = tp_group.ca_comm
+            yield torch.compile(
+                torch.no_grad()(model.forward),
+                mode=os.environ.get(
+                    "SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs"
+                ),
+                dynamic=_is_hip and get_bool_env_var("SGLANG_TORCH_DYNAMIC_SHAPE"),
+            )</code></pre>
+</div>
+
+<p><code>dynamic=</code> is False on CUDA, so this path specialises per batch size &mdash; which is
+why it is bounded by <code>torch_compile_max_bs</code>, default 32
+(<code>python/sglang/srt/server_args.py:L2087-L2097</code>): compile once per captured bucket up to 32,
+fall back above it.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Compilation surface at the pinned SHAs. vLLM <code>a556f3f</code>, SGLang <code>7d89325</code>. Read from config source, not from docs.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Question</th><th>vLLM</th><th>SGLang</th></tr></thead>
+      <tbody>
+        <tr><td>Knob</td><td><code>-O0..-O3</code> &rarr; <code>OptimizationLevel</code>; <code>-cc.mode</code> &rarr; <code>CompilationMode</code></td><td><code>--cuda-graph-backend-prefill</code>, <code>--cuda-graph-tc-compiler</code>; separately <code>--enable-torch-compile</code></td></tr>
+        <tr><td>Enum values</td><td><code>NONE=0, STOCK_TORCH_COMPILE=1, DYNAMO_TRACE_ONCE=2, VLLM_COMPILE=3</code></td><td>backend <code>full | breakable | tc_piecewise | disabled</code>; <code>tc_compiler</code> <code>eager | inductor</code></td></tr>
+        <tr><td>Default</td><td><code>-O2</code>; <code>mode=VLLM_COMPILE</code>, <code>cudagraph_mode=FULL_AND_PIECEWISE</code></td><td>prefill <code>breakable</code> on CUDA; <code>tc_compiler="eager"</code>; <code>enable_torch_compile=False</code></td></tr>
+        <tr><td>Is Inductor on by default?</td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--blocked">no</span></td></tr>
+        <tr><td>Split-op registry</td><td>central list, <code>CompilationConfig._attention_ops</code></td><td>decorator at definition, <code>@register_split_op()</code></td></tr>
+        <tr><td>Guards</td><td>dropped entirely unless <code>mode=1</code></td><td>kept (stock <code>torch.compile</code> semantics)</td></tr>
+        <tr><td>Custom FX passes</td><td>25 concrete pass classes wired into <code>PostGradPassManager</code> (<code>vllm/compilation/passes/pass_manager.py:L155-L232</code>)</td><td><code>FixFunctionalizationPass</code> only &mdash; <code>self.passes</code> starts empty and nothing adds to it (<code>python/sglang/srt/compilation/pass_manager.py:L36-L52</code>)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h3>vLLM's custom passes, and one that breaks the piecewise contract</h3>
+
+<p>Because vLLM owns the Inductor backend it can insert FX passes after AOTAutograd's
+functionalisation and before Inductor's lowering; <code>vllm/compilation/passes/pass_manager.py</code>
+assembles them from <code>PassConfig</code> flags. Take <code>SequenceParallelismPass</code>, which
+<a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a> flagged as vLLM's route to a fusion
+SGLang reaches differently. Read it as an opt-in, not as what your server is doing:
+<code>-O2</code>'s <code>pass_config</code> sets <code>"enable_sp": IS_DENSE</code> and
+<code>IS_DENSE</code> is hardcoded <code>False</code> at this SHA
+(<code>vllm/config/vllm.py:L147-L154</code>), so on a stock <code>-O2</code> server this pass does not
+run for any model. It matches an all-reduce feeding an RMSNorm:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/passes/fusion/sequence_parallelism.py:L202-L248</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def register(self, pm_pass: PatternMatcherPass) -&gt; None:
+        def pattern(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -&gt; tuple[torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(mm_1)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
+            return rmsnorm[0], rmsnorm[1]
+
+        def replacement(
+            residual: torch.Tensor,
+            mm_1: torch.Tensor,
+            rms_norm_weights: torch.Tensor,
+        ) -&gt; tuple[torch.Tensor, torch.Tensor]:
+# ...
+            reduce_scatter = self._reduce_scatter(mm_1)
+            local_len = reduce_scatter.size(0)
+# ...
+            residual = residual[
+                self.tp_rank * local_len : self.tp_rank * local_len + local_len, ...
+            ]
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
+            all_gather = self._all_gather(rmsnorm[0])
+            return all_gather, rmsnorm[1]</code></pre>
+</div>
+
+<p>Pattern: <code>all_reduce &rarr; fused_add_rms_norm</code>. Replacement:
+<code>reduce_scatter &rarr; norm on 1/TP of the rows &rarr; all_gather</code>. Wire volume is
+unchanged &mdash; an all-reduce <em>is</em> a reduce-scatter plus an all-gather. The class docstring is
+unusually candid about why the pass exists anyway:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/passes/fusion/sequence_parallelism.py:L511-L521</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    While this pass itself does not directly yield performance improvements,
+    it lays the groundwork for subsequent fusion passes, such as
+    GEMM + ReduceScatter and AllGather + GEMM fusions. These fusions can
+    significantly reduce communication overhead and improve overall model
+    performance.
+
+    This pass is only supported when compiling the whole graph (fullgraph
+    mode, i.e. using Inductor graph partition or empty splitting_ops).
+    Piecewise compilation is not supported because the residual tensor
+    gets split across TP ranks, causing size mismatches at subgraph
+    boundaries.</code></pre>
+</div>
+
+<p>This is the chapter's sharpest tradeoff, stated by the code itself. The pass makes the residual
+stream <em>shorter</em> between the reduce-scatter and the all-gather, and a tensor that changes shape
+cannot cross a subgraph boundary whose shapes were fixed at split time. So enabling sequence
+parallelism means giving up FX-level piecewise splitting &mdash; either <code>splitting_ops=[]</code>
+or <code>use_inductor_graph_partition=True</code>, which defers partitioning to Inductor codegen time,
+after all passes have run (<code>vllm/config/compilation.py:L669-L687</code>). Piecewise splitting and
+whole-graph rewriting want opposite things; the Inductor-partition mode exists to have both.</p>
+
+<h3>Caching, and what invalidates it</h3>
+
+<p>Compiling 33 subgraphs across several compile ranges takes minutes, so artefacts go on disk under
+a directory named by a hash of everything that could change the generated code:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/backends.py:L1058-L1070</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if not self.compilation_config.cache_dir:
+            # no provided cache dir, generate one based on the known factors
+            # that affects the compilation. if none of the factors change,
+            # the cache dir will be the same so that we can reuse the compiled
+            # graph.
+            factors = [env_hash, config_hash, code_hash, compiler_hash]
+            # Use SHA-256 for cache key hashing to be consistent across
+            # compute_hash functions. Truncate for a short cache dir name.
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
+            )
+            self.compilation_config.cache_dir = cache_dir</code></pre>
+</div>
+
+<p>Four factors, each worth knowing because each is a different way to lose your warm start:</p>
+
+<div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">env_hash</span><h4>Almost every VLLM_ env var</h4>
+    <p><code>envs.compile_factors()</code> takes every known vLLM env var and subtracts a small ignore
+    list &mdash; ports, credentials, logging, location-only paths. Flip an unrelated
+    <code>VLLM_*</code> knob in a deployment template and you cold-start the fleet.</p></div>
+  <div class="ve-card"><span class="ve-card__k">config_hash</span><h4>The whole VllmConfig</h4>
+    <p><code>CompilationConfig.compute_hash</code> is opt-out: every declared field except paths and
+    timing counters, with <code>pass_config</code> and <code>dynamic_shapes_config</code> folded in by
+    their own hashes (<code>vllm/config/compilation.py:L780-L812</code>). TP size, quantisation, or one
+    fusion flag is a miss.</p></div>
+  <div class="ve-card"><span class="ve-card__k">code_hash</span><h4>The bytes of every traced file</h4>
+    <p>vLLM records the files Dynamo traced through and SHA-256s their contents
+    (<code>vllm/compilation/backends.py:L1039-L1056</code>). Editing a model file &mdash; even a
+    comment &mdash; invalidates the cache. A feature, and also why the dev loop feels slow.</p></div>
+  <div class="ve-card"><span class="ve-card__k">compiler_hash</span><h4>PyTorch and Inductor themselves</h4>
+    <p><code>get_inductor_factors()</code> hashes <code>CacheBase.get_system()</code>,
+    <code>torch_key()</code>, and portable dumps of the Inductor and functorch configs
+    (<code>vllm/compilation/compiler_interface.py:L170-L190</code>). A PyTorch patch bump discards the
+    whole fleet's artefacts.</p></div>
+</div>
+
+<p>The operational consequence: a rolling deploy that changes any of those four does not restart
+pods, it recompiles them, serially, at the moment you are adding capacity. Bake the cache into the
+image or mount it, and make sure the mount key covers all four factors &mdash; that is the plumbing
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> has to route around.
+SGLang's version is one factor, not four: <code>SGLangBackend.__call__</code> names the directory from
+<code>self.compiler_manager.compute_hash()</code> alone
+(<code>python/sglang/srt/compilation/backend.py:L404-L418</code>) &mdash; cheaper to reason about,
+correspondingly easier to make stale.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one Llama forward, cold</h2></div><div class="sec__body"><p>Follow the very first <code>LlamaModel.__call__</code> on a cold cache, naming functions in order.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the cold-start call path, vLLM.</b>
+    Every hop is a real function at <code>a556f3f</code>.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["_support_torch_compile.__call__<br/>decorators.py:L502"] --> B["_mark_dynamic_inputs<br/>mark_dynamic on input_ids, positions dim 0"]
+    B --> C["TorchCompileWithNoGuardsWrapper.__call__<br/>torch.compile fullgraph=True, guards filtered out"]
+    C --> D["Dynamo traces to ONE FX graph<br/>logs Dynamo bytecode transform time"]
+    D --> E["VllmBackend.__call__<br/>backends.py:L1020"]
+    E --> F["hash env + config + traced code + compiler<br/>make or reuse VLLM_CACHE_ROOT dir"]
+    F --> G["configure_post_pass<br/>installs PostGradPassManager"]
+    G --> H["split_graph on splitting_ops<br/>65 subgraphs for L=32"]
+    H --> I["PiecewiseCompileInterpreter.run<br/>walks the split module"]
+    I --> J["call_module per compilable submod<br/>builds PiecewiseBackend index 0..32"]
+    J --> K["wrap_with_cudagraph_if_needed<br/>CUDAGraphWrapper mode PIECEWISE"]
+    K --> L["CompilerManager.compile per compile_range<br/>PostGradPassManager then Inductor"]
+    L --> M["save_to_file writes vllm_compile_cache.py<br/>plus computation_graph.py for reading"]
+    M --> N["generate_execution_code + compile_execution_fn<br/>one Python callable that calls the pieces in order"]
+  </script>
+</div>
+
+<p><b>Hop I&rarr;J.</b> <code>PiecewiseCompileInterpreter</code> subclasses
+<code>torch.fx.Interpreter</code> and overrides <code>call_module</code>. For each submodule in
+<code>compile_submod_names</code> it constructs a <code>PiecewiseBackend</code>, wraps it, and
+<em>replaces the submodule in <code>self.module.__dict__</code></em> with the wrapper
+(<code>vllm/compilation/backends.py:L730-L775</code>). What comes out is structurally the split graph
+with each compilable child swapped for a compiled-and-captured callable. That is the entire mechanism
+of "piecewise": no special runtime, just a graph whose children happen to be CUDA graph replays.</p>
+
+<p><b>Hop L.</b> The cache key inside <code>CompilerManager</code> is
+<code>(runtime_shape, graph_index, backend_name)</code> &mdash; a <code>Range</code>, a piece index,
+and the compiler name (<code>vllm/compilation/backends.py:L124-L138</code>). Compilation is therefore
+per-piece <em>and</em> per compile-range: <code>compile_ranges_endpoints</code> partitions
+<code>[1, max_num_batched_tokens]</code> into intervals, each getting its own Inductor artefact
+(<code>vllm/config/compilation.py:L580-L593</code>). Multiply 33 pieces by the number of ranges and
+you see where the minutes go.</p>
+
+<p>SGLang's trace has one structural difference worth naming: it compiles the general dynamic-shape
+graph <em>during tracing</em>, inside <code>call_module</code>, and defers shape-specialised
+compilation to the first real call at that shape
+(<code>python/sglang/srt/compilation/backend.py:L304-L343</code>).
+<code>CUDAPiecewiseBackend.__call__</code> then compiles and captures lazily per bucket:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/compilation/cuda_piecewise_backend.py:L114-L126</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def __call__(self, *args) -&gt; Any:
+        if not self.first_run_finished:
+            self.first_run_finished = True
+            self.check_for_ending_compilation()
+            return self.compiled_graph_for_general_shape(*args)
+
+        if len(self.sym_shape_indices) == 0:
+            return self.compiled_graph_for_general_shape(*args)
+
+        runtime_shape = args[self.sym_shape_indices[0]]
+        if runtime_shape not in self.concrete_size_entries:
+            # we don't need to do anything for this shape
+            return self.compiled_graph_for_general_shape(*args)</code></pre>
+</div>
+
+<p>vLLM went the other way at this SHA: <code>PiecewiseCompileInterpreter</code>'s docstring says it
+"creates a PiecewiseBackend and compiles all ranges up front", and
+<code>monitor_profiling_run</code> asserts that <code>num_backend_compilations</code> does not change
+during the profiling run (<code>vllm/compilation/monitor.py:L61-L82</code>). Front-loading everything
+makes startup slower and steady-state latency more predictable; SGLang's laziness does the opposite.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Graph breaks are errors here, not slowdowns</span>
+  <p>The folklore &mdash; "a graph break in a hot loop silently eats your speedup" &mdash; is true of
+  stock <code>torch.compile</code>, not of vLLM, which compiles <code>fullgraph=True</code> so Dynamo
+  raises instead of falling back (<code>docs/design/debug_vllm_compile.md:L138-L147</code>). The silent
+  version still bites in two places: code outside the decorated module (sampler, logits processors,
+  multimodal preprocessing) is never compiled at all, and SGLang's
+  <code>--enable-torch-compile</code> path does not force fullgraph.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Dropped guards turn a recompile into a wrong answer</span>
+  <p>Because vLLM installs <code>skip_all_guards_unsafe</code>, a shape-dependent branch does not
+  cause a recompilation storm &mdash; it makes the branch traced at compile time run for every batch
+  size forever. <code>docs/design/debug_vllm_compile.md:L154-L176</code> gives the canonical shape:
+  <code>if data.size[0] % 128 == 0:</code>. Diagnose with <code>TORCH_TRACE=~/trace_dir</code> plus
+  <code>tlparse</code> and read <code>compilation_metrics</code>; any symbolic constraint on the batch
+  dimension is a bug. Fix by moving the branch into a custom operator. To make the failure loud
+  instead, set <code>-cc.dynamic_shapes_config.evaluate_guards=True</code>, which keeps shape guards
+  and fails on any recompile one causes.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">A pass that needs the whole graph will assert, loudly</span>
+  <p><code>SequenceParallelismPass.is_applicable_for_range</code> opens with
+  <code>assert self.compilation_config.use_inductor_graph_partition or not
+  self.compilation_config.splitting_ops, "SequenceParallelismPass requires full-graph compilation"</code>
+  (<code>vllm/compilation/passes/fusion/sequence_parallelism.py:L592-L612</code>). If you enable SP on
+  a default <code>-O2</code> config with the standard splitting ops, that is what you will see. The
+  fix is <code>-cc.use_inductor_graph_partition=True</code>, not
+  <code>-cc.pass_config.enable_sp=False</code>.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Cache misses look like a hung server</span>
+  <p>A cold cache produces no output between "Dynamo bytecode transform time" and "torch.compile took
+  N s in total". For a wrong-cache bug rather than a slow one, the documented escape is
+  <code>VLLM_DISABLE_COMPILE_CACHE=1</code> plus <code>rm -rf ~/.cache/vllm</code> and
+  <code>rm -rf /tmp/torchinductor_$(whoami)</code>
+  (<code>docs/design/debug_vllm_compile.md:L303-L331</code>). The docs are blunt that the layer "is
+  unfortunately not always correct" when a hash factor is missing: if flipping a flag changes nothing,
+  suspect a stale artefact before you suspect the flag.</p>
+</div>
+
+<p>Two more honest limits. Compiled code is not steppable: the Triton kernel that replaced ten aten
+ops has no Python frame to break on, and a numerical bug in it surfaces as a wrong tensor with no
+intermediate to inspect. <code>-cc.debug_dump_path=...</code> makes vLLM run the whole compilation
+under <code>depyf</code> (<code>vllm/compilation/monitor.py:L31-L39</code>), writing readable Python
+for the transformed bytecode and each graph. And fusion changes numerics: reassociating a reduction or
+holding an accumulator at a different width gives different bits than the eager chain, so a compiled
+server and an eager server will not agree token-for-token &mdash;
+<a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>'s subject.</p>
+
+<h3>Ahead-of-time kernel compilation is a different animal</h3>
+
+<p>SGLang ships one more thing called compilation that is not <code>torch.compile</code>.
+<code>python/sglang/compile_deep_gemm.py</code> launches a real server with
+<code>SGLANG_IN_DEEPGEMM_PRECOMPILE_STAGE</code> and <code>SGLANG_ENABLE_JIT_DEEPGEMM</code> set,
+sends one four-token request through it, waits, and exits
+(<code>python/sglang/compile_deep_gemm.py:L31-L37</code>, <code>L58-L90</code>). DeepGEMM JIT-compiles
+a kernel per problem shape on first use, so on a live server the first request at each new shape pays
+a compile. Running the script beforehand populates the kernel cache so production never does &mdash;
+the same operational idea as the FX cache, applied at individual kernels rather than graphs.</p></div></section>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Everything below is CPU-cheap except the server launches, which need a GPU. Numbers you get are
+yours, not the book's.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">measure the compile cost and see the pieces</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># 1. Cold compile. Watch for "Dynamo bytecode transform time" and
+#    "torch.compile took N s in total".
+rm -rf ~/.cache/vllm
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct 2&gt;&amp;1 | grep -E "Dynamo|torch.compile took|cache directory"
+
+# 2. Warm restart. Same command, no rm. The delta is what the cache buys.
+
+# 3. Read the split graph vLLM wrote for you. This file is the answer to
+#    "how many pieces did it make", printed as Python.
+find ~/.cache/vllm/torch_compile_cache -name computation_graph.py | head -1 | xargs grep -c "submod_"
+
+# 4. Turn compilation off, keep CUDA graphs, and compare.
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct -cc.mode=0
+
+# 5. Turn both off.
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --enforce-eager
+
+# 6. Full torch.compile logs for a real diagnosis.
+pip install tlparse
+TORCH_TRACE=~/trace_dir vllm serve meta-llama/Meta-Llama-3-8B-Instruct
+tlparse ~/trace_dir/&lt;rank_0_log_file&gt;</code></pre>
+</div>
+
+<p>On the SGLang side the comparison worth running is the one the defaults do not give you:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">turn Inductor on in SGLang</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Default on CUDA: prefill uses the breakable backend, no Dynamo at all.
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct
+
+# Piecewise compile the prefill phase with Inductor.
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --cuda-graph-backend-prefill tc_piecewise --cuda-graph-tc-compiler inductor
+
+# The other, unrelated path: whole-forward compile inside decode capture,
+# bounded at batch 32 by default.
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --enable-torch-compile --torch-compile-max-bs 32</code></pre>
+</div></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Count the pieces.</b> Read <code>vllm/compilation/backends.py:L553-L627</code> and
+  <code>vllm/config/compilation.py:L1134-L1185</code>. For Qwen3-32B (L=64, standard attention, no
+  Mamba layers), how many entries end up in <code>piecewise_graphs</code>, and how many of those are
+  passed to <code>PiecewiseCompileInterpreter</code> as compilable? Show your reasoning about the
+  consecutive-splitting-op merge.</li>
+
+  <li><b>Predict, then verify.</b> You set <code>-cc.splitting_ops='[]'</code> with
+  <code>-cc.cudagraph_mode=PIECEWISE</code>. Predict the log line and the resulting cudagraph mode,
+  then check against <code>vllm/config/compilation.py:L1187-L1210</code>.</li>
+
+  <li><b>Break the cache on purpose.</b> Using <code>vllm/compilation/backends.py:L1030-L1073</code>
+  and <code>vllm/config/compilation.py:L780-L812</code>, name three single-character edits to a
+  deployment &mdash; one to an env var, one to a CLI flag, one to a Python file &mdash; that each
+  force a full recompile, and one plausible-looking change that does <em>not</em>.</li>
+
+  <li><b>Price a different fusion.</b> Redo §3's table for <code>SiluAndMul.forward_native</code>
+  (<code>vllm/model_executor/layers/activation.py:L133-L137</code>) on Llama-3-8B's MLP,
+  $d_{\text{ff}} = 14336$, bf16. How many bytes per token does fusion save, and how does the answer
+  compare to the 13.63 MB from the norms? Which of the two would you fuse first if you could only
+  have one?</li>
+
+  <li><b>Argue the other side.</b> <code>-O2</code>'s pass config sets
+  <code>"enable_sp": IS_DENSE</code>, and <code>IS_DENSE</code> is the module-level constant
+  <code>False</code> &mdash; not a predicate on the model
+  (<code>vllm/config/vllm.py:L147-L154</code>, whose own comment says these are "currently set to
+  False in all cases", referencing vLLM issue 25689). So <code>SequenceParallelismPass</code> is off
+  at <code>-O2</code> for <em>every</em> model, dense or MoE, and the commented-out predicate shows
+  where it would come back. Sketch what would have to be true of an MoE forward pass for SP to be
+  safe once that predicate is restored, and say which piece of the piecewise machinery would have to
+  change.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answer &mdash; 1</summary>
+  <div class="fold__body">
+    <p>64 attention layers, each emitting <code>vllm::unified_kv_cache_update</code> immediately
+    followed by <code>vllm::unified_attention_with_output</code>. Both are in the default
+    <code>splitting_ops</code>, and the "keep consecutive splitting ops together" branch merges the
+    adjacent pair into one splitting subgraph. So 64 splitting subgraphs, 65 compilable ones, 129
+    <code>SplitItem</code>s. <code>submod_names_to_compile</code> filters on
+    <code>not item.is_splitting_graph</code>, so <code>num_piecewise_capturable_graphs_seen</code>
+    reaches 65 and <code>num_piecewise_graphs_seen</code> 129. If the backend sets
+    <code>forward_includes_kv_cache_update</code> the update op is never emitted and the counts are
+    unchanged &mdash; the merge had already collapsed it.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Answer &mdash; 2</summary>
+  <div class="fold__body">
+    <p>Two warnings fire: <code>"Using piecewise cudagraph with empty splitting_ops"</code>, then,
+    because the mode is exactly <code>PIECEWISE</code>, a second saying such a configuration contains
+    no piecewise cudagraph &mdash; and <code>cudagraph_mode</code> is set to
+    <code>CUDAGraphMode.NONE</code>, with a hint to ask for <code>FULL</code> or
+    <code>FULL_DECODE_ONLY</code>. You get a compiled model and <em>no</em> CUDA graphs, the worst
+    combination for batch-1 decode. Had you asked for <code>FULL_AND_PIECEWISE</code>, the same branch
+    would downgrade you to <code>FULL</code>, which is usually what you wanted.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Answer &mdash; 3</summary>
+  <div class="fold__body">
+    <p>Env: <code>VLLM_USE_AOT_COMPILE=1</code>, or almost any <code>VLLM_*</code> outside
+    <code>envs.compile_factors()</code>'s ignore set, changes <code>env_hash</code>. Flag:
+    <code>-cc.pass_config.fuse_act_quant=False</code> changes <code>pass_config.compute_hash()</code>
+    and so <code>config_hash</code>. File: a blank line in
+    <code>vllm/model_executor/models/llama.py</code> changes <code>code_hash</code>, since vLLM hashes
+    the full contents of every traced file. What does <em>not</em> invalidate: moving
+    <code>VLLM_CACHE_ROOT</code> &mdash; explicitly ignored, with the comment that hashing
+    location-only paths would let relocating HOME silently discard every cache.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Answer &mdash; 4</summary>
+  <div class="fold__body">
+    <p><code>F.silu(x[..., :d]) * x[..., d:]</code> with $d = 14336$, bf16 (28,672 B per half-row).
+    Eager: silu reads 28,672 and writes 28,672; the multiply reads 57,344 and writes 28,672. Total
+    143,360 B. Fused: read both halves (57,344) and write one (28,672) = 86,016 B. Saving 57,344 B per
+    call, one call per layer, 32 layers &rarr; 1.84 MB per token. That is 7.4&times; less than the
+    norms' 13.63 MB, because the norm decomposition materialises eight <em>fp32</em> intermediates
+    while SiLU materialises one bf16 one. Fuse the norms first. The general lesson: dtype promotion
+    inside a reference implementation is where the intermediate traffic hides.</p>
+  </div>
+</details>
+
+<details class="fold">
+  <summary>Answer &mdash; 5</summary>
+  <div class="fold__body">
+    <p>SP shortens the residual to $1/\text{TP}$ of its rows between the reduce-scatter and the
+    all-gather. In an MoE layer the routing happens inside that window and the all-to-all dispatch
+    expects full-length token indices, so a rank holding only its slice cannot build a correct expert
+    assignment without another collective. Safety would mean routing before the reduce-scatter, or an
+    a2a that works on sharded rows. Nothing in <code>split_graph</code> would change &mdash; SP already
+    requires <code>use_inductor_graph_partition=True</code> or empty <code>splitting_ops</code>. What
+    changes is the pattern set: the current patterns match
+    <code>all_reduce &rarr; fused_add_rms_norm</code>, and an MoE block interposes the a2a between
+    them.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>Fusing one <code>fused_add_rms_norm</code> on Llama-3-8B removes 213,012 of 253,972 bytes, a
+  6.2&times; cut &mdash; but at batch 1 the 64 call sites total only 13.63 MB, 0.09% of the 4.48 ms
+  decode floor. The batch-1 win is ~576 fewer kernel launches; the bandwidth win only appears at
+  scale, where it reaches 23% of the step's bytes at 256 tokens. Any single claimed speedup for
+  <code>torch.compile</code> is hiding one of those two regimes.</li>
+
+  <li>Attention is excluded because it is a custom op that reads its metadata from a global forward
+  context and dispatches into an external backend. Everything about "piecewise" &mdash; the split
+  scan, the 33-plus-32 subgraph structure, the per-piece CUDA graph wrapping &mdash; is downstream of
+  that single fact.</li>
+
+  <li>Piecewise splitting and whole-graph rewriting are mutually exclusive at the FX level.
+  <code>SequenceParallelismPass</code> changes the residual's row count, which cannot cross a fixed
+  subgraph boundary, so vLLM needs <code>use_inductor_graph_partition=True</code> &mdash; partitioning
+  after codegen &mdash; to run both.</li>
+
+  <li>vLLM drops all Dynamo guards and compiles <code>fullgraph=True</code>. That converts two
+  familiar failure modes: graph breaks become hard errors, and shape-dependent branches become silent
+  wrong answers instead of recompilations.</li>
+
+  <li>The compile cache key is four hashes &mdash; env vars, the full config, the bytes of every
+  traced source file, and the PyTorch/Inductor build. Warm starts survive a restart; they do not
+  survive a torch upgrade, a flag change, or a source edit, which is what makes autoscaling on a cold
+  cache an availability problem rather than a latency one.</li>
+
+  <li>At these SHAs the engines have made opposite default choices: vLLM ships
+  <code>-O2</code>/<code>VLLM_COMPILE</code> with Inductor on for everyone, while SGLang's CUDA
+  default is the breakable backend with no Dynamo, and its piecewise path defaults
+  <code>tc_compiler="eager"</code> and covers prefill only.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/vllm-project/vllm/blob/a556f3fccb701e5618d84d547ff454c56a1bfdfb/docs/design/torch_compile.md">vLLM design doc: torch_compile.md</a>
+  &mdash; the maintainers' own overview of the integration, at the pinned SHA.</li>
+  <li><a href="https://github.com/vllm-project/vllm/blob/a556f3fccb701e5618d84d547ff454c56a1bfdfb/docs/design/debug_vllm_compile.md">vLLM design doc: debug_vllm_compile.md</a>
+  &mdash; the tlparse workflow, the dynamic-shape failure modes, and the cache escape hatches quoted
+  in §6. Read this before your first compile bug, not after.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/20059">vLLM PR #20059</a> &mdash; why full
+  CUDA graphs are captured <em>outside</em> a piecewise FX graph rather than by flattening it, cited
+  in the <code>set_splitting_ops_for_v1</code> comment.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/33267">vLLM issue #33267</a> &mdash;
+  <code>unified_kv_cache_update</code>'s string parameter blocking Inductor from reusing piecewise
+  graphs, the reason it is appended to <code>splitting_ops</code>.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/25689">vLLM issue #25689</a> &mdash; why
+  <code>IS_QUANTIZED</code> and <code>IS_DENSE</code> are hardcoded False in the optimization-level
+  tables, disabling SP and attention-quant fusion by default.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/25094">vLLM issue #25094</a> &mdash; the
+  blocked-weights case that forces <code>+quant_fp8</code> back on even under Inductor; a good
+  example of a custom op that Inductor cannot replace.</li>
+  <li><a href="https://github.com/meta-pytorch/tlparse">tlparse</a> &mdash; the log renderer that turns
+  <code>TORCH_TRACE</code> output into browsable compilation metrics, guards, and generated Triton.</li>
+  <li><a href="https://docs.pytorch.org/docs/stable/compile/programming_model.dynamo_core_concepts.html">PyTorch: Dynamo core concepts</a>
+  &mdash; the reference the vLLM debug doc points you at when you hit a graph break.</li>
+  <li><a href="https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html">PyTorch: torch.compile caching</a>
+  &mdash; the layer underneath vLLM's cache; worth knowing which of the two you are fighting.</li>
+</ul></div></section>
+<div class="pager"><a href="08-01-cuda-graphs.html"><div class="pager__k">← Previous</div><div class="pager__t">CUDA graphs and kernel-launch overhead</div></a><a class="pager__next" href="08-03-triton-and-cutlass.html"><div class="pager__k">Next →</div><div class="pager__t">Writing a Triton kernel; CUTLASS at a glance</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: pricing one fusion</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: one Llama forward, cold</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

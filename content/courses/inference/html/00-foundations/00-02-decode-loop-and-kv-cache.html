@@ -1,0 +1,1748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The decode loop and why the KV cache exists — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i is-current" href="00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 0 · Foundations · 00-02</div>
+<h1>The decode loop and why the KV cache exists</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/worker/gpu_model_runner.py</code></li><li><code>python/sglang/srt/model_executor/forward_batch_info.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Generating 512 tokens from Llama-3-8B after a 2048-token prompt costs about
+8.8&nbsp;TFLOP with a KV cache and about 19.7&nbsp;PFLOP without one. That factor of
+2,200&times; is the single reason every serving engine in this book is organised around a
+block of memory rather than around a matrix multiply.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Autoregressive generation has an ugly property: to produce token $t+1$ you need a
+forward pass over tokens $1 \dots t$, and to produce token $t+2$ you need a forward pass
+over tokens $1 \dots t{+}1$. The naive implementation re-runs the whole model over the
+whole sequence, once per output token. Every previous token's key and value vectors get
+recomputed from scratch at every single step, from identical inputs, to identical values.</p>
+
+<p>Here is what that costs on one real model. Llama-3-8B, bf16, batch 1, a 2048-token
+prompt, 512 generated tokens. Both columns are arithmetic from published shapes
+(<code>L=32, d=4096, h=32, h_kv=8, d_h=128, d_ff=14336</code>, vocab 128256, $P =
+8.03\times10^{9}$), not measurements.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">2,224&times;</div><div class="kpi__l">FLOPs saved over the decode phase (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">128 KiB</div><div class="kpi__l">KV cache per token, Llama-3-8B bf16</div></div>
+  <div class="kpi"><div class="kpi__n">1.06</div><div class="kpi__l">FLOP/byte of a cached decode step</div></div>
+</div>
+
+<p>The last number is the twist, and it is what the rest of the book is about. The cache
+does not make the problem small. It converts an <em>arithmetic</em> problem into a
+<em>memory</em> problem: a cached decode step performs roughly one floating-point
+operation per byte it moves, which on any modern accelerator means the GPU spends its time
+waiting on HBM. Chapter <a href="00-04-roofline-and-arithmetic-intensity.html">§0.4</a>
+makes that precise; this chapter derives why it is inevitable.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A decoder-only transformer with causal masking has one structural gift: the key and
+value vectors for token $i$ depend only on tokens $1 \dots i$. They cannot change when
+token $i{+}1$ arrives, because token $i$ is not allowed to look forward. So every K and V
+you compute is <em>permanently correct</em> and can be written down once. The query vector
+is different — at each step you have exactly one new query, you use it once, and you throw
+it away. That asymmetry is the whole design. Keys and values are state; queries are
+transient.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one decode step, without and with the cache.</b>
+    Shapes are Llama-3-8B, one layer, batch 1, generating token 2560.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph NOCACHE["No cache - 42.8 TFLOP per step"]
+      A1["all 2560 token ids"] --> A2["embed + 32 layers of qkv_proj<br/>x: 2560 x 4096"]
+      A2 --> A3["Q: 2560 x 32 x 128<br/>K: 2560 x 8 x 128<br/>V: 2560 x 8 x 128"]
+      A3 --> A4["causal attention<br/>2560 queries x 2560 keys"]
+      A4 --> A5["MLP, o_proj, lm_head"]
+      A5 --> A6["logits: 2560 x 128256<br/>keep row 2559, discard 2559 rows"]
+    end
+    subgraph CACHE["With cache - 17.4 GFLOP per step"]
+      B1["1 token id"] --> B2["embed + 32 layers of qkv_proj<br/>x: 1 x 4096"]
+      B2 --> B3["Q: 1 x 32 x 128<br/>K_new: 1 x 8 x 128<br/>V_new: 1 x 8 x 128"]
+      B3 --> B4["append K_new, V_new<br/>128 KiB written across 32 layers"]
+      B4 --> B5["attention<br/>1 query x 2560 cached keys<br/>reads 320 MiB of KV"]
+      B5 --> B6["MLP, o_proj, lm_head"]
+      B6 --> B7["logits: 1 x 128256"]
+    end
+  </script>
+</div>
+
+<p>Both columns compute the same last row of logits. The left one computes 2,559 other
+rows first and throws them away.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the algebra of one step</h2></div><div class="sec__body"><p>Symbols, matching <a href="../FORMULAS.html">the formula sheet</a>: $L$ layers, hidden
+size $d$, $h$ query heads, $h_{kv}$ key/value heads, head dimension $d_h$, FFN
+intermediate size $d_{ff}$, total parameter count $P$, bytes per cached element $b$
+(2 for bf16). Let $p$ be the prompt length and $n$ the number of tokens to generate. At
+decode step $t \in \{1 \dots n\}$ the sequence length including the token being produced
+is $s_t = p + t$.</p>
+
+<h3>Cost of one cached decode step</h3>
+
+<p>The input to the layer stack is a single row $x \in \mathbb{R}^{1 \times d}$. Per layer:</p>
+
+<ul>
+  <li><b>QKV projection.</b> $W_q \in \mathbb{R}^{d \times h d_h}$, $W_k, W_v \in
+    \mathbb{R}^{d \times h_{kv} d_h}$. A matrix-vector product of an $m \times k$ matrix
+    costs $2mk$ FLOPs (one multiply, one add per element), so this is
+    $2d(h d_h) + 4 d (h_{kv} d_h)$.</li>
+  <li><b>Attention.</b> One query per head, $s_t$ keys. $QK^\top$ is $2 h d_h s_t$; the
+    weighted sum over $V$ is another $2 h d_h s_t$. Softmax is $O(h s_t)$ and drops out.
+    Total $4 h d_h s_t$.</li>
+  <li><b>Output projection.</b> $2 (h d_h) d$.</li>
+  <li><b>MLP.</b> SwiGLU has three matrices of shape $d \times d_{ff}$: $2 \cdot 3 d d_{ff}
+    = 6 d d_{ff}$.</li>
+</ul>
+
+<p>Every term except attention is a fixed cost per token that depends only on weight
+shapes, and summing all of them over $L$ layers plus the embedding and LM head is exactly
+$2P$ — two FLOPs per parameter, because each weight is touched by one multiply and one
+add. So:</p>
+
+<div class="math-display">$$\text{FLOPs}^{\text{cached}}_{t} \;=\; 2P \;+\; 4\,L\,h\,d_h\,s_t$$</div>
+
+<p>Sanity check on Llama-3-8B: one layer holds $d(h d_h) + 2 d (h_{kv} d_h) + (h d_h)d =
+41{,}943{,}040$ attention parameters and $3 d d_{ff} = 176{,}160{,}768$ MLP parameters,
+$218{,}103{,}808$ in total, so $2 \times$ that is 436.2&nbsp;MFLOP per layer &mdash; which
+is what you get by adding 50.3 (QKV) + 33.6 (o_proj) + 352.3 (MLP) MFLOP directly.</p>
+
+<h3>Cost of one uncached decode step</h3>
+
+<p>Without a cache the step must reconstruct every K and V, which means a full forward pass
+over $s_t$ tokens. Every per-token weight cost is now paid $s_t$ times. Attention becomes
+$s_t$ queries against $s_t$ keys; a causal kernel skips the masked half, so it is
+$\tfrac{1}{2} \cdot 4 h d_h s_t^2$ per layer.</p>
+
+<div class="math-display">$$\text{FLOPs}^{\text{uncached}}_{t} \;=\; 2P\,s_t \;+\; 2\,L\,h\,d_h\,s_t^2$$</div>
+
+<p>The two headline asymptotics fall straight out. Attention work per step goes from
+$\Theta(s^2)$ to $\Theta(s)$; weight-GEMM work per step goes from $\Theta(s)$ to
+$\Theta(1)$. Summed over $n$ steps with $p = 0$, generating $n$ tokens costs $O(n^3)$
+attention and $O(n^2)$ projection FLOPs without a cache, versus $O(n^2)$ and $O(n)$ with
+one.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Precision</span>
+  <p>&ldquo;The KV cache turns $O(n^2)$ into $O(n)$&rdquo; is shorthand for the
+  <em>per-step</em> statement, and it is the projections it refers to, not attention.
+  Attention per step is $O(n^2) \to O(n)$; the model as a whole per step is
+  $O(n) \to O(1)$ in the term that actually dominates. Total attention work across a
+  generation stays quadratic even with a perfect cache &mdash; which is why long-context
+  serving is still hard, and why Part&nbsp;3 exists.</p>
+</div>
+
+<h3>The Llama-3-8B example, all the way through</h3>
+
+<p>$p = 2048$, $n = 512$, so $s_t$ runs 2049 &hellip; 2560.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; arithmetic from the formulas above and published Llama-3-8B shapes. No measurement.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Quantity</th><th>No cache</th><th>With cache</th><th>Ratio</th></tr></thead>
+    <tbody>
+      <tr><td>New K/V vectors computed at step 512</td><td class="num">2,560</td><td class="num">1</td><td class="num">2,560&times;</td></tr>
+      <tr><td>Projection FLOPs, one step at $s=2560$</td><td class="num">4.11e13</td><td class="num">1.61e10</td><td class="num">2,560&times;</td></tr>
+      <tr><td>Attention FLOPs, one step at $s=2560$</td><td class="num">1.72e12</td><td class="num">1.34e9</td><td class="num">1,280&times;</td></tr>
+      <tr><td>Total FLOPs, one step at $s=2560$</td><td class="num">4.28e13</td><td class="num">1.74e10</td><td class="num">2,460&times;</td></tr>
+      <tr><td><b>Total FLOPs, all 512 steps</b></td><td class="num"><b>1.97e16</b></td><td class="num"><b>8.84e12</b></td><td class="num"><b>2,224&times;</b></td></tr>
+      <tr><td>Attention share of the total</td><td class="num">3.6%</td><td class="num">7.0%</td><td class="num">&mdash;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Read the last row before anything else. Attention is a <em>minority</em> of decode
+FLOPs at 2.5k context on an 8B model &mdash; 7% &mdash; and the cache's main job is not
+saving attention arithmetic. Its main job is deleting the 2,559 redundant copies of the
+weight GEMMs. That is why the ratio is 2,224&times; and not 2&times;.</p>
+
+<h3>Now count bytes, because bytes are what you actually pay</h3>
+
+<p>Per cached decode step, batch 1, a GPU must move: every weight, once
+($P \cdot b = 16.06$&nbsp;GB); every cached K and V element, once
+($2 L h_{kv} d_h b s_t$ bytes = 335&nbsp;MB at $s = 2560$); plus the 128&nbsp;KiB of new
+KV it writes. Arithmetic intensity at $s = 2304$ (the midpoint):</p>
+
+<div class="math-display">$$I \;=\; \frac{2P + 4 L h d_h s}{P b + 2 L h_{kv} d_h b s} \;=\; \frac{1.727\times10^{10}}{1.636\times10^{10}} \;=\; 1.06 \ \text{FLOP/byte}$$</div>
+
+<p>The uncached step moves almost exactly the same weight bytes &mdash; you still stream
+the model once &mdash; but performs 2,460&times; the arithmetic, giving
+$I \approx 2.7\times10^{3}$&nbsp;FLOP/byte. <b>The cache does not make decode faster by
+making it cheaper in bytes. It makes it faster by deleting arithmetic, and in doing so it
+moves the workload from the compute-bound side of the roofline to the memory-bound side.</b>
+Every later chapter &mdash; quantization, MLA, paged memory, CUDA graphs, speculative
+decoding &mdash; is an attack on the memory-bound regime the cache creates.</p>
+
+<p>Over the full 512-step decode phase the machine moves 7,658&nbsp;GiB of weights and
+144&nbsp;GiB of KV. At the 3.35&nbsp;TB/s HBM3 figure NVIDIA publishes for H100 SXM
+(<a href="https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-datasheet">datasheet</a>),
+that is a floor of 2.5&nbsp;s, or 4.9&nbsp;ms per token &mdash; a derived roofline bound
+against a vendor peak, not a benchmark. Note the shape of it: 98% of the traffic is
+weights, at batch 1. Batching amortises the weight read across sequences and does nothing
+for the KV read, which is why the KV term dominates capacity planning and the weight term
+dominates single-stream latency.</p></div></section>
+<section class="sec" id="what-is-cacheable" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">What is cacheable, and why causality is the precondition</h2></div><div class="sec__body"><p>Three things are true of a decoder-only transformer, and only the first is about caching.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero">
+    <span class="ve-card__k">CACHE</span>
+    <h4>K and V</h4>
+    <p>$k_i = x_i W_k$ and $v_i = x_i W_v$ where $x_i$ is the layer input at position $i$.
+    Under a causal mask, $x_i$ depends only on tokens $1 \dots i$. Appending token $i{+}1$
+    cannot change $x_i$, so it cannot change $k_i$ or $v_i$. Computed once, correct forever.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">DISCARD</span>
+    <h4>Q</h4>
+    <p>The query for position $i$ is used exactly once, in step $i$, and never again.
+    Position $i{+}1$ brings its own query. Storing $q_i$ would cost the same as storing
+    $k_i$ and buy nothing.</p>
+  </div>
+  <div class="ve-card ve-card--recessed">
+    <span class="ve-card__k">NOTHING</span>
+    <h4>The MLP</h4>
+    <p>The FFN is position-wise: its output at $i$ is a function of the hidden state at
+    $i$ alone. There is no cross-token reuse to exploit &mdash; and it is 80% of the FLOPs.
+    This is why decode stays expensive even with a perfect cache.</p>
+  </div>
+</div>
+
+<p>Causality is the precondition, not a detail. Drop the causal mask &mdash; a BERT-style
+encoder, or a prefix-LM segment where every token attends to every other &mdash; and $x_i$
+becomes a function of the <em>whole</em> sequence, so appending a token invalidates every
+previously computed K and V. There is nothing to cache. vLLM encodes precisely this in the
+KV-cache spec: an encoder-only attention layer contributes no cache group at all.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/attention.py:L597-L608</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_kv_cache_spec(self, vllm_config: VllmConfig) -&gt; KVCacheSpec | None:
+        # Block size may get updated after model loading, refresh it
+        block_size = vllm_config.cache_config.block_size
+        # Encoder-only attention is prefill-only and keeps no autoregressive KV
+        # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
+        # linear_attention interleaved with full_attention) the runner iterates
+        # every attention module to build the KV-cache spec, so an ENCODER_ONLY
+        # full_attention layer reaches here; it contributes no KV cache group.
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return None</code></pre>
+</div>
+
+<p>The same assumption sits in the attention metadata as a plain default. As of
+<code>a556f3f</code>, <code>CommonAttentionMetadata</code> carries <code>causal: bool |
+torch.Tensor = True</code> at
+<code>vllm/v1/attention/backend.py:L485</code> &mdash; causal is the default because the
+cache is only valid under it.</p>
+
+<p>Two fields above it encode the entire asymmetry of this chapter:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backend.py:L465-L480</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    """(batch_size + 1,), the start location of each request in query Tensor"""
+
+    seq_lens: torch.Tensor
+    """(batch_size,), the number of computed tokens for each request"""
+
+    num_reqs: int
+    """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
+    num_actual_tokens: int
+    """Total number of tokens in batch"""
+    max_query_len: int
+    """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length (may be an upper bound)"""</code></pre>
+</div>
+
+<p>Query length and sequence length are <em>separate tensors</em>. In prefill they are
+equal. In decode, query length is 1 and sequence length is $s_t$. Every attention backend
+in vLLM is written against that pair, because that pair is the KV cache.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the cache growing across three decode steps,</b>
+    Llama-3-8B layer 0, batch 1. Each token contributes 8 KV heads &times; 128 dims &times; 2 bytes
+    &times; 2 tensors = 4 KiB per layer, 128 KiB across all 32 layers.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    P["PREFILL<br/>2048 tokens in one pass<br/>writes K/V for positions 0..2047<br/>256 MiB across 32 layers"]
+    P --> D1
+    D1["DECODE step 1<br/>query len 1, seq len 2049<br/>read 2048 cached KV, append 1<br/>cache: 256.1 MiB"]
+    D1 --> D2["DECODE step 2<br/>query len 1, seq len 2050<br/>read 2049 cached KV, append 1<br/>cache: 256.2 MiB"]
+    D2 --> D3["DECODE step 3<br/>query len 1, seq len 2051<br/>read 2050 cached KV, append 1<br/>cache: 256.4 MiB"]
+    D3 --> DN["... 509 more steps ..."]
+    DN --> DE["DECODE step 512<br/>query len 1, seq len 2560<br/>cache: 320 MiB<br/>KV bytes read this step: 335 MB"]
+    DE --> F["EOS or max_tokens<br/>320 MiB freed in one shot"]
+  </script>
+</div></div></section>
+<section class="sec" id="memory-cost" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The bill: a compute problem becomes a memory problem</h2></div><div class="sec__body"><p>The cache is not free. Its size is fixed by four model constants and one runtime
+variable:</p>
+
+<div class="math-display">$$\text{bytes}_{\text{KV}} \;=\; 2 \cdot L \cdot h_{kv} \cdot d_h \cdot b \cdot \sum_{i=1}^{B} s_i$$</div>
+
+<p>The leading 2 is K and V. The dependence is on $h_{kv}$, <em>not</em> $h$ &mdash; which
+is the entire point of grouped-query attention, and worth 4&times; on Llama-3-8B
+(8 KV heads instead of 32). Note also what is missing: batch size $B$ appears only inside
+the sum. The cache is linear in <em>total resident tokens</em>, not in the number of
+sequences.</p>
+
+<p>For Llama-3-8B in bf16: $2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072$ bytes =
+<b>128 KiB per token</b>, or 4 KiB per token per layer. The 2560-token sequence from the
+worked example holds 320&nbsp;MiB. Thirty-two such sequences hold 10&nbsp;GiB; sixty-four
+sequences at 8k context hold 64&nbsp;GiB, which does not fit on an 80&nbsp;GB H100
+alongside 16&nbsp;GB of weights. Turning that observation into an admission-control policy
+is chapter <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>, and
+storing it without wasting half of it to fragmentation is
+<a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>.</p>
+
+<p>vLLM writes this formula down almost literally, as a property on the per-layer cache
+spec:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/kv_cache_interface.py:L243-L252</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @property
+    def state_content_size_bytes(self) -&gt; int:
+        """Bytes per (head slot, stored state) cell of the page."""
+        if self.state_content_bytes is not None:
+            return self.state_content_bytes
+        return (self.head_size + self.head_size_v) * get_dtype_size(self.dtype)
+
+    @property
+    def unpadded_page_size_bytes(self) -&gt; int:
+        return self.num_heads * self.storage_block_size * self.state_content_size_bytes</code></pre>
+</div>
+
+<p><code>(head_size + head_size_v) * dtype_size</code> is the $2 d_h b$ of the formula
+(split into K and V head dims, which differ only under MLA &mdash;
+<a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>). Multiply by
+<code>num_heads</code>, which resolves to <code>num_kv_heads</code>, and by
+<code>storage_block_size</code> tokens, and you have bytes per layer per block. The $L$ in
+the formula is the number of layers each contributing such a spec.</p></div></section>
+<section class="sec" id="production" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>Both engines make the same structural choice &mdash; keep K and V in a large
+pre-allocated pool, pass exactly one token per sequence during decode &mdash; and both name
+the two resulting regimes explicitly. SGLang names them in an enum:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/forward_batch_info.py:L100-L109</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class ForwardMode(IntEnum):
+    # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
+    # It is also called "prefill" in common terminology.
+    EXTEND = auto()
+    # Decode one token.
+    DECODE = auto()
+    # Contains both EXTEND and DECODE when doing chunked prefill.
+    MIXED = auto()
+    # No sequence to forward. For data parallel attention, some workers will be IDLE if no sequence are allocated.
+    IDLE = auto()</code></pre>
+</div>
+
+<p>The comment on <code>EXTEND</code> is doing quiet work: SGLang's prefill mode is not
+&ldquo;run the prompt&rdquo;, it is &ldquo;extend a sequence whose prefix may already be
+cached&rdquo;. That framing is why RadixAttention
+(<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>) fits so naturally
+into SGLang &mdash; the mode was designed around a partially populated cache. vLLM reaches
+the same place from the other direction, with a single unified path in which prefill is
+just a request whose <code>num_scheduled_tokens</code> happens to be large.</p>
+
+<p>The one-token-per-decode property shows up as arithmetic in the scheduler, not as a
+branch. For a running request:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L566-L575</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
+            if 0 &lt; self.scheduler_config.long_prefill_token_threshold &lt; num_new_tokens:
+                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            num_new_tokens = min(
+                num_new_tokens, token_budget, input_budget - draft_slots
+            )</code></pre>
+</div>
+
+<p>A request mid-generation has computed everything but the token just sampled, so
+<code>num_tokens_with_spec - num_computed_tokens</code> evaluates to 1 (more with
+speculative decoding, which is exactly why the field is named <code>_with_spec</code>).
+Decode is not a special case; it is the general case with the difference equal to one.</p>
+
+<p>SGLang states it directly instead, because <code>ForwardMode</code> is available:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/forward_batch_info.py:L1057-L1061</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _init_ngram_embedding_info(self, batch: ScheduleBatch, device: torch.device):
+        if self.forward_mode.is_decode():
+            column_starts, req_lens = self.seq_lens - 1, 1
+        else:
+            column_starts, req_lens = self.extend_prefix_lens, self.extend_seq_lens</code></pre>
+</div>
+
+<p>Same statement at the position level: in decode the position of the new token is simply
+<code>seq_lens</code>, with no per-token offset array needed at all.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/forward_batch_info.py:L871-L875</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Init position information
+        if ret.forward_mode.is_decode() or ret.forward_mode.is_target_verify():
+            if ret.positions is None:
+                ret.positions = clamp_position(batch.seq_lens)
+        else:</code></pre>
+</div>
+
+<p>The storage layouts differ in a way worth noticing. SGLang's MHA pool keeps K and V as
+two <em>separate Python lists of per-layer tensors</em>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L2049-L2060</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _kv_buffer_shapes(self):
+        """(k_shape, v_shape)"""
+        if self.use_hnd:
+            return (
+                (self.num_pages, self.head_num, self.page_size, self.head_dim),
+                (self.num_pages, self.head_num, self.page_size, self.v_head_dim),
+            )
+        rows = self.size + self.page_size
+        return (
+            (rows, self.head_num, self.head_dim),
+            (rows, self.head_num, self.v_head_dim),
+        )</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L2105-L2113</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                    k_shape, v_shape = self._kv_buffer_shapes()
+                    self.k_buffer = [
+                        torch.zeros(k_shape, dtype=self.store_dtype, device=self.device)
+                        for _ in range(self.layer_num)
+                    ]
+                    self.v_buffer = [
+                        torch.zeros(v_shape, dtype=self.store_dtype, device=self.device)
+                        for _ in range(self.layer_num)
+                    ]</code></pre>
+</div>
+
+<p>There is the size formula as an allocation: $2$ (two lists) $\times$
+<code>layer_num</code> ($L$) $\times$ <code>rows</code> (token slots) $\times$
+<code>head_num</code> ($h_{kv}$) $\times$ <code>head_dim</code> ($d_h$) $\times$
+<code>itemsize</code> ($b$). vLLM instead lets each attention backend declare its own
+packing via <code>AttentionBackend.get_kv_cache_shape</code>
+(<code>vllm/v1/attention/backend.py:L89-L96</code>) and reduces everything to a
+<code>page_size_bytes</code> the allocator can reason about. The tradeoff is real: SGLang's
+concrete layout makes kernels and PD transfer simple to write against; vLLM's abstraction
+lets FlashAttention, FlashInfer, Triton and MLA backends each choose a layout their kernel
+prefers, at the cost of a level of indirection everywhere the cache is touched. Both
+converge on the same non-negotiable: one contiguous device allocation, sized at startup,
+never resized.</p>
+
+<p>SGLang's write path takes K and V and nothing else &mdash; the API itself refuses to
+cache a query:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L2331-L2341</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def set_kv_buffer(
+        self,
+        layer: RadixAttention,
+        loc_info,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        k_scale: Optional[float] = None,
+        v_scale: Optional[float] = None,
+        layer_id_override: Optional[int] = None,
+        dcp_kv_mask: Optional[torch.Tensor] = None,
+    ):</code></pre>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: one decode step through vLLM</h2></div><div class="sec__body"><p>Follow the 512th token of the running example through <code class="c-vllm">a556f3f</code>.</p>
+
+<p><b>1. The loop.</b> <code>EngineCore.step()</code> is the outer loop of the whole
+system &mdash; schedule, execute, sample, update:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L583-L610</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def step(self) -&gt; tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+        # ...
+        """
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return {}, False
+        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        # ...
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )</code></pre>
+</div>
+
+<p><b>2. Scheduling.</b> <code>Scheduler.schedule()</code> computes
+<code>num_new_tokens = 1</code> for our request by the subtraction quoted above
+(<code>vllm/v1/core/sched/scheduler.py:L566-L575</code>) and records it in
+<code>scheduler_output.num_scheduled_tokens</code>.</p>
+
+<p><b>3. Input preparation.</b> The model runner turns <code>scheduler_output</code> into flat
+GPU tensors, flattening the whole batch into one ragged token stream. Two GPU runners ship at
+this SHA and they do it differently, so it matters which one you are reading:</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Which runner</span>
+  <p>As of <code>a556f3f</code>, <code>VllmConfig.use_v2_model_runner</code>
+  (<code>vllm/config/vllm.py:L648-L700</code>) selects
+  <code>vllm/v1/worker/gpu/model_runner.py</code> &mdash; the newer &ldquo;V2&rdquo; runner &mdash;
+  for every <em>dense</em> model, Llama-3-8B included. The older
+  <code>vllm/v1/worker/gpu_model_runner.py</code> quoted below is the fallback: MoE architectures
+  outside an opt-in list, hybrid and attention-free models, and any configuration that trips a V2
+  feature gate. Both compute the same quantities; V2 fuses them into Triton kernels
+  (<code>prepare_pos_seq_lens</code>, <code>vllm/v1/worker/gpu/input_batch.py:L367-L385</code>) where
+  V1 spells them out in NumPy and eager torch ops, which is why V1 is the readable one for the
+  arithmetic and V2 is the one actually running your Llama server.
+  <a href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html">&sect;11.4</a> reads both side
+  by side and owns the selection policy.</p>
+</div>
+
+<p>In V1, <code>GPUModelRunner.execute_model()</code>
+(<code>vllm/v1/worker/gpu_model_runner.py:L4287-L4291</code>) calls <code>_prepare_inputs()</code>;
+in V2, <code>GPUModelRunner.execute_model()</code>
+(<code>vllm/v1/worker/gpu/model_runner.py:L1416-L1424</code>) calls the public
+<code>prepare_inputs()</code>. The V1 body is the piece worth reading twice, because it is where
+prefill and decode stop being different:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2041-L2055</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Get request indices.
+        # E.g., [2, 5, 3] -&gt; [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+
+        # cu_num_tokens: [2, 5, 3] -&gt; [2, 7, 10]
+        # self.query_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        cu_num_tokens = self._get_cumsum_and_arange(
+            num_scheduled_tokens, self.query_pos.np
+        )
+
+        # Get positions.
+        positions_np = (
+            self.input_batch.num_computed_tokens_cpu[req_indices]
+            + self.query_pos.np[: cu_num_tokens[-1]]
+        )</code></pre>
+</div>
+
+<p>The worked comment shows a batch of three requests scheduled for 2, 5 and 3 tokens.
+A pure-decode batch is the case where <code>num_scheduled_tokens</code> is all ones: then
+<code>req_indices</code> is <code>[0, 1, 2, ...]</code>, <code>query_pos</code> is all
+zeros, and <code>positions_np</code> collapses to <code>num_computed_tokens</code> &mdash;
+one position per sequence, exactly the SGLang <code>clamp_position(seq_lens)</code> above.</p>
+
+<p><b>4. Slot assignment.</b> The device-side companion &mdash; still V1; V2 fuses the same two
+lines into <code>prepare_pos_seq_lens</code> &mdash; computes positions and sequence lengths and
+hands them to the block table to resolve where in the pool each new K/V goes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2248-L2261</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.positions[:total_num_scheduled_tokens] = (
+            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+            + self.query_pos.gpu[:total_num_scheduled_tokens]
+        )
+        self.seq_lens[:num_reqs] = (
+            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+        )
+        self.seq_lens[num_reqs:].fill_(0)
+
+        self.input_batch.block_table.compute_slot_mapping(
+            num_reqs,
+            self.query_start_loc.gpu[: num_reqs + 1],
+            self.positions[:total_num_scheduled_tokens],
+        )</code></pre>
+</div>
+
+<p>Here <code>positions</code> has one entry per scheduled <em>token</em> and
+<code>seq_lens</code> one entry per <em>request</em>. In our decode step they have the same
+length and differ by one: <code>positions = [2559, ...]</code>,
+<code>seq_lens = [2560, ...]</code>. How <code>compute_slot_mapping</code> turns a position
+into a physical address is PagedAttention's job &mdash;
+<a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>.</p>
+
+<p><b>5. The layer.</b> Inside the model, the shape split is explicit:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L221-L231</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -&gt; torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output</code></pre>
+</div>
+
+<p>With <code>self.q_size = self.num_heads * self.head_dim</code> and
+<code>self.kv_size = self.num_kv_heads * self.head_dim</code>
+(<code>vllm/model_executor/models/llama.py:L157-L158</code>), that split is 4096 / 1024 /
+1024 for Llama-3-8B at TP=1 &mdash; the 4:1 GQA ratio, visible in one line. Note that
+<code>rotary_emb</code> is applied to <code>q</code> and <code>k</code> only: what lands in
+the cache is post-RoPE K, which is why positions must be correct <em>before</em> the write
+and why a bug in <code>positions</code> corrupts the cache silently rather than crashing.
+<code>self.attn(q, k, v)</code> is the <code>Attention</code> module, which writes K and V
+into <code>self.kv_cache</code> at the slot mapping and runs the backend kernel against the
+full <code>seq_lens</code> context.</p>
+
+<p><b>6. Sample, append, repeat.</b> <code>sample_tokens</code> reduces the single row of
+logits to one token id, <code>update_from_output</code> appends it to the request, and
+<code>num_computed_tokens</code> advances by one &mdash; making the next
+<code>num_new_tokens</code> subtraction yield 1 again. The loop is closed.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><b>Position drift corrupts the cache without an error.</b> Because RoPE is applied
+before the cache write, an off-by-one in <code>positions</code> produces K vectors rotated
+to the wrong angle. Attention still runs, shapes still match, and the model degrades into
+plausible nonsense a few hundred tokens in. There is no exception to catch. The debugging
+move is to dump <code>positions</code> and <code>seq_lens</code> for a single-request batch
+and assert <code>positions[-1] == seq_lens[0] - 1</code> at every step.</p>
+
+<p><b>Treating the cache as a compute optimisation.</b> Engineers who arrive from training
+reach for bigger batches to fix slow decode, then are surprised that per-token latency
+barely improves. At batch 1 in our example, 98% of the bytes moved are weights; batching
+amortises exactly those and leaves the KV read growing linearly with batch. Batching fixes
+<em>throughput</em>; it does not fix TTFT or single-stream TPOT. Those metrics get defined
+properly in <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">§1.2</a>.</p>
+
+<p><b>Assuming the cache is proportional to $h$.</b> Sizing Llama-3-8B's cache from 32
+query heads gives 512 KiB per token instead of 128 KiB &mdash; a 4&times; over-estimate,
+and the wrong number to plan a fleet on. The formula depends on $h_{kv}$. On an MQA model
+($h_{kv}=1$) the gap is 32&times;; on MLA it is a different formula entirely.</p>
+
+<p><b>Expecting the cache to shrink.</b> It only grows within a sequence, and it is freed
+all at once at EOS. A long-running request holds its full footprint for its entire
+lifetime, which is why preemption and recomputation exist, and why the scheduler
+(<a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a>) is fundamentally a memory
+allocator wearing a batching costume.</p></div></section>
+<section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Measure the ratio yourself on CPU, no GPU required. HuggingFace <code>transformers</code>
+exposes the flag directly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 - &lt;&lt;'PY'
+import time, torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+m = "HuggingFaceTB/SmolLM2-135M"          # small enough to run on a laptop CPU
+tok = AutoTokenizer.from_pretrained(m)
+mod = AutoModelForCausalLM.from_pretrained(m, dtype=torch.float32).eval()
+ids = tok("The capital of France is", return_tensors="pt").input_ids
+for use_cache in (True, False):
+    t0 = time.perf_counter()
+    mod.generate(ids, max_new_tokens=128, do_sample=False, use_cache=use_cache)
+    print(f"use_cache={use_cache}: {time.perf_counter()-t0:.2f}s")
+PY</code></pre>
+</div>
+
+<p>Then confirm the shapes claim: run one forward pass with
+<code>use_cache=True</code>, take the layer-0 key tensor out of the returned
+<code>past_key_values</code>, and check its shape is <code>[batch, h_kv, seq, d_h]</code>.
+The dimension to stare at is the second one &mdash; it is the <em>KV</em> head count, not
+the query head count. On a GQA model the two differ, and every capacity mistake in this
+chapter's pitfalls list comes from confusing them. (The exact accessor moved when
+<code>transformers</code> replaced the legacy tuple with a <code>Cache</code> object;
+inspect the object rather than assuming an index.)</p>
+
+<p>On the engine side, the fastest way to see the size formula bite is to start vLLM and
+read its own startup accounting, which prints the KV pool it allocated and the concurrency
+that implies:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 4096 2&gt;&amp;1 | grep -i "GPU KV cache size\|maximum concurrency"</code></pre>
+</div>
+
+<p>Divide the reported KV cache size in tokens by 4096 and you should recover the maximum
+concurrency line; multiply by 131,072 bytes and you should recover the pool size in bytes.
+If those three numbers are consistent, you have verified the formula against a running
+engine.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Recompute the ratio for a different shape.</b> Redo the 2,224&times; calculation
+  for Llama-3-70B ($L=80$, $d=8192$, $h=64$, $h_{kv}=8$, $d_h=128$, $P = 70.6\times10^9$)
+  at the same $p=2048$, $n=512$. Does the ratio go up or down, and which term drives it?</li>
+
+  <li><b>Read the source.</b> Open <code>vllm/v1/kv_cache_interface.py</code> and find
+  <code>MLAAttentionSpec</code>. Compare its <code>storage_block_size</code> with
+  <code>AttentionSpec</code>'s. What does MLA change about the per-token byte count, and
+  which symbol in the size formula does it collapse?</li>
+
+  <li><b>Predict, then verify.</b> Suppose you set <code>--kv-cache-dtype fp8</code> on
+  Llama-3-8B. Predict the new bytes-per-token, the new arithmetic intensity of a decode
+  step at $s=2304$, and whether the step gets faster by more or less than 2&times;. Then
+  check your prediction against the roofline in
+  <a href="00-04-roofline-and-arithmetic-intensity.html">§0.4</a>.</li>
+
+  <li><b>Find the invariant in code.</b> In
+  <code>python/sglang/srt/model_executor/forward_batch_info.py</code>, locate every branch
+  guarded by <code>forward_mode.is_decode()</code>. For each one, state in a sentence what
+  the decode path is allowed to assume that the extend path is not.</li>
+
+  <li><b>Break causality on purpose.</b> If you removed the causal mask from a decoder-only
+  model but kept the KV cache, at what point would generated text diverge from the correct
+  output, and would any assertion in vLLM fire? Support your answer with a specific line
+  from <code>vllm/v1/attention/backend.py</code>.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> It goes <em>up</em>, to 2,257&times; (derived). The projection term's ratio
+    is $\bar{s} \approx 2304$ for any model; the attention term's is only $\bar{s}/2 \approx
+    1152$, so the overall ratio is a weighted average pulled down by however much attention
+    weighs. Going 8B&nbsp;&rarr;&nbsp;70B, $L h d_h$ grows 5&times; while $P$ grows
+    8.8&times;, so attention's share of cached decode FLOPs <em>falls</em> from 7.0% to
+    4.1% and the average drifts toward the pure-projection ceiling of
+    $\bar{s} \approx 2{,}304\times$. The driver is always the weight GEMMs. (2,560&times; is the
+    per-step ratio at the <em>last</em> step, not the whole-phase one &mdash; the phase ratio can
+    never exceed the mean sequence length.)</p>
+
+    <p><b>2.</b> MLA stores a single compressed latent per token instead of separate per-head
+    K and V, so <code>head_size</code> and <code>head_size_v</code> stop describing $h_{kv}$
+    independent heads &mdash; the $h_{kv}$ factor effectively collapses to 1 and the
+    per-token cost becomes the latent dimension plus the RoPE dimension. Full treatment in
+    <a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>.</p>
+
+    <p><b>3.</b> Bytes per token halve to 64 KiB, but that is the small half of the step.
+    At $s=2304$ and batch 1 the KV term is only $3.02\times10^{8}$ bytes against
+    $1.606\times10^{10}$ of weights, so halving it moves total step bytes from
+    $1.636\times10^{10}$ to $1.621\times10^{10}$ &mdash; <b>0.9%</b> &mdash; and $I$ rises
+    from 1.055 to 1.065. Single-stream decode gets essentially no faster. fp8 KV pays off
+    through <em>capacity</em>: twice the resident tokens for the same pool, hence a larger
+    batch, and it is the batch that converts into throughput. Any answer predicting a
+    &ldquo;2&times; from halving the KV&rdquo; has mistaken the KV term for the dominant
+    one at batch 1.</p>
+
+    <p><b>4.</b> The decode path may assume: query length is exactly 1 per sequence, so no
+    <code>extend_seq_lens</code>/<code>extend_start_loc</code> arrays are needed; the new
+    token's position is <code>seq_lens - 1</code>; every prior KV is already resident; and
+    the batch is rectangular, which is what makes CUDA-graph capture possible for decode
+    and awkward for extend.</p>
+
+    <p><b>5.</b> Divergence begins at the very first token generated after the mask is
+    removed, because a bidirectional layer's hidden state at position $i$ changes as soon
+    as position $i{+}1$ exists, invalidating every cached K and V. No assertion fires:
+    <code>causal</code> is a plain field with a default
+    (<code>vllm/v1/attention/backend.py:L485</code>), and backends that advertise
+    <code>supports_non_causal</code> simply pass it through to the kernel. The failure is
+    numerical, not structural &mdash; which is the general shape of KV-cache bugs.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The cache exists because causal masking makes $k_i$ and $v_i$ functions of tokens
+  $1 \dots i$ only. Remove causality and there is nothing to cache; that is the whole
+  precondition, and it is why encoder layers get no cache group in vLLM
+  (<code>vllm/model_executor/layers/attention/attention.py:L597-L608</code>).</li>
+
+  <li>The dominant saving is <em>not</em> attention arithmetic. At 2.5k context on
+  Llama-3-8B attention is 7% of decode FLOPs; the cache's real job is deleting $s{-}1$
+  redundant passes through the weight GEMMs. That is why the derived ratio is 2,224&times;
+  and not 2&times;.</li>
+
+  <li>A cached decode step runs at roughly 1 FLOP per byte moved. The cache converts a
+  compute-bound problem into a memory-bound one, and every optimisation in Parts 2 through
+  6 is an attack on that new bottleneck rather than on FLOPs.</li>
+
+  <li>Bytes per token is $2 L h_{kv} d_h b$ &mdash; 128 KiB for Llama-3-8B in bf16 &mdash;
+  and depends on $h_{kv}$, not $h$. Sizing from query heads over-estimates by the GQA ratio,
+  4&times; here and 32&times; on an MQA model.</li>
+
+  <li>In both engines the decode/prefill distinction reduces to one integer: how many
+  tokens this request contributes to this step. vLLM computes it by subtraction
+  (<code>scheduler.py:L566-L575</code>); SGLang names it in an enum
+  (<code>ForwardMode.EXTEND</code> vs <code>DECODE</code>). Same invariant, opposite
+  ergonomics.</li>
+
+  <li>Query length and sequence length are separate quantities in every attention metadata
+  struct in this book. Prefill is where they are equal; decode is where their ratio is
+  $1 : s$. Chapter <a href="../01-the-core-loop/01-01-prefill-vs-decode.html">§1.1</a>
+  shows why that makes them two different computers.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Shazeer, <a href="https://arxiv.org/abs/1911.02150">&ldquo;Fast Transformer Decoding:
+  One Write-Head is All You Need&rdquo;</a> (2019) &mdash; the paper that identified the KV
+  cache as the decode bottleneck and proposed MQA. Section 2 is the cleanest published
+  statement of the memory-bandwidth argument this chapter derives.</li>
+
+  <li>Ainslie et al., <a href="https://arxiv.org/abs/2305.13245">&ldquo;GQA: Training
+  Generalized Multi-Query Transformer Models from Multi-Head Checkpoints&rdquo;</a> (2023)
+  &mdash; why Llama-3 has $h_{kv} = 8$ and not 32.</li>
+
+  <li>Kwon et al., <a href="https://arxiv.org/abs/2309.06180">&ldquo;Efficient Memory
+  Management for Large Language Model Serving with PagedAttention&rdquo;</a> (SOSP 2023)
+  &mdash; the vLLM paper. Read Section 3 now for the memory-waste measurements; save
+  Section 4 for <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>.</li>
+
+  <li>Zheng et al., <a href="https://arxiv.org/abs/2312.07104">&ldquo;SGLang: Efficient
+  Execution of Structured Language Model Programs&rdquo;</a> &mdash; the RadixAttention
+  paper, whose central premise is that the &ldquo;extend&rdquo; framing quoted above is the
+  right one.</li>
+
+  <li><a href="https://blog.vllm.ai/2025/01/27/v1-alpha-release.html">&ldquo;vLLM V1: A
+  Major Upgrade to vLLM's Core Architecture&rdquo;</a> (27 Jan 2025), linked from
+  <code>docs/usage/v1_guide.md:L28-L29</code> at this SHA, plus
+  <a href="https://github.com/vllm-project/vllm/issues/18571">RFC #18571</a>, the V0
+  deprecation thread it points at. Between them they document why the scheduler stopped
+  having separate prefill and decode batches and became the single
+  <code>num_scheduled_tokens</code> dictionary quoted above.</li>
+
+  <li>Pope et al., <a href="https://arxiv.org/abs/2211.05102">&ldquo;Efficiently Scaling
+  Transformer Inference&rdquo;</a> (2022) &mdash; the analytic cost model this chapter's
+  bytes-and-FLOPs accounting follows, extended to multi-chip partitioning.</li>
+</ul></div></section>
+<div class="pager"><a href="00-01-what-inference-is.html"><div class="pager__k">← Previous</div><div class="pager__t">Inference is not training</div></a><a class="pager__next" href="00-03-gpu-architecture.html"><div class="pager__k">Next →</div><div class="pager__t">GPU architecture for inference engineers</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: the algebra of one step</a>
+<a href="#what-is-cacheable">What is cacheable, and why causality is the precondition</a>
+<a href="#memory-cost">The bill: a compute problem becomes a memory problem</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: one decode step through vLLM</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

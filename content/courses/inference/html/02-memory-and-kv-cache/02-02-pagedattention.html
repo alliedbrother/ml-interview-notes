@@ -1,0 +1,1874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PagedAttention: fragmentation, blocks, block tables — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="loop">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i is-current" href="02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 2 · Memory and the KV cache · 02-02</div>
+<h1>PagedAttention: fragmentation, blocks, block tables</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/block_pool.py</code></li><li><code>vllm/v1/core/kv_cache_manager.py</code></li><li><code>vllm/v1/worker/block_table.py</code></li><li><code>python/sglang/srt/mem_cache/allocator/</code></li><li><code>python/sglang/srt/mem_cache/memory_pool.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A contiguous KV allocator must reserve for the worst case it can be asked for. On an H100 running Llama-3-8B at a 32k context window that is 4 GiB per sequence, which caps the server at thirteen concurrent requests — while the tokens actually in flight occupy under 1 GiB. PagedAttention is the data structure that recovers the other 51.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the reference machine from <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>: one H100 SXM, 80 GB. Serve Llama-3-8B in bf16 with <code>--max-model-len 32768</code>. <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a> did this budget in full — 79.65 GiB of HBM, times the default <code>gpu_memory_utilization</code> of 0.92, minus 14.96 GiB of bf16 weights, minus a 6.0 GiB allowance for activations, CUDA graph pools (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>) and workspace — and landed on a <b>52.32 GiB</b> KV pool. Take that as given here. One token of Llama-3-8B KV costs</p>
+
+<div class="math-display">$$2 \cdot L \cdot h_{kv} \cdot d_h \cdot b = 2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072\ \text{B} = 128\ \text{KiB}$$</div>
+
+<p>where $L$ is layer count, $h_{kv}$ the number of KV heads, $d_h$ the head dimension and $b$ the bytes per element. Carved into <code>block_size=16</code> blocks, 52.32 GiB is 26,785 blocks — <b>428,560 token-slots</b> (§2.1 works the two floor divisions). That is a lot of tokens. The question is how many <em>requests</em> it is.</p>
+
+<p>If the allocator hands each sequence one contiguous extent, it has to size that extent when the request is admitted — before a single token has been generated, and therefore before anyone knows how long the output will be. The only safe size is <code>max_model_len</code>. That is 32,768 &times; 128 KiB = <strong>4 GiB per sequence</strong>, and 52.32 GiB / 4 GiB = <strong>13 concurrent sequences</strong>. Thirteen, on a GPU that can comfortably run a decode batch of several hundred.</p>
+
+<p>Now count what those thirteen sequences actually use. A typical chat turn is a 512-token prompt and 100 generated tokens: 612 tokens, 76.5 MiB. Thirteen of them is 0.97 GiB of live KV inside a 52.32 GiB pool.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">13</div><div class="kpi__l">concurrent seqs, contiguous, 32k window</div></div>
+  <div class="kpi"><div class="kpi__n">1.9%</div><div class="kpi__l">of the pool holding real KV</div></div>
+  <div class="kpi"><div class="kpi__n">99.7%</div><div class="kpi__l">waste on a 100-token generation</div></div>
+</div>
+
+<p>The last figure is the one people quote. A request that produces 100 tokens against a 32,768-token reservation writes 0.305% of what it holds. It wastes 99.7% of its own allocation, and it holds that allocation for its entire lifetime.</p>
+
+<p>The waste has three distinct sources and they behave differently, so split them before fixing them. All three numbers below are derived arithmetic on the setup above, not measurements.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">1. over-reservation</span><h4>32,156 tokens/seq</h4><p>Reserved because the output length is unknown, never written. 98.1% of a 612-token sequence's extent. Scales with <code>max_model_len</code>, which is exactly the knob users turn up.</p></div>
+  <div class="ve-card"><span class="ve-card__k">2. internal frag</span><h4>0 &rarr; up to 15 tokens/seq</h4><p>Space inside the last allocation unit. Zero under exact contiguous sizing; it is what paging <em>introduces</em>, bounded above by <code>block_size &minus; 1</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">3. external frag</span><h4>unbounded</h4><p>Free bytes that exist but are not contiguous. Three holes of 1.6, 1.5 and 0.9 GiB total 4 GiB and still cannot admit a 2 GiB request.</p></div>
+</div>
+
+<p>Kwon et al. report that existing serving systems waste 60&ndash;80% of KV cache memory to these effects. That figure is theirs, not mine &mdash; the systems compared and the methodology are in &sect;1 and Figure 2 of <a href="https://arxiv.org/abs/2309.06180">arXiv:2309.06180</a>, and I have not re-measured it. The derivation above only shows how a number that large is arithmetically possible.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>The fix is the one operating systems landed on in the 1960s: stop allocating a contiguous extent and start allocating a list of fixed-size pieces. A sequence no longer owns a range of memory; it owns a <em>list of block indices</em>. Logical position 4,097 in the sequence and physical position 4,097 in the pool have nothing to do with each other, and the mapping between them is an array lookup.</p>
+
+<p>That kills two of the three wastes outright &mdash; over-reservation, because a block is allocated only when the previous one fills, and external fragmentation, because every free unit is the same size and therefore satisfies any request &mdash; and introduces the third, the unwritten tail of the last block, in a bounded form.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one 612-token sequence in a 32,768-slot window, drawn to scale.</b>
+  The full bar is 32,768 token-slots (800 px, so 1 px = 41 tokens). Teal is written KV; plum is held-but-never-written; grey is available to other sequences. Llama-3-8B, bf16, <code>block_size</code> 16.</p>
+  <svg viewBox="0 0 900 300" width="100%" role="img" aria-label="Scale comparison of contiguous versus paged KV allocation for a 612-token sequence in a 32768-token window">
+    <g font-family="monospace" font-size="11" fill="var(--text-dim)">
+      <text x="0" y="14">token</text><text x="60" y="14">0</text>
+      <text x="255" y="14">8,192</text><text x="455" y="14">16,384</text>
+      <text x="655" y="14">24,576</text><text x="820" y="14">32,768</text>
+    </g>
+    <line x1="60" y1="20" x2="860" y2="20" stroke="var(--border)" stroke-width="1"/>
+    <g stroke="var(--border)" stroke-width="0.7">
+      <line x1="260" y1="20" x2="260" y2="26"/><line x1="460" y1="20" x2="460" y2="26"/><line x1="660" y1="20" x2="660" y2="26"/>
+    </g>
+
+    <text x="0" y="58" font-family="monospace" font-size="12" fill="var(--text)">contiguous</text>
+    <text x="0" y="74" font-family="monospace" font-size="10.5" fill="var(--text-dim)">4 GiB held</text>
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="60" y="42" width="15" height="26" fill="var(--teal)" fill-opacity="0.55"/>
+      <rect x="75" y="42" width="785" height="26" fill="var(--plum)" fill-opacity="0.22"/>
+    </g>
+    <text x="90" y="59" font-family="monospace" font-size="11" fill="var(--plum)">reserved, never written &mdash; 32,156 tokens (98.1%)</text>
+
+    <text x="0" y="116" font-family="monospace" font-size="12" fill="var(--text)">paged</text>
+    <text x="0" y="132" font-family="monospace" font-size="10.5" fill="var(--text-dim)">78 MiB held</text>
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="60" y="100" width="15" height="26" fill="var(--teal)" fill-opacity="0.55"/>
+      <rect x="75" y="100" width="785" height="26" fill="var(--surface2)"/>
+    </g>
+    <g stroke="var(--border)" stroke-width="0.5" stroke-opacity="0.6">
+      <line x1="135" y1="100" x2="135" y2="126"/><line x1="210" y1="100" x2="210" y2="126"/>
+      <line x1="285" y1="100" x2="285" y2="126"/><line x1="360" y1="100" x2="360" y2="126"/>
+      <line x1="435" y1="100" x2="435" y2="126"/><line x1="510" y1="100" x2="510" y2="126"/>
+      <line x1="585" y1="100" x2="585" y2="126"/><line x1="660" y1="100" x2="660" y2="126"/>
+      <line x1="735" y1="100" x2="735" y2="126"/><line x1="810" y1="100" x2="810" y2="126"/>
+    </g>
+    <text x="90" y="117" font-family="monospace" font-size="11" fill="var(--text-dim)">free &mdash; goes to the other 685 sequences the pool can now hold</text>
+
+    <line x1="60" y1="140" x2="75" y2="140" stroke="var(--teal)" stroke-width="1"/>
+    <line x1="60" y1="140" x2="60" y2="176" stroke="var(--teal)" stroke-width="1" stroke-dasharray="2 2"/>
+    <line x1="75" y1="140" x2="470" y2="176" stroke="var(--teal)" stroke-width="1" stroke-dasharray="2 2"/>
+    <text x="0" y="200" font-family="monospace" font-size="12" fill="var(--text)">zoom</text>
+    <text x="0" y="216" font-family="monospace" font-size="10.5" fill="var(--text-dim)">39 blocks</text>
+
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="60" y="184" width="380" height="24" fill="var(--teal)" fill-opacity="0.45"/>
+      <rect x="440" y="184" width="30" height="24" fill="var(--teal)" fill-opacity="0.45"/>
+      <rect x="470" y="184" width="90" height="24" fill="var(--copper)" fill-opacity="0.30"/>
+    </g>
+    <g font-family="monospace" font-size="10.5" fill="var(--text)">
+      <text x="150" y="200">blocks 0&ndash;37 &mdash; 608 tokens, all full</text>
+      <text x="443" y="200">4</text>
+      <text x="482" y="200">12 unwritten</text>
+    </g>
+    <text x="60" y="230" font-family="monospace" font-size="10.5" fill="var(--text-dim)">block 38 is the tail: internal fragmentation is 12 of 624 slots &mdash; 1.9% of this sequence, bounded by block_size &minus; 1 = 15</text>
+
+    <line x1="0" y1="252" x2="900" y2="252" stroke="var(--border)" stroke-width="1"/>
+    <g font-family="monospace" font-size="11" fill="var(--text-dim)">
+      <text x="0" y="272">52.32 GiB pool, 26,785 blocks at block_size 16, 428,560 token-slots</text>
+      <text x="0" y="290" fill="var(--text)">contiguous: 52.32 GiB / 4 GiB = 13 sequences &nbsp;&nbsp;|&nbsp;&nbsp; paged: 26,785 / 39 = 686 sequences &nbsp;&nbsp;|&nbsp;&nbsp; 53&times; &mdash; derived arithmetic</text>
+    </g>
+  </svg>
+</div>
+
+<p>686 is a memory ceiling, not a throughput promise &mdash; <code>--max-num-seqs</code> and the compute roofline will bind first. The point is that memory stops being the binding constraint, which is the whole game.</p></div></section>
+<section class="sec" id="where-the-os-analogy-breaks" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">Where the OS analogy breaks</h2></div><div class="sec__body"><p>The mapping to virtual memory is exact enough to be useful: a sequence's token positions are virtual addresses, physical blocks in the pool are page frames, the per-sequence block table is a page table, and the block pool's free list is the kernel's free-frame list. Keep that. But four things are different, and every one of them is a design decision someone made deliberately.</p>
+
+<p><strong>Blocks are appended in order, never inserted randomly.</strong> A page table takes arbitrary VA&rarr;PA insertions in any order; a block table only ever grows at the tail, because a sequence only ever extends forward. vLLM leans on this hard enough to write it into a comment justifying a correctness shortcut:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/block_pool.py:L45-L52</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    NOTE #1: We currently don't de-duplicate the blocks in the cache,
+    meaning that if a block becomes full and is cached, we don't check
+    if there is already an identical block in the cache. This is because
+    we want to make sure the allocated block IDs won't change so that
+    block tables are append-only.</code></pre>
+</div>
+
+<p>Because the table is append-only, the worker-side update is a single strided numpy write with no reshuffling and no invalidation, and the device-side row can be memcpy'd wholesale. An OS would need TLB shootdowns for the equivalent.</p>
+
+<p><strong>There is no demand paging.</strong> No fault handler exists. The engine never over-commits and then resolves the fault on access &mdash; it checks capacity <em>before</em> the step and, if the check fails, does not run the request at all. <code>allocate_slots</code> returns <code>None</code> and the scheduler preempts somebody; the policy for who is <a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a>'s. The consequence is that a KV block is never absent when the kernel reaches for it, which is why the attention kernel can be a straight gather with no fallback path.</p>
+
+<p><strong>The page size is chosen for kernel efficiency, not for an MMU.</strong> An OS page size is fixed by hardware. Here it is a free parameter, and the two engines pick opposite ends of the range &mdash; vLLM defaults to 16 tokens, SGLang to 1. Neither number has anything to do with address translation; both are about how the attention backend wants to read memory. &sect;2.2.7 below.</p>
+
+<p><strong>Sharing is content-addressed at prefix granularity.</strong> Two processes share a frame because the OS mapped the same physical frame into both address spaces &mdash; an explicit act. Two sequences share a block because their token prefixes happen to be identical, discovered by hashing (<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a>). The allocator never decides to share; it only maintains the reference counts that make sharing safe.</p>
+
+<p>Underneath all four: <strong>there is no MMU</strong>. Translation is neither free nor hidden &mdash; every attention kernel invocation is handed the block table as a tensor and does the lookup itself, in software, per query. That cost is why block size is a tuning parameter at all.</p></div></section>
+<section class="sec" id="the-three-data-structures" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The three data structures</h2></div><div class="sec__body"><p>Everything above is implemented by exactly three things in vLLM. Read them in this order and the rest of the file makes sense.</p>
+
+<h3>1. The block pool</h3>
+
+<p>The pool owns every block in the KV cache and one free list. A block is 40-odd bytes of Python metadata &mdash; not the KV data itself, which lives in per-layer GPU tensors indexed by <code>block_id</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L159-L180</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@dataclass(slots=True)
+class KVCacheBlock:
+    """KV-cache block metadata."""
+
+    # Block ID, ranging from 0 to num_gpu_blocks - 1.
+    block_id: int
+    # Reference count.
+    ref_cnt: int = 0
+    # The hash key (block hash + group id) of the block, only available
+    # when the block is full and cached.
+    _block_hash: BlockHashWithGroupId | None = None
+    # Number of prefix tokens covered by _block_hash. For full blocks this is
+    # the full block boundary; partial entries can end inside a cache block.
+    _block_hash_num_tokens: int | None = None
+
+    # Used to construct a doubly linked list for free blocks.
+    # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
+
+    # Whether the block is a null block that should never be cached.
+    is_null: bool = False</code></pre>
+</div>
+
+<p>The free list is intrusive: <code>prev_free_block</code>/<code>next_free_block</code> live on the block itself, so <code>FreeKVCacheBlockQueue</code> allocates no Python objects while manipulating the list, and removing a block from the middle &mdash; which happens whenever a cached block gets a prefix hit &mdash; is O(1). The pool is constructed once, at startup, with one <code>KVCacheBlock</code> per physical block:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/block_pool.py:L166-L192</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks &gt; 0
+        self.num_gpu_blocks = num_gpu_blocks
+        self.enable_caching = enable_caching
+        self.hash_block_size = hash_block_size
+        # All kv-cache blocks.
+        self.blocks: list[KVCacheBlock] = [
+            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+        ]
+        # Free block queue that constructs and manipulates a doubly linked
+        # list of free blocks (including eviction candidates when caching is
+        # enabled).
+        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+
+        # Cache for block lookup
+        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
+        self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+
+        # To represent a placeholder block with block_id=0.
+        # The ref_cnt of null_block is not maintained, needs special care to
+        # avoid freeing it.
+        self.null_block = self.free_block_queue.popleft()
+        self.null_block.is_null = True</code></pre>
+</div>
+
+<p>Allocation is a pop from the head, plus an eviction of whatever prefix-cache entry that block used to hold:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/block_pool.py:L647-L668</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def get_new_blocks(self, num_blocks: int) -&gt; list[KVCacheBlock]:
+        """Get new blocks from the free block pool.
+
+        Note that we do not check block cache in this function.
+
+        Args:
+            num_blocks: The number of blocks to allocate.
+
+        Returns:
+            A list of new block.
+        """
+        if num_blocks &gt; self.get_num_free_blocks():
+            raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
+
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+
+        # In order to only iterate the list once, we duplicated code a bit
+        if self.enable_caching:
+            for block in ret:
+                self._maybe_evict_cached_block(block)
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1</code></pre>
+</div>
+
+<p>Freeing is where the interesting policy sits, and it is the mechanism behind the finding <a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a> reported about preemption victims resuming with a near-total prefix-cache hit:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/block_pool.py:L719-L744</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -&gt; None:
+        """Free a list of blocks. The blocks should be ordered by their
+        eviction priority, where the first block will be evicted first.
+
+        Args:
+            ordered_blocks: A list of blocks to free ordered by their eviction
+                priority.
+        """
+        # Identify blocks with hash (LRU cache) and without it (never match APC)
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
+        for block in ordered_blocks:
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
+                else:
+                    # FIFO reuse of cached blocks for LRU eviction behavior.
+                    blocks_to_evict_last.append(block)
+
+        # Blocks to reuse first are prepended to the front of the free queue.
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse last are appended to the end of the free queue.
+        self.free_block_queue.append_n(blocks_to_evict_last)</code></pre>
+</div>
+
+<p>A freed block does not lose its hash. It goes to the <em>tail</em> of the free queue if it carries one and to the <em>head</em> if it does not, so hashed blocks are the last to be recycled and remain matchable in <code>cached_block_hash_to_block</code> the whole time. That single branch is why a preempted request can come back and hit its own blocks. It is also the reason a request's blocks are freed in reverse order &mdash; <code>SingleTypeKVCacheManager.free</code> calls <code>free_blocks(reversed(...))</code> so the tail of the sequence, which is the least valuable prefix, is evicted first.</p>
+
+<h3>2. The block table</h3>
+
+<p>Per sequence, the logical&rarr;physical map is a plain Python list on the scheduler side &mdash; <code>self.req_to_blocks: defaultdict[str, list[KVCacheBlock]]</code> in <code>SingleTypeKVCacheManager.__init__</code> (<code>vllm/v1/core/single_type_kv_cache_manager.py:L91-L94</code>). Position $p$ lives in block <code>req_to_blocks[req_id][p // block_size]</code> at offset <code>p % block_size</code>. That is the whole abstraction.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; two sequences sharing a 3-block prefix.</b>
+  Logical block index is a position in the row; the value stored there is a physical block id. Sequences A and B were given the same first three physical blocks by the prefix cache, so those blocks carry <code>ref_cnt=2</code>. Nothing about the physical ids is ordered or adjacent.</p>
+  <svg viewBox="0 0 900 330" width="100%" role="img" aria-label="Two per-sequence block tables mapping logical block indices to physical block ids in a shared pool, with a three-block shared prefix">
+    <g font-family="monospace" font-size="11" fill="var(--text-dim)">
+      <text x="0" y="16">logical blocks</text>
+      <text x="330" y="16">block table row (int32)</text>
+      <text x="640" y="16">physical block pool</text>
+    </g>
+
+    <text x="0" y="56" font-family="monospace" font-size="12" fill="var(--text)">seq A</text>
+    <g stroke="var(--border-bright)" stroke-width="0.7" font-family="monospace" font-size="10.5">
+      <rect x="60" y="40" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="94" y="40" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="128" y="40" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="162" y="40" width="34" height="22" fill="var(--teal)" fill-opacity="0.32"/>
+      <rect x="196" y="40" width="34" height="22" fill="var(--teal)" fill-opacity="0.32"/>
+    </g>
+    <g font-family="monospace" font-size="10.5" fill="var(--text)">
+      <text x="70" y="55">L0</text><text x="104" y="55">L1</text><text x="138" y="55">L2</text><text x="172" y="55">L3</text><text x="206" y="55">L4</text>
+    </g>
+
+    <text x="0" y="116" font-family="monospace" font-size="12" fill="var(--text)">seq B</text>
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="60" y="100" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="94" y="100" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="128" y="100" width="34" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="162" y="100" width="34" height="22" fill="var(--copper)" fill-opacity="0.30"/>
+    </g>
+    <g font-family="monospace" font-size="10.5" fill="var(--text)">
+      <text x="70" y="115">L0</text><text x="104" y="115">L1</text><text x="138" y="115">L2</text><text x="172" y="115">L3</text>
+    </g>
+
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="330" y="40" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="376" y="40" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="422" y="40" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="468" y="40" width="46" height="22" fill="var(--teal)" fill-opacity="0.32"/>
+      <rect x="514" y="40" width="46" height="22" fill="var(--teal)" fill-opacity="0.32"/>
+      <rect x="330" y="100" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="376" y="100" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="422" y="100" width="46" height="22" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="468" y="100" width="46" height="22" fill="var(--copper)" fill-opacity="0.30"/>
+    </g>
+    <g font-family="monospace" font-size="11" fill="var(--text)">
+      <text x="340" y="55">1904</text><text x="386" y="55">  77</text><text x="432" y="55">2311</text><text x="478" y="55">  12</text><text x="524" y="55">1913</text>
+      <text x="340" y="115">1904</text><text x="386" y="115">  77</text><text x="432" y="115">2311</text><text x="478" y="115">8402</text>
+    </g>
+
+    <g stroke="var(--text-dim)" stroke-width="0.8" fill="none" stroke-opacity="0.5">
+      <path d="M 232 51 L 326 51"/><path d="M 200 111 L 326 111"/>
+    </g>
+
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="640" y="34" width="46" height="20" fill="var(--surface2)"/>
+      <rect x="690" y="34" width="46" height="20" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="740" y="34" width="46" height="20" fill="var(--surface2)"/>
+      <rect x="790" y="34" width="46" height="20" fill="var(--teal)" fill-opacity="0.32"/>
+      <rect x="640" y="58" width="46" height="20" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="690" y="58" width="46" height="20" fill="var(--surface2)"/>
+      <rect x="740" y="58" width="46" height="20" fill="var(--copper)" fill-opacity="0.30"/>
+      <rect x="790" y="58" width="46" height="20" fill="var(--surface2)"/>
+      <rect x="640" y="82" width="46" height="20" fill="var(--olive)" fill-opacity="0.30"/>
+      <rect x="690" y="82" width="46" height="20" fill="var(--teal)" fill-opacity="0.32"/>
+      <rect x="740" y="82" width="46" height="20" fill="var(--surface2)"/>
+      <rect x="790" y="82" width="46" height="20" fill="var(--olive)" fill-opacity="0.30"/>
+    </g>
+    <g font-family="monospace" font-size="10" fill="var(--text)">
+      <text x="694" y="48">  77</text><text x="794" y="48">  12</text>
+      <text x="644" y="72">1904</text><text x="744" y="72">8402</text>
+      <text x="644" y="96">2311</text><text x="694" y="96">1913</text><text x="794" y="96">free</text>
+    </g>
+
+    <g font-family="monospace" font-size="10.5" fill="var(--text-dim)">
+      <text x="640" y="126">26,785 blocks, 2 MiB each across 32 layers</text>
+    </g>
+
+    <line x1="0" y1="150" x2="900" y2="150" stroke="var(--border)" stroke-width="1"/>
+
+    <g font-family="monospace" font-size="11">
+      <text x="0" y="176" fill="var(--olive)">shared prefix, ref_cnt = 2</text>
+      <text x="0" y="196" fill="var(--text-dim)">blocks 1904, 77, 2311 &mdash; 48 tokens of KV stored once, read by both sequences</text>
+      <text x="0" y="222" fill="var(--teal)">private to A, ref_cnt = 1</text>
+      <text x="0" y="242" fill="var(--text-dim)">block 12 full, block 1913 is A's tail &mdash; the only block A can write to this step</text>
+      <text x="0" y="268" fill="var(--copper)">private to B, ref_cnt = 1</text>
+      <text x="0" y="288" fill="var(--text-dim)">block 8402 is B's tail; B diverged from A at logical block 3</text>
+      <text x="0" y="316" fill="var(--text)">memory saved vs. no sharing: 3 blocks x 2 MiB = 6 MiB on this pair alone &mdash; derived</text>
+    </g>
+  </svg>
+</div>
+
+<p>On the worker side that Python list becomes a rectangular int32 tensor with a CPU staging copy:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/block_table.py:L113-L121</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.block_table = self._make_buffer(
+            self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
+        )
+        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens, dtype=torch.int64
+        )</code></pre>
+</div>
+
+<p>Note the shape. <code>max_num_blocks_per_req</code> is <code>max_model_len / block_size</code> &mdash; the table itself is still sized for the worst case, because it must be a fixed-shape tensor for CUDA graphs. But it costs 4 bytes per logical block instead of 128 KiB: at <code>max_num_reqs=256</code> and a 32k window, 256 &times; 2048 &times; 4 = 2 MiB of metadata to index 52.32 GiB of KV. That ratio &mdash; 4 bytes of index per 32 KiB of data &mdash; is what makes the indirection affordable, and it is exactly the ratio <code>block_size</code> controls.</p>
+
+<p>Appending is the append-only write promised above:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/block_table.py:L157-L173</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def append_row(
+        self,
+        block_ids: list[int],
+        row_idx: int,
+    ) -&gt; None:
+        if not block_ids:
+            return
+
+        if self.use_hybrid_blocks:
+            block_ids = self.map_to_kernel_blocks(
+                np.array(block_ids), self.blocks_per_kv_block, self._kernel_block_arange
+            )
+
+        num_blocks = len(block_ids)
+        start = self.num_blocks_per_row[row_idx]
+        self.num_blocks_per_row[row_idx] += num_blocks
+        self.block_table.np[row_idx, start : start + num_blocks] = block_ids</code></pre>
+</div>
+
+<h3>3. The slot mapping</h3>
+
+<p>The block table tells the kernel where to <em>read</em> past K/V. The slot mapping tells it where to <em>write</em> this step's new K/V: one int64 per scheduled token, giving a flat index into the block-major KV storage. It is recomputed every step by a Triton kernel, and the arithmetic is four lines (shown with context-parallel world size 1, where the virtual/local distinction collapses):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/block_table.py:L463-L475</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            block_indices = (
+                virtual_block_indices * BLOCKS_PER_KV_BLOCK
+                + local_block_offsets // block_size
+            )
+            block_numbers = tl.load(
+                block_table_ptr + row_offset + block_indices,
+                mask=mask &amp; is_local,
+                other=0,
+            ).to(tl.int64)
+            slot_offsets = local_block_offsets % block_size
+            slot_ids = block_numbers * block_size + slot_offsets
+            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+            tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)</code></pre>
+</div>
+
+<p>Strip the parallelism and it is <code>slot = block_table[req][pos // block_size] * block_size + pos % block_size</code>. That the KV storage is genuinely block-major, so this index is valid, is asserted elsewhere in the codebase: <em>"Block-major backing storage: block i owns the contiguous byte range [i * page_size, (i + 1) * page_size)"</em> (<code>vllm/v1/worker/utils.py:L585-L586</code>).</p></div></section>
+<section class="sec" id="allocate-path" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The allocate path</h2></div><div class="sec__body"><p><code>KVCacheManager.allocate_slots</code> is the single entry point, and its docstring carries an ASCII diagram of the token ranges it reasons about that is worth reading before the code:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_manager.py:L393-L404</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        Blocks layout:
+        ```
+        ----------------------------------------------------------------------
+        | &lt; comp &gt; | &lt; new_comp &gt; | &lt; ext_comp &gt;  | &lt; new &gt;  | &lt; lookahead &gt; |
+        ----------------------------------------------------------------------
+                                                  |   &lt; to be computed &gt;     |
+        ----------------------------------------------------------------------
+                                  |            &lt; to be allocated &gt;           |
+        ----------------------------------------------------------------------
+                                  | &lt; to be cached (roughly, |
+                                  | details below)&gt;          |
+        ----------------------------------------------------------------------</code></pre>
+</div>
+
+<p>The capacity test is a subtraction, not a search &mdash; which is the whole payoff of uniform block size:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_manager.py:L524-L530</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Keep `reserved_blocks` free for other in-flight sequences, and an
+        # additional watermark of headroom for waiting/preempted admissions.
+        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
+        required_blocks = num_blocks_to_allocate + watermark_blocks
+        if required_blocks &gt; available_blocks:
+            # Cannot allocate new blocks
+            return None</code></pre>
+</div>
+
+<p>Under a contiguous allocator this test would be "is there a free extent of at least N contiguous bytes", which is a first-fit or best-fit scan and can fail while N bytes are free. Here it is one integer comparison and it never lies.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the allocate path for one request in one scheduler step.</b>
+  Numbers annotate a Llama-3-8B decode step at block_size 16 with a full tail block. Return of <code>None</code> is not an error; it is the signal that drives preemption in §1.4.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Scheduler.schedule()<br/>vllm/v1/core/sched/scheduler.py:L639"] --> B["KVCacheManager.allocate_slots<br/>num_new_tokens=1"]
+    B --> C["coordinator.remove_skipped_blocks<br/>drop blocks outside the attention window<br/>no-op for full attention"]
+    C --> D["get_num_blocks_to_allocate<br/>cdiv(4097, 16) - 256 = 1"]
+    D --> E{"required 1 plus watermark<br/>exceeds free blocks"}
+    E -->|"yes"| F["return None<br/>scheduler preempts a victim<br/>and retries the loop"]
+    E -->|"no"| G["allocate_new_blocks<br/>single_type_kv_cache_manager.py:L327"]
+    G --> H{"partial prefix hit<br/>pending for this req"}
+    H -->|"yes"| I["get_new_blocks(1) for CoW<br/>_apply_cow replaces the shared tail"]
+    H -->|"no"| J["BlockPool.get_new_blocks(1)<br/>popleft from free_block_queue<br/>evict its old hash, ref_cnt 0 to 1"]
+    I --> J
+    J --> K["req_to_blocks extended by 1<br/>row is now 257 entries"]
+    K --> L["SchedulerOutput.new_block_ids<br/>sched/output.py:L142"]
+    L --> M["BlockTable.append_row<br/>writes 1913 at column 256 of row 3"]
+    M --> N["commit_block_table<br/>H2D copy of num_reqs rows"]
+    N --> O["compute_slot_mapping (Triton)<br/>slot = 1913 * 16 + 0 = 30608"]
+    O --> P["FlashAttentionMetadata<br/>block_table + slot_mapping"]
+  </script>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: allocating token 4,097</h2></div><div class="sec__body"><p>Concretely: request <code>r7</code> is at row 3 of the persistent batch, has 4,096 committed tokens of Llama-3-8B context, and the scheduler gives it one more token this step. <code>block_size</code> is 16, so its 4,096 tokens fill logical blocks 0&ndash;255 exactly &mdash; the tail block is full and the next write has nowhere to go.</p>
+
+<ol>
+  <li><strong>Scheduler asks.</strong> <code>Scheduler.schedule()</code> reaches the running-request loop and calls <code>self.kv_cache_manager.allocate_slots(request, num_new_tokens=1, ...)</code> (<code>vllm/v1/core/sched/scheduler.py:L637-L643</code>) inside a <code>while True</code> that retries after each preemption.</li>
+  <li><strong>Sizing.</strong> <code>get_num_blocks_to_allocate</code> computes <code>num_required_blocks = cdiv(4097, 16) = 257</code>. The request already holds <code>num_req_blocks = 256</code>. It is a running request, so the fast path fires: <code>return max(257 - 256, 0) = 1</code> (<code>vllm/v1/core/single_type_kv_cache_manager.py:L191-L197</code>).</li>
+  <li><strong>Capacity.</strong> <code>1 + watermark_blocks</code> is compared against <code>get_num_free_blocks() - reserved_blocks</code>. Suppose 8,412 blocks are free; it passes. Had it failed, <code>allocate_slots</code> would return <code>None</code> and the scheduler's loop would evict somebody and come back.</li>
+  <li><strong>Pop.</strong> <code>allocate_new_blocks</code> recomputes <code>num_new_blocks = 257 - 256 = 1</code> and calls <code>self.block_pool.get_new_blocks(1)</code>. That pops the head of <code>free_block_queue</code> &mdash; say block <strong>1913</strong> &mdash; calls <code>_maybe_evict_cached_block</code> on it (if 1913 still carried a hash from a previous tenant, that prefix-cache entry dies here), asserts <code>ref_cnt == 0</code> and sets it to 1.</li>
+  <li><strong>Append.</strong> <code>req_blocks.extend([block 1913])</code>. The scheduler-side row is now 257 long; <code>req_to_blocks["r7"][256].block_id == 1913</code>.</li>
+  <li><strong>Cross the process boundary.</strong> The new ids travel as <code>CachedRequestData.new_block_ids</code>, documented as "<em>For request ids not in resumed_req_ids, new_block_ids will be appended to the request's block IDs</em>" (<code>vllm/v1/core/sched/output.py:L131-L142</code>).</li>
+  <li><strong>Worker table.</strong> The model runner calls <code>self.input_batch.block_table.append_row(new_block_ids, req_index)</code> (<code>vllm/v1/worker/gpu_model_runner.py:L1526-L1528</code>). With <code>row_idx = 3</code> and <code>num_blocks_per_row[3] == 256</code>, this writes <code>block_table.np[3, 256] = 1913</code> and bumps the row length to 257. Nothing else in the row moves. Then <code>commit_block_table(num_reqs)</code> does the H2D copy.</li>
+  <li><strong>Slot index.</strong> <code>compute_slot_mapping</code> launches the Triton kernel with this step's <code>positions</code>. For our token, <code>pos = 4096</code>, so <code>block_indices = 4096 // 16 = 256</code>, <code>block_numbers = block_table[3, 256] = 1913</code>, <code>slot_offsets = 4096 % 16 = 0</code>, and <code>slot_ids = 1913 * 16 + 0 = <strong>30,608</strong></code>.</li>
+  <li><strong>Write.</strong> Every layer's KV-cache-write op stores this token's K and V at flat row 30,608 of its block-major cache tensor. All 32 layers use the same slot index; only the tensor differs.</li>
+</ol>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the address computation for one token, end to end.</b>
+  Every arrow is an integer op; nothing here is a memory allocation. The same block table row serves the read path (past K/V, via the kernel's own gather) and, through this arithmetic, the write path.</p>
+  <svg viewBox="0 0 900 260" width="100%" role="img" aria-label="Pipeline from logical token position 4096 through block table lookup to physical slot index 30608">
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="0"   y="30" width="150" height="46" fill="var(--surface2)"/>
+      <rect x="190" y="10" width="150" height="38" fill="var(--steel)" fill-opacity="0.16"/>
+      <rect x="190" y="58" width="150" height="38" fill="var(--steel)" fill-opacity="0.16"/>
+      <rect x="380" y="10" width="180" height="38" fill="var(--teal)" fill-opacity="0.20"/>
+      <rect x="600" y="30" width="150" height="46" fill="var(--copper)" fill-opacity="0.22"/>
+    </g>
+    <g font-family="monospace" font-size="11.5" fill="var(--text)">
+      <text x="12" y="50">positions[i]</text>
+      <text x="12" y="68">= 4096</text>
+      <text x="202" y="26">pos // block_size</text>
+      <text x="202" y="42">= 4096 // 16 = 256</text>
+      <text x="202" y="74">pos % block_size</text>
+      <text x="202" y="90">= 4096 % 16 = 0</text>
+      <text x="392" y="26">block_table[3][256]</text>
+      <text x="392" y="42">= 1913</text>
+      <text x="612" y="50">1913*16 + 0</text>
+      <text x="612" y="68">= 30608</text>
+    </g>
+    <g stroke="var(--text-dim)" stroke-width="1" fill="none" stroke-opacity="0.6">
+      <path d="M 152 45 L 186 29"/><path d="M 152 61 L 186 77"/>
+      <path d="M 342 29 L 376 29"/>
+      <path d="M 562 29 L 596 45"/><path d="M 342 77 L 596 61"/>
+    </g>
+    <g font-family="monospace" font-size="10" fill="var(--text-dim)">
+      <text x="0" y="18">logical</text>
+      <text x="190" y="108">index + offset</text>
+      <text x="380" y="62">physical block id</text>
+      <text x="600" y="18">slot_mapping[i]</text>
+    </g>
+
+    <line x1="0" y1="130" x2="900" y2="130" stroke="var(--border)" stroke-width="1"/>
+    <text x="0" y="152" font-family="monospace" font-size="11" fill="var(--text-dim)">per-layer KV cache tensor, block-major: block i owns bytes [i * page_size, (i+1) * page_size)</text>
+
+    <g stroke="var(--border-bright)" stroke-width="0.7">
+      <rect x="0"   y="164" width="120" height="26" fill="var(--surface2)"/>
+      <rect x="124" y="164" width="120" height="26" fill="var(--surface2)"/>
+      <rect x="248" y="164" width="16"  height="26" fill="var(--surface2)"/>
+      <rect x="300" y="164" width="120" height="26" fill="var(--copper)" fill-opacity="0.22"/>
+      <rect x="424" y="164" width="16"  height="26" fill="var(--surface2)"/>
+      <rect x="476" y="164" width="120" height="26" fill="var(--surface2)"/>
+    </g>
+    <g font-family="monospace" font-size="10.5" fill="var(--text)">
+      <text x="18" y="181">block 0</text><text x="142" y="181">block 1</text><text x="252" y="181">..</text>
+      <text x="312" y="181">block 1913</text><text x="428" y="181">..</text><text x="484" y="181">block 26784</text>
+    </g>
+    <g stroke="var(--border)" stroke-width="0.5">
+      <rect x="300" y="200" width="120" height="20" fill="none"/>
+      <line x1="307.5" y1="200" x2="307.5" y2="220"/><line x1="315" y1="200" x2="315" y2="220"/>
+      <line x1="322.5" y1="200" x2="322.5" y2="220"/><line x1="330" y1="200" x2="330" y2="220"/>
+      <line x1="337.5" y1="200" x2="337.5" y2="220"/><line x1="345" y1="200" x2="345" y2="220"/>
+      <line x1="352.5" y1="200" x2="352.5" y2="220"/><line x1="360" y1="200" x2="360" y2="220"/>
+      <line x1="367.5" y1="200" x2="367.5" y2="220"/><line x1="375" y1="200" x2="375" y2="220"/>
+      <line x1="382.5" y1="200" x2="382.5" y2="220"/><line x1="390" y1="200" x2="390" y2="220"/>
+      <line x1="397.5" y1="200" x2="397.5" y2="220"/><line x1="405" y1="200" x2="405" y2="220"/>
+      <line x1="412.5" y1="200" x2="412.5" y2="220"/>
+    </g>
+    <rect x="300" y="200" width="7.5" height="20" fill="var(--teal)" fill-opacity="0.55" stroke="var(--border-bright)" stroke-width="0.5"/>
+    <g font-family="monospace" font-size="10.5" fill="var(--text-dim)">
+      <text x="300" y="238">slot 30608 &mdash; the first of 16 token slots in block 1913; the other 15 are internal fragmentation until later steps fill them</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="block-size" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Block size is a real tuning parameter</h2></div><div class="sec__body"><p>Internal fragmentation is bounded by <code>block_size &minus; 1</code> tokens per sequence per KV cache group. For Llama-3-8B at 128 KiB/token that is up to 1.875 MiB per sequence at <code>block_size=16</code>, 15.875 MiB at 128. At 686 concurrent sequences those are 1.3 GiB and 10.6 GiB of the 52.32 GiB pool respectively &mdash; 2.4% versus 20%. Small blocks are strictly better on memory.</p>
+
+<p>They are not better on everything else. Larger blocks mean a narrower block table (fewer int32 loads per query in the attention kernel), longer contiguous runs for the KV gather, fewer entries to hash for prefix caching, and fewer free-list operations per step. Some backends will not accept small blocks at all &mdash; <code>FlashAttentionBackend.get_preferred_block_size</code> raises the floor to 64 on XPU (<code>vllm/v1/attention/backends/flash_attn.py:L96-L99</code>), and the platform layer lets any backend override the default before the pool is sized.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Defaults at the pinned SHAs. Fragmentation column is derived arithmetic for Llama-3-8B bf16, 128 KiB/token, worst case per sequence.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Engine</th><th>Flag</th><th class="num">Default</th><th>Where</th><th class="num">Max internal frag / seq</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill pill--verified">vLLM</span></td><td><code>--block-size</code></td><td class="num">16</td><td><code>CacheConfig.DEFAULT_BLOCK_SIZE</code>, <code>vllm/config/cache.py:L59</code></td><td class="num">1.875 MiB</td></tr>
+        <tr><td><span class="pill pill--verified">SGLang</span></td><td><code>--page-size</code></td><td class="num">1</td><td><code>_page_size_default</code>, <code>overrides.py:L2395-L2396</code></td><td class="num">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>vLLM's default is a constant with a backend override hook:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/cache.py:L56-L63</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class CacheConfig:
+    """Configuration for the KV cache."""
+
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens.
+    Accepts None (meaning "use default"). After construction, always int."""</code></pre>
+</div>
+
+<p>SGLang's is a resolution pass that returns 1 on everything except MUSA and a specific ROCm KV layout:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/arg_groups/overrides.py:L2389-L2397</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if is_hip() and envs.SGLANG_AITER_KV_CACHE_LAYOUT.get().lower() == "vectorized_5d":
+        logger.info(
+            "Setting page_size=64 as default for "
+            "SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d."
+        )
+        return {"page_size": 64}
+    if not is_musa():
+        return {"page_size": 1}
+    return {"page_size": 64}</code></pre>
+</div>
+
+<p>vLLM decoupled the two pressures rather than picking a compromise. <code>get_block_table_width</code> takes a separate <code>kernel_block_size</code> and splits each allocation block into several kernel blocks, so a 32-token allocation block can feed a kernel that wants 16-token pages (<code>vllm/v1/worker/block_table.py:L29-L49</code>, <code>map_to_kernel_blocks</code> at L238-L266). And <code>prefix_match_unit</code> &mdash; the <code>hash_block_size</code> threaded through <code>BlockPool</code> &mdash; can be finer than <code>block_size</code>, so prefix-cache hits can land inside a physical block. That last decoupling is what creates the need for copy-on-write.</p></div></section>
+<section class="sec" id="copy-on-write" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Copy-on-write, and what changed since the paper</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Finding</span>
+  <p>vLLM V1's copy-on-write is <em>not</em> the paper's. The 2023 paper's CoW served sequence forking &mdash; parallel sampling and beam search, where one prompt spawns <em>n</em> continuations that share the prompt's blocks until one of them writes into a shared partial block. At <code>a556f3f</code> there is no fork primitive in the V1 block layer at all. The only CoW that exists fires on a <strong>partial prefix-cache hit</strong>: a hit whose boundary lands inside a block rather than on a block boundary.</p>
+</div>
+
+<p>The trigger is one modulo:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L129-L139</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _has_partial_local_hit(
+        self,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+    ) -&gt; bool:
+        # The local prefix-cache hit ends inside one of this manager's
+        # blocks: the shared tail block needs CoW.
+        return (
+            len(new_computed_blocks) &gt; 0
+            and num_local_computed_tokens % self.block_size != 0
+        )</code></pre>
+</div>
+
+<p>If a hit covers 4,100 tokens with <code>block_size=16</code>, logical block 256 is shared but only 4 of its 16 slots are valid for this request. The request cannot write into slots 4&ndash;15 of a block another request also references. <code>add_local_computed_blocks</code> records the offending index &mdash; <code>block_idx = num_local_computed_tokens // self.block_size</code>, with the shared tail block, at <code>vllm/v1/core/single_type_kv_cache_manager.py:L280-L286</code> &mdash; and <code>allocate_new_blocks</code> then pulls one extra block and redirects:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L344-L354</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        cow_blocks: list[KVCacheBlock] = []
+        if request_id in self._partial_hit_reqs:
+            # Partial hit: redirect the shared tail to a private CoW block.
+            # Replacing in place keeps the length-based allocation below
+            # correct; the extra block was reserved by
+            # get_num_blocks_to_allocate.
+            block_idx, source_block = self._partial_hit_reqs.pop(request_id)
+            cow_block = self.block_pool.get_new_blocks(1)[0]
+            self._apply_cow(request_id, block_idx, source_block, cow_block)
+            self.new_block_ids.append(cow_block.block_id)
+            cow_blocks.append(cow_block)</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L409-L422</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        """Redirect a partial prefix-cache hit to a private CoW block.
+
+        Both copy endpoints stay retained until the copy has run on the worker,
+        so a same-step free cannot recycle them: ``source_block`` keeps its
+        hit-ref, ``cow_block`` takes an extra ref beyond the one handed to the
+        request.
+        """
+        req_blocks = self.req_to_blocks[request_id]
+        assert block_idx &lt; len(req_blocks)
+        assert req_blocks[block_idx] is source_block
+        assert not source_block.is_null and source_block.ref_cnt &gt; 0
+        req_blocks[block_idx] = cow_block
+        self._pending_cow_copies.append((source_block, cow_block))
+        cow_block.ref_cnt += 1</code></pre>
+</div>
+
+<p>The row is patched in place &mdash; the only non-append write to a block table anywhere in the allocator &mdash; and the copy is deferred to the worker. It travels as <code>SchedulerOutput.kv_cache_block_copies</code>, a list of <code>(src_block_id, dst_block_id)</code> pairs, and runs before the forward pass reads the cache:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu/model_runner.py:L1048-L1055</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Apply copy-on-write block copies for partial prefix-cache hits, after
+        # zeroing new blocks and before the forward pass reads them.
+        if scheduler_output.kv_cache_block_copies:
+            copy_kv_cache_blocks_inplace(
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )</code></pre>
+</div>
+
+<p>The copy itself is a single fancy-index assignment over the block-major storage &mdash; not a per-layer loop, because the layers alias the same backing tensor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/utils.py:L576-L589</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    device = storage_tensors[0].device
+    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices = async_tensor_h2d(indices_np, device=device)
+    src_indices, dst_indices = indices.unbind(dim=1)
+
+    for tensor in storage_tensors:
+        assert tensor.device == device
+        blocks = torch.empty(0, dtype=torch.uint8, device=device)
+        blocks.set_(tensor.untyped_storage())
+        # Block-major backing storage: block i owns the contiguous byte range
+        # [i * page_size, (i + 1) * page_size).
+        assert blocks.numel() % num_blocks == 0
+        blocks = blocks.view(num_blocks, -1)
+        blocks[dst_indices] = blocks[src_indices]</code></pre>
+</div>
+
+<p>The cost is one block copy &mdash; 2 MiB across all Llama-3-8B layers &mdash; per partial hit. Full-block sharing needs no copy at all: both sequences hold refs via <code>BlockPool.touch</code>, which increments <code>ref_cnt</code> and pulls the block out of the free queue if it was sitting there as an eviction candidate (<code>vllm/v1/core/block_pool.py:L702-L717</code>). Divergence is then automatic, because each sequence appends into its own newly-allocated tail. Reference counting does the work; CoW only patches the one case where a shared block is partially valid.</p></div></section>
+<section class="sec" id="reaching-the-kernel" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">How the block table reaches the kernel</h2></div><div class="sec__body"><p>Everything above is scheduler-side bookkeeping. It becomes the kernel's problem through two tensors on a metadata struct. The backend-agnostic carrier is <code>CommonAttentionMetadata</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backend.py:L465-L483</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    """(batch_size + 1,), the start location of each request in query Tensor"""
+
+    seq_lens: torch.Tensor
+    """(batch_size,), the number of computed tokens for each request"""
+
+    num_reqs: int
+    """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
+    num_actual_tokens: int
+    """Total number of tokens in batch"""
+    max_query_len: int
+    """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length (may be an upper bound)"""
+
+    block_table_tensor: torch.Tensor
+    slot_mapping: torch.Tensor</code></pre>
+</div>
+
+<p>Each backend's builder turns that into its own struct; FlashAttention's carries the same two fields verbatim:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/attention/backends/flash_attn.py:L259-L265</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    num_actual_tokens: int  # Number of tokens excluding padding.
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor</code></pre>
+</div>
+
+<p><code>block_table</code> is <code>[num_reqs, max_num_blocks_per_req]</code> int32; <code>slot_mapping</code> is <code>[num_tokens]</code> int64. The kernel writes new K/V at <code>slot_mapping[i]</code> and gathers past K/V by walking row <code>r</code> of <code>block_table</code> for <code>ceil(seq_lens[r] / block_size)</code> entries. How it does that efficiently &mdash; the tiling, the split-K, the paged gather &mdash; is <a href="../03-attention-kernels/03-03-decode-attention.html">Part 3</a>.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">History</span>
+  <p>Almost every blog post about PagedAttention describes a bespoke CUDA kernel in <code>csrc/attention/</code>. That kernel no longer exists. At the pinned SHA <code>csrc/attention/</code> contains only dtype headers (<code>attention_dtypes.h</code>, <code>dtype_bfloat16.cuh</code>, and friends); the kernel was moved to <code>csrc/libtorch_stable/attention/</code> in PR&nbsp;#43717 &mdash; <code>csrc/libtorch_stable/</code> is the subtree vLLM is migrating kernels into for PyTorch's stable C++ ABI (<code>torch::stable::Tensor</code> rather than <code>at::Tensor</code>), and most active kernels now live there; <a href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html">&sect;11.1</a> maps the tree &mdash; and then deleted outright in commit <code>d715b3aa1e</code>, "<a href="https://github.com/vllm-project/vllm/pull/47361">Delete PagedAttention (#47361)</a>", on 2026-07-02. What survives is <code>csrc/rocm/attention.cu</code> for ROCm and <code>csrc/libtorch_stable/attention/attention_utils.cuh</code>. On CUDA, attention runs through FlashAttention, FlashInfer or Triton backends, all of which accept a block table natively. Verify with <code>git -C ~/Documents/other_git_repos/vllm log --oneline -1 --grep="Delete PagedAttention"</code>.</p>
+  <p>The right way to read that: <strong>PagedAttention is a memory-management design, not a kernel.</strong> The contribution that survived contact with three years of kernel evolution is the block pool, the block table and the slot mapping &mdash; the Python in this chapter. The custom kernel that originally consumed them was outcompeted by general varlen/paged kernels and retired.</p>
+</div></div></section>
+<section class="sec" id="sglang" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">SGLang: a token-level allocator</h2></div><div class="sec__body"><p>SGLang solves the same problem with a different granularity and a different data structure, and the difference is genuine rather than cosmetic. Its default <code>page_size</code> is 1, which means the default allocator is not paged at all:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocator/token.py:L42-L64</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def clear(self):
+        # The padded slot 0 is used for writing dummy outputs from padded tokens.
+        self.free_pages = torch.arange(
+            1, self.size + 1, dtype=torch.int64, device=self.device
+        )
+        self.is_not_in_free_group = True
+        self.free_group = []
+        self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+
+    def available_size(self):
+        # To avoid minor "len(free_pages) * 1" overhead
+        return len(self.free_pages) + len(self.release_pages)
+
+    def alloc(self, need_size: int):
+        if self.need_sort and need_size &gt; len(self.free_pages):
+            self.merge_and_sort_free()
+
+        if need_size &gt; len(self.free_pages):
+            return None
+
+        select_index = self.free_pages[:need_size]
+        self.free_pages = self.free_pages[need_size:]
+        return select_index</code></pre>
+</div>
+
+<p>Compare structure, not just size. vLLM's free list is a CPU-side intrusive doubly linked list of Python objects, traversed and mutated by the scheduler process. SGLang's is a <code>torch.Tensor</code> on the GPU; allocation is a tensor slice and freeing is a <code>torch.cat</code>. Nothing is ever popped one at a time, and there are no per-block Python objects to garbage-collect. The tradeoff is that removing an arbitrary block from the middle is not O(1) &mdash; it is not supported &mdash; and reuse order degrades until <code>merge_and_sort_free</code> re-sorts.</p>
+
+<p>The counterpart of vLLM's block table is <code>ReqToTokenPool.req_to_token</code>, and it is a token-level table:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/memory_pool.py:L272-L283</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        self.size = size
+        # +1 padding row at index 0: cuda-graph padded batches default
+        # req_pool_indices to 0, so dummy reads/writes land here harmlessly.
+        self._alloc_size = size + 1
+        self.max_context_len = max_context_len
+        self.device = device
+        with memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            self.req_to_token = torch.zeros(
+                (self._alloc_size, max_context_len), dtype=torch.int32, device=device
+            )
+        self.free_slots = list(range(1, self._alloc_size))
+        self.req_generation = torch.zeros(self._alloc_size, dtype=torch.int64)</code></pre>
+</div>
+
+<p>One int32 per <em>token</em>, not per block. That is the entire trade, in one shape. At 256 requests and a 32,768-token window: vLLM's block table is 256 &times; 2,048 &times; 4 B = <strong>2 MiB</strong>; SGLang's <code>req_to_token</code> is 257 &times; 32,768 &times; 4 B = <strong>32.1 MiB</strong>, and it is allocated on the GPU inside the KV-cache memory-saver region, so it competes with the KV cache itself. In exchange, SGLang has zero internal fragmentation and its prefix cache can share at exact token boundaries with no copy-on-write machinery at all &mdash; the radix tree (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>) refcounts tree nodes rather than blocks.</p>
+
+<p>SGLang does have a paged allocator, selected when the backend demands <code>page_size &gt; 1</code> or DCP is on:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/kv_cache_configurator.py:L1702-L1721</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                    elif (
+                        get_schedule().page_size == 1 and not get_parallel().dcp_enabled
+                    ):
+                        token_to_kv_pool_allocator = TokenToKVPoolAllocator(
+                            sizes.max_total_num_tokens,
+                            dtype=self.kv_cache_dtype,
+                            device=self.device,
+                            kvcache=token_to_kv_pool,
+                            need_sort=need_sort,
+                        )
+                    else:
+                        token_to_kv_pool_allocator = PagedTokenToKVPoolAllocator(
+                            sizes.max_total_num_tokens * get_parallel().attn_dcp_size,
+                            page_size=get_schedule().page_size
+                            * get_parallel().attn_dcp_size,
+                            dtype=self.kv_cache_dtype,
+                            device=self.device,
+                            kvcache=token_to_kv_pool,
+                            need_sort=need_sort,
+                        )</code></pre>
+</div>
+
+<p>The paged path is more elaborate than vLLM's precisely because the table stays token-level: a prefill must fill the partial tail page of the prefix, then whole new pages, then a partial final page, which is three cases handled by a Triton kernel (<code>alloc_extend_kernel</code>, dispatched at <code>python/sglang/srt/mem_cache/allocator/paged.py:L197-L204</code>; the readable reference implementation is <code>alloc_extend_naive</code> at L44-L103). vLLM never needs this, because its block table <em>is</em> the page list &mdash; appending one block id covers all three cases.</p>
+
+<p>Neither choice is wrong. vLLM optimises index-tensor bandwidth and pays 1&ndash;2% of the pool in internal fragmentation; SGLang optimises fragmentation and prefix-sharing granularity and pays 16&times; the index memory plus per-request page-boundary logic when it does page. The fact that both projects independently defaulted to different ends of this axis is a good sign that the optimum depends on the workload.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><strong>The startup error that reads like a memory error but is an over-reservation error.</strong> The engine refuses to start if it cannot hold <em>one</em> request at <code>max_model_len</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L799-L806</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        raise ValueError(
+            f"To serve at least one request with the model's max seq len "
+            f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"Try increasing `gpu_memory_utilization` (which also controls "
+            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
+            f"when initializing the engine. "</code></pre>
+</div>
+
+<p>Paging removed over-reservation at runtime, but this admission check reintroduces a single-request worst-case reservation at startup. Lowering <code>--max-model-len</code> to what your traffic actually uses is usually the right fix; raising <code>--gpu-memory-utilization</code> past 0.95 buys you an OOM later instead.</p>
+
+<p><strong>The pool exhaustion assertion.</strong> <code>get_new_blocks</code> raises <code>ValueError(f"Cannot get {num_blocks} free blocks from the pool")</code> (<code>vllm/v1/core/block_pool.py:L659</code>). Seeing this in production means the capacity check in <code>allocate_slots</code> and the pool disagreed &mdash; an accounting bug, not a capacity problem. Reach for it when debugging a new KV cache group type or a connector.</p>
+
+<p><strong>SGLang's version is a warning plus a tree dump.</strong> <code>alloc_token_slots</code> and <code>alloc_paged_token_slots_extend</code> both log and then raise, after printing the radix tree:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocation.py:L160-L169</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if out_cache_loc is None:
+        error_msg = (
+            f"Out of memory. Try to lower your batch size.\n"
+            f"Try to allocate {num_tokens} tokens.\n"
+            f"{available_and_evictable_str(tree_cache)}"
+        )
+        logger.error(error_msg)
+        if tree_cache is not None:
+            tree_cache.pretty_print()
+        raise RuntimeError(error_msg)</code></pre>
+</div>
+
+<p>The <code>available_and_evictable_str</code> split is the diagnostic that matters: if evictable is large and available is zero, the eviction pass ran too late, not the pool being too small.</p>
+
+<p><strong>Block size is not free to change.</strong> Raising <code>--block-size</code> to 32 halves the block table width and the free-list operation count, and doubles worst-case internal fragmentation. It also changes prefix-cache hit granularity, so a workload with many 20-token-boundary shared prefixes can lose hits. Measure hit rate, not just throughput.</p>
+
+<p><strong>Reference counts and preemption interact.</strong> Because <code>free_blocks</code> keeps hashes and appends to the tail, a preempted request's blocks are recoverable &mdash; but only until enough allocation pressure recycles them. Under sustained pressure the preemption/recompute cycle degrades to full re-prefill. The counter to watch is <code>vllm:num_preemptions</code> alongside the KV usage percentage in the periodic log line (<code>vllm/v1/metrics/loggers.py:L195</code>).</p></div></section>
+<section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Prove the block accounting to yourself without a GPU-heavy benchmark. Start a server with the pool pinned to a small, known size:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --max-model-len 32768 \
+  --block-size 16 \
+  --num-gpu-blocks-override 2048 \
+  --max-num-seqs 64 \
+  --no-enable-prefix-caching</code></pre>
+</div>
+
+<p>2,048 blocks is 32,768 token-slots &mdash; exactly one full-length sequence. Send two concurrent 4,000-token prompts. Both are admitted (each needs 250 blocks) even though a contiguous allocator sized for <code>max_model_len</code> could admit only one. Then raise the concurrency until the log line starts reporting preemptions and read the KV usage percentage it prints alongside.</p>
+
+<p>Three things to vary and predict before you run them:</p>
+
+<ol>
+  <li><code>--block-size 32</code> with the block count halved to 1024. Same total token capacity; watch whether steady-state throughput moves. Any change is kernel-side, not capacity-side.</li>
+  <li>Drop <code>--no-enable-prefix-caching</code> and re-send the same prompt twice. The second request should allocate almost no new blocks &mdash; the pool's free-queue tail still holds the hashed blocks from the first (<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a> owns why they match).</li>
+  <li>Set <code>--max-model-len 131072</code> with the same override and watch the startup check in <code>_check_enough_kv_cache_memory</code> fire with the exact message quoted above.</li>
+</ol>
+
+<p>The SGLang comparison is one flag: <code>python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --page-size 1</code> versus <code>--page-size 16</code>. The first uses <code>TokenToKVPoolAllocator</code>, the second <code>PagedTokenToKVPoolAllocator</code> &mdash; different code paths, same interface, and the selection is the branch quoted from <code>kv_cache_configurator.py</code> above.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><strong>Read and answer.</strong> Open <code>vllm/v1/core/block_pool.py</code> and find <code>get_usage</code>. Why does it subtract 1 from <code>num_gpu_blocks</code>? What would the reported usage be on a freshly started engine if it did not?</li>
+  <li><strong>Derive.</strong> Llama-3-70B (L=80, h_kv=8, d_h=128) in bf16 on 4&times;H100 with TP=4. Per GPU, what is one <code>block_size=16</code> block worth in bytes? If 40 GiB per GPU is left for KV, how many blocks is that, and how many 8k-context sequences fit? Compare against the contiguous ceiling at <code>max_model_len=32768</code>.</li>
+  <li><strong>Predict, then verify.</strong> A request has 4,112 committed tokens, <code>block_size=16</code>, and the scheduler grants it 20 new tokens this step. How many blocks does <code>get_num_blocks_to_allocate</code> return? Now check the code path in <code>single_type_kv_cache_manager.py:L191-L197</code> and confirm which branch runs.</li>
+  <li><strong>Trace the CoW.</strong> With <code>block_size=16</code> and <code>prefix_match_unit=8</code>, a request gets a prefix-cache hit of exactly 4,104 tokens. Walk the path: which predicate fires, how many extra blocks does <code>get_num_blocks_to_allocate</code> reserve, which index of the block table is patched, and how many bytes does the resulting copy move for Llama-3-8B?</li>
+  <li><strong>Compare.</strong> For <code>max_num_reqs=512</code> and <code>max_context_len=65536</code>, compute the index-metadata footprint of vLLM's block table at <code>block_size=16</code> and of SGLang's <code>req_to_token</code>. At what block size do they cross 10&times;? What does SGLang buy for the difference?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><strong>1.</strong> Block 0 is popped in <code>BlockPool.__init__</code> to serve as <code>null_block</code> and is never in the free queue, so the denominator must exclude it. Without the subtraction a fresh engine would report <code>1 - (N-1)/N</code> usage &mdash; a small non-zero value, e.g. 0.0037% at 26,785 blocks &mdash; instead of 0.</p>
+    <p><strong>2.</strong> With TP=4 the KV heads are split, so each GPU holds $h_{kv}/4 = 2$ heads. Per token per GPU: $2 \cdot 80 \cdot 2 \cdot 128 \cdot 2 = 81{,}920$ B = 80 KiB. One block = 16 &times; 80 KiB = 1.25 MiB. 40 GiB / 1.25 MiB = 32,768 blocks = 524,288 token-slots. An 8k sequence needs 512 blocks, so 64 sequences fit. Contiguous at 32,768: 32,768 &times; 80 KiB = 2.5 GiB per sequence, 40 / 2.5 = 16 sequences. 4&times; better, and that is before accounting for outputs shorter than 8k.</p>
+    <p><strong>3.</strong> <code>cdiv(4112 + 20, 16) = cdiv(4132, 16) = 259</code>. The request already holds <code>cdiv(4112, 16) = 257</code> blocks. So 2. Because the request is running, <code>request_id in self.num_cached_block</code> is true and the fast path <code>return max(num_required_blocks - num_req_blocks, 0)</code> runs &mdash; the skipped-token and evictable-block arithmetic below it is skipped entirely.</p>
+    <p><strong>4.</strong> <code>4104 % 16 = 8 &ne; 0</code>, so <code>_has_partial_local_hit</code> returns True. <code>get_num_blocks_to_allocate</code> adds <code>num_new_blocks += 1</code> for the CoW redirect. The patched index is <code>block_idx = 4104 // 16 = 256</code>, i.e. <code>req_to_blocks[req][256]</code> is replaced in <code>_apply_cow</code>. The copy moves one block across all layers: 16 tokens &times; 128 KiB/token = 2 MiB for Llama-3-8B.</p>
+    <p><strong>5.</strong> vLLM: 512 &times; (65536/16) &times; 4 B = 512 &times; 4096 &times; 4 = 8 MiB. SGLang: 513 &times; 65536 &times; 4 B = 128.25 MiB &mdash; 16&times;. They cross 10&times; at <code>block_size = 10</code>, i.e. at any vLLM block size of 16 or above the gap already exceeds 10&times;. SGLang buys zero internal fragmentation and exact-token prefix sharing with no CoW machinery.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The dominant waste in a contiguous KV allocator is <em>over-reservation</em>, not fragmentation: 98.1% of a typical sequence's extent at <code>max_model_len=32768</code>, because output length is unknown at admission. Paging removes it by deferring allocation to when a block actually fills.</li>
+  <li>Uniform block size turns the admission test from "find N contiguous bytes" into one integer comparison against <code>get_num_free_blocks()</code>, which is why <code>allocate_slots</code> can never fail for a reason the scheduler cannot see coming.</li>
+  <li>vLLM's block tables are <em>append-only</em>, and the codebase deliberately forgoes block deduplication to keep them that way. The single exception is the copy-on-write patch, which is also the only place a block table entry is overwritten.</li>
+  <li>V1's copy-on-write serves partial prefix-cache hits, not sequence forking. The paper's beam-search CoW has no counterpart in the V1 block layer at <code>a556f3f</code>; ordinary full-block sharing needs only reference counting.</li>
+  <li>PagedAttention survives as a memory-management design, not a kernel &mdash; the custom CUDA kernel was deleted in <code>d715b3aa1e</code> and CUDA attention now runs through general paged backends that take the block table as a tensor.</li>
+  <li>vLLM defaults to <code>block_size=16</code> and SGLang to <code>page_size=1</code>, trading up to 1.9% internal fragmentation against 16&times; the index-tensor footprint. Both defaults are defensible; the workload decides.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Kwon et al., <a href="https://arxiv.org/abs/2309.06180">Efficient Memory Management for Large Language Model Serving with PagedAttention</a> (arXiv:2309.06180, SOSP 2023) &mdash; the original. Read &sect;1&ndash;&sect;4 and treat &sect;4.3's copy-on-write as historical.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/47361">vllm#47361 &mdash; Delete PagedAttention</a>, the commit that removed the CUDA kernel. Worth reading for the discussion of why general varlen kernels won.</li>
+  <li><a href="https://blog.vllm.ai/2025/01/27/v1-alpha-release.html">vLLM V1 alpha release notes</a> &mdash; the rewrite that produced <code>vllm/v1/core/block_pool.py</code> and the coordinator/single-type-manager split described here.</li>
+  <li>Zheng et al., <a href="https://arxiv.org/abs/2312.07104">SGLang: Efficient Execution of Structured Language Model Programs</a> (arXiv:2312.07104) &mdash; the token-level allocator and radix tree, from the other side.</li>
+  <li>In this book: <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> for the sizing arithmetic, <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> for block hashing, <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> for SGLang's radix tree, <a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a> for what happens when <code>allocate_slots</code> returns <code>None</code>.</li>
+</ul></div></section>
+<div class="pager"><a href="02-01-kv-cache-sizing.html"><div class="pager__k">← Previous</div><div class="pager__t">The KV cache size formula</div></a><a class="pager__next" href="02-03-prefix-caching-hash.html"><div class="pager__k">Next →</div><div class="pager__t">Prefix caching by hash (vLLM)</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#where-the-os-analogy-breaks">Where the OS analogy breaks</a>
+<a href="#the-three-data-structures">The three data structures</a>
+<a href="#allocate-path">The allocate path</a>
+<a href="#worked-trace">Worked trace: allocating token 4,097</a>
+<a href="#block-size">Block size is a real tuning parameter</a>
+<a href="#copy-on-write">Copy-on-write, and what changed since the paper</a>
+<a href="#reaching-the-kernel">How the block table reaches the kernel</a>
+<a href="#sglang">SGLang: a token-level allocator</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

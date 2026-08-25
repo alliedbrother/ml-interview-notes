@@ -1,0 +1,2243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frontend DSL, grammar backends, router, extension points — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i is-current" href="12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 12 · SGLang deep dive · 12-04</div>
+<h1>Frontend DSL, grammar backends, router, extension points</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>python/sglang/lang/</code></li><li><code>python/sglang/srt/constrained/</code></li><li><code>sgl-model-gateway/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">SGLang is named after a programming language its own package README now marks
+deprecated. That is not an embarrassment — the language's central idea moved into the engine and
+became RadixAttention. This chapter closes the deep dive with the things SGLang has that vLLM
+does not: that retired frontend and the insight it left behind, a registry for grammar backends,
+a Rust gateway shipped as its own product, and a plugin system that patches arbitrary dotted
+paths.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You wrote a replacement for SGLang's radix tree and pointed the server at it. It comes back
+with this:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L199-L210</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def create_tree_cache(ctx: TreeCacheBuildContext) -&gt; BasePrefixCache:
+    &quot;&quot;&quot;Route to the matching factory to construct Radix Cache.&quot;&quot;&quot;
+    name = ctx.server_args.radix_cache_backend
+    if name:
+        factory = get_radix_cache_factory(name)
+        if factory is None:
+            raise ValueError(
+                f&quot;--radix-cache-backend={name!r} is not registered. &quot;
+                f&quot;Registered backends: {registered_radix_cache_backends()}. &quot;
+                &quot;External backends must call register_radix_cache_backend(...) at import time.&quot;
+            )
+        cache = factory(ctx)</code></pre>
+</div>
+
+<p>That error names the function, says when to call it, and prints what is already registered.
+It is the best-behaved seam in the tree. Three directories away,
+<code>register_grammar_backend(name, init_func)</code> is a bare dict assignment with no
+validation at all, and an in-tree test that asserts the second registration silently wins. Both
+are extension points. They disagree about almost everything else.</p>
+
+<p><a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html">§11.5</a> ran this audit on
+vLLM and found the same kind of disagreement — quantization and attention overwrite silently,
+<code>KVConnectorFactory</code> raises, linear kernels append at lowest priority. This is the
+SGLang half, so that <a href="../13-comparison-and-frontier/13-01-head-to-head.html">§13.1</a>
+gets symmetric material. But the audit is only half the story: SGLang's surface contains three
+things with no vLLM counterpart at all — a language frontend, a grammar-backend registry where
+vLLM has a hard-coded <code>if</code>/<code>elif</code> chain, and a Rust gateway that is a
+separately versioned product.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Scope</span>
+  <p>Every size figure in this chapter counts <code>python/sglang/lang/</code>,
+  <code>python/sglang/srt/</code>, and <code>sgl-model-gateway/</code> only. It excludes
+  <code>python/sglang/multimodal_gen/</code>, which
+  <a href="12-01-repo-map-and-processes.html#repo-map">§12.1</a> shows is a second, separate
+  runtime with its own <code>server_args.py</code>. Mixing the two makes every ratio
+  meaningless. One path convention: this book reserves the <code>docs/</code> prefix for the
+  vLLM checkout, so SGLang documentation is cited relative to its docs root: a path given as
+  <code>developer_guide/contribution_guide.mdx</code> sits under the SGLang checkout's
+  doubled <code>docs</code> directory.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: four surfaces, three address spaces</h2></div><div class="sec__body"><p>The four topics are not peers; they sit at three distances from the GPU. The frontend language
+runs in <em>your</em> process and talks HTTP. The router runs in <em>its own</em> process — a
+different language, release cadence, and version number. The grammar backends and the registries
+run inside the engine processes
+<a href="12-01-repo-map-and-processes.html#process-architecture">§12.1</a> laid out. Nothing in
+the frontend can see a KV block; nothing in the router can either.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — the four surfaces, mapped onto the processes that host them.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    DSL["YOUR PROCESS, historical<br/>python/sglang/lang<br/>14 files, 4644 lines<br/>marked deprecated in<br/>python/sglang/README.md"]
+    OAI["YOUR PROCESS, today<br/>OpenAI SDK, or<br/>requests.post /generate"]
+    GW["GATEWAY PROCESS<br/>sgl-model-gateway<br/>Rust crate smg v0.3.2<br/>axum plus tokio"]
+    HTTP["ENGINE PROCESS 0<br/>http_server plus TokenizerManager<br/>skipped when SGLANG_RUST_SERVER is set"]
+    SCHED["SCHEDULER PROCESS x TP<br/>GrammarManager, tree cache,<br/>attention backend, spec worker"]
+    DET["DETOKENIZER PROCESS<br/>also skipped in Rust server mode"]
+    DSL -->|"POST /generate with the full prefix text"| GW
+    OAI -->|"POST /v1/chat/completions"| GW
+    GW -->|"selects a worker, forwards"| HTTP
+    HTTP -->|"ZMQ TokenizedGenerateReqInput"| SCHED
+    SCHED -->|"ZMQ BatchTokenIDOut"| DET
+    REG["REGISTRIES load here<br/>load_plugins at process start"] -.-> SCHED
+    REG -.-> HTTP
+  </script>
+</div>
+
+<p>The seam between the frontend and the engine is worth staring at, because it is the whole
+design. The language never sends a KV handle, a session id, or a cache key. It sends
+<em>text</em>. The sharing that makes a forked program cheap is not arranged by the frontend at
+all — it falls out of RadixAttention matching two prompts that happen to start the same way
+(<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>). The language's only job
+was to make sure they do.</p></div></section>
+<section class="sec" id="frontend-dsl" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: a retired language whose idea survived</h2></div><div class="sec__body"><p>State the current status first, from the repo's own code-structure doc, so nothing below
+misleads:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/README.md:L5-L11</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>- `benchmark/`: Benchmark implementations and dataset utilities.
+- `cli/`: Command-line interface commands and entrypoints.
+- `kernels/`: Kernel interfaces, implementations, selection, and debugging utilities shared by the runtimes.
+- `lang/`: Deprecated language frontend that is no longer actively maintained.
+- `multimodal_gen/`: Core runtime for image, video, and audio generation models, most of which are diffusion models.
+- `srt/`: Core runtime for autoregressive language models. (SRT = SGLang Runtime.)
+- `test/`: Shared test and evaluation utilities.</code></pre>
+</div>
+
+<p>Fourteen files, 4,644 lines, one line of documentation saying do not build on it. The
+interface today is the OpenAI-compatible server
+(<a href="../09-serving-system/09-01-openai-api-surface.html">§9.1</a>). Read this section the
+way <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a> reads the deleted
+PagedAttention kernel and <a href="../06-decoding-algorithms/06-05-structured-decoding.html#jump-forward">§6.5</a>
+reads dead jump-forward decoding: a retired design, explicitly labelled, taught because
+understanding it explains something that is still live.</p>
+
+<p>Here, what is still live is RadixAttention, and the language is where its motivation comes
+from.</p>
+
+<h3>The bottleneck the language was answering</h3>
+
+<p>A structured LM program — chain of thought with $n$ branches, a self-consistency vote, a
+tool-choice tree, a rubric scored on five axes — issues many generations that share a long
+preamble. Naively, each branch is an independent request and each pays a full prefill of the
+shared preamble.</p>
+
+<p>Price it. The KV cell size from <a href="../FORMULAS.html#memory-formulas">FORMULAS</a> is
+$k = 2 \cdot L \cdot h_{kv} \cdot d_h \cdot b$. For Llama-3-8B in bf16 ($L=32$, $h_{kv}=8$,
+$d_h=128$, $b=2$) that is $2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072$ bytes, i.e.
+128 KiB per token. A program that forks 8 ways after a 2,048-token shared prompt holds:</p>
+
+<div class="math-display">$$8 \times 2048 \times 128\ \text{KiB} = 2\ \text{GiB} \quad\text{(no sharing)}, \qquad 1 \times 2048 \times 128\ \text{KiB} = 256\ \text{MiB} \quad\text{(shared)}$$</div>
+
+<p>1.75 GiB of H100 HBM recovered, and seven eighths of the prefill FLOPs skipped — arithmetic
+from the formula and published Llama-3-8B shapes, not a measurement. That is the entire economic
+argument for both the language and the cache. They are one insight approached from two
+directions: the cache makes shared prefixes cheap <em>if</em> requests have them; a program with
+a <code>fork</code> has one <em>by construction</em>. Only one of those two directions turned out
+to be necessary, which is why one of them is deprecated and the other is the first bullet in the
+project README.</p>
+
+<h3>What a program looked like</h3>
+
+<p>A program is a Python function whose first parameter is the state <code>s</code>, decorated
+with <code>@sgl.function</code>; the decorator asserts the calling convention at definition time
+(<code>assert argspec.args[0] == "s"</code>, <code>python/sglang/lang/ir.py:L148</code>).
+Everything is <code>+=</code>: a literal string, or an <code>SglExpr</code> — a
+<code>gen</code>, a <code>select</code>, a role marker. Control flow is ordinary Python, which is
+the interesting part: <code>if s["tool"] == "calculator":</code> reads a variable the model just
+produced, so the interpreter must block on that generation before the branch is evaluable. Here
+is the fork idiom as the in-tree program tests exercise it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/test/test_programs.py:L262-L276</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Generate detailed tips
+        forks = s.fork(fork_size)
+        for i in range(fork_size):
+            forks[
+                i
+            ] += f&quot;Now, I expand tip {i+1} into a detailed paragraph:\nTip {i+1}:&quot;
+            forks[i] += sgl.gen(&quot;detailed_tip&quot;, max_tokens, stop=[&quot;\n\n&quot;])
+        forks.join()
+
+        # Concatenate tips and summarize
+        s += &quot;Here are these tips with detailed explanation:\n&quot;
+        for i in range(fork_size):
+            s += f&quot;Tip {i+1}:&quot; + forks[i][&quot;detailed_tip&quot;] + &quot;\n&quot;
+
+        s += &quot;\nIn summary,&quot; + sgl.gen(&quot;summary&quot;, max_tokens=512)</code></pre>
+</div>
+
+<p>The prefix-tree shape is visible in the source. One preamble, <code>fork_size</code> branches,
+a <code>join()</code> that collects every result — a program that <em>cannot</em> be written
+without a shared prefix.</p>
+
+<h3>Worked trace: what a fork actually did</h3>
+
+<p><code>StreamExecutor.fork()</code> is the load-bearing 30 lines, and the mechanism is not what
+the name suggests:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/lang/interpreter.py:L370-L400</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def fork(
+        self,
+        size: int = 1,
+        position_ids_offset: Optional[List[int]] = None,
+    ):
+        if size &gt; 1 and str(self.text_):
+            self.submit(SglCommitLazy())
+
+        self.sync()
+        size = int(size)
+
+        exes = [
+            StreamExecutor(
+                self.backend,
+                self.arguments,
+                self.default_sampling_para,
+                self.chat_template,
+                self.stream,
+            )
+            for _ in range(size)
+        ]
+        for i in range(size):
+            exes[i].variables = dict(self.variables)
+            exes[i].text_ = str(self.text_)
+            exes[i].messages_ = list(self.messages_)
+            exes[i].cur_role = self.cur_role
+            exes[i].cur_role_begin_pos = self.cur_role_begin_pos
+            exes[i].fork_start_text_pos = len(self.text_)
+            exes[i].images_ = list(self.images_)
+
+            # TODO(ying): handle API speculative execution</code></pre>
+</div>
+
+<p>Each child gets <code>str(self.text_)</code> — a full copy of the parent's <em>string</em>. No
+KV handle, no request id, no reference to a tree node. Each child then POSTs that whole string
+as its prompt (<code>python/sglang/lang/backend/runtime_endpoint.py:L166-L167</code> sets
+<code>"text": s.text_</code>). The one optimisation the frontend performs is the
+<code>SglCommitLazy</code> at the top of <code>fork()</code>, which fires a zero-token generation
+whose only purpose is to plant the shared prefix in the server's radix tree <em>before</em> the
+branches race for it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/lang/backend/runtime_endpoint.py:L105-L114</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def commit_lazy_operations(self, s: StreamExecutor):
+        data = {&quot;text&quot;: s.text_, &quot;sampling_params&quot;: {&quot;max_new_tokens&quot;: 0}}
+        self._add_images(s, data)
+        res = http_request(
+            self.base_url + &quot;/generate&quot;,
+            json=data,
+            api_key=self.api_key,
+            verify=self.verify,
+        )
+        self._assert_success(res)</code></pre>
+</div>
+
+<p>The full path, in order: <code>SglFunction.run()</code> → <code>run_program()</code> →
+<code>StreamExecutor.__init__</code> starts a worker thread → <code>ProgramState.fork(n)</code> →
+<code>StreamExecutor.fork()</code> submits <code>SglCommitLazy</code> →
+<code>_execute_commit_lazy_operations</code> → <code>RuntimeEndpoint.commit_lazy_operations</code>
+posts <code>max_new_tokens: 0</code> → each child <code>StreamExecutor</code> runs
+<code>_execute_gen</code> → <code>RuntimeEndpoint.generate</code> posts the full text → the
+server's <code>match_prefix</code> finds the committed nodes
+(<a href="12-03-radix-cache-in-code.html#the-tree-core">§12.3</a>) → every branch prefills only
+its own suffix → <code>ProgramStateGroup.join()</code> gathers the child variables back into the
+parent (<code>python/sglang/lang/interpreter.py:L1052-L1066</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — a two-way fork becomes two prompts with a common prefix, and the radix tree does the rest. Sizes for a 2048-token preamble on Llama-3-8B bf16 at 128 KiB per token.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["s += preamble<br/>StreamExecutor.text_ grows<br/>2048 tokens"]
+    B["s.fork(2)<br/>submit SglCommitLazy<br/>POST /generate max_new_tokens=0"]
+    C["RADIX TREE NODE<br/>preamble, 2048 tokens<br/>256 MiB KV, refcount rises"]
+    D["child 0 text_ = preamble + expand tip 1<br/>POST /generate"]
+    E["child 1 text_ = preamble + expand tip 2<br/>POST /generate"]
+    F["match_prefix hits 2048 tokens<br/>prefill only the short suffix"]
+    G["match_prefix hits 2048 tokens<br/>prefill only the short suffix"]
+    H["leaf 0<br/>detailed_tip, new tokens only"]
+    I["leaf 1<br/>detailed_tip, new tokens only"]
+    J["join gather_variable<br/>parent detailed_tip becomes a list of 2"]
+    K["WITHOUT the shared node<br/>2 GiB at fork 8, all prefill repeated"]
+    A --> B --> C
+    C --> D --> F --> H --> J
+    C --> E --> G --> I --> J
+    C -.->|"if evicted between commit and branch"| K
+  </script>
+</div>
+
+<p>Two conclusions, and they are why the language was retire-able. First, <b>it had no
+privileged channel</b>: anything it achieved, a plain HTTP client arranging its prompts the same
+way achieves identically. It was ergonomics over a cache, never an API into one. Second, <b>the
+"batching across program branches" the SGLang paper describes is the server's continuous
+batching, not a frontend scheduler</b> — <code>run_batch</code> is a
+<code>ThreadPoolExecutor</code> fanning out independent HTTP requests, sized
+<code>max(96, multiprocessing.cpu_count() * 16)</code> and capped by the batch length
+(<code>python/sglang/lang/interpreter.py:L109-L176</code>). Once RadixAttention shipped, every
+client got the benefit without adopting a language, and the language stopped earning its
+maintenance.</p>
+
+<p>The log agrees with the README. Thirteen commits touched
+<code>python/sglang/lang/</code> since 2026-01-01 against 4,731 to <code>python/sglang/srt/</code>
+and 176 to <code>sgl-model-gateway/</code>; nine of the thirteen are cross-cutting sweeps. Its
+tests live in <code>test/manual/lang_frontend/</code>, and <code>test/README.md:L15</code>
+defines that directory as "Non-CI tests for local debugging or special setups." It still works
+and still carries five API backends. But nothing in CI would notice if it broke.</p></div></section>
+<section class="sec" id="grammar-backends" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Grammar backends: SGLang has a registry, vLLM has an if-chain</h2></div><div class="sec__body"><p><a href="../06-decoding-algorithms/06-05-structured-decoding.html">§6.5</a> owns the
+mechanism — how a grammar compiles to a token-level FSM, how the bitmask lands on logits, where
+the host-side cost goes, and why jump-forward decoding is dead code at this SHA. What belongs
+here is the <em>seam</em>: what a backend must implement, how one is selected, and how the shape
+of that interface differs from vLLM's.</p>
+
+<p>The contract has two halves. A <code>BaseGrammarObject</code> is per-request state:
+<code>accept_token(token)</code>, <code>rollback(k)</code>, <code>allocate_vocab_mask</code>,
+<code>fill_vocab_mask(mask, idx)</code>, and the three static methods
+<code>reset_vocab_mask</code>, <code>move_vocab_mask</code>, <code>apply_vocab_mask</code>
+(<code>python/sglang/srt/constrained/base_grammar_backend.py:L58-L107</code>). A
+<code>BaseGrammarBackend</code> is the per-server compiler, and its abstract surface is four
+dispatch methods with permissive defaults:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/constrained/base_grammar_backend.py:L241-L257</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def dispatch_fallback(self, key_type: str, key_string: str) -&gt; BaseGrammarObject:
+        &quot;&quot;&quot;
+        This function should not be reached in any case.
+        &quot;&quot;&quot;
+        raise ValueError(f&quot;Invalid key_type: {key_type}={key_string}&quot;)
+
+    def dispatch_json(self, key_string: str) -&gt; BaseGrammarObject:
+        return self._not_supported(&quot;json&quot;, key_string)
+
+    def dispatch_regex(self, key_string: str) -&gt; BaseGrammarObject:
+        return self._not_supported(&quot;regex&quot;, key_string)
+
+    def dispatch_ebnf(self, key_string: str) -&gt; BaseGrammarObject:
+        return self._not_supported(&quot;ebnf&quot;, key_string)
+
+    def dispatch_structural_tag(self, key_string: str) -&gt; BaseGrammarObject:
+        return self._not_supported(&quot;structural_tag&quot;, key_string)</code></pre>
+</div>
+
+<p>Every default returns an <code>InvalidGrammarObject</code> after logging
+<code>"Skip unsupported {key_type=}, {key_string=}"</code>, so a backend that only understands
+JSON schemas overrides one method and degrades gracefully on the other three. vLLM takes the
+opposite stance — one abstract <code>compile_grammar(request_type, grammar_spec,
+stop_token_ids)</code> that must handle every member of the
+<code>StructuredOutputOptions</code> enum:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/structured_output/backend_types.py:L99-L118</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class StructuredOutputBackend(ABC):
+    &quot;&quot;&quot;Engine-level backend for structured output requests.&quot;&quot;&quot;
+
+    vllm_config: VllmConfig
+    tokenizer: TokenizerLike
+    vocab_size: int
+
+    @abstractmethod
+    def compile_grammar(
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
+    ) -&gt; StructuredOutputGrammar:
+        &quot;&quot;&quot;
+        Compiles a grammar specification into a structured output grammar.
+
+        Args:
+            request_type (StructuredOutputOptions): The type of structured
+                output request.</code></pre>
+</div>
+
+<p>Both engines converged on the same three-verb runtime contract — accept a token, fill a
+bitmask, ask whether the grammar is terminated. The divergence is in <em>selection</em>. SGLang
+has a registry, checked first:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/constrained/base_grammar_backend.py:L347-L366</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def register_grammar_backend(name, init_func):
+    GRAMMAR_BACKEND_REGISTRY[name] = init_func
+
+
+def create_grammar_backend(
+    server_args: ServerArgs,
+    tokenizer,
+    vocab_size: int,
+    eos_token_ids: Optional[set] = None,
+    think_end_ids: Optional[List[int]] = None,
+) -&gt; Optional[BaseGrammarBackend]:
+    name = get_exec().kernel.grammar_backend
+
+    # Custom grammar backend has the highest priority
+    if name in GRAMMAR_BACKEND_REGISTRY:
+        return GRAMMAR_BACKEND_REGISTRY[name](
+            server_args, tokenizer, vocab_size, eos_token_ids
+        )
+
+    # Default grammar backends</code></pre>
+</div>
+
+<p>vLLM has a hard-coded chain in the manager instead, ending in
+<code>raise ValueError(f"Unsupported structured output backend: {backend}")</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/structured_output/__init__.py:L130-L145</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if self.backend is None:
+            assert request.sampling_params is not None
+            backend = request.sampling_params.structured_outputs._backend
+            vocab_size = self.vllm_config.model_config.get_vocab_size()
+            if backend == &quot;xgrammar&quot;:
+                self.backend = XgrammarBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
+            elif backend == &quot;guidance&quot;:
+                self.backend = GuidanceBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )</code></pre>
+</div>
+
+<p>A fifth structured-output backend in vLLM is a core-file PR. In SGLang it is a
+<code>register_grammar_backend</code> call from a plugin. Two caveats before you celebrate.
+"Custom grammar backend has the highest priority" means a plugin registering under the name
+<code>"xgrammar"</code> shadows the built-in with no warning; and the overwrite semantics are
+pinned by a test, so they are intentional, not an oversight:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">test/registered/unit/constrained/test_base_grammar_backend.py:L218-L223</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def test_overwrite_registration(self):
+        register_grammar_backend(&quot;dup&quot;, lambda *a: &quot;first&quot;)
+        register_grammar_backend(&quot;dup&quot;, lambda *a: &quot;second&quot;)
+        self.assertEqual(
+            GRAMMAR_BACKEND_REGISTRY[&quot;dup&quot;](None, None, None, None), &quot;second&quot;
+        )</code></pre>
+</div>
+
+<p>One more structural difference worth copying. SGLang's interface is <em>composable</em>:
+<code>ReasonerGrammarBackend</code> is a <code>BaseGrammarBackend</code> that <em>wraps</em>
+another one and adds reasoning-block handling
+(<code>python/sglang/srt/constrained/reasoner_grammar_backend.py:L243-L251</code>), applied by
+the factory when <code>--reasoning-parser</code> is set. vLLM handles the same concern inside
+<code>StructuredOutputManager</code> with a request-scoped <code>reasoner_cls</code>
+(<code>vllm/v1/structured_output/__init__.py:L41-L44</code>). SGLang's version means a
+third-party backend inherits reasoning support for free; vLLM's means the logic is written once
+and cannot drift per backend. Both defensible; only one lets you decorate.</p>
+
+<p>Consumption is via <code>GrammarManager</code>, which owns the backend and a
+<code>grammar_queue</code> of requests whose grammars are still compiling. Compilation runs on a
+<code>ThreadPoolExecutor</code> and is cached by <code>(key_type, key_string)</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/constrained/base_grammar_backend.py:L284-L296</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def get_cached_or_future_value(
+        self, key: Tuple[str, str], require_reasoning: bool
+    ) -&gt; Tuple[BaseGrammarObject | Future[BaseGrammarObject], bool]:
+        value = self.cache.get(key)
+        if value:
+            copied_value = value.copy()
+            copied_value.maybe_init_reasoning(require_reasoning)
+            return copied_value, True
+        value = self.executor.submit(self._init_value_dispatch, key, require_reasoning)
+        return value, False
+
+    def set_cache(self, key: Tuple[str, str], value: BaseGrammarObject):
+        self.cache[key] = value</code></pre>
+</div>
+
+<p>On a miss, <code>GrammarManager.process_req_with_grammar</code> parks the request;
+<code>get_ready_grammar_requests()</code> later releases it after an all-gather across the DP/TP
+group so every rank agrees which grammars finished
+(<code>python/sglang/srt/constrained/grammar_manager.py:L184-L197</code>). Your backend's
+<code>copy()</code> must therefore be cheap and must not share mutable FSM state — the default
+<code>BaseGrammarObject.copy()</code> returns <code>self</code>
+(<code>base_grammar_backend.py:L109-L110</code>), correct only for a stateless object.</p></div></section>
+<section class="sec" id="the-router" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The router as a component</h2></div><div class="sec__body"><p><a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> owns routing
+<em>policy</em> — cache-aware routing, the approximate cache model the gateway keeps, the
+Rust/Python <code>max_tree_size</code> default disagreement, and the fact that nothing tells the
+gateway when the engine evicts. This section is about the router as a <em>thing you deploy</em>:
+what it is built from, how it ships, how it finds workers.</p>
+
+<p>Start with the manifest, because it answers the shipping question outright:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/Cargo.toml:L1-L32</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>[workspace]
+members = [&quot;bindings/python&quot;]
+exclude = [&quot;bindings/golang&quot;, &quot;examples&quot;]
+
+[package]
+name = &quot;sgl-model-gateway&quot;
+version = &quot;0.3.2&quot;
+edition = &quot;2021&quot;
+
+[features]
+default = [&quot;grpc-client&quot;]
+grpc-client = []
+grpc-server = []
+
+vendored-openssl = [&quot;openssl/vendored&quot;]
+
+[lints.rust]
+unused_qualifications = &quot;warn&quot;
+
+[lib]
+name = &quot;smg&quot;
+crate-type = [&quot;rlib&quot;]
+
+[[bin]]
+name = &quot;sgl-model-gateway&quot;
+path = &quot;src/main.rs&quot;
+
+[[bin]]
+name = &quot;smg&quot;
+path = &quot;src/main.rs&quot;
+
+[[bin]]</code></pre>
+</div>
+
+<p>It is <em>both</em>. The crate builds three identically-sourced binaries
+(<code>sgl-model-gateway</code>, <code>smg</code>, <code>amg</code>, all from
+<code>src/main.rs</code>), and the workspace member <code>bindings/python</code> wraps the same
+library into a wheel with maturin:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/pyproject.toml:L44-L53</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>
+[project.scripts]
+smg = &quot;sglang_router.cli:main&quot;
+amg = &quot;sglang_router.cli:main&quot;
+sglang-router = &quot;sglang_router.cli:main&quot;
+
+
+[tool.maturin]
+python-source = &quot;src&quot;
+module-name = &quot;sglang_router.sglang_router_rs&quot;</code></pre>
+</div>
+
+<p>Note the version: the wheel is <code>sglang-router 0.3.2</code>, matching the crate but
+unrelated to the SGLang engine's version — a separate product on a separate release cadence, also
+on Docker Hub as <code>lmsysorg/sgl-model-gateway</code>
+(<code>sgl-model-gateway/README.md:L47-L52</code>). The Python side is a thin PyO3 shim:
+<code>sglang_router/router.py</code> imports <code>Router</code> and <code>PolicyType</code> from
+the compiled <code>sglang_router.sglang_router_rs</code> module and maps CLI strings onto Rust
+enums (<code>sgl-model-gateway/bindings/python/src/sglang_router/router.py:L7-L34</code>).
+Reading Rust is not a prerequisite for operating it.</p>
+
+<p>Worker discovery has three modes, none of which the engine participates in:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">static</span><h4>--worker-urls</h4><p>A list on the command line. <code>python3 -m sglang_router.launch_router --worker-urls http://w1:8000 http://w2:8000 --policy cache_aware</code>. Simplest, and what the README leads with.</p></div>
+  <div class="ve-card"><span class="ve-card__k">dynamic</span><h4>POST /workers</h4><p>Register at runtime with a JSON body carrying <code>url</code>, <code>model_id</code>, <code>priority</code>, and free-form <code>labels</code>. <code>GET /workers</code> lists them. This is what inference-gateway mode (<code>--enable-igw</code>) is built on.</p></div>
+  <div class="ve-card"><span class="ve-card__k">kubernetes</span><h4>label selectors</h4><p>The gateway watches pods with <code>kube</code> and reconciles the registry against label selectors, with separate selectors for prefill and decode pods in PD mode.</p></div>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/service_discovery.rs:L32-L50</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>#[derive(Debug, Clone)]
+pub struct ServiceDiscoveryConfig {
+    pub enabled: bool,
+    pub selector: HashMap&lt;String, String&gt;,
+    pub check_interval: Duration,
+    pub port: u16,
+    pub namespace: Option&lt;String&gt;,
+    // PD mode specific configuration
+    pub pd_mode: bool,
+    pub prefill_selector: HashMap&lt;String, String&gt;,
+    pub decode_selector: HashMap&lt;String, String&gt;,
+    // Bootstrap port annotation specific to mooncake implementation
+    pub bootstrap_port_annotation: String,
+    // Router node discovery for mesh
+    pub router_selector: HashMap&lt;String, String&gt;,
+    pub router_mesh_port_annotation: String,
+    // When true (IGW mode), also discover selector pods as Regular workers alongside PD workers
+    pub igw_mode: bool,
+}</code></pre>
+</div>
+
+<p>Two details an operator needs. The default poll is
+<code>check_interval: Duration::from_secs(60)</code> (<code>service_discovery.rs:L58</code>), so
+a dead pod is caught by the health checker long before the discovery loop notices. And the
+prefill bootstrap port is read from a pod <em>annotation</em> defaulting to
+<code>"sglang.ai/bootstrap-port"</code> (<code>service_discovery.rs:L63</code>) — the contract
+between your Kubernetes manifests and the gateway's PD handshake, and an overridable default
+rather than a constant.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — the router as deployed: what it is, what it talks to, and what it does not know.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    CLI["Client<br/>OpenAI SDK or sgl.RuntimeEndpoint"]
+    GW["sgl-model-gateway v0.3.2<br/>Rust binary smg, or the<br/>sglang-router wheel via PyO3<br/>axum on tokio"]
+    POL["PolicyRegistry<br/>one LoadBalancingPolicy per model id<br/>random, round_robin, cache_aware,<br/>power_of_two, bucket, manual,<br/>consistent_hashing, prefix_hash"]
+    HC["Health checker plus load monitor<br/>GET /health on each worker<br/>circuit breakers"]
+    SD["Service discovery<br/>kube pod watch, 60s default<br/>label selectors per role"]
+    WASM["WASM middleware store<br/>POST /wasm uploads a module"]
+    W1["SGLang engine 1<br/>port 30000"]
+    W2["SGLang engine 2<br/>port 30001"]
+    PDP["Prefill pool"]
+    PDD["Decode pool"]
+    CLI --> GW
+    GW --> POL
+    POL --> W1
+    POL --> W2
+    POL --> PDP
+    PDP -->|"KV over the bootstrap port"| PDD
+    HC --> W1
+    HC --> W2
+    SD --> GW
+    WASM --> GW
+    W1 -.->|"evicts KV, tells nobody"| POL
+  </script>
+</div>
+
+<p>The dashed edge is the honest one, and
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html#pitfalls">§9.4</a> owns why
+it matters: the gateway's cache-aware policy maintains an <em>approximation</em> of each worker's
+radix tree, and no engine-side eviction ever reaches it.</p>
+
+<p>The artefact to read if you do not read Rust is <code>mini_lb.py</code>, 462 lines of FastAPI
+implementing the same PD-dispatch shape. It announces its limits in the constructor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L54-L61</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _validate_router_args(self, router_args: RouterArgs):
+        logger.warning(
+            &quot;\x1b[33mMiniLB is only for debugging purposes, it only supports random policy!\033[0m&quot;
+        )
+
+        # NOTE: too many arguments unsupported, just validate some important ones
+        if router_args.policy != &quot;random&quot;:
+            logger.warning(&quot;[MiniLB] Overriding policy to random&quot;)</code></pre>
+</div>
+
+<p>Its selection is two <code>random.randint</code> calls
+(<code>mini_lb.py:L103-L112</code>) and its dispatch is the dual-POST that
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html#worked-trace">§9.4</a>
+traces — the same request goes to a prefill worker and a decode worker concurrently, and only the
+decode response reaches the client:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L128-L141</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=self.timeout
+            )  # Add timeout for request reliability
+        ) as session:
+
+            tasks = [
+                session.post(f&quot;{prefill_server}/{endpoint}&quot;, json=prefill_req),
+                session.post(f&quot;{decode_server}/{endpoint}&quot;, json=decode_req),
+            ]
+
+            # Wait for both responses to complete. Prefill should end first.
+            prefill_response, decode_response = await asyncio.gather(*tasks)</code></pre>
+</div>
+
+<p>Is the hop affordable? Take the book's Llama-3-8B decode floor of 4.48 ms per step at batch 1
+on an H100 SXM (<a href="../06-decoding-algorithms/06-01-sampling-on-gpu.html">§6.1</a>). A
+256-token completion is $256 \times 4.48 = 1147$ ms of decode, so a hypothetical 1 ms routing
+decision is 0.09% of it — arithmetic on a derived constant against a budget, not a measurement of
+this router. The gateway is on the request path once, never the token path. That is why Rust here
+buys tail-latency predictability rather than throughput, and why <code>mini_lb</code> is adequate
+for correctness testing.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Converging</span>
+  <p>SGLang's Rust work does not stop at the gateway. <code>SGLANG_RUST_SERVER</code> collapses
+  the three-process split entirely: "The embedded Rust server (started inside the rank-0
+  scheduler) owns the API server, tokenization, and detokenization. In that mode we do not start
+  the Python detokenizer subprocess(es) or tokenizer manager"
+  (<code>python/sglang/srt/entrypoints/engine.py:L1178-L1182</code>) —
+  <a href="12-01-repo-map-and-processes.html#process-architecture">§12.1</a> has the full
+  topology. And vLLM is arriving at the same place from the other side: its in-tree
+  <code>rust/</code> workspace is 309 Rust files, "a Rust drop-in alternative frontend … to
+  rebuild the northbound serving layer in Rust while still talking to the core Python vLLM engine
+  process(es) via ZMQ over the existing engine boundary" (<code>rust/README.md:L3</code>). Both
+  projects concluded independently that the Python request path is the wrong place to spend tail
+  latency. <a href="../13-comparison-and-frontier/13-01-head-to-head.html">§13.1</a> owns the
+  comparison.</p>
+</div></div></section>
+<section class="sec" id="extension-seams" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The seam audit, with collision policy</h2></div><div class="sec__body"><p>Now the systematic pass, the same one
+<a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html#mental-model">§11.5</a> ran over
+vLLM. For each seam: what you implement, how you register, what happens on a name collision.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — SGLang's registries grouped by what they do when two things claim the same name.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    ROOT["A second registration under an existing name"]
+    HARD["REFUSES<br/>raises at registration or lookup time"]
+    SOFT["OVERWRITES<br/>last write wins, no error"]
+    ACC["ACCUMULATES<br/>both run"]
+    ROOT --> HARD
+    ROOT --> SOFT
+    ROOT --> ACC
+    HARD --> H1["register_algorithm<br/>ValueError, plus reserved enum names,<br/>plus a duck-typing conformance check"]
+    HARD --> H2["register_radix_cache_backend<br/>ValueError, also on an empty name"]
+    HARD --> H3["serve backends entry point<br/>RuntimeError on a reserved name,<br/>on two dists claiming one name,<br/>and on an api_version mismatch"]
+    HARD --> H4["ModelRegistry.register default<br/>ValueError, but the env-var path<br/>passes overwrite=True"]
+    HARD --> H5["platform plugins<br/>RuntimeError if two activate"]
+    SOFT --> S1["register_attention_backend<br/>plain dict assignment"]
+    SOFT --> S2["register_grammar_backend<br/>plain dict assignment,<br/>overwrite pinned by a test"]
+    SOFT --> S3["HookRegistry REPLACE<br/>logs a warning naming both plugins"]
+    ACC --> A1["register_model_override<br/>appends, all providers run,<br/>last writer wins per field"]
+    ACC --> A2["add_attention_backend_choices<br/>extends the argparse choice list"]
+  </script>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The seam inventory as of <code>7d89325</code>. No numbers — every row is a code path.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Seam</th><th>You implement</th><th>You register with</th><th>Collision policy</th></tr></thead>
+      <tbody>
+        <tr><td>Model architecture</td><td><code>nn.Module</code> exposed as <code>EntryClass</code></td><td>a module in a scanned package; <code>SGLANG_EXTERNAL_MODEL_PACKAGE</code></td><td><code>assert</code> within a package; <code>ValueError</code> across, but the env path forces <code>overwrite=True</code></td></tr>
+        <tr><td>Attention backend</td><td>factory <code>fn(runner) -&gt; AttentionBackend</code></td><td><code>@register_attention_backend(name)</code> <b>and</b> <code>add_attention_backend_choices</code></td><td><span class="pill pill--draft">silent overwrite</span></td></tr>
+        <tr><td>Grammar backend</td><td><code>BaseGrammarBackend</code> + <code>BaseGrammarObject</code></td><td><code>register_grammar_backend(name, init_func)</code></td><td><span class="pill pill--draft">silent overwrite</span>, and shadows built-ins</td></tr>
+        <tr><td>Radix cache backend</td><td><code>BasePrefixCache</code> via a <code>RadixCacheFactory</code></td><td><code>register_radix_cache_backend(name, factory)</code></td><td><span class="pill pill--verified">ValueError</span></td></tr>
+        <tr><td>Speculative algorithm</td><td>worker factory + optional <code>CustomSpecAlgo</code> subclass</td><td><code>register_algorithm(name, ...)</code></td><td><span class="pill pill--verified">ValueError</span> + reserved names + <code>TypeError</code> on interface drift</td></tr>
+        <tr><td>Quantization method</td><td><code>QuantizationConfig</code></td><td><em>no registry</em> — an out-of-tree platform's <code>get_quantization_config</code></td><td>platform wins over <code>QUANTIZATION_METHODS</code></td></tr>
+        <tr><td>Hardware platform</td><td><code>SRTPlatform</code> subclass</td><td><code>sglang.srt.platforms</code> entry point</td><td><code>RuntimeError</code> if two activate; <code>SGLANG_PLATFORM</code> selects</td></tr>
+        <tr><td>General plugin / hook</td><td>zero-arg callable calling <code>HookRegistry.register</code></td><td><code>sglang.srt.plugins</code> entry point; <code>SGLANG_PLUGINS</code> allowlist</td><td>warns, keeps the last <code>REPLACE</code></td></tr>
+        <tr><td>Serve backend</td><td><code>ServeBackend</code> with an <code>api_version</code></td><td><code>sglang.serve_backends</code> entry point</td><td><span class="pill pill--verified">RuntimeError</span> on reserved, duplicate, or version mismatch</td></tr>
+        <tr><td>Model config override</td><td><code>fn(server_args, hf_config) -&gt; dict</code></td><td><code>@register_model_override(arch)</code>, <code>@register_model_override_predicate(pred)</code></td><td>appends; all run; last writer wins per field</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Five of these deserve a closer look.</p>
+
+<h3>Model registration is by convention, not by call</h3>
+
+<p>There is no <code>register_model</code> function. <code>import_model_classes</code> walks a
+package with <code>pkgutil.iter_modules</code> and picks up any module defining
+<code>EntryClass</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/registry.py:L109-L125</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                logger.warning(f&quot;Ignore import error when loading {name}: {e}&quot;)
+                continue
+            if hasattr(module, &quot;EntryClass&quot;):
+                entry = module.EntryClass
+                if isinstance(
+                    entry, list
+                ):  # To support multiple model classes in one module
+                    for tmp in entry:
+                        assert (
+                            tmp.__name__ not in model_arch_name_to_cls
+                        ), f&quot;Duplicated model implementation for {tmp.__name__}&quot;
+                        model_arch_name_to_cls[tmp.__name__] = tmp
+                else:
+                    assert (
+                        entry.__name__ not in model_arch_name_to_cls
+                    ), f&quot;Duplicated model implementation for {entry.__name__}&quot;
+                    model_arch_name_to_cls[entry.__name__] = entry</code></pre>
+</div>
+
+<p>The dict key is <code>entry.__name__</code>, the Python class name, which must therefore equal
+the HF <code>config.json</code> architecture string because <code>resolve_model_cls</code> looks up
+<code>architectures[0]</code> directly. Out-of-tree, you point one environment variable at your
+package — the only path in the tree that opts into overwriting:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/registry.py:L129-L134</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>
+ModelRegistry = _ModelRegistry()
+ModelRegistry.register(&quot;sglang.srt.models&quot;)
+
+if external_pkg := envs.SGLANG_EXTERNAL_MODEL_PACKAGE.get():
+    ModelRegistry.register(external_pkg, overwrite=True)</code></pre>
+</div>
+
+<p>Note also the <code>logger.warning(f"Ignore import error when loading {name}")</code> two lines
+above: a model module that fails to import is skipped, not fatal, unless <code>strict=True</code>.
+The symptom is "Model architectures [...] are not supported for now" with a long list that omits
+yours. Grep the log for that warning first. And <code>import_model_classes</code> is
+<code>@lru_cache()</code>d on the package name, so a second registration of the same package in
+one process is a no-op.</p>
+
+<h3>The attention registry is two registrations, not one</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/attention/attention_registry.py:L31-L39</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>ATTENTION_BACKENDS = {}
+
+
+def register_attention_backend(name):
+    def decorator(fn):
+        ATTENTION_BACKENDS[name] = fn
+        return fn
+
+    return decorator</code></pre>
+</div>
+
+<p>The registered value is a <em>factory taking the model runner</em>, not a class, which is why
+in-tree entries can branch on runner state — <code>create_flashinfer_backend</code> returns
+<code>FlashInferAttnBackend</code> or <code>FlashInferMLAAttnBackend</code> depending on
+<code>runner.use_mla_backend</code>, and allocates a CUDA stream when EAGLE is on
+(<code>attention_registry.py:L41-L66</code>). Lookup raises
+<code>ValueError(f"Invalid attention backend: {backend_str}")</code>
+(<code>python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py:L254-L257</code>).</p>
+
+<p>But <code>--attention-backend</code>'s argparse <code>choices</code> list is a separate module
+constant, <code>ATTENTION_BACKEND_CHOICES</code> at <code>server_args.py:L181</code>, consumed at
+three call sites (<code>L1717</code>, <code>L1726</code>, <code>L1735</code>). Registering the
+factory without also calling <code>add_attention_backend_choices</code>
+(<code>server_args.py:L405-L406</code>) gets you rejected by argparse before the engine starts.
+Three further list-extenders sit beside it (<code>server_args.py:L401-L419</code>), and the
+comment above the chunked-prefix list states the contract: "Out-of-tree platforms may extend this
+list … before ServerArgs construction" (<code>server_args.py:L211-L214</code>). This is the exact
+timing hazard <a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html#plugin-system">§11.5</a>
+found in vLLM's quantization path, reproduced in a different registry.</p>
+
+<h3>The speculative registry is the strictest thing in either engine</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/speculative/spec_registry.py:L222-L243</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def register_algorithm(
+    name: str,
+    *,
+    supports_overlap: bool = False,
+    validate_server_args: Optional[ServerArgsValidator] = None,
+    spec_class: Type[CustomSpecAlgo] = CustomSpecAlgo,
+) -&gt; Callable[[WorkerFactory], WorkerFactory]:
+    &quot;&quot;&quot;Return a decorator that registers a plugin algorithm under ``name``.
+
+    Pass a ``spec_class`` subclass of ``CustomSpecAlgo`` to override any
+    ``is_*()`` / ``supports_*()`` / ``create_worker`` method.
+    &quot;&quot;&quot;
+    upper = name.upper()
+    if upper in _reserved_names():
+        raise ValueError(
+            f&quot;&#x27;{upper}&#x27; is a reserved speculative algorithm name; cannot be re-registered.&quot;
+        )
+    if upper in _REGISTRY:
+        raise ValueError(f&quot;Speculative algorithm &#x27;{upper}&#x27; already registered.&quot;)
+    _assert_custom_spec_algo_conforms(spec_class)
+
+    def decorator(factory: WorkerFactory) -&gt; WorkerFactory:</code></pre>
+</div>
+
+<p>Three guards in order. <code>_reserved_names()</code> is derived lazily from the
+<code>SpeculativeAlgorithm</code> enum plus <code>{"NEXTN"}</code>, so a new built-in becomes
+reserved without anyone editing a second list (<code>spec_registry.py:L168-L180</code>).
+Duplicates raise. <code>_assert_custom_spec_algo_conforms</code> reflects over
+<code>vars(SpeculativeAlgorithm)</code> for every <code>is_*</code> / <code>supports_*</code>
+method and raises <code>TypeError</code> if your class is missing one — with a comment recording
+that this is exactly how <code>is_some</code> and <code>is_frozen_kv_mtp</code> silently went
+missing before the guard existed (<code>spec_registry.py:L184-L201</code>). The reason:
+<code>CustomSpecAlgo</code> duck-types the enum so the dozens of
+<code>if spec_algorithm.is_eagle():</code> branches through the scheduler and model runner keep
+working for a plugin algorithm.
+<a href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html">§6.6</a> covers the
+resulting zoo; this is why adding to it does not break those branches.</p>
+
+<h3>Quantization has no registry at all</h3>
+
+<p><code>QUANTIZATION_METHODS</code> is a module dict built from in-tree imports
+(<code>python/sglang/srt/layers/quantization/__init__.py:L143</code>), and
+<code>get_quantization_config</code> raises
+<code>ValueError(f"Invalid quantization method: {quantization}. Available methods: ...")</code> on
+an unknown name. The only out-of-tree route is a platform plugin:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/__init__.py:L163-L170</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if current_platform.is_out_of_tree():
+        config = current_platform.get_quantization_config(quantization)
+
+        # If the platform has a quantization config, use it else use the default
+        if config is not None:
+            return config
+
+    return QUANTIZATION_METHODS[quantization]</code></pre>
+</div>
+
+<p>vLLM has <code>@register_quantization_config</code> and SGLang does not; SGLang has
+<code>register_grammar_backend</code> and vLLM does not. Neither project set out to build a
+coherent plugin architecture — both grew seams where somebody needed one.</p>
+
+<h3>The config surface: arg_groups declares, it does not mutate</h3>
+
+<p><code>python/sglang/srt/arg_groups/</code> is the newest and most disciplined of the seams. Its
+module docstring states the rule: model-identity adjustments are "DECLARED here and materialized
+onto <code>server_args</code> at the end of <code>__post_init__</code> (gate order, last writer
+wins) — model code never mutates <code>ServerArgs</code> fields imperatively"
+(<code>arg_groups/overrides.py:L15-L20</code>). Two declaration forms exist: a constant dict
+<code>MODEL_OVERRIDES</code>, and a decorator for derived cases:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/arg_groups/overrides.py:L86-L100</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def register_model_override(architecture: str):
+    &quot;&quot;&quot;Register a derived-override provider for ``architecture``.
+
+    The decorated callable receives ``(server_args, hf_config)``, must not
+    mutate either, and returns a ``{field: resolved_value}`` dict (possibly
+    empty when nothing applies). Providers needing derived model data beyond
+    the HF config go through ``server_args.get_model_config()`` (cached,
+    read-only) — never anything mutating.
+    &quot;&quot;&quot;
+
+    def decorator(fn: Callable[..., dict]) -&gt; Callable[..., dict]:
+        _MODEL_OVERRIDE_FNS.setdefault(architecture, []).append(fn)
+        return fn
+
+    return decorator</code></pre>
+</div>
+
+<p>The collision policy is a third kind. <code>collect_model_override_declarations</code> pins the
+order exactly: the constant entry first, then exact-keyed callables in registration order, then
+matching predicate-keyed callables, "last writer wins downstream in the gate"
+(<code>overrides.py:L354-L360</code>). Everyone runs. If your provider and an in-tree family
+provider both set <code>attention_backend</code>, whichever registered later wins, and the source
+is recorded by <code>fn.__qualname__</code> so the log names it. This is the one SGLang seam where
+a collision is <em>designed</em> rather than tolerated.</p>
+
+<h3>The escape hatch: hooks on dotted paths</h3>
+
+<p>SGLang's general plugin mechanism is not a set of registries at all. It is a monkey-patch
+framework with four hook types, keyed on any fully-qualified name in the codebase:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/plugins/hook_registry.py:L60-L66</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class HookType(Enum):
+    &quot;&quot;&quot;Types of hooks that can be applied to functions or classes.&quot;&quot;&quot;
+
+    BEFORE = &quot;before&quot;  # Execute before original; can modify args
+    AFTER = &quot;after&quot;  # Execute after original; can modify return value
+    AROUND = &quot;around&quot;  # Wrap original; full control over execution
+    REPLACE = &quot;replace&quot;  # Replace the original function or class entirely</code></pre>
+</div>
+
+<p>The module docstring's own example targets
+<code>"sglang.srt.managers.scheduler.Scheduler.schedule"</code>
+(<code>hook_registry.py:L15-L21</code>). Two entry-point groups feed it —
+<code>PLATFORM_PLUGINS_GROUP = "sglang.srt.platforms"</code> and
+<code>GENERAL_PLUGINS_GROUP = "sglang.srt.plugins"</code>
+(<code>python/sglang/srt/plugins/__init__.py:L27-L29</code>) — and <code>load_plugins()</code>
+runs each plugin then calls <code>HookRegistry.apply_hooks()</code>. Registering a second
+<code>REPLACE</code> on one target logs a warning naming both plugins and their distributions, and
+keeps the last (<code>hook_registry.py:L120-L136</code>). The timing discipline is the same one
+vLLM enforces — load before config is built:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/engine.py:L238-L240</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Ensure plugins are loaded before ServerArgs construction,
+        # so hooks on ServerArgs.__post_init__ fire correctly.
+        load_plugins()</code></pre>
+</div>
+
+<p>It is called again at the top of <code>run_scheduler_process</code> — "Load plugins so hooks
+can override Scheduler and its dependencies"
+(<code>python/sglang/srt/managers/scheduler.py:L5124-L5125</code>) — and defensively in
+<code>_launch_subprocesses</code> (<code>engine.py:L1086-L1088</code>), once per process, guarded
+by a module-level <code>_plugins_loaded</code> flag, exactly as vLLM's
+<code>load_general_plugins()</code> is. Same lesson as
+<a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html#plugin-system">§11.5</a>: the
+registry dicts are per-process, so a plugin must be re-entrant and side-effect free.</p></div></section>
+<section class="sec" id="not-extensible" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">What is not extensible, honestly</h2></div><div class="sec__body"><p>The hook registry makes the naive answer "everything is extensible, you can patch any dotted
+path". That is true and it is not a plan. Here is what has no versioned seam.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">no seam</span><h4>The scheduler</h4><p>No <code>scheduler_cls</code>, no <code>SchedulerInterface</code> ABC. vLLM has both (<a href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html">§11.3</a>). In SGLang the only route is a <code>HookType.REPLACE</code> on <code>sglang.srt.managers.scheduler.Scheduler</code>, against a class the project rewrites weekly.</p></div>
+  <div class="ve-card"><span class="ve-card__k">no seam</span><h4>Router policies</h4><p><code>PolicyFactory::create_from_config</code> is a <code>match</code> over a Rust enum with eight arms (<code>sgl-model-gateway/src/policies/factory.rs:L17-L64</code>). A ninth policy means editing the enum, the factory, and the Python string map, then recompiling. There is no dynamic policy registration.</p></div>
+  <div class="ve-card"><span class="ve-card__k">no seam</span><h4>Sampling</h4><p>No logits-processor plugin group, no <code>--logits-processors</code> flag, no <code>extra_args</code> passthrough on <code>SamplingParams</code>. vLLM's entire §11.5 worked example has no SGLang counterpart; the grammar backend's vocab mask is the closest thing, and it is a mask, not a transform.</p></div>
+  <div class="ve-card"><span class="ve-card__k">no seam</span><h4>The frontend language</h4><p><code>StreamExecutor._execute</code> is an <code>isinstance</code> chain ending in <code>raise ValueError(f"Unknown type: {type(other)}")</code> (<code>interpreter.py:L461-L502</code>). A new <code>SglExpr</code> means editing the interpreter, <code>ir.py</code>, <code>api.py</code>, and <code>tracer.py</code> — in a package marked deprecated.</p></div>
+  <div class="ve-card"><span class="ve-card__k">one slot</span><h4>External models</h4><p><code>SGLANG_EXTERNAL_MODEL_PACKAGE</code> takes one package name and <code>import_model_classes</code> is cached. Two out-of-tree model packages cannot both be loaded.</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">versioned</span><h4>The one real contract</h4><p>Serve backends are the only seam with an explicit compatibility number. Everything else is a seam that exists, not a contract that holds.</p></div>
+</div>
+
+<p>That last card mirrors vLLM, where exactly one interface —
+<code>ModelRegistry.register_model</code> — carries a published guarantee. SGLang guarantees a
+different one:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/cli/serve_backends.py:L155-L163</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            raise TypeError(
+                f&quot;Serve backend {name!r} factory returned {type(backend).__name__}; &quot;
+                &quot;expected sglang.cli.serve_backends.ServeBackend.&quot;
+            )
+        if backend.api_version != SERVE_BACKEND_API_VERSION:
+            raise RuntimeError(
+                f&quot;Serve backend {name!r} uses API version {backend.api_version}; &quot;
+                f&quot;this SGLang release requires version {SERVE_BACKEND_API_VERSION}.&quot;
+            )</code></pre>
+</div>
+
+<p><code>SERVE_BACKEND_API_VERSION = 1</code> at <code>serve_backends.py:L24</code>, and the docs
+say why you must hard-code your side: "Declare the API version implemented by your extension as a
+literal. Do not copy SGLang's current version constant at runtime; a fixed value lets a future
+SGLang release detect an older plugin contract"
+(<code>developer_guide/serve_backend_plugins.mdx:L151</code>). This is the seam for plugging a
+different runtime into <code>sglang serve MODEL --model-type my_runtime</code>, and the only place
+in either project where a version number does compatibility work.</p>
+
+<p>The router's equivalent of a plugin is not a Rust trait — it is a WebAssembly module uploaded
+at runtime over HTTP into a middleware layer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/server.rs:L615-L617</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        .route(&quot;/wasm&quot;, post(add_wasm_module))
+        .route(&quot;/wasm/{module_uuid}&quot;, delete(remove_wasm_module))
+        .route(&quot;/wasm&quot;, get(list_wasm_modules))</code></pre>
+</div>
+
+<p>Admin routes behind auth, running on <code>wasmtime</code>
+(<code>sgl-model-gateway/Cargo.toml:L131</code>). It is request-level middleware, not routing
+policy: you can rewrite, reject, or annotate a request without a Rust rebuild, but you still
+cannot choose a worker.</p></div></section>
+<section class="sec" id="workflow" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">The contribution workflow</h2></div><div class="sec__body"><p>Tests live in two trees with different meanings. <code>test/registered/</code> is
+CI-discovered: every file there calls a registration function at module level, and
+<code>run_suite.py</code> collects <code>est_time</code>, <code>stage</code>, and
+<code>runner_config</code> <em>by AST parsing</em>, so those arguments must be literals
+(<code>test/README.md:L62-L73</code>). Unit tests mirror the source tree —
+<code>srt/mem_cache/radix_cache.py</code> maps to
+<code>unit/mem_cache/test_radix_cache_unit.py</code>
+(<code>developer_guide/contribution_guide.mdx:L44-L50</code>). The grammar-registry test
+quoted earlier registers itself with <code>register_cpu_ci(2.0, "base-a-test-cpu")</code>: two
+seconds, CPU only, the earliest stage. A registry test needs no GPU, and putting it in the CPU
+stage means it gates every PR rather than a nightly. That is the pattern to copy for any seam you
+add.</p>
+
+<p><code>test/manual/</code> is explicitly outside CI, which is where the frontend language's
+tests live.</p>
+
+<p>CI runs three sequential stages — A (pre-flight, ~3 min), B (basic, ~30 min), C (advanced,
+~30 min) (<code>test/README.md:L10</code>). The gate that surprises newcomers is that CI does not
+run on a PR at all unless it carries the <code>run-ci</code> label, and only users in
+<code>.github/CI_PERMISSIONS.json</code> can apply it. Authors can always comment
+<code>/rerun-failed-ci</code> on their own PR; <code>/tag-and-rerun-ci</code> is the command for a
+fresh one, because <code>/tag-run-ci-label</code> alone only affects future commits
+(<code>developer_guide/contribution_guide.mdx:L120-L128</code>). Selective reruns skip building a
+PR-local kernel wheel, so a change under <code>python/sglang/kernels/aot/</code> needs the full
+workflow.</p>
+
+<p>Local hygiene is <code>pre-commit</code>: <code>pip3 install pre-commit; pre-commit install;
+pre-commit run --all-files</code>, re-run once if the first pass fixes things
+(<code>contribution_guide.mdx:L27-L35</code>). Docs links are checked with Mintlify —
+<code>cd docs &amp;&amp; mint broken-links --check-anchors --check-redirects</code>. And the
+code-style section is unusually specific about the cost model you are writing into: "SGLang is a
+runtime, and most of your code runs on the critical path for every request … A common pattern is
+some runtime checks in the model forward pass … Please cache the result as a single boolean value
+in <code>__init__</code>" (<code>contribution_guide.mdx:L163-L166</code>). Against the 4.48 ms
+Llama-3-8B decode floor, a per-layer Python predicate evaluated 32 times per step is real money.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><ul>
+<li><b>Registering an attention backend and forgetting argparse.</b> The factory dict and the CLI
+<code>choices</code> list are different module-level objects in different files. You get
+<code>argparse: error: argument --attention-backend: invalid choice</code> and no hint that your
+registration succeeded. Call <code>add_attention_backend_choices([...])</code> from the same
+plugin, before <code>ServerArgs</code> is constructed.</li>
+
+<li><b>Shadowing a built-in grammar backend.</b> <code>create_grammar_backend</code> checks
+<code>GRAMMAR_BACKEND_REGISTRY</code> <em>before</em> the <code>if name == "outlines"</code>
+chain, and the registry silently accepts <code>"xgrammar"</code>. Two plugins that both pick a
+friendly name will silently resolve to whichever imported last. Namespace your name.</li>
+
+<li><b>Assuming <code>fork()</code> shares KV directly.</b> It copies a Python string. If the tree
+evicted the prefix between the commit and the branches, both branches re-prefill and the program
+is slower than one request. <code>SglCommitLazy</code> is a hint, not a lock —
+<a href="12-03-radix-cache-in-code.html#the-invariants">§12.3</a> owns the refcount rules that
+decide whether the node survives.</li>
+
+<li><b>A model module that fails to import disappears silently.</b>
+<code>import_model_classes</code> logs <code>"Ignore import error when loading {name}"</code> at
+WARNING and continues, so a typo'd import in your architecture file surfaces as "Model
+architectures [...] are not supported for now" with a long list that omits yours. Set
+<code>strict=True</code> or grep for that warning.</li>
+
+<li><b>Two model packages, one env var.</b> <code>SGLANG_EXTERNAL_MODEL_PACKAGE</code> takes a
+single package name and <code>import_model_classes</code> is <code>lru_cache</code>d — no merge
+story for two vendors' out-of-tree models.</li>
+
+<li><b>MiniLB in production.</b> It forces <code>--policy random</code> and raises
+<code>ValueError("MiniLB only supports PD disaggregation mode")</code> outside PD mode
+(<code>mini_lb.py:L64-L65</code>). It exists to make PD dispatch readable, not to serve traffic.</li>
+
+<li><b>Building on <code>sglang.lang</code> in 2026.</b> The package README says deprecated and no
+CI covers it. Migration is mechanical: the shared prefix is the payload, so send it as the prompt
+of $n$ independent requests and let RadixAttention do what the interpreter was arranging.</li>
+</ul></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">local — SGLang checkout at 7d89325</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># 1. Enumerate every registration function in the tree, in one pass.
+grep -rn "^def register_\|^    def register(" python/sglang/srt/ python/sglang/cli/ | grep -v test
+
+# 2. Print the collision policy of each, side by side. This is the chapter's table, from source.
+sed -n '55,69p'   python/sglang/srt/mem_cache/registry.py        # raises
+sed -n '222,243p' python/sglang/srt/speculative/spec_registry.py # raises, twice, plus conformance
+sed -n '34,39p'   python/sglang/srt/layers/attention/attention_registry.py  # overwrites
+sed -n '347,348p' python/sglang/srt/constrained/base_grammar_backend.py     # overwrites
+sed -n '96,100p'  python/sglang/srt/arg_groups/overrides.py                 # appends
+
+# 3. Run the grammar-registry unit test. No GPU, no weights, about two seconds.
+python3 test/registered/unit/constrained/test_base_grammar_backend.py
+
+# 4. Prove the frontend has no privileged channel: same two prompts, no DSL.
+python3 -m sglang.launch_server --model-path Qwen/Qwen2.5-0.5B-Instruct --port 30000 &amp;
+P="Here are two tips for staying healthy: 1. Balanced Diet. 2. Regular Exercise."
+curl -s localhost:30000/generate -d "{\"text\": \"$P\", \"sampling_params\": {\"max_new_tokens\": 0}}" &gt; /dev/null
+curl -s localhost:30000/generate -d "{\"text\": \"$P Expand tip 1:\", \"sampling_params\": {\"max_new_tokens\": 32}}"
+curl -s localhost:30000/generate -d "{\"text\": \"$P Expand tip 2:\", \"sampling_params\": {\"max_new_tokens\": 32}}"
+
+# 5. Confirm the shared prefix was reused rather than re-prefilled.
+curl -s localhost:30000/server_info | python3 -m json.tool | grep -i cache
+
+# 6. See the router's two shipping forms.
+cd sgl-model-gateway &amp;&amp; grep -A3 '\[\[bin\]\]' Cargo.toml
+grep -A4 'tool.maturin' bindings/python/pyproject.toml</code></pre>
+</div>
+
+<p>Step 4 is the one that teaches. Those three curls are what a two-way <code>fork</code> compiles
+down to: a zero-token commit followed by two full-text prompts. Compare the cache hit rate against
+the same two prompts sent without the commit and you have measured the frontend language's entire
+contribution.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li>Read <code>python/sglang/lang/interpreter.py</code> and answer precisely: what state does a
+child <code>StreamExecutor</code> receive from its parent at <code>fork()</code>, and what does it
+<em>not</em> receive? Name the field that records where the fork happened, and say what uses it.</li>
+
+<li>Predict, then verify. A plugin calls
+<code>register_grammar_backend("xgrammar", MyBackend)</code> and the server is launched with
+<code>--grammar-backend xgrammar</code>. Which backend runs? Now do the same with
+<code>register_radix_cache_backend</code> and a name already in the registry — what happens
+instead, and which of the two behaviours would you rather have shipped?</li>
+
+<li>You register a new attention backend and the server refuses to start with an argparse error.
+Read <code>python/sglang/srt/layers/attention/attention_registry.py</code> and
+<code>python/sglang/srt/server_args.py</code> and explain, naming both module-level objects, why
+one registration is not enough. Then say which vLLM registry has the same hazard.</li>
+
+<li>Compare <code>python/sglang/srt/constrained/base_grammar_backend.py</code> with
+<code>vllm/v1/structured_output/backend_types.py</code>. Each engine makes one thing easy that the
+other makes hard. Name both, and give one concrete scenario where each choice is the right one.</li>
+
+<li>Design the smallest upstream change that would let two out-of-tree model packages coexist in
+one SGLang process. Say which of the three current behaviours —
+<code>SGLANG_EXTERNAL_MODEL_PACKAGE</code> being scalar, <code>register(overwrite=True)</code>, and
+<code>@lru_cache()</code> on <code>import_model_classes</code> — each of your edits touches.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> The child receives copies of <code>variables</code>, <code>text_</code>,
+  <code>messages_</code>, <code>cur_role</code>, <code>cur_role_begin_pos</code>, and
+  <code>images_</code> (<code>interpreter.py:L392-L399</code>). It does <em>not</em> receive
+  <code>meta_info</code>, <code>variable_event</code>, the parent's worker thread, or any KV
+  handle — it constructs a fresh <code>StreamExecutor</code> with its own thread and its own
+  <code>sid</code>. <code>fork_start_text_pos = len(self.text_)</code> records the split point;
+  <code>_execute_concatenate_and_append_text</code> uses it to slice out only what the child
+  added when joining in <code>concate_and_append</code> mode
+  (<code>interpreter.py:L729-L736</code>).</p>
+  <p><b>2.</b> Yours. <code>create_grammar_backend</code> checks
+  <code>GRAMMAR_BACKEND_REGISTRY</code> before the built-in <code>if</code>-chain, under the
+  comment "Custom grammar backend has the highest priority"
+  (<code>base_grammar_backend.py:L360</code>), and <code>register_grammar_backend</code> is a
+  bare dict assignment. <code>register_radix_cache_backend</code> raises
+  <code>ValueError(f"register_radix_cache_backend: {name!r} is already registered")</code>
+  (<code>mem_cache/registry.py:L65-L68</code>). The cache registry's behaviour is the better
+  default: a shadowed grammar backend changes what a JSON-mode request is allowed to emit, so
+  the failure mode is a wrong output rather than a crash.</p>
+  <p><b>3.</b> <code>ATTENTION_BACKENDS</code> (<code>attention_registry.py:L31</code>) is the
+  factory dict consumed at model-runner construction. <code>ATTENTION_BACKEND_CHOICES</code>
+  (<code>server_args.py:L181</code>) is a separate list handed to argparse as
+  <code>choices=</code> at three call sites. Argparse validates before any engine code runs, so a
+  factory registered without <code>add_attention_backend_choices</code>
+  (<code>server_args.py:L405-L406</code>) is unreachable. vLLM's quantization registry has the
+  same coupling — <code>@register_quantization_config</code> appends to
+  <code>QUANTIZATION_METHODS</code>, which <em>is</em> the choice list — but vLLM solves it by
+  calling <code>load_general_plugins()</code> before <code>add_cli_args</code>
+  (<a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html#plugin-system">§11.5</a>),
+  where SGLang asks you to call a second function.</p>
+  <p><b>4.</b> SGLang makes <em>partial</em> and <em>composed</em> backends easy: four
+  <code>dispatch_*</code> methods with defaults that log and return
+  <code>InvalidGrammarObject</code>, plus <code>ReasonerGrammarBackend</code> wrapping any
+  backend. vLLM makes <em>completeness</em> easy to enforce: one abstract
+  <code>compile_grammar</code> covering the whole <code>StructuredOutputOptions</code> enum means
+  a backend cannot half-implement the surface without an explicit raise. SGLang's shape suits a
+  research backend that only handles regex; vLLM's suits guaranteeing every request type is served
+  identically across four backends.</p>
+  <p><b>5.</b> Change <code>SGLANG_EXTERNAL_MODEL_PACKAGE</code> to parse a comma-separated list
+  and loop; drop <code>overwrite=True</code> so a genuine collision between two vendors raises the
+  existing <code>ValueError</code> rather than silently picking the last one; and leave
+  <code>@lru_cache()</code> alone — it is keyed on the package name, so a loop calling it once per
+  package is already correct. The <code>assert</code> inside <code>import_model_classes</code>
+  stays as-is: it guards duplicates <em>within</em> one package, a different failure.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li><code>python/sglang/lang/</code> is marked "Deprecated language frontend that is no longer
+actively maintained" in the package README. Read it as history: its <code>fork</code> is where
+RadixAttention's motivation comes from, because a forked program has a shared prefix by
+construction. Once the cache shipped, every client got that benefit without a language.</li>
+<li><code>fork()</code> copies a Python <em>string</em>, not a KV handle. The 1.75 GiB saved on a
+fork of 8 over a 2,048-token Llama-3-8B preamble is entirely the server's radix tree; the
+frontend only contributes a zero-token commit that plants the prefix first.</li>
+<li>SGLang's grammar backends are a real registry where vLLM's are an <code>if</code>-chain, and
+the interface is <em>composable</em> — <code>ReasonerGrammarBackend</code> wraps another backend.
+The price is that <code>register_grammar_backend</code> silently shadows built-ins, a behaviour
+pinned by an in-tree test.</li>
+<li>The registries disagree on collision policy exactly as vLLM's do, along different lines:
+speculative algorithms, cache backends, serve backends, and platforms refuse duplicates; attention
+and grammar backends overwrite in silence; model overrides accumulate, last writer winning per
+field. Know which one you are writing into before you pick a name.</li>
+<li>One seam needs <em>two</em> registrations — an attention backend must widen the argparse choice
+list separately from registering its factory — and exactly one,
+<code>sglang.serve_backends</code>, carries a compatibility version. Everything else is a seam that
+exists, not a contract that holds.</li>
+<li>The router is a separately versioned product: one Rust crate producing three binaries and, via
+maturin, the <code>sglang-router</code> wheel. Its extension seam is a WASM module uploaded over
+HTTP, not a Rust trait — and routing policy is a <code>match</code> arm you cannot extend without
+recompiling.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="https://arxiv.org/abs/2312.07104">Zheng et al., <em>SGLang: Efficient Execution of
+Structured Language Model Programs</em></a> — the paper the frontend comes from. Read it for the
+motivation, then <code>python/sglang/lang/interpreter.py</code> for what actually shipped; the
+interpreter's coordination is thinner than the paper's framing suggests, and
+<code>python/sglang/README.md:L8</code> is where that story ends.</li>
+<li><code>developer_guide/serve_backend_plugins.mdx</code> — the only versioned
+extension contract in the project, end to end: entry point, <code>ServeBackend</code>,
+<code>ServeBackendDetection</code>, and the automatic-routing rules for
+<code>--model-type auto</code>.</li>
+<li><code>developer_guide/contribution_guide.mdx</code> and
+<code>test/README.md</code> — CI stages, the <code>run-ci</code> label,
+<code>register_*_ci</code>, and why <code>est_time</code> must be a literal.</li>
+<li><code>sgl-model-gateway/README.md</code> — 49 KB of operator documentation: build modes, IGW,
+PD flags, the worker registration API, the Prometheus metric list. Its vLLM counterpart is
+<code>rust/README.md</code>, stating the same thesis from a project that still has a Python
+frontend.</li>
+<li><code>references/frontend/frontend_tutorial.mdx</code> and
+<code>choices_methods.mdx</code> — the frontend as the project still documents it, including the
+three <code>select</code> scoring methods (<code>token_length_normalized</code>,
+<code>greedy_token_selection</code>, <code>unconditional_likelihood_normalized</code>) that
+<code>python/sglang/lang/choices.py</code> implements.</li>
+<li><a href="../06-decoding-algorithms/06-05-structured-decoding.html">§6.5</a> for the grammar
+mechanism and the jump-forward story,
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> for routing policy,
+<a href="12-03-radix-cache-in-code.html">§12.3</a> for the cache the frontend was aiming at, and
+<a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html">§11.5</a> for the vLLM half of
+this audit. <a href="../13-comparison-and-frontier/13-01-head-to-head.html">§13.1</a> puts the two
+side by side.</li>
+</ul></div></section>
+<div class="pager"><a href="12-03-radix-cache-in-code.html"><div class="pager__k">← Previous</div><div class="pager__t">RadixAttention and the memory pools, in code</div></a><a class="pager__next" href="../13-comparison-and-frontier/13-01-head-to-head.html"><div class="pager__k">Next →</div><div class="pager__t">Head-to-head design comparison</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: four surfaces, three address spaces</a>
+<a href="#frontend-dsl">First principles: a retired language whose idea survived</a>
+<a href="#grammar-backends">Grammar backends: SGLang has a registry, vLLM has an if-chain</a>
+<a href="#the-router">The router as a component</a>
+<a href="#extension-seams">The seam audit, with collision policy</a>
+<a href="#not-extensible">What is not extensible, honestly</a>
+<a href="#workflow">The contribution workflow</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

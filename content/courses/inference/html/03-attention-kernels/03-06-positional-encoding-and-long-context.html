@@ -1,0 +1,2073 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RoPE, scaling, sliding window, attention sinks — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="kernels">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i is-current" href="03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 3 · Attention kernels · 03-06</div>
+<h1>RoPE, scaling, sliding window, attention sinks</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/rotary_embedding/</code></li><li><code>python/sglang/srt/layers/rotary_embedding/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A transformer's attention is permutation-invariant: shuffle the keys and the output is
+unchanged. Everything a served model knows about word order arrives through one small tensor of
+integers that the scheduler hands the model runner each step. This chapter follows those integers
+into the rotation that encodes them, out into the KV cache where they become permanent, and finally
+into the block allocator — where a windowed model stops the cache from growing at all.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Two symptoms, both common, both silent.</p>
+
+<p>The first: you serve a model whose config says <code>max_position_embeddings: 8192</code> and launch
+it with <code>--max-model-len 32768</code>. vLLM refuses:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L2496-L2509</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            msg = (
+                f"User-specified max_model_len ({max_model_len}) is greater "
+                f"than the derived max_model_len ({max_len_key}="
+                f"{derived_max_model_len} or model_max_length="
+                f"{model_max_length} in model's config.json)."
+            )
+            warning = (
+                "VLLM_ALLOW_LONG_MAX_MODEL_LEN must be used with extreme "
+                "caution. If the model uses relative position encoding (RoPE), "
+                "positions exceeding derived_max_model_len lead to nan. If the "
+                "model uses absolute position encoding, positions exceeding "
+                "derived_max_model_len will cause a CUDA array out-of-bounds "
+                "error."
+            )</code></pre>
+</div>
+
+<p>So you set <code>VLLM_ALLOW_LONG_MAX_MODEL_LEN=1</code>, the server starts, requests complete, no
+error appears — and the model's answers past 8k are subtly wrong. Nothing crashed, nothing logged. The
+positional frequencies simply left the range the weights were trained on.</p>
+
+<p>The second: you serve a sliding-window model, hybrid KV caching is off, and this appears once at
+startup and never again:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L1592-L1597</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    logger.warning(
+        "Hybrid KV cache manager is disabled for this hybrid model, "
+        "This means we do not enable any optimizations for saving KV cache "
+        "memory (e.g., dropping the KV cache outside the sliding window). "
+        "The compute of layers like sliding window is still saved."
+    )</code></pre>
+
+</div>
+
+<p>Your KV cache is now sized as if every layer were full attention: on a Llama-3-8B-shaped model at 128k
+context, 16&nbsp;GiB per sequence instead of 4.375&nbsp;GiB — on a 3:1 sliding-to-full layer pattern
+with a 4,096-token window, derived in §7 — a 3.7× loss of batch capacity from one warning line. Both failures come from the same place — <em>position is not a property of the model, it
+is a property of the cache</em>.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Rotary position embedding (RoPE, Su et al., <a href="https://arxiv.org/abs/2104.09864">arXiv:2104.09864</a>)
+adds nothing to the hidden state. It cuts each head's query and key vectors into two-dimensional pairs
+and <em>rotates each pair by an angle proportional to the token's absolute position</em>. Pairs rotate
+at geometrically spaced rates: the first turns a full revolution roughly every 6.3 tokens, the last
+takes tens of thousands of tokens to turn once. The head dimension becomes a bank of clocks, and a
+position is the reading of all of them at once.</p>
+
+<p>The reason to rotate rather than add is that the dot product of two rotated vectors depends only on
+the <em>difference</em> of the rotation angles. A query at position 5 against a key at position 3 gives
+exactly the inner product of a query at 105 against a key at 103. Absolute positions go in; relative
+distance comes out.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — one query/key pair, one frequency, two absolute-position pairs.</b>
+    The frequency drawn is $\omega = 0.1$ rad/token (pair index $i=16$ at base $b=10^4$). Both panels
+    enclose the same angle, so both produce the same logit contribution.</p>
+  <svg viewBox="0 0 860 400" width="100%" role="img" aria-labelledby="ropeTitle ropeDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="ropeTitle">RoPE relative-angle property</title>
+    <desc id="ropeDesc">Two circles. In the left circle a query vector rotated by five position steps
+    and a key vector rotated by three position steps enclose an angle of 0.7 radians. In the right
+    circle the same vectors rotated by 105 and 103 steps sit in a completely different part of the
+    circle but enclose the identical 0.7 radian angle.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.18" fill="none">
+      <circle cx="210" cy="190" r="110"/>
+      <circle cx="630" cy="190" r="110"/>
+      <line x1="100" y1="190" x2="320" y2="190"/>
+      <line x1="210" y1="80" x2="210" y2="300"/>
+      <line x1="520" y1="190" x2="740" y2="190"/>
+      <line x1="630" y1="80" x2="630" y2="300"/>
+    </g>
+
+    <g stroke="currentColor" stroke-width="2.5" fill="none" marker-end="url(#ropearrow)">
+      <line x1="210" y1="190" x2="228.7" y2="81.6"/>
+      <line x1="630" y1="190" x2="673.3" y2="291.1"/>
+    </g>
+    <g stroke="currentColor" stroke-width="2.5" stroke-dasharray="6 4" fill="none" marker-end="url(#ropearrow)">
+      <line x1="210" y1="190" x2="294.1" y2="119.1"/>
+      <line x1="630" y1="190" x2="598.0" y2="295.2"/>
+    </g>
+
+    <defs>
+      <marker id="ropearrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+      </marker>
+    </defs>
+
+    <g stroke="currentColor" stroke-opacity="0.55" stroke-width="2" fill="none">
+      <path d="M 254.4 152.6 A 58 58 0 0 1 219.9 132.8"/>
+      <path d="M 613.1 245.5 A 58 58 0 0 1 652.8 243.3"/>
+    </g>
+
+    <g font-size="12.5" fill="currentColor">
+      <text x="223" y="72">R(5&#969;)q</text>
+      <text x="298" y="114">R(3&#969;)k</text>
+      <text x="678" y="304">R(105&#969;)q</text>
+      <text x="540" y="308">R(103&#969;)k</text>
+      <text x="238" y="130" font-size="11.5" fill-opacity="0.8">0.7 rad</text>
+      <text x="608" y="266" font-size="11.5" fill-opacity="0.8">0.7 rad</text>
+    </g>
+
+    <g font-size="12" fill="currentColor" text-anchor="middle">
+      <text x="210" y="336" font-weight="700">m = 5, n = 3</text>
+      <text x="210" y="356" fill-opacity="0.75">&#10216;R(0.5)q, R(0.3)k&#10217; = |q||k| cos(&#8736;qk + 0.2)</text>
+      <text x="630" y="336" font-weight="700">m = 105, n = 103</text>
+      <text x="630" y="356" fill-opacity="0.75">&#10216;R(10.5)q, R(10.3)k&#10217; = |q||k| cos(&#8736;qk + 0.2)</text>
+      <text x="420" y="384" fill-opacity="0.75">same m &#8722; n = 2 &#8658; same logit, anywhere on the circle</text>
+    </g>
+  </svg>
+</div>
+
+<p>Two consequences fall out of that picture. The rotation is applied to Q and K only — never to V,
+which carries content and must not be spun. And the K written to the KV cache is the <em>rotated</em>
+K: the cache does not store keys, it stores keys-at-a-position.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the rotation, exactly</h2></div><div class="sec__body"><p>Let $d_h$ be the head dimension, $r \le d_h$ the <em>rotary dimension</em> (the leading slice RoPE
+touches; the tail passes through untouched), $b$ the base frequency (`rope_theta` in the checkpoint),
+and $m \in \mathbb{Z}_{\ge 0}$ the token's absolute position. Index the rotary pairs by
+$i = 0, 1, \dots, r/2 - 1$. The frequency of pair $i$ is</p>
+
+<div class="math-display">$$\omega_i \;=\; b^{-2i/r}, \qquad\text{wavelength}\quad \lambda_i \;=\; \frac{2\pi}{\omega_i} \;=\; 2\pi\, b^{2i/r}\ \text{tokens.}$$</div>
+
+<p>That is one line of code, and it is the line every scaling scheme in this chapter modifies:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/base.py:L80-L103</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _compute_inv_freq(self, base: float) -&gt; torch.Tensor:
+        """Compute the inverse frequency."""
+        # ...
+        inv_freq = 1.0 / (
+            base
+            ** (
+                torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
+            )
+        )
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -&gt; torch.Tensor:
+        """Compute the cos and sin cache."""
+        inv_freq = self._compute_inv_freq(self.base)
+        t = torch.arange(self.max_position_embeddings, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -&gt; ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache</code></pre>
+</div>
+
+<p>Note what that is: a table of shape $[\texttt{max\_position\_embeddings},\, r]$ built once at model
+construction. RoPE at inference is not trigonometry, it is a gather. The rotation, writing
+$x^{(i)} = (x_{i}, x_{i+r/2})$ for the NeoX pairing,</p>
+
+<div class="math-display">$$\tilde{x}^{(i)}_m \;=\; \begin{pmatrix}\cos m\omega_i & -\sin m\omega_i \\[2pt] \sin m\omega_i & \cos m\omega_i\end{pmatrix} x^{(i)} \;=\; R(m\omega_i)\, x^{(i)}$$</div>
+
+<p>is four multiplies and two adds per pair, and appears verbatim as:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/common.py:L169-L181</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if is_neox_style:
+            x1, x2 = torch.chunk(x, 2, dim=-1)
+        else:
+            x1 = x[..., ::2]
+            x2 = x[..., 1::2]
+
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+
+        if is_neox_style:
+            output = torch.cat((o1, o2), dim=-1)
+        else:
+            output = torch.stack((o1, o2), dim=-1).flatten(-2)</code></pre>
+</div>
+
+<p>The <code>is_neox_style</code> branch is a real inference hazard, not a stylistic one: NeoX pairs
+element $j$ with element $j + r/2$, GPT-J pairs $2j$ with $2j+1$. Same mathematics, different memory
+layout, and checkpoints have their QK weight rows permuted to match one or the other. Get it wrong and
+the model produces fluent garbage with no error.</p>
+
+<h3>Why the dot product only sees $m - n$</h3>
+
+<p>Rotation matrices are orthogonal, with $R(a)^{\!\top} = R(-a)$ and $R(a)R(c) = R(a+c)$. For query
+pair $q^{(i)}$ at position $m$ and key pair $k^{(i)}$ at position $n$:</p>
+
+<div class="math-display">$$\big\langle R(m\omega_i)q^{(i)},\, R(n\omega_i)k^{(i)} \big\rangle \;=\; q^{(i)\top} R(-m\omega_i) R(n\omega_i) k^{(i)} \;=\; q^{(i)\top} R\big((n-m)\omega_i\big)\, k^{(i)}.$$</div>
+
+<p>Summing over pairs, the full head logit is a function of $q$, $k$, and $m-n$ alone. Absolute
+positions vanish from the score even though they were used to compute it.</p>
+
+<h3>A worked number</h3>
+
+<p>Take pair $i = 16$ at $b = 10^4$, $r = 128$: $\omega_{16} = 10000^{-32/128} = 0.1$ rad/token,
+wavelength $62.8$ tokens. Let $q^{(16)} = k^{(16)} = (1, 0)$ before rotation.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — pure arithmetic on the formula above, no model involved.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>positions</th><th>angle of $\tilde q$</th><th>angle of $\tilde k$</th><th>$\tilde q$</th><th>$\tilde k$</th><th class="num">$\langle \tilde q, \tilde k\rangle$</th></tr></thead>
+      <tbody>
+        <tr><td>$m=5,\ n=3$</td><td>0.5 rad</td><td>0.3 rad</td><td>(0.87758, 0.47943)</td><td>(0.95534, 0.29552)</td><td class="num">0.9800666</td></tr>
+        <tr><td>$m=105,\ n=103$</td><td>10.5 rad</td><td>10.3 rad</td><td>(&minus;0.47554, &minus;0.87970)</td><td>(&minus;0.64083, &minus;0.76769)</td><td class="num">0.9800666</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Both equal $\cos(0.2) = 0.9800666$. The vectors moved to a completely different part of the circle;
+the score did not move at all.</p>
+
+<h3>Where the positions come from</h3>
+
+<p>Nothing in the model computes a position. The model runner materialises one flat int64 tensor per
+step, and it is pure scheduler bookkeeping:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2248-L2251</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.positions[:total_num_scheduled_tokens] = (
+            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+            + self.query_pos.gpu[:total_num_scheduled_tokens]
+        )</code></pre>
+</div>
+
+<p>Position = tokens of this request already in the cache, plus the offset within this step's chunk. The
+same tensor then feeds <code>compute_slot_mapping</code>, so <em>positions and cache slots come from
+one counter</em> — the only thing keeping rotation angle and storage location in agreement. An
+off-by-one in <code>num_computed_tokens</code> does not crash; it rotates every subsequent key by one
+extra tick and quietly shifts the model's sense of distance.</p></div></section>
+<section class="sec" id="rope-and-the-cache" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Why the cache holds post-RoPE keys</h2></div><div class="sec__body"><p>Read one attention block and the ordering is unambiguous:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L221-L231</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -&gt; torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output</code></pre>
+</div>
+
+<p><code>rotary_emb</code> runs first and mutates <code>k</code> in place (<code>ops.rotary_embedding</code>
+is documented as in-place at <code>base.py:L242-L252</code>); <code>self.attn</code> then writes that
+rotated <code>k</code> into the paged cache. No unrotated copy exists anywhere.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Consequence</span>
+  <p>A cached KV block is only reusable by a request that places the same tokens at the <em>same
+  absolute positions</em>. Prefix caching is therefore prefix caching in the literal sense: it matches a
+  shared head of the token stream, never a shared substring at a different offset. Which is why the
+  block-hash chain in <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a> folds
+  the parent hash into every block — position-dependence is baked into the key, not bolted on.</p>
+</div>
+
+<p>The practical cost: insert a 40-token per-user preamble <em>before</em> a 20,000-token shared document
+and every document block becomes a miss, because each token shifted by 40 positions and its stored key
+is the wrong rotation. Move the preamble after the document and the whole document stays cacheable.
+Prompt <em>order</em> is a throughput decision. Storing pre-RoPE keys would fix this but move the
+rotation of the entire cached prefix into every decode step — turning a gather into a full pass over
+the KV cache, exactly the traffic <a href="03-02-flashattention.html">§3.2</a> exists to avoid.</p></div></section>
+<section class="sec" id="context-extension" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Extending context: PI, NTK, YaRN</h2></div><div class="sec__body"><p>Why does a model trained at 8k degrade at 32k? Look at the slowest pair. At $b = 5\times10^5$,
+$r = 128$, pair $i = 63$ has wavelength $2\pi (5\times10^5)^{63/64} = 2.56\times10^6$ tokens. Over the
+entire 8192-token training window it rotates through $0.0032$ of a revolution — an arc of about 1.15°,
+and every weight reading that pair was fitted on that sliver. At position 32768 the arc is four times
+wider. Chen et al. (<a href="https://arxiv.org/abs/2306.15595">arXiv:2306.15595</a>) report that direct
+extrapolation blows up attention scores catastrophically, far worse than naive expectation. The fast
+pairs are fine — pair 0 completes 1300 revolutions in 8192 tokens. The problem is entirely at the slow
+end.</p>
+
+<p>Four families of fix, all edits to $\omega_i$ or to the position axis.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">PI</span>
+    <h4>Position Interpolation</h4>
+    <p>Divide positions by $s$ before rotating: $m \mapsto m/s$. Every wavelength stretches by $s$, so
+    no angle leaves the trained arc. Cost: positional detail is compressed by $s$ at the fast end, where
+    nothing was broken. (<a href="https://arxiv.org/abs/2306.15595">arXiv:2306.15595</a>)</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">NTK</span>
+    <h4>NTK-aware scaling</h4>
+    <p>Leave positions alone; raise the base $b \mapsto b\cdot s$. Since $\omega_i = b^{-2i/r}$, that
+    barely moves $i=0$ and moves $i = r/2$ by nearly the full factor $s$ — interpolation spread across
+    the spectrum instead of applied flat.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Dynamic</span>
+    <h4>Dynamic NTK</h4>
+    <p>The same base shift with $s$ growing with the length in use, so short sequences run at
+    $s \approx 1$ and pay nothing. At serving time the "dynamic" is resolved at cache construction, not
+    per request.</p>
+  </div>
+  <div class="ve-card ve-card--hero">
+    <span class="ve-card__k">YaRN</span>
+    <h4>YaRN</h4>
+    <p>Decide per pair. Extrapolate (leave $\omega_i$ alone) where the pair completes many rotations in
+    the training window; interpolate ($\omega_i / s$) where it completes fewer than one; ramp linearly
+    between. Then correct the softmax temperature.
+    (<a href="https://arxiv.org/abs/2309.00071">arXiv:2309.00071</a>)</p>
+  </div>
+</div>
+
+<p>Each is a handful of lines. PI edits the position axis
+(<code>linear_scaling_rope.py:L90-L97</code>: build <code>t</code> to
+<code>max_position_embeddings * scaling_factor</code>, then <code>t = t / scaling_factor</code>); fixed
+NTK edits the base (<code>ntk_scaling_rope.py:L31-L36</code>); dynamic NTK recomputes the base from the
+ratio of served length to trained length:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/dynamic_ntk_scaling_rope.py:L58-L66</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        base = self.base * (
+            (
+                self.scaling_factor
+                * self.max_position_embeddings
+                / self.max_trained_positions
+            )
+            - (self.scaling_factor - 1)
+        ) ** (self.rotary_dim / (self.rotary_dim - 2))
+        inv_freq = self._compute_inv_freq(base)</code></pre>
+</div>
+
+<p>Llama-3's own scheme is a third shape — a wavelength-thresholded blend, not a base shift
+(<code>llama3_rope.py:L33-L54</code>): pairs with wavelength below
+<code>orig_max_position / high_freq_factor</code> are untouched, pairs above
+<code>orig_max_position / low_freq_factor</code> are divided by the scaling factor, and the band
+between is linearly smoothed.</p>
+
+<h3>YaRN, precisely</h3>
+
+<p>YaRN's contribution is choosing the band by <em>rotation count</em> rather than by hand. Given
+$\beta_{\text{fast}}$ (default 32) and $\beta_{\text{slow}}$ (default 1), it inverts the wavelength
+formula to find the pair indices at which a pair completes exactly that many rotations within the
+original context length $L_0$:</p>
+
+<div class="math-display">$$d(\beta) \;=\; \frac{r \,\ln\!\big(L_0 / (2\pi\beta)\big)}{2 \ln b}$$</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/common.py:L34-L76</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def yarn_find_correction_dim(
+    num_rotations: int,
+    dim: int,
+    base: float = 10000,
+    max_position_embeddings: int = 2048,
+) -&gt; float:
+    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
+        2 * math.log(base)
+    )
+# ...
+def yarn_linear_ramp_mask(
+    low: float, high: float, dim: int, dtype: torch.dtype
+) -&gt; torch.Tensor:
+    if low == high:
+        high += 0.001  # Prevent singularity
+
+    linear_func = (torch.arange(dim, dtype=dtype) - low) / (high - low)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+
+def yarn_get_mscale(scale: float = 1) -&gt; float:
+    if scale &lt;= 1:
+        return 1.0
+    return 0.1 * math.log(scale) + 1.0</code></pre>
+</div>
+
+<p>and blends the two frequency sets with that ramp:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/yarn_scaling_rope.py:L49-L84</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _compute_inv_freq(self, scaling_factor: float) -&gt; torch.Tensor:
+        pos_freqs = self.base ** (
+            torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
+        )
+        inv_freq_extrapolation = 1.0 / pos_freqs
+        inv_freq_interpolation = 1.0 / (scaling_factor * pos_freqs)
+
+        low, high = yarn_find_correction_range(
+            self.beta_fast,
+            self.beta_slow,
+            self.rotary_dim,
+            self.base,
+            self.max_position_embeddings,
+            self.truncate,
+        )
+        # Get n-d rotational scaling corrected for extrapolation
+        inv_freq_mask = (
+            1
+            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
+        ) * self.extrapolation_factor
+        inv_freq = (
+            inv_freq_interpolation * (1 - inv_freq_mask)
+            + inv_freq_extrapolation * inv_freq_mask
+        )
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -&gt; torch.Tensor:
+        inv_freq = self._compute_inv_freq(self.scaling_factor)
+        t = torch.arange(
+            self.max_position_embeddings * self.scaling_factor, dtype=torch.float32
+        )
+        freqs = torch.einsum("i,j -&gt; ij", t, inv_freq)
+        cos = freqs.cos() * self.mscale
+        sin = freqs.sin() * self.mscale
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache</code></pre>
+</div>
+
+<p>Work the defaults for $r = 128$, $b = 10^4$, $L_0 = 4096$: $d(32) = 20.94$, $d(1) = 45.03$, truncated
+to $[20, 46]$. Pairs 0–20 keep their original frequency, pairs 46–63 are divided by $s$, pairs 21–45
+ramp. Check the endpoints: pair 21 has wavelength 129 tokens — 31.75 rotations in 4096, i.e.
+$\beta_{\text{fast}}$. Pair 45 has wavelength 4080 — 1.00 rotations, i.e. $\beta_{\text{slow}}$. The
+constants mean exactly what they say.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — effective wavelength per rotary pair. Derived</b> from the cited
+    formulas at $r=128$, $b=10^4$, $s=8$, $L_0=4096$, $\beta_{\text{fast}}=32$, $\beta_{\text{slow}}=1$.
+    The shaded band is exactly <code>[low, high] = [20, 46]</code> returned by <code>yarn_find_correction_range</code>.</p>
+  <svg viewBox="0 0 830 430" width="100%" role="img" aria-labelledby="freqTitle freqDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="freqTitle">Wavelength versus rotary pair index for base RoPE, linear interpolation and YaRN</title>
+    <desc id="freqDesc">A log-scale line chart. Base RoPE rises as a straight line from about 6 tokens
+    at pair zero to 54000 tokens at pair 63. Linear interpolation is the same line shifted up by a
+    factor of 8 everywhere. YaRN follows the base RoPE line exactly up to pair 20, then curves upward
+    through a shaded band from pair 20 to pair 46, joining the interpolation line from pair 46 onward.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.10">
+      <line x1="90" y1="60" x2="780" y2="60"/>
+      <line x1="90" y1="110" x2="780" y2="110"/>
+      <line x1="90" y1="160" x2="780" y2="160"/>
+      <line x1="90" y1="210" x2="780" y2="210"/>
+      <line x1="90" y1="260" x2="780" y2="260"/>
+      <line x1="90" y1="310" x2="780" y2="310"/>
+      <line x1="90" y1="360" x2="780" y2="360"/>
+    </g>
+
+    <rect x="309" y="60" width="285" height="300" fill="currentColor" fill-opacity="0.07"/>
+    <g stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="4 4">
+      <line x1="309" y1="60" x2="309" y2="360"/>
+      <line x1="594" y1="60" x2="594" y2="360"/>
+    </g>
+
+    <polyline fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="2" stroke-dasharray="7 5"
+      points="90.0,274.9 199.5,243.7 309.0,212.4 418.6,181.2 528.1,149.9 637.6,118.7 747.1,87.4 780.0,78.1"/>
+    <polyline fill="none" stroke="currentColor" stroke-opacity="0.45" stroke-width="2"
+      points="90.0,320.1 199.5,288.8 309.0,257.6 418.6,226.3 528.1,195.1 637.6,163.8 747.1,132.6 780.0,123.2"/>
+    <polyline fill="none" stroke="currentColor" stroke-width="3.2"
+      points="90.0,320.1 144.8,304.5 199.5,288.8 254.3,273.2 309.0,257.6 320.0,253.7 341.9,245.9 363.8,238.0 385.7,229.9 407.6,221.6 429.5,213.2 451.4,204.5 473.3,195.5 495.2,186.0 517.1,176.1 539.0,165.3 561.0,153.4 582.9,139.5 593.8,131.2 604.8,128.1 648.6,115.6 692.4,103.1 736.2,90.6 780.0,78.1"/>
+
+    <g stroke="currentColor" stroke-opacity="0.35">
+      <line x1="90" y1="360" x2="780" y2="360"/>
+      <line x1="90" y1="60" x2="90" y2="360"/>
+    </g>
+
+    <g font-size="11" fill="currentColor" fill-opacity="0.8" text-anchor="end">
+      <text x="82" y="364">1</text>
+      <text x="82" y="314">10</text>
+      <text x="82" y="264">10&#178;</text>
+      <text x="82" y="214">10&#179;</text>
+      <text x="82" y="164">10&#8308;</text>
+      <text x="82" y="114">10&#8309;</text>
+      <text x="82" y="64">10&#8310;</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.8" text-anchor="middle">
+      <text x="90" y="380">0</text>
+      <text x="265" y="380">16</text>
+      <text x="440" y="380">32</text>
+      <text x="616" y="380">48</text>
+      <text x="780" y="380">63</text>
+      <text x="435" y="402" font-weight="700">rotary pair index i</text>
+      <text x="309" y="52" font-size="10.5">low=20</text>
+      <text x="594" y="52" font-size="10.5">high=46</text>
+      <text x="451" y="52" font-size="10.5" fill-opacity="0.7">YaRN ramp band</text>
+    </g>
+    <text x="20" y="215" font-size="11" fill="currentColor" font-weight="700" transform="rotate(-90 20 215)" text-anchor="middle">wavelength (tokens, log)</text>
+
+    <g font-size="11.5" fill="currentColor">
+      <text x="600" y="180">base RoPE</text>
+      <text x="596" y="253" fill-opacity="0.75">&#8592; YaRN</text>
+      <text x="150" y="264" fill-opacity="0.75">linear interp (&#215;8)</text>
+    </g>
+  </svg>
+</div>
+
+<p>The attention-temperature correction hides in the last two lines of
+<code>_compute_cos_sin_cache</code>. Both <code>cos</code> and <code>sin</code> are multiplied by
+$\mu = 0.1\ln s + 1$, so the rotation becomes $\mu R(m\omega_i)$ — applied to $q$ and $k$ from the same
+table, which multiplies every pre-softmax logit by $\mu^2$. At $s = 8$, $\mu = 1.2079$ and
+$\mu^2 = 1.459$: the softmax runs 46% colder, sharpening a distribution interpolation had flattened.
+YaRN reports this closes most of the remaining gap
+(<a href="https://arxiv.org/abs/2309.00071">arXiv:2309.00071</a>).</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Honesty</span>
+  <p>All four schemes are approximations: they move a trained function to inputs it was not trained on
+  and hope the interpolation is benign. The published evidence is that YaRN needs far less fine-tuning
+  than PI to recover quality, not that it is free. Distrust any perplexity number quoted without the
+  exact checkpoint, evaluation set, and $s$ — measure on your own workload.</p>
+</div></div></section>
+<section class="sec" id="production-config" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Scaling is a startup decision, not a runtime one</h2></div><div class="sec__body"><p>Both engines resolve the scaling type once, at startup, and memoise the module. vLLM's
+<code>get_rope</code> reads two keys and switches on the second:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/rotary_embedding/__init__.py:L64-L65, L382</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    base = rope_parameters.get("rope_theta", 10000)
+    scaling_type = rope_parameters.get("rope_type", "default")
+# ...
+        raise ValueError(f"Unknown RoPE scaling type {scaling_type}")</code></pre>
+</div>
+
+<p>then caches the module in a module-level <code>_ROPE_DICT</code> keyed on
+<code>(head_size, rotary_dim, max_position, is_neox_style, rope_parameters, ...)</code>, so every layer
+sharing a config shares one cos/sin table. SGLang's <code>factory.py</code> has the same dispatch and
+the same <code>_ROPE_DICT</code>, plus a warning for the failure mode that motivates this section:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/rotary_embedding/factory.py:L34-L51</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _get_rope_param(rope_scaling, key, default, scaling_type):
+    """Get a parameter from rope_scaling dict, warn if missing.
+
+    In transformers v5, config.rope_scaling is an alias for rope_parameters
+    which may be non-None even for models with no actual scaling (rope_type=default).
+    When a required key is missing, this logs a warning instead of silently
+    defaulting, to make config mismatches easier to debug.
+    """
+    if key in rope_scaling:
+        return rope_scaling[key]
+    logger.warning(
+        "rope_scaling (type=%s) missing key '%s', defaulting to %s. "
+        "This may indicate a v5 config issue &#8212; check model accuracy.",
+        scaling_type,
+        key,
+        default,
+    )
+    return default</code></pre>
+</div>
+
+<p>The genuine engine difference is what happens when a position exceeds the table. vLLM builds it to
+<code>max_position_embeddings</code> and stops; an out-of-range
+<code>cos_sin_cache.index_select(0, positions)</code> is the CUDA out-of-bounds the config warning
+threatens. SGLang can grow the table:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/rotary_embedding/base.py:L184-L196</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _ensure_cos_sin_cache_length(self, needed_max_pos: int):
+        """Ensure cos_sin_cache length &gt; needed_max_pos."""
+        cur_len = int(self.cos_sin_cache.shape[0])
+        if needed_max_pos &lt; cur_len:
+            return
+
+        # Align to reduce realloc frequency
+        align = envs.SGLANG_ROPE_CACHE_ALIGN.get()
+        new_len = ((needed_max_pos + align) // align) * align
+        device = self.cos_sin_cache.device
+        dtype = self.cos_sin_cache.dtype</code></pre>
+</div>
+
+<p>It extends incrementally with <code>self.base</code> — the <em>unscaled</em> base for the plain class.
+That trades a hard crash for a soft quality loss: friendlier, and much harder to notice.</p>
+
+<p>The load-bearing point for operators: <strong>the scaling factor is baked into the cos/sin table at
+construction</strong>. Restart with a different <code>--rope-scaling</code> and every KV block cached
+under the old table is meaningless, because the rotation that produced those keys no longer matches the
+rotation applied to new queries. Nothing on a KV block records this; if you persist or share prefix
+caches across processes
+(<a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">§2.6</a>), the rope config is
+part of the cache identity whether or not the system says so.</p>
+
+<p>Config also decides the context length. vLLM multiplies the model's own maximum by the factor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L2446-L2466</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            rope_type = rp["rope_type"]
+
+            if rope_type not in ("su", "longrope", "llama3"):
+                # NOTE: rope_type == "default" does not define factor ...
+                # NOTE: This assumes all layer types have the same scaling factor.
+                scaling_factor = rp.get("factor", scaling_factor)
+
+                if rope_type == "yarn":
+                    derived_max_model_len = rp["original_max_position_embeddings"]
+        if scaling_factor is None:
+            # Fallback the factor to 1.0 if a user assigned `null`
+            logger.warning_once(
+                "The model's RoPE configuration has a null scaling "
+                "factor which is unexpected. This likely indicates a bug "
+                "in the model's HuggingFace config.json. Please notify the "
+                "model vendor. Falling back the value to 1.0. "
+            )
+            scaling_factor = 1.0
+        # Do this outside loop since all layer types should have the same scaling
+        derived_max_model_len *= scaling_factor</code></pre>
+</div>
+
+<p>Note the YaRN special case: the derived length is reset to
+<code>original_max_position_embeddings</code> before being multiplied, because a YaRN checkpoint's
+<code>max_position_embeddings</code> is usually already the extended figure and would otherwise be
+scaled twice.</p></div></section>
+<section class="sec" id="sliding-window" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Sliding window: the cache stops growing</h2></div><div class="sec__body"><div class="callout callout--note">
+  <span class="callout__k">Liveness check</span>
+  <p>Of the two sliding-window caches, only one runs. <code>PureSWARadixCache</code> <em>is</em>
+  constructed — <code>python/sglang/srt/mem_cache/registry.py:L114</code>, on the hybrid-SWA path
+  where <code>full_tokens_per_layer == 0</code>. <code>SWARadixCache</code> is
+  <strong>never constructed</strong>; sliding-window state on the ordinary path is a
+  <code>ComponentType.SWA</code> inside <code>UnifiedRadixCache</code>
+  (<code>registry.py:L159-L167</code>).
+  <a href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html">&sect;12.3</a> maps the live set.</p>
+</div>
+
+
+<p>Sliding-window attention caps how far back a query may look. The kernel consequence is a mask; the
+serving consequence is much larger, because a key that can never be attended again is a key you can
+free. Full attention holds $T$ tokens of KV per sequence and grows without bound; a window of $W$ holds
+$\min(T, W)$ — a constant.</p>
+
+<p>Using the cell size from <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a>,
+$c = 2 L h_{kv} d_h \cdot \texttt{bytes}$, a Llama-3-8B-shaped model ($L=32$, $h_{kv}=8$, $d_h=128$,
+bf16) costs 128 KiB per token:</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="kpi__n">16 GiB</div><div class="kpi__l">full attention, 128k tokens (derived)</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">512 MiB</div><div class="kpi__l">window W = 4096, any length (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">32&times;</div><div class="kpi__l">per-sequence reduction</div></div>
+</div>
+
+<p>The allocator does not think in tokens, though — it thinks in blocks, and vLLM's
+<code>SlidingWindowSpec</code> states the bound precisely:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/kv_cache_interface.py:L565-L572</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        num_tokens = min(
+            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            max_model_len,
+        )
+        # +1 because the sliding window may not start from the beginning of
+        # the block. E.g. block size 4 and num_token 4 needs two blocks
+        # [XXCD][EF] to store the 6-token window [CDEF].
+        return cdiv(num_tokens, self.block_size) + 1</code></pre>
+</div>
+
+<p>Compare <code>FullAttentionSpec.max_memory_usage_bytes</code>:
+<code>cdiv(max_model_len, self.block_size) * self.page_size_bytes</code>
+(<code>kv_cache_interface.py:L300-L306</code>). Same page size, same arithmetic shape — only the
+numerator differs, <code>sliding_window</code> instead of <code>max_model_len</code>. That substitution
+is the entire memory story. At $W = 4096$, block size 16, ignoring in-flight tokens:
+$\lceil 4095/16 \rceil + 1 = 257$ blocks, against $\lceil 131072/16\rceil = 8192$ for full attention at
+128k.</p>
+
+<p>The freeing is where <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>'s null
+block earns its keep. A request's block table must stay index-addressable — slot $j$ is tokens
+$[16j, 16j+16)$ — so a freed leading block cannot be removed from the list, only replaced:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L612-L622</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        blocks = self.req_to_blocks[request_id]
+        last_block = min(last_block, len(blocks))
+
+        freed: list[KVCacheBlock] = []
+        for i in range(last_block - 1, first_block - 1, -1):
+            if blocks[i] == self._null_block:
+                break
+            freed.append(blocks[i])
+            blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)</code></pre>
+</div>
+
+<p>and the window edge is one subtraction:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L1095-L1098</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        return max(
+            0,
+            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+        )</code></pre>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — block lifecycle under a sliding window.</b> Drawn at
+    <code>block_size = 4</code>, <code>sliding_window = 8</code> for legibility. Physical block ids are
+    illustrative; the null block is id 0, popped from the free queue at pool construction
+    (<code>block_pool.py:L187-L191</code>) and never freed. The block table grows; the number of real
+    blocks does not.</p>
+  <svg viewBox="0 0 840 400" width="100%" role="img" aria-labelledby="swaTitle swaDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="swaTitle">Sliding window block table over four decode snapshots</title>
+    <desc id="swaDesc">Four rows of block-table slots. As the number of computed tokens grows from 8 to
+    20, leading slots are replaced by the null block id zero and their physical blocks return to the
+    free pool, so the count of real blocks held stays at two.</desc>
+
+    <g font-size="11.5" fill="currentColor" fill-opacity="0.8">
+      <text x="20" y="46">computed</text>
+      <text x="120" y="46">block table slot &#8594;</text>
+      <text x="700" y="46">real blocks</text>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.30" fill="none">
+      <rect x="120" y="60" width="88" height="44"/><rect x="212" y="60" width="88" height="44"/>
+      <rect x="120" y="132" width="88" height="44" stroke-dasharray="5 4"/><rect x="212" y="132" width="88" height="44"/><rect x="304" y="132" width="88" height="44"/>
+      <rect x="120" y="204" width="88" height="44" stroke-dasharray="5 4"/><rect x="212" y="204" width="88" height="44" stroke-dasharray="5 4"/><rect x="304" y="204" width="88" height="44"/><rect x="396" y="204" width="88" height="44"/>
+      <rect x="120" y="276" width="88" height="44" stroke-dasharray="5 4"/><rect x="212" y="276" width="88" height="44" stroke-dasharray="5 4"/><rect x="304" y="276" width="88" height="44" stroke-dasharray="5 4"/><rect x="396" y="276" width="88" height="44"/><rect x="488" y="276" width="88" height="44"/>
+    </g>
+
+    <g font-size="12.5" fill="currentColor" text-anchor="middle" font-weight="600">
+      <text x="164" y="88">41</text><text x="256" y="88">57</text>
+      <text x="164" y="160" fill-opacity="0.45">null 0</text><text x="256" y="160">57</text><text x="348" y="160">12</text>
+      <text x="164" y="232" fill-opacity="0.45">null 0</text><text x="256" y="232" fill-opacity="0.45">null 0</text><text x="348" y="232">12</text><text x="440" y="232">88</text>
+      <text x="164" y="304" fill-opacity="0.45">null 0</text><text x="256" y="304" fill-opacity="0.45">null 0</text><text x="348" y="304" fill-opacity="0.45">null 0</text><text x="440" y="304">88</text><text x="532" y="304">63</text>
+    </g>
+
+    <g font-size="10.5" fill="currentColor" fill-opacity="0.6" text-anchor="middle">
+      <text x="164" y="100">t0&#8211;3</text><text x="256" y="100">t4&#8211;7</text>
+      <text x="256" y="172">t4&#8211;7</text><text x="348" y="172">t8&#8211;11</text>
+      <text x="348" y="244">t8&#8211;11</text><text x="440" y="244">t12&#8211;15</text>
+      <text x="440" y="316">t12&#8211;15</text><text x="532" y="316">t16&#8211;19</text>
+    </g>
+
+    <g font-size="12" fill="currentColor">
+      <text x="20" y="88">n = 8</text>
+      <text x="20" y="160">n = 12</text>
+      <text x="20" y="232">n = 16</text>
+      <text x="20" y="304">n = 20</text>
+    </g>
+    <g font-size="13" fill="currentColor" font-weight="700" text-anchor="middle">
+      <text x="740" y="88">2</text><text x="740" y="160">2</text><text x="740" y="232">2</text><text x="740" y="304">2</text>
+    </g>
+    <g font-size="10.5" fill="currentColor" fill-opacity="0.7">
+      <text x="596" y="160">&#8592; frees 41</text>
+      <text x="596" y="232">&#8592; frees 57</text>
+      <text x="596" y="304">&#8592; frees 12</text>
+    </g>
+
+    <text x="20" y="356" font-size="11.5" fill="currentColor" fill-opacity="0.8">get_num_skipped_tokens(n) = max(0, n &#8722; 8 + 1);  nulled slots = that // 4</text>
+    <text x="20" y="376" font-size="11.5" fill="currentColor" fill-opacity="0.8">admission bound = cdiv(8 &#8722; 1, 4) + 1 = 3 blocks, forever &#8212; independent of sequence length</text>
+  </svg>
+</div>
+
+<h3>Hybrid models break the uniform-spec assumption</h3>
+
+<p>A block manager that assumed one spec per model now faces two. SGLang enumerates the pattern per
+architecture — for Llama-4, three of every four layers are windowed:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/configs/model_config.py:L2114-L2128</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if "Llama4ForConditionalGeneration" in model_architectures:
+        swa_attention_layer_ids = [
+            i for i in range(num_hidden_layers) if (i + 1) % 4 != 0
+        ]
+        full_attention_layer_ids = [
+            i for i in range(num_hidden_layers) if (i + 1) % 4 == 0
+        ]
+    elif any(arch in SWA_SINK_ARCHS for arch in model_architectures):
+        layer_types = getattr(hf_text_config, "layer_types", [])
+        swa_attention_layer_ids = [
+            i for i, x in enumerate(layer_types) if x == "sliding_attention"
+        ]
+        full_attention_layer_ids = [
+            i for i, x in enumerate(layer_types) if x == "full_attention"
+        ]</code></pre>
+</div>
+
+<p><b>Derived</b>, for a 32-layer model on that 3:1 pattern at 128k, $W = 4096$, per-layer per-token cost
+$2 h_{kv} d_h \cdot 2 = 4$ KiB: the 8 full layers hold $8 \times 131072 \times 4096 = 4$ GiB, the 24
+windowed layers $24 \times 4096 \times 4096 = 384$ MiB. Total 4.375 GiB against 16 GiB uniform — 3.66×,
+and that is what the "hybrid KV cache manager is disabled" warning silently costs, because the fallback
+promotes every <code>SlidingWindowSpec</code> to <code>FullAttentionSpec</code>
+(<code>kv_cache_utils.py:L1578-L1600</code>).</p>
+
+<p>SGLang solves the same problem in the cache rather than the allocator. Windowed and full layers have
+different lifetimes for the <em>same</em> radix-tree node, so <code>SWARadixCache</code> keeps two
+independent LRU orders over one tree
+(<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>). Per the callout above it is
+the readable statement of the idea rather than the live class — but it is the clearest one in the
+tree, so it is what this section quotes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/swa_radix_cache.py:L408-L410 &mdash; never constructed at 7d89325; read as the reference statement</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # LRU lists are used to maintain the order of eviction of the nodes in the tree
+        self.full_lru_list = LRUList(is_swa_list=False)
+        self.swa_lru_list = LRUList(is_swa_list=True)</code></pre>
+</div>
+
+<p>The invariant is in the <code>TreeNode</code> comment at <code>swa_radix_cache.py:L70-L74</code>:
+<code>full_lock_ref</code> is always $\ge$ <code>swa_lock_ref</code>. Eviction from the full list must
+take a leaf; eviction from the SWA list need not, because an internal node's window-layer KV can be
+dropped while its children still hold live full-layer KV. Such a node becomes a <em>tombstone</em> —
+present in the tree, matchable for the full layers, its SWA indices already returned to the allocator
+(<code>swa_radix_cache.py:L640-L672</code>). An all-windowed model needs none of that, so SGLang ships a
+153-line <code>PureSWARadixCache</code> that caches the prefill prefix and frees the window
+(<code>pure_swa_radix_cache.py:L24-L30</code>). Two caches for two model shapes, versus vLLM's one
+allocator parameterised by spec.</p></div></section>
+<section class="sec" id="attention-sinks" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Attention sinks</h2></div><div class="sec__body"><p>The obvious way to bound KV growth without a windowed checkpoint is to evict the oldest tokens. Xiao
+et al. (<a href="https://arxiv.org/abs/2309.17453">arXiv:2309.17453</a>) show this destroys the model:
+perplexity explodes the moment the very first tokens leave the cache. Their diagnosis is that the first
+few positions absorb a disproportionate share of attention mass across most heads and layers — not
+because those tokens are informative, but because softmax must put its mass somewhere and the initial
+tokens are visible to every subsequent query. They are a bias term the model learned to lean on; evict
+them and every softmax denominator changes at once.</p>
+
+<p>The fix is to pin them: keep the first few tokens' KV permanently and slide a window over everything
+else — StreamingLLM reports four sink tokens suffice. vLLM implements this as a block reservation
+mirroring the null block exactly: pop the sink blocks out of the free queue at construction so nothing
+can allocate them.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/single_type_kv_cache_manager.py:L1846-L1850</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        sink_len = kv_cache_spec.sink_len
+        assert sink_len is not None and sink_len &gt; 0 and sink_len % self.block_size == 0
+        num_sink_block = sink_len // self.block_size
+        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)</code></pre>
+</div>
+
+<p>The attention side prepends those blocks to every block table and inflates the sequence length to
+match, so the kernel needs no modification:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/attention/static_sink_attention.py:L86-L99</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            common_attn_metadata.seq_lens[:] = (
+                common_attn_metadata.seq_lens + self.sink_len
+            )
+            common_attn_metadata.seq_lens[
+                common_attn_metadata.seq_lens == self.sink_len
+            ] = 0
+            common_attn_metadata.max_seq_len = (
+                common_attn_metadata.max_seq_len + self.sink_len
+            )
+            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
+            num_reqs = common_attn_metadata.num_reqs
+            self.block_table_with_sink[
+                :num_reqs, self.num_sink_blocks : self.num_sink_blocks + max_num_blocks
+            ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]</code></pre>
+</div>
+
+<p>A second, unrelated thing is also called an attention sink. SGLang's model config defines it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/configs/model_config.py:L816-L822</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _detect_attention_sinks(self) -&gt; bool:
+        """Check whether the model uses learned attention sinks.
+
+        Attention sinks are per-head scalars added to the softmax denominator
+        to compensate for evicted KV-cache entries under sliding-window
+        attention.  Not every hybrid-SWA model uses them.
+        """</code></pre>
+</div>
+
+<p>That is a <em>learned</em> sink — a trained per-head logit in the denominator, costing zero cache
+blocks — against StreamingLLM's <em>pinned KV</em> sink, which costs real blocks and needs no
+retraining. vLLM keeps them separate deliberately: a plain <code>Attention</code> layer with learned
+sinks still yields an ordinary <code>FullAttentionSpec</code> or <code>SlidingWindowSpec</code>, and
+only <code>StaticSinkAttention</code> yields <code>SinkFullAttentionSpec</code>
+(<code>vllm/v1/attention/selector.py:L76-L80</code>). One is a kernel argument; the other is an
+allocator contract.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Worked trace: one token, one position, one block</h2></div><div class="sec__body"><p>Follow token 4096 of a request on a windowed layer with $W = 4096$, block size 16, on vLLM.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — the path a single position takes,</b> from scheduler counter to
+    freed block. Every node is a real function at <code>a556f3f</code>.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["scheduler: num_computed_tokens = 4096"] --> B["_prepare_inputs<br/>positions = 4096"]
+    B --> C["compute_slot_mapping<br/>slot = block_table slot 256 times 16"]
+    B --> D["LlamaAttention.forward<br/>q, k = rotary_emb(positions, q, k)"]
+    D --> E["RotaryEmbedding.forward_cuda<br/>cos_sin_cache.index_select(0, 4096)"]
+    E --> F["ops.rotary_embedding in-place<br/>k is now R(4096 omega) k"]
+    F --> G["Attention.forward writes rotated k<br/>into slot from step C"]
+    G --> H["next step: allocate_slots calls<br/>SlidingWindowManager.remove_skipped_blocks"]
+    H --> I["get_num_skipped_tokens(4097) = 2<br/>skipped blocks = 0, nothing freed yet"]
+    I --> J["at n = 8192: skipped = 4097<br/>blocks 0..255 nulled, 256 blocks freed"]
+  </script>
+</div>
+
+<ol>
+  <li><b>Position.</b> <code>GPUModelRunner._prepare_inputs</code> writes
+  <code>positions[i] = num_computed_tokens[req] + query_pos[i]</code>
+  (<code>gpu_model_runner.py:L2248-L2251</code>), then passes the same tensor to
+  <code>block_table.compute_slot_mapping</code> (<code>L2257-L2261</code>).</li>
+  <li><b>Rotation.</b> <code>LlamaAttention.forward</code> calls
+  <code>self.rotary_emb(positions, q, k)</code> (<code>llama.py:L228</code>), dispatching through
+  <code>CustomOp</code> to <code>RotaryEmbedding.forward_cuda</code>
+  (<code>base.py:L221-L252</code>): a <code>cos_sin_cache.index_select(0, positions)</code> and an
+  in-place mutation of <code>q</code> and <code>k</code>. No trigonometry at runtime.</li>
+  <li><b>Storage.</b> <code>self.attn(q, k, v)</code> writes the rotated <code>k</code> to the slot
+  from step 1. The cache now holds $R(4096\,\omega)k$, permanently.</li>
+  <li><b>Release.</b> Before each subsequent chunk, <code>allocate_slots</code> calls
+  <code>SlidingWindowManager.remove_skipped_blocks</code>
+  (<code>single_type_kv_cache_manager.py:L624-L657</code>) &rarr;
+  <code>_remove_blocks_in_range</code>. That loop runs <em>backwards</em> and breaks on the first null
+  it meets — an O(newly-freed) scan rather than O(sequence) on every step.</li>
+</ol></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">Silent</span>
+    <h4>rope config drift</h4>
+    <p>The checkpoint says <code>rope_type: yarn, factor: 4</code>; your override says
+    <code>factor: 8</code>. Both start, both serve, nothing warns — SGLang's
+    <code>_get_rope_param</code> catches a <em>missing</em> key, never a <em>wrong</em> one. Diagnose by
+    printing <code>rotary_emb.cos_sin_cache.shape</code>: the first dimension is $L_0 \cdot s$ and names
+    the factor actually in effect.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Capacity</span>
+    <h4>hybrid allocator disabled</h4>
+    <p>Grep startup logs for "Hybrid KV cache manager is disabled". If present, every windowed layer is
+    sized as full attention and your <code>--max-num-seqs</code> ceiling is several times below what the
+    hardware allows. "KV cache page sizes cannot be unified"
+    (<code>kv_cache_utils.py:L1569-L1573</code>) is the MLA-plus-SWA variant of the same loss.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Assertion</span>
+    <h4>mismatched window sizes</h4>
+    <p><code>"All attention layers in the same KV cache group must have the "
+    "same window size."</code> (<code>kv_cache_interface.py:L308-L317</code>) fires when a config
+    declares per-layer windows that differ. Grouping, not the kernel, is what breaks.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Throughput</span>
+    <h4>preamble before the shared document</h4>
+    <p>Post-RoPE keys mean a shared body only caches at identical positions, so per-request text belongs
+    at the <em>end</em> of the prompt. Usually the largest prefix-cache hit-rate lever in a RAG
+    deployment, and free to fix.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Cross-engine</span>
+    <h4>same prompt, different logits</h4>
+    <p>vLLM casts its cos/sin cache to the model dtype (<code>base.py:L58-L61</code>); SGLang keeps it in
+    fp32 unless told otherwise (<code>base.py:L102-L105</code>, "cache needs to be in FP32 for numerical
+    stability"). Small logit differences at long positions are expected, not a bug in either.</p>
+  </div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. See the YaRN band for your own config.</b> The correction range is pure arithmetic on four
+config fields, computable without importing anything:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">transcription of vllm/model_executor/layers/rotary_embedding/common.py:L34-L59</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 -c '
+import math
+r, b, L0, bfast, bslow = 128, 10000, 4096, 32, 1
+d = lambda n: (r*math.log(L0/(n*2*math.pi)))/(2*math.log(b))
+lo, hi = math.floor(d(bfast)), math.ceil(d(bslow))
+print("ramp band [low, high] =", (max(lo,0), min(hi, r-1)))
+for i in (lo, lo+1, hi-1, hi):
+    wl = 2*math.pi*b**(2*i/r)
+    print(f"pair {i:2d}  wavelength {wl:10.1f}  rotations in L0 {L0/wl:7.2f}")'</code></pre>
+</div>
+
+<p>Running that here prints the band <code>(20, 46)</code> and 36.66 / 31.75 / 1.00 / 0.87 rotations
+at pairs 20 / 21 / 45 / 46 — the endpoint numbers used in §5, <b>derived</b>, not measured. Change
+<code>b</code> to <code>500000</code> and the band moves to <code>(14, 32)</code>: a larger base
+lengthens every wavelength, so more pairs fall below one rotation in $L_0$ and the interpolated tail
+grows. Change $L_0$ to 8192 as well — Llama-3's actual pair — and it returns to
+<code>(18, 35)</code>.</p>
+
+<p><b>2. Confirm the scaling factor actually in effect</b>, on a machine with vLLM installed:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">reads vllm/model_executor/layers/rotary_embedding/__init__.py:L33-L95</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python3 -c '
+from vllm.model_executor.layers.rotary_embedding import get_rope
+plain = get_rope(128, 8192, rope_parameters={"rope_theta": 10000.0})
+yarn  = get_rope(128, 8192, rope_parameters={"rope_theta": 10000.0, "rope_type": "yarn",
+                 "factor": 8.0, "original_max_position_embeddings": 4096})
+print(type(yarn).__name__, yarn.cos_sin_cache.shape, "mscale", yarn.mscale)
+print(type(plain).__name__, plain.cos_sin_cache.shape)'</code></pre>
+</div>
+
+<p><code>mscale</code> should read 1.2079 for $s=8$ and the YaRN table's first dimension should be
+$4096 \times 8$. <em>I did not execute this — no GPU and no vLLM install in this environment.</em></p>
+
+<p><b>3. Watch a window free blocks.</b> Serve any sliding-window checkpoint with
+<code>--max-model-len</code> well above the window and confirm the free-block count stops falling once
+a sequence passes $W$ tokens; then flip <code>--disable-hybrid-kv-cache-manager</code> and watch it
+fall linearly instead.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read and answer.</b> Open
+  <code>vllm/model_executor/layers/rotary_embedding/linear_scaling_rope.py</code>. Its
+  <code>_compute_cos_sin_cache</code> builds one table per entry in <code>scaling_factors</code> and
+  concatenates them. Why does a serving engine ever need more than one table alive at once? The class
+  docstring gives the answer in one clause.</li>
+
+  <li><b>Arithmetic.</b> A model has $L=48$, $h_{kv}=8$, $d_h=128$, bf16, sliding window 8192, block
+  size 16. Compute (a) bytes per token, (b) <code>SlidingWindowSpec.max_admission_blocks_per_request</code>
+  with <code>max_in_flight_tokens = 0</code> and <code>extra_retained_tokens = 0</code>, (c) the
+  steady-state KV bytes per sequence, and (d) how many concurrent sequences fit in 40 GiB.</li>
+
+  <li><b>Predict, then verify.</b> Two requests share a 2000-token document. A sends
+  <code>[document][question]</code>; B sends <code>[50-token user profile][document][question]</code>.
+  Predict how many cached blocks B reuses from A at block size 16, then check against the block-hash
+  construction in <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a> and §4's
+  post-RoPE result.</li>
+
+  <li><b>Predict, then verify.</b> In
+  <code>vllm/v1/core/single_type_kv_cache_manager.py:L612-L622</code> the loop runs backwards and
+  <code>break</code>s on the first null block. Predict what breaks (correctness? performance? both?) if
+  it ran forwards with <code>continue</code>. Then read <code>remove_skipped_blocks</code> at
+  <code>L624-L657</code> to see how often it is called.</li>
+
+  <li><b>Design.</b> vLLM parameterises one allocator by spec; SGLang ships <code>SWARadixCache</code>
+  (1,440 lines, dual-LRU with tombstones) and <code>PureSWARadixCache</code> (153 lines) as separate
+  classes. Name one failure mode each approach makes more likely.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> LoRA. The docstring at <code>linear_scaling_rope.py:L34-L37</code>: "Since multiple
+    LoRA adapters may have different scaling factors, we need multiple cos/sin caches. In this way,
+    instead of running rotary embedding kernel per lora, we can run multiple lora in a batched way."
+    <code>scaling_factor_to_offset</code> lets one kernel launch index the right sub-table per
+    request.</p>
+
+    <p><b>2.</b> (a) $2 \times 48 \times 8 \times 128 \times 2 = 196608$ B = 192 KiB/token.
+    (b) $\lceil 8191/16 \rceil + 1 = 513$ blocks. (c) $513 \times 16 \times 192\,\text{KiB} = 1.503$ GiB
+    block-granular (token-exact: 1.5 GiB). (d) 26 sequences — at <em>any</em> context length, which is
+    the point.</p>
+
+    <p><b>3.</b> Zero. Every document token in B sits 50 positions later than in A, so every block has a
+    different position, rotation, stored key, and hash (the block-hash chain folds in the parent hash,
+    so the first differing block poisons all descendants). B re-prefills all 2000 tokens. Move the
+    profile after the document and B reuses $\lfloor 2000/16 \rfloor = 125$ blocks.</p>
+
+    <p><b>4.</b> Correctness is fine either way — the same blocks end up freed. Performance is not.
+    <code>remove_skipped_blocks</code> runs before every chunk, so a forward scan would walk the entire
+    nulled prefix each step: O(sequence) per step, O($T^2$) over a request. The backward scan touches
+    only blocks freed since the last call.</p>
+
+    <p><b>5.</b> vLLM's single parameterised allocator risks a spec whose semantics do not fit the
+    shared path — hence the escape hatches that promote <code>SlidingWindowSpec</code> to
+    <code>FullAttentionSpec</code> and give up the saving rather than misbehave. SGLang's separate
+    classes risk divergence: a fix landing in one and not the other — which is why
+    <code>PureSWARadixCache</code> is a thin <code>RadixCache</code> subclass rather than a third full
+    implementation.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>RoPE at inference is a gather, not a computation: a $[\texttt{max\_position\_embeddings}, r]$
+  cos/sin table built once at construction and indexed by a position tensor the scheduler derives from
+  <code>num_computed_tokens</code>. That table is the only place the scaling factor lives, and it is
+  frozen at startup.</li>
+
+  <li>The KV cache stores post-rotation keys, which is why prefix caching is position-locked and prompt
+  ordering is a throughput decision. Storing pre-RoPE keys would trade the position lock for a full
+  re-rotation pass over the cache every decode step.</li>
+
+  <li>Every context-extension scheme is one edit to $\omega_i = b^{-2i/r}$ or to the position axis. PI
+  divides positions, NTK multiplies the base, YaRN chooses per frequency band via
+  <code>yarn_find_correction_range</code> and then multiplies the cos/sin table by
+  $\mu = 0.1\ln s + 1$ — scaling every logit by $\mu^2$, an attention-temperature correction hiding in
+  two lines of cache construction.</li>
+
+  <li>A sliding window converts KV from $O(T)$ to $O(W)$ per sequence by substituting
+  <code>sliding_window</code> for <code>max_model_len</code> in one memory formula. Freed blocks are
+  replaced by the null block rather than removed, because block-table slot index must keep meaning token
+  offset.</li>
+
+  <li>Hybrid full/windowed models break the memory system's uniformity assumption. vLLM's fallback
+  promotes windowed specs to full and logs a warning that costs, on a 3:1 pattern at 128k, a derived
+  3.66× in per-sequence KV. SGLang's answer is a second cache class with two LRU orders over one tree
+  and tombstoned internal nodes.</li>
+
+  <li>"Attention sink" names two unrelated things: StreamingLLM's pinned first-token KV, costing real
+  blocks popped from the free queue at construction, and a learned per-head scalar in the softmax
+  denominator, costing none. Only the first changes the allocator contract.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Su et al., <a href="https://arxiv.org/abs/2104.09864">RoFormer (arXiv:2104.09864)</a> — the
+  original derivation of the relative-position property worked in §3.</li>
+  <li>Chen et al., <a href="https://arxiv.org/abs/2306.15595">Extending Context Window of LLMs via
+  Positional Interpolation (arXiv:2306.15595)</a> — PI, and the measurement that naive extrapolation
+  blows up attention scores.</li>
+  <li>Peng et al., <a href="https://arxiv.org/abs/2309.00071">YaRN (arXiv:2309.00071)</a> — the band
+  decomposition, $\beta_{\text{fast}}$ / $\beta_{\text{slow}}$, and the attention-temperature
+  correction. vLLM credits <a href="https://github.com/jquesnelle/yarn">github.com/jquesnelle/yarn</a>
+  in the class docstring.</li>
+  <li>Xiao et al., <a href="https://arxiv.org/abs/2309.17453">Efficient Streaming Language Models with
+  Attention Sinks (arXiv:2309.17453)</a> — the attention-mass finding and the four-token fix.</li>
+  <li>The NTK schemes originate in community posts and both repos say so in their docstrings:
+  <code>ntk_scaling_rope.py:L11-L12</code> cites
+  <a href="https://kexue.fm/archives/9706">kexue.fm/archives/9706</a>;
+  <code>dynamic_ntk_scaling_rope.py:L33</code> credits "/u/bloc97 and /u/emozilla". Unusually
+  well-attributed folklore.</li>
+  <li>Source to read next, in order: <code>vllm/model_executor/layers/rotary_embedding/base.py</code>
+  (324 lines, the whole mechanism), then <code>vllm/v1/kv_cache_interface.py:L537-L594</code>, then
+  <code>python/sglang/srt/mem_cache/swa_radix_cache.py</code> — start at <code>evict</code>
+  (L594-L700), where the dual-LRU design is most legible.</li>
+</ul></div></section>
+<div class="pager"><a href="03-05-mha-mqa-gqa-mla.html"><div class="pager__k">← Previous</div><div class="pager__t">MHA → MQA → GQA → MLA</div></a><a class="pager__next" href="../04-quantization/04-01-the-design-space.html"><div class="pager__k">Next →</div><div class="pager__t">The design space: PTQ/QAT, weight-only, W+A, KV</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: the rotation, exactly</a>
+<a href="#rope-and-the-cache">Why the cache holds post-RoPE keys</a>
+<a href="#context-extension">Extending context: PI, NTK, YaRN</a>
+<a href="#production-config">Scaling is a startup decision, not a runtime one</a>
+<a href="#sliding-window">Sliding window: the cache stops growing</a>
+<a href="#attention-sinks">Attention sinks</a>
+<a href="#worked-trace">Worked trace: one token, one position, one block</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,1760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chunked prefill — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="loop">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i is-current" href="01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 1 · The core serving loop · 01-05</div>
+<h1>Chunked prefill</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>vllm/config/scheduler.py</code></li><li><code>python/sglang/srt/managers/schedule_policy.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">One 32k-token prompt lands in a server that is happily streaming tokens to thirty other
+users. Every one of them stops receiving tokens for about a second and a half. Chunked prefill is
+the scheduler surgery that cuts that stall down to roughly one chunk's worth of compute — and the
+price it charges is paid in HBM traffic, which is why the chunk cannot be made arbitrarily small.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take Llama-3-8B on one H100 SXM. Thirty-two requests are decoding, each around 2k tokens of
+context. A thirty-third request arrives with a 32,768-token prompt — a code file, a long document,
+a stuffed RAG context. The scheduler admits it. What happens to the thirty-two decoders?</p>
+
+<p>Work the two iteration costs. Symbols follow <a href="../FORMULAS.html">FORMULAS</a>:
+$L=32$, $h=32$, $h_{kv}=8$, $d_h=128$, $P = 8.03\times10^{9}$, $b = 2$ bytes (bf16). Two hardware
+numbers are assumed and stated up front, because everything below scales with them: an achieved
+$\pi_{\text{eff}} = 500$ TFLOP/s in bf16 (about half of the H100's 989 TFLOP/s dense peak) and an
+achieved $\beta_{\text{eff}} = 2.6$ TB/s (about 78% of HBM3's 3.35 TB/s) — measure yours in
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a> and substitute.</p>
+
+<p><b>Cost of the prefill iteration (derived).</b> Prefill FLOPs for a prompt of $S$ tokens are the
+weight GEMMs plus causal attention:</p>
+
+<div class="math-display">$$\text{FLOPs}_{\text{prefill}}(S) \;\approx\; 2PS \;+\; 2\,L\,h\,d_h\,S^{2}$$</div>
+
+<p>The second term is the $\text{FLOPs}_{\text{tok}}$ attention term of
+<a href="../FORMULAS.html#perf-formulas">FORMULAS</a> summed over positions $1..S$, which halves the
+$4$ to a $2$. At $S = 32768$: $2PS = 5.26\times10^{14} = 526$ TFLOP, and
+$2\cdot32\cdot32\cdot128\cdot S^2 = 2.82\times10^{14} = 281$ TFLOP. Total <b>807 TFLOP</b>, so
+$t_{\text{prefill}} = 807/500 = \mathbf{1.61\ s}$.</p>
+
+<p><b>Cost of a decode iteration (derived).</b> One decode step must stream all weights plus every
+resident KV element once. Per-token KV bytes across all layers are
+$2 \cdot L \cdot h_{kv} \cdot d_h \cdot b = 2\cdot32\cdot8\cdot128\cdot2 = 131{,}072$ B — exactly
+128 KiB per token, a number worth memorising for this model. Weights are $2P = 16.06$ GB; the
+32 sequences at 2048 tokens hold $65{,}536$ tokens $\times$ 128 KiB $= 8.59$ GB. Total 24.65 GB, so
+$t_{\text{decode}} = 24.65/2600 = \mathbf{9.5\ ms}$.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">1.61 s</div><div class="kpi__l">32k prefill, derived</div></div>
+  <div class="kpi"><div class="kpi__n">9.5 ms</div><div class="kpi__l">decode step, B=32, derived</div></div>
+  <div class="kpi"><div class="kpi__n">170&times;</div><div class="kpi__l">ITL spike on admission</div></div>
+</div>
+
+<p>That is the symptom. Every decoding request sees one inter-token gap of 1.61 s instead of 9.5 ms —
+a 170&times; spike — and a p99 ITL SLO of 50 ms is blown by a factor of 32 by a single admission.
+Nothing is broken and nothing is misconfigured; one long prompt simply owns the GPU for a second and
+a half. <a href="../01-the-core-loop/01-03-continuous-batching.html">Continuous batching</a> does not
+help: it removed the wait for a batch to <em>finish</em>, not the cost of a single iteration.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Stop treating a prefill as an atomic unit of work. A request in flight is nothing but a pair
+<code>(num_computed_tokens, num_tokens)</code>, and the KV cache is the record of how far along it
+is: if the cache holds K and V for positions $[0, k)$, the next forward pass can pick up at position
+$k$ with no state beyond that cache. The scheduler is therefore free to hand the model any number of
+new positions per iteration. Chunked prefill is the policy of handing it a bounded number.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — the same 32k prefill, unchunked and chunked.</b>
+    Iteration wall-clock is derived arithmetic on the H100 assumptions above. Note what does
+    <em>not</em> happen: the ITL spike is capped, not removed.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph NC["Unchunked - budget 32768, one prefill owns the pass"]
+        direction LR
+        N1["iter t<br/>32 decode tokens<br/>9.5 ms"] --> N2["iter t+1<br/>32768 prefill tokens<br/>807 TFLOP<br/>1610 ms"]
+        N2 --> N3["iter t+2<br/>33 decode tokens<br/>9.6 ms"]
+        N3 --> N4["ITL seen by every decoder<br/>1610 ms"]
+    end
+    subgraph CH["Chunked - budget 2048, decode tokens go in first"]
+        direction LR
+        C1["iter t<br/>32 decode<br/>9.5 ms"] --> C2["iter t+1<br/>32 decode + chunk 1 of 17<br/>2016 prefill tokens<br/>70 ms"]
+        C2 --> C3["iter t+2<br/>chunk 2 of 17<br/>74 ms"]
+        C3 --> C4["13 more iterations<br/>each about 4 ms longer<br/>attention grows with prefix"]
+        C4 --> C5["iter t+16 is the worst<br/>2016 tokens against a 30k prefix<br/>134 ms<br/>iter t+17 is a 512-token remainder"]
+        C5 --> C6["ITL seen by every decoder<br/>70 to 134 ms<br/>TTFT 1.7 s"]
+    end
+    NC --> CH
+  </script>
+</div>
+
+<p>Two things in Figure 1 deserve to be uncomfortable. Total prefill wall-clock is essentially
+unchanged — seventeen chunks summing to the same 807 TFLOP still take 1.61 s, plus about 56 ms for
+the decode tokens now riding along — because chunking does not change the FLOP count. And ITL does
+not return to 9.5 ms; it lands at one chunk's compute time, which is not even constant: chunk 17
+attends to 32k keys where chunk 1 attended to 2k, so it costs 134 ms against the first chunk's 70 ms.
+Chunked prefill converts an unbounded latency spike into a <em>bounded</em> one whose size you
+choose, and that choice is the whole engineering content of this chapter.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles</h2></div><div class="sec__body"><h3>Why splitting a prefill is correct, for free</h3>
+
+<p>The non-obvious part is that no compensation is needed. Consider query position $i$ in chunk
+$j$, which covers positions $[jc, (j{+}1)c)$ for chunk size $c$. Causal attention says $i$ attends
+only to keys at positions $0 \ldots i$. Positions $&lt; jc$ had their K and V written to the cache by
+chunks $0 \ldots j{-}1$; positions in $[jc, i]$ are in the current chunk's own K and V. So the
+softmax denominator for position $i$ ranges over exactly the same key set it would have in a single
+32k forward pass. No rescaling, no stitching of partial softmax statistics, no recomputation. The
+causal mask is what makes it free — a bidirectional encoder cannot be chunked this way, which is
+why vLLM disables the feature for encoder-decoder models.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/scheduler.py:L227-L236</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -&gt; None:
+        if is_encoder_decoder:
+            # Chunked prefill should be disabled for encoder-decoder models.
+            self.disable_chunked_mm_input = True
+            self.enable_chunked_prefill = False
+            self.long_prefill_token_threshold = 0
+            logger.info(
+                "Encoder-decoder models do not support chunked prefill nor"
+                " prefix caching; disabling both."
+            )</code></pre>
+</div>
+
+<p>The one piece of bookkeeping that <em>is</em> required: a non-final chunk's last position is not
+the end of the prompt, so the token sampled there is garbage. vLLM samples it anyway and discards
+it, which is cheaper than special-casing the sampler. The two blocks below are the V1 model runner,
+whose NumPy version of the predicate is the readable one; the V2 runner a dense model actually gets
+computes the same fact as <code>is_prefilling_np = num_computed_prefill_tokens_np &lt; prefill_len_np</code>
+(<code>vllm/v1/worker/gpu/model_runner.py:L1089</code>) and carries it through the batch state
+(<a href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html">&sect;11.4</a>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2302-L2311</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) &gt; 0
+        if not use_spec_decode:
+            # NOTE(woosuk): Due to chunked prefills, the batch may contain
+            # partial requests. While we should not sample any token
+            # from these partial requests, we do so for simplicity.
+            # We will ignore the sampled tokens from the partial requests.
+            # TODO: Support prompt logprobs.
+            logits_indices = query_start_loc[1:] - 1
+            spec_decode_metadata = None
+            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)</code></pre>
+</div>
+
+<p>The discard is a one-line predicate — partial means sequence length still short of prompt:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2160-L2165</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Record which requests should not be sampled,
+        # so that we could clear the sampled tokens before returning
+        self.discard_request_mask.np[:num_reqs] = (
+            self.optimistic_seq_lens_cpu[:num_reqs].numpy() &lt; num_tokens_np
+        )
+        self.discard_request_mask.copy_to_gpu(num_reqs)</code></pre>
+</div>
+
+<h3>The token budget, and why one slot is not one unit of work</h3>
+
+<p>Neither engine has a "chunk size" in the primitive sense. Both schedule against a per-iteration
+<em>token budget</em>: an integer count of query positions the next forward pass may contain.
+Requests draw from it in priority order until it is empty. Chunked prefill is simply what happens
+when a prefill request wants more positions than the budget has left — it takes what is left and
+comes back next iteration.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — one token budget, three iterations.</b>
+    Budget 2048, 32 decoding requests, one 32768-token prefill in flight. Decode tokens are placed
+    first and each costs one slot regardless of how much work it represents.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    B0["token_budget = 2048<br/>reset at the top of schedule"]
+    B0 --> R["running queue first<br/>32 decode requests<br/>1 slot each"]
+    R --> R1["budget 2048 minus 32 = 2016<br/>marginal cost of the 32 decodes<br/>4.3 ms total - 1.0 GEMM plus 3.3 KV read"]
+    R1 --> W["waiting queue next<br/>req wants 32768 minus computed"]
+    W --> CLAMP["num_new_tokens = min of<br/>32768 and 2016<br/>equals 2016"]
+    CLAMP --> F["forward pass<br/>2048 rows<br/>2016 prefill + 32 decode<br/>71 ms"]
+    F --> U["num_computed_tokens += 2016<br/>is_prefill_chunk = True<br/>sampled token discarded"]
+    U --> B1["iteration 2<br/>computed 2016 of 32768<br/>request now in the RUNNING queue<br/>clamped to 2016 again"]
+    B1 --> B2["iteration 16<br/>computed 30240 of 32768<br/>wants 2528, gets 2016<br/>iteration 17 finishes it<br/>first token emitted"]
+  </script>
+</div>
+
+<p>Here is the asymmetry that causes most tuning confusion. A budget slot is a row of the batched
+GEMM, and prefill and decode tokens each occupy one row for the same $2P$ FLOPs of weight math.
+But <em>attention</em> cost is proportional to the number of keys the query attends to: a decode
+token at 32k context reads 32,768 keys while a fresh prefill token at position 500 reads 500. And
+a decode-only pass has too few rows to cover the 16.06 GB weight stream, so it is bandwidth-bound
+and its per-slot cost explodes. Price a few iteration shapes:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — Llama-3-8B on H100, &pi;<sub>eff</sub> = 500 TFLOP/s, &beta;<sub>eff</sub> = 2.6 TB/s. Prefill slots cost about the same regardless of chunk size; decode slots cost up to 64&times; more.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Iteration contents</th><th>Slots</th><th>Dominant term</th><th>Time</th><th>&micro;s / slot</th></tr></thead>
+    <tbody>
+      <tr><td>2048-token prefill chunk, fresh prompt</td><td class="num">2048</td><td>34 TFLOP compute</td><td class="num">68 ms</td><td class="num">33</td></tr>
+      <tr><td>256-token prefill chunk, fresh prompt</td><td class="num">256</td><td>4.1 TFLOP compute</td><td class="num">8.3 ms</td><td class="num">32</td></tr>
+      <tr><td>256 decode tokens at 2k context</td><td class="num">256</td><td>84.8 GB HBM</td><td class="num">32.6 ms</td><td class="num">127</td></tr>
+      <tr><td>32 decode tokens at 2k context</td><td class="num">32</td><td>24.7 GB HBM</td><td class="num">9.5 ms</td><td class="num">297</td></tr>
+      <tr><td>16 decode tokens at 32k context</td><td class="num">16</td><td>84.8 GB HBM</td><td class="num">32.6 ms</td><td class="num">2038</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>One budget slot buys 33 &micro;s of prefill or 2 ms of long-context decode. The budget bounds batch
+<em>width</em>, not iteration <em>duration</em>, and it proxies for duration only when the batch is
+prefill-dominated. That is why "just lower <code>max_num_batched_tokens</code> until ITL is fine"
+stops working once resident contexts get long: the decode half of the iteration, which the budget
+barely constrains, becomes the term that sets ITL.</p>
+
+<h3>Why chunk size cannot go to 1</h3>
+
+<p>Chunking is FLOP-neutral. It is emphatically not byte-neutral. Split $S$ tokens into $N = S/c$
+chunks and two costs appear, both scaling as $1/c$:</p>
+
+<div class="math-display">$$\text{bytes}_{\text{HBM}}(c) \;=\; \underbrace{\frac{S}{c}\cdot 2P b_w}_{\text{weights re-streamed}} \;+\; \underbrace{k\,c\,\frac{N(N-1)}{2}}_{\text{KV re-read}} \;\approx\; \frac{S}{c}\Big(2Pb_w + \frac{kS}{2}\Big)$$</div>
+
+<p>where $k = 2 L h_{kv} d_h b$ is the per-token KV footprint (128 KiB here). Every chunk is a
+separate set of kernel launches, so every chunk re-streams the full 16.06 GB of weights; and chunk
+$j$ must read the K and V that chunks $0 \ldots j{-}1$ wrote, which is $k \cdot jc$ bytes. At 32k
+the KV term is $kS/2 = 2.15$ GB against a weight term of 16.06 GB, so weight re-streaming dominates;
+the two cross at $S = 4Pb_w/k \approx 245$k tokens, and at 128k the KV re-read is already 53% of the
+weight cost.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — 32,768-token Llama-3-8B prefill. "ms / chunk" is the <em>mean</em> chunk, max(compute, HBM bytes / &beta;<sub>eff</sub>); the last chunk always costs more than the first. FLOPs are constant at 807 TFLOP; only the bytes move.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Chunk size c</th><th>Chunks</th><th>ms / chunk</th><th>Bound by</th><th>Total HBM</th><th>Total prefill</th><th>vs. unchunked</th></tr></thead>
+    <tbody>
+      <tr><td class="num">8192</td><td class="num">4</td><td class="num">404</td><td>compute</td><td class="num">75 GB</td><td class="num">1.61 s</td><td class="num">1.00&times;</td></tr>
+      <tr><td class="num">2048</td><td class="num">16</td><td class="num">101</td><td>compute</td><td class="num">293 GB</td><td class="num">1.61 s</td><td class="num">1.00&times;</td></tr>
+      <tr><td class="num">512</td><td class="num">64</td><td class="num">25.2</td><td>compute</td><td class="num">1.16 TB</td><td class="num">1.61 s</td><td class="num">1.00&times;</td></tr>
+      <tr><td class="num">256</td><td class="num">128</td><td class="num">12.6</td><td>compute</td><td class="num">2.33 TB</td><td class="num">1.61 s</td><td class="num">1.00&times;</td></tr>
+      <tr><td class="num">128</td><td class="num">256</td><td class="num">7.0</td><td>HBM</td><td class="num">4.66 TB</td><td class="num">1.79 s</td><td class="num">1.11&times;</td></tr>
+      <tr><td class="num">32</td><td class="num">1024</td><td class="num">7.0</td><td>HBM</td><td class="num">18.6 TB</td><td class="num">7.17 s</td><td class="num">4.45&times;</td></tr>
+      <tr><td class="num">1</td><td class="num">32768</td><td class="num">7.0</td><td>HBM</td><td class="num">596 TB</td><td class="num">229 s</td><td class="num">142&times;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>The transition between rows 4 and 5 is the rule to remember. A chunk's weight GEMMs have
+arithmetic intensity $I \approx c$ FLOP/byte — each weight byte is read once and used for $c$ rows —
+and the roofline ridge point is $I^{*} = \pi/\beta$: $989/3.35 = 295$ on H100 spec sheets, $500/2.6
+= 192$ on the achieved numbers assumed here. A chunk stops paying for its own weight stream at
+$c \approx 200$. Below that you buy lower ITL with pure waste.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Rule</span>
+  <p>Chunk size must stay above the roofline ridge point of your GPU in your dtype — a few hundred
+  tokens on Hopper, higher on Blackwell. Both engines' smallest shipped default is 2048, an order of
+  magnitude clear of it. Derive your own ridge point in
+  <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>; measure the chunk-size sweep in
+  <a href="../LABS.html#index">Lab 05</a>.</p>
+</div></div></section>
+<section class="sec" id="how-production-systems-do-it" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM: clamp against a shared budget</h3>
+
+<p>In vLLM V1 there is no prefill phase. <code class="c-vllm">Scheduler.schedule()</code> opens with a
+comment that is the clearest statement of the design in either codebase:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L484-L497</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def schedule(self, throttle_prefills: bool = False) -&gt; SchedulerOutput:
+        self.current_step += 1
+        # NOTE(woosuk) on the scheduling algorithm:
+        # There's no "decoding phase" nor "prefill phase" in the scheduler.
+        # Each request just has the num_computed_tokens and
+        # num_tokens_with_spec. num_tokens_with_spec =
+        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
+        # At each step, the scheduler tries to assign tokens to the requests
+        # so that each request's num_computed_tokens can catch up its
+        # num_tokens_with_spec. This is general enough to cover
+        # chunked prefills, prefix caching, speculative decoding,
+        # and the "jump decoding" optimization in the future.</code></pre>
+</div>
+
+<p>The budget is initialised once per call and drawn down by the running queue before the waiting
+queue is touched — that ordering is what "decode is prioritised" means concretely:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L503-L507</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        num_scheduled_tokens: dict[str, int] = {}
+        token_budget = self.max_num_scheduled_tokens
+        spec = self.vllm_config.speculative_config
+        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
+        input_budget = self.scheduler_config.max_num_batched_tokens</code></pre>
+</div>
+
+<p>And this — five lines in the waiting-queue loop — <em>is</em> chunked prefill. There is no other
+implementation of it in vLLM:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L935-L940</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    request_token_budget = min(token_budget, input_budget - draft_slots)
+                    # Number of tokens to be scheduled.
+                    # We use `request.num_tokens` instead of
+                    # `request.num_prompt_tokens` to consider the resumed
+                    # requests, which have output tokens.
+                    num_new_tokens = request.num_tokens - num_computed_tokens</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L959-L975</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    threshold = self.scheduler_config.long_prefill_token_threshold
+                    if 0 &lt; threshold &lt; num_new_tokens:
+                        num_new_tokens = threshold
+
+                    # chunked prefill has to be enabled explicitly to allow
+                    # pooling requests to be chunked
+                    if (
+                        not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens &gt; request_token_budget
+                    ):
+                        # If chunked_prefill is disabled,
+                        # we can stop the scheduling here.
+                        break
+
+                    num_new_tokens = min(num_new_tokens, request_token_budget)
+                    assert num_new_tokens &gt; 0</code></pre>
+</div>
+
+<p>Read the disabled path carefully: with <code>enable_chunked_prefill=False</code> the scheduler does
+not run a smaller prefill, it <code>break</code>s out of admission entirely and the request waits for
+an iteration with a big enough budget — §1's head-of-line block, restored on purpose.</p>
+
+<p>An in-flight prefill returns to the <em>running</em> queue, where the identical clamp appears at
+<code>vllm/v1/core/sched/scheduler.py:L566-L575</code>. One predicate then marks the request as
+mid-prefill, which downstream code uses to suppress structured-output advancement and speculative
+drafting:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L1400-L1412</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        for req_id, num_scheduled_token in num_scheduled_tokens.items():
+            request = self.requests[req_id]
+            request.num_computed_tokens += num_scheduled_token
+            request.num_in_flight_tokens += num_scheduled_token
+            if self.defer_block_free:
+                # Record the in-flight step, to fence deferred block freeing.
+                request.last_sched_seq = self.sched_step_seq
+            request.is_prefill_chunk = request.num_computed_tokens &lt; (
+                request.num_tokens + request.num_output_placeholders
+            )</code></pre>
+</div>
+
+<p><b>Defaults at <code>a556f3f</code>.</b> <code>enable_chunked_prefill</code> is <code>True</code>
+in <code>SchedulerConfig</code> (<code>vllm/config/scheduler.py:L74-L76</code>), resolved per model
+from <code>model_config.is_chunked_prefill_supported</code>
+(<code>vllm/engine/arg_utils.py:L2678-L2683</code>). The budget default is <em>not</em> the
+<code>DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048</code> class constant at
+<code>vllm/config/scheduler.py:L41-L43</code>, whose own docstring calls it "mainly for convenience
+when testing". The real default is chosen by device memory and usage context:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/engine/arg_utils.py:L2606-L2628</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
+        # throughput, see PR #17885 for more details.
+        # So here we do an extra device name check to prevent such regression.
+        if device_memory &gt;= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with &gt;= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory &gt;= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }</code></pre>
+</div>
+
+<p>So an H100 serving over the OpenAI-compatible endpoint defaults to a budget of <b>8192</b>, the
+same H100 driven from the offline <code>LLM</code> class defaults to <b>16384</b>, and anything
+below 70 GB — or any A100, by explicit name check — falls to <b>2048</b> for the API server and
+<b>8192</b> offline (<code>vllm/engine/arg_utils.py:L2629-L2639</code>).</p>
+
+<p><code>long_prefill_token_threshold</code> is a second, separate control. It defaults to
+<code>0</code>, meaning disabled (<code>vllm/config/scheduler.py:L70-L72</code>), and it is applied
+<em>before</em> the budget clamp in both loops. The difference matters: the budget clamp is
+opportunistic, so a 32k prompt arriving at an idle server with a 16384 budget gets all 16384 tokens
+and produces a 400 ms iteration. The threshold is absolute — set it to 2048 and no request ever
+gets more than 2048 prefill positions in one pass, however empty the budget is. It is the knob for
+"bound my worst-case ITL" as distinct from "bound my batch width".</p>
+
+<h3>SGLang: one in-flight chunked request, carried by hand</h3>
+
+<p>SGLang reaches the same outcome through a visibly different structure. Its loop picks a batch
+<em>kind</em> per iteration rather than filling one unified batch:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L3188-L3196</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if new_batch is not None:
+            # Run prefill first if possible
+            ret = new_batch
+        else:
+            # Run decode (skip for prefill-only batches)
+            if not running_batch.is_empty() and not running_batch.is_prefill_only:
+                running_batch = self.update_running_batch(running_batch)
+                ret = running_batch if not running_batch.is_empty() else None
+            else:</code></pre>
+</div>
+
+<p>The budget lives in <code class="c-sglang">PrefillAdder</code>, which holds two counters:
+<code>rem_input_tokens</code> (from <code>--max-prefill-tokens</code>, default 16384) and
+<code>rem_chunk_tokens</code> (from <code>--chunked-prefill-size</code>). <code>None</code> for the
+latter means chunking is off. Decode tokens that will ride along are subtracted from both up front:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_policy.py:L537-L546</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        self.rem_input_tokens = rem_input_tokens - num_mixed_decode_tokens
+        self.rem_chunk_tokens = rem_chunk_tokens
+        self.dllm_config = dllm_config
+
+        if self.dllm_config is not None:
+            self._init_dllm_meta(dllm_config)
+
+        if self.rem_chunk_tokens is not None:
+            self.rem_chunk_tokens -= num_mixed_decode_tokens
+        self.rem_total_token_offset = num_mixed_decode_tokens</code></pre>
+</div>
+
+<p>The split itself is the <code>else</code> branch of <code>add_one_req</code>. Note the page
+alignment — SGLang truncates the chunk down to a multiple of <code>page_size</code> in <em>two</em>
+places, once on the chunk length and once on the resulting absolute prefix length, so that a chunk
+boundary is always a KV page boundary:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_policy.py:L1386-L1424</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            else:
+                # Make sure at least one page is available
+                trunc_len = chunk_tokens_limit // self.page_size * self.page_size
+
+                if trunc_len &lt;= 0:
+                    return AddReqResult.OTHER
+# ...
+                now_input_len = trunc_len + len(req.prefix_indices)
+                now_input_len = now_input_len // self.page_size * self.page_size
+                trunc_len = now_input_len - len(req.prefix_indices)
+
+                if trunc_len &lt;= 0:
+                    return AddReqResult.OTHER
+# ...
+                # Chunked prefill
+                req.set_extend_range(
+                    len(req.prefix_indices), len(req.prefix_indices) + trunc_len
+                )
+
+                self.can_run_list.append(req)
+                self.new_chunked_req = req</code></pre>
+</div>
+
+<p>And here is the real design difference. SGLang tracks <b>exactly one</b> in-flight chunked request
+on the scheduler object, and the invariant is enforced by an assertion:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L3461-L3467</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if adder.new_chunked_req is not None:
+            # Update chunked prefill
+            assert self.chunked_req is None
+            self.chunked_req = adder.new_chunked_req
+
+        if self.chunked_req is not None:
+            self.chunked_req.inflight_middle_chunks += 1</code></pre>
+</div>
+
+<p>Next iteration, that request is re-entered explicitly at the head of the adder, before any waiting
+request is considered:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L3341-L3343</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if self.chunked_req is not None:
+            self.chunked_req.init_next_round_input()
+            self.chunked_req = adder.add_chunked_req(self.chunked_req)</code></pre>
+</div>
+
+<p><code>add_chunked_req</code> returns the request if it is still truncated and <code>None</code> when
+the last chunk fits, which is how the field clears itself
+(<code>python/sglang/srt/managers/schedule_policy.py:L1036-L1053</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — two ways to carry a half-finished prefill.</b>
+    vLLM keeps the request in one queue and lets the same clamp fire again; SGLang parks it in a
+    dedicated slot and re-admits it by hand.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    V0["vLLM V1 schedule<br/>one unified batch"] --> V1["running queue loop<br/>decodes AND in-flight chunks<br/>same min clamp at L566"]
+    V1 --> V2["waiting queue loop<br/>new arrivals<br/>same min clamp at L974"]
+    V2 --> V3["any number of prefills<br/>may be partially computed<br/>state lives in num_computed_tokens"]
+    S0["SGLang get_next_batch_to_run<br/>prefill batch or decode batch"] --> S1["self.chunked_req<br/>at most one, asserted"]
+    S1 --> S2["adder.add_chunked_req<br/>re-admitted first<br/>returns None when done"]
+    S2 --> S3["PrefillAdder.add_one_req<br/>new arrivals fill<br/>rem_chunk_tokens"]
+    S3 --> S4["mixed batch only if<br/>enable_mixed_chunk<br/>default False"]
+  </script>
+</div>
+
+<p>Why the difference? A mid-chunk request holds a lock on its radix-cache tree node, and permitting
+several simultaneous partial prefills would multiply the pinned, half-written subtrees the cache has
+to reason about; the single-slot invariant keeps that analysable. The cost is that a second long
+prompt cannot start until the first finishes chunking, so under a burst of long prompts SGLang
+serialises where vLLM interleaves — and vLLM pays for that flexibility with an
+<code>_inflight_prefills</code> set and per-request state on every path that cares.</p>
+
+<p><b>Defaults at <code>7d89325</code>.</b> <code>chunked_prefill_size</code> is <code>None</code> in
+<code>ServerArgs</code> (<code>python/sglang/srt/server_args.py:L811-L815</code>) and auto-tuned from
+GPU memory, together with the decode CUDA-graph batch size, in
+<code>_handle_gpu_memory_settings</code>:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Cited — <code>python/sglang/srt/server_args.py:L4866-L4925</code>, read at <code>7d89325</code>.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>GPU memory</th><th>Example cards, per the comments</th><th><code>chunked_prefill_size</code></th><th>decode <code>max_bs</code></th></tr></thead>
+    <tbody>
+      <tr><td>&lt; 20 GB</td><td>T4, 4080</td><td class="num">2048</td><td class="num">8</td></tr>
+      <tr><td>&lt; 35 GB</td><td>A10, 4090, 5090</td><td class="num">2048</td><td class="num">24 / 80</td></tr>
+      <tr><td>&lt; 60 GB</td><td>A100 40GB, L40</td><td class="num">4096</td><td class="num">32 / 160</td></tr>
+      <tr><td>&lt; 90 GB</td><td>H100, A100</td><td class="num">8192</td><td class="num">256 / 512</td></tr>
+      <tr><td>&lt; 160 GB</td><td>H20, H200</td><td class="num">8192</td><td class="num">256 / 512</td></tr>
+      <tr><td>&ge; 160 GB</td><td>B200, MI300</td><td class="num">16384</td><td class="num">512</td></tr>
+      <tr><td>unknown</td><td>fallback</td><td class="num">4096</td><td class="num">160</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>The two split values are <code>tp_size &lt; 4</code> versus otherwise. The same docstring explains
+why this is not purely a latency knob: <code>mem_fraction_static</code> &mdash; SGLang's single knob
+for how much device memory the weights and KV pool may claim, owned by
+<a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> &mdash; is
+derived from it, since
+"the activation memory is proportional to the chunked_prefill_size", via
+<code>reserved_mem = chunked_prefill_size * 1.5 + max_bs * 2</code> GB. Raising the chunk size on
+SGLang silently shrinks the KV pool.</p>
+
+<h3>Piggybacking: a chunk and a decode in one pass</h3>
+
+<p>vLLM mixes unconditionally — the running loop and the waiting loop write into the same
+<code>num_scheduled_tokens</code> dict, so a chunk and thirty-two decodes become one forward pass with
+2048 rows. SGLang gates it behind a flag that is <b>off</b> by default:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L996-L1000</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    enable_mixed_chunk: A[
+        bool,
+        "Enabling mixing prefill and decode in a batch when using chunked prefill.",
+        NS("schedule"),
+    ] = False</code></pre>
+</div>
+
+<p>When on, <code>ScheduleBatch.mix_with_running</code> sets <code>ForwardMode.MIXED</code> and appends
+each running request as a one-token extend
+(<code>python/sglang/srt/managers/schedule_batch.py:L2758-L2788</code>). Price the 32 decodes both
+ways (derived): standalone, 16.06 GB of weights plus 8.59 GB of KV, i.e. 9.5 ms. Folded into a
+2016-token chunk the prefill has already paid for the weight stream, so their marginal cost is 32
+extra GEMM rows (about 1.0 ms) plus their own 8.59 GB of KV attention (3.3 ms) — <b>4.3 ms instead
+of 9.5 ms, a 2.2&times; reduction</b>. The saving shrinks as the decode batch grows, because a wide
+decode batch is compute-bound on its own and no longer needs to borrow the weight read.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace</h2></div><div class="sec__body"><p>One 32,768-token request through vLLM V1 at <code>a556f3f</code>, budget 2048, 32 requests already
+decoding. Function names in call order.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">iter t+1</span><h4>Admission and first clamp</h4>
+  <p><code>Scheduler.schedule()</code> sets <code>token_budget = 2048</code> (L504). The running loop
+  spends 32 slots on decodes. The waiting loop reaches our request, computes
+  <code>request_token_budget = min(2016, ...)</code> (L935), then
+  <code>num_new_tokens = 32768 - 0</code> (L940), then <code>min(num_new_tokens, 2016)</code> (L974).
+  <code>_inflight_prefills.add(request)</code> fires at L1150 because
+  <code>0 + 2016 &lt; 32768</code>.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">issue</span><h4>Post-schedule bookkeeping</h4>
+  <p><code>Scheduler._update_after_schedule()</code> advances
+  <code>num_computed_tokens += 2016</code> and sets <code>is_prefill_chunk = True</code> (L1400-L1409)
+  <em>before</em> the model runs, so the next <code>schedule()</code> can be issued without waiting for
+  output.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">forward</span><h4>The pass itself</h4>
+  <p><code>GPUModelRunner.execute_model()</code> builds
+  <code>discard_request_mask = seq_lens &lt; num_tokens</code> (L2162), which is <code>True</code> for
+  our request. <code>logits_indices = query_start_loc[1:] - 1</code> (L2309) samples a token for it
+  anyway; L3818 collects the discard indices and drops it.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">iter t+2..t+17</span><h4>Return via the running queue</h4>
+  <p>The request is now <code>RUNNING</code>, so the <em>running</em> loop serves it, with the same
+  <code>min</code> at L566-L575. Fifteen more passes of 2016 and one of 512 finish the prompt; on
+  that last one <code>is_prefill_chunk</code> flips to <code>False</code>, the sampled token
+  survives, and TTFT is recorded.</p></div>
+</div>
+
+<p>Seventeen iterations, not sixteen, because the decodes take 32 slots off the top of each:
+$\lceil 32768/2016 \rceil = 17$. That is also why
+<code>max_num_batched_tokens &gt;= max_num_seqs</code> is a hard error — at
+<code>max_num_seqs = 2048</code> with a budget of 2048, decodes would take every slot and no prefill
+would ever advance.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">startup</span><h4>Budget below context length, chunking off</h4>
+  <p>Disabling chunked prefill turns the budget into a hard cap on prompt length, so vLLM refuses to
+  start: <code>max_num_batched_tokens (2048) is smaller than max_model_len (32768). This effectively
+  limits the maximum sequence length to max_num_batched_tokens and makes vLLM reject longer
+  sequences.</code> — <code>vllm/config/scheduler.py:L248-L261</code>. The fix is almost never to raise
+  the budget; it is to stop disabling chunked prefill.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">startup</span><h4>Starving prefill entirely</h4>
+  <p><code>max_num_batched_tokens (1024) must be greater than or equal to max_num_seqs (2048).</code>
+  — <code>vllm/config/scheduler.py:L263-L268</code>. Guarantees at least one slot per running sequence
+  so the budget cannot be fully consumed by decodes.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">startup</span><h4>Chunk not page-aligned</h4>
+  <p>SGLang asserts <code>chunked_prefill_size must be divisible by page_size</code>
+  (<code>python/sglang/srt/server_args.py:L9288-L9291</code>) whenever chunking is on and the node is
+  not a disaggregated decode worker. Set <code>--page-size 64</code> and
+  <code>--chunked-prefill-size 3000</code> and you will not get a server.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">silent</span><h4>Chunking silently disabled</h4>
+  <p>SGLang turns it off for multimodal models on the Transformers backend, logging
+  <code>Chunked prefill is disabled for multimodal models with the Transformers backend to avoid
+  partial multimodal chunk mismatches.</code>
+  (<code>python/sglang/srt/managers/scheduler.py:L1170-L1180</code>). Your ITL regression is a log line,
+  not a bug.</p></div>
+
+  <div class="ve-card"><span class="ve-card__k">tuning</span><h4>Lowering the budget stops helping</h4>
+  <p>Once resident contexts are long, ITL is set by the decode half of the mixed batch, whose cost the
+  budget barely constrains — see the 2038 &micro;s/slot row above. Cap KV residency or use
+  <code>--long-prefill-token-threshold</code> instead of shrinking the budget further. On SGLang the
+  opposite trap: <code>mem_fraction_static</code> is derived from
+  <code>chunked_prefill_size * 1.5 + max_bs * 2</code> GB of reserved activation memory, so doubling
+  the chunk to buy TTFT can cost enough KV pool to trigger preemption.</p></div>
+</div>
+
+<p>Two debugging entry points. vLLM logs its budget once at startup:
+<code>Chunked prefill is enabled with max_num_batched_tokens=%d.</code>
+(<code>vllm/config/scheduler.py:L241-L246</code>) — if that number is not what you passed, something
+in <code>_set_default_max_num_seqs_and_batched_tokens_args</code> clamped it, most likely
+<code>min(max_num_seqs * max_model_len, ...)</code> at
+<code>vllm/engine/arg_utils.py:L2851-L2856</code>. On SGLang, an in-flight chunk increments
+<code>inflight_middle_chunks</code> every iteration
+(<code>python/sglang/srt/managers/scheduler.py:L3466-L3467</code>); a counter that keeps climbing means
+chunks are being truncated far below the configured size, usually by KV pressure in
+<code>add_chunked_req</code>.</p></div></section>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Pick a chunk size from an ITL SLO, don't guess it. The arithmetic is one line: a chunk of $c$
+tokens costs roughly $2Pc/\pi_{\text{eff}}$ once $c$ is above the ridge point, so</p>
+
+<div class="math-display">$$c \;\approx\; \frac{\pi_{\text{eff}} \cdot \big(\text{ITL}_{\text{target}} - t_{\text{decode}}\big)}{2P}$$</div>
+
+<p>For a 60 ms p99 ITL target on Llama-3-8B/H100 with $t_{\text{decode}} = 9.5$ ms:
+$c \approx 500\times10^{12}\times0.0505 / 1.606\times10^{10} = 1572$, so 1536 after page alignment —
+which is why 2048 feels slightly coarse for a chat SLO and 512 leaves throughput on the table. This
+is a <em>lower</em> bound on chunk cost: it counts only the weight GEMMs, and the attention term adds
+$4Lh d_h c \cdot s_{\text{prefix}}/\pi_{\text{eff}}$ on top, which is what makes the last chunk of a
+long prompt roughly twice the first. Budget for the last chunk, not the average.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">flip one flag at a time and diff the ITL histogram</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: bound the batch width, then bound the worst-case chunk independently
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --max-model-len 32768 --max-num-seqs 64 \
+  --max-num-batched-tokens 2048 \
+  --long-prefill-token-threshold 1536
+
+# vLLM: the pathological baseline this chapter opened on
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --max-model-len 32768 --no-enable-chunked-prefill \
+  --max-num-batched-tokens 32768
+
+# SGLang: chunk size and the mixed batch are separate decisions
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --context-length 32768 --chunked-prefill-size 2048 --enable-mixed-chunk
+
+# SGLang: chunking off
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --context-length 32768 --chunked-prefill-size -1</code></pre>
+</div>
+
+<p>The workload that exposes the effect is one long prompt injected into a stream of short ones —
+exactly what <a href="../LABS.html#index">Lab 05</a> runs. Watch p99 ITL, p99 TTFT, and output
+tokens/s together; any two can be made to look good by sacrificing the third. Methodology
+(open-loop arrivals, warmup, goodput rather than throughput) is
+<a href="../10-benchmarking/10-03-honest-benchmarking.html">§10.3</a>.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Provenance</span>
+  <p>Every latency and byte figure in this chapter is <em>derived</em> — arithmetic on published model
+  shapes and the two stated hardware assumptions. None of it was measured; the author has no GPU.
+  Lab 05 is where these become measurements, and expect the derived chunk times to be optimistic by
+  whatever your kernel-launch and scheduling overhead turns out to be.</p>
+</div></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the source.</b> In <code>vllm/v1/core/sched/scheduler.py</code>, the same clamp appears
+  around L566 and around L974. One of them handles a request that has already been partially
+  prefilled and one handles a fresh arrival. Which is which, and what would break if the running-queue
+  clamp were removed?</li>
+
+  <li><b>Predict, then verify.</b> You run vLLM on an A100 80GB via the OpenAI server with no
+  <code>--max-num-batched-tokens</code>. Predict the budget it will pick. Then read
+  <code>vllm/engine/arg_utils.py:L2606-L2639</code> and check.</li>
+
+  <li><b>Do the arithmetic.</b> Llama-3-70B is $L=80$, $h_{kv}=8$, $d_h=128$, $P = 70.6\times10^{9}$.
+  Compute its per-token KV bytes and the total HBM traffic of a 32k prefill chunked at $c = 2048$ on
+  TP=8. Which term dominates, and does the answer change at 128k context?</li>
+
+  <li><b>Predict, then verify.</b> On SGLang, set <code>--chunked-prefill-size 2048</code> and send two
+  32k prompts simultaneously. Predict how many iterations pass before the <em>second</em> one begins
+  prefilling, given the <code>assert self.chunked_req is None</code> at
+  <code>python/sglang/srt/managers/scheduler.py:L3463</code>. Now predict the same for vLLM.</li>
+
+  <li><b>Design.</b> Your SLO is p99 ITL &le; 25 ms and p99 TTFT &le; 4 s for prompts up to 128k on
+  Llama-3-8B/H100. Derive a chunk size, check it against the ridge point, then compute the resulting
+  TTFT for a 128k prompt. Is the SLO satisfiable on one GPU? If not, name the chapter that fixes it.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> L566 is the running-queue loop, serving requests already in
+  <code>RequestStatus.RUNNING</code> — decodes and in-flight prefill chunks alike, since V1 does not
+  distinguish them. L974 is the waiting-queue loop for fresh admissions. Remove the running-queue
+  clamp and a resumed prefill asks for all its remaining tokens at once, blowing
+  <code>assert total_num_scheduled_tokens &lt;= self.max_num_scheduled_tokens</code> at L1179:
+  chunking would apply only to each request's first chunk.</p>
+
+  <p><b>2.</b> 2048. The A100 has 80 GB so it clears the <code>&gt;= 70 * GiB_bytes</code> test, but the
+  branch also requires <code>"a100" not in device_name</code>, added because larger budgets regressed
+  A100 throughput (PR #17885, named in the comment). It falls to the <code>else</code>
+  branch: 8192 offline, 2048 for the API server.</p>
+
+  <p><b>3.</b> $k = 2\cdot80\cdot8\cdot128\cdot2 = 327{,}680$ B = 320 KiB/token. On TP=8 each rank
+  streams 17.6 GB of weights and holds one KV head, i.e. 40 KiB/token. Per rank at 32k with
+  $N = 16$: weights re-streamed $= 283$ GB, KV re-read
+  $= 40\text{KiB} \times 2048 \times 120 = 10.1$ GB — weights dominate by 28&times;. At 128k,
+  $N = 64$: weights 1.13 TB, KV re-read 169 GB, a ratio of 6.7&times;. The ratio keeps falling
+  because the KV term is quadratic in $S$ and the weight term only linear.</p>
+
+  <p><b>4.</b> SGLang: prompt two cannot start until prompt one finishes, because
+  <code>self.chunked_req</code> holds at most one request and the assertion enforces it — 16
+  iterations of head-of-line blocking on its TTFT. vLLM: both sit in the running queue and the clamp
+  fires per request in queue order, so with a small budget prompt one still consumes it each
+  iteration; but that is a consequence of the budget, not an invariant, and a larger budget lets the
+  two genuinely interleave.</p>
+
+  <p><b>5.</b> $c = 500\times10^{12}\times(0.025 - 0.0095)/1.606\times10^{10} = 483$, round to 512 for
+  page alignment — comfortably above the 192–295 ridge point, so no waste. But a 128k prefill is
+  $2PS + 2Lhd_hS^2 = 6.6$ PFLOP, i.e. 13.2 s at 500 TFLOP/s: more than 3&times; over the 4 s TTFT
+  budget, and chunk size cannot help because FLOPs are invariant. One GPU cannot satisfy it. The
+  fixes are tensor parallelism
+  (<a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a>), prefix caching if the 128k is
+  shared (<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a>), or moving prefill to
+  its own machines — <a href="../01-the-core-loop/01-06-pd-disaggregation.html">§1.6</a>.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="key-takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>A partially prefilled sequence is not a special state — it is a sequence whose KV cache covers
+  $[0,k)$, and causal masking makes chunk $j$'s softmax denominator identical to the unchunked one.
+  The only bookkeeping is <code>discard_request_mask = seq_lens &lt; num_tokens</code>.</li>
+
+  <li>Chunking bounds the ITL spike; it does not remove it. Here ITL goes from 1610 ms to 70–134 ms,
+  not back to 9.5 ms — and it is not flat, because a late chunk attends to far more keys than an
+  early one. The floor is one chunk of compute plus the decode half of the batch.</li>
+
+  <li>The chunk is not a parameter — it is the residue of a token budget shared with decode. Both
+  engines subtract decode tokens first, and a decode slot can cost 60&times; a prefill slot in
+  wall-clock, which is why the budget is a poor proxy for iteration duration at long context.</li>
+
+  <li>Shrinking the chunk costs HBM traffic linear in $1/c$: every chunk re-streams all weights and
+  re-reads the KV earlier chunks wrote. The floor is the ridge point $\pi/\beta$ — below roughly 200
+  rows on H100 a chunk cannot pay for its own weight stream, and $c = 1$ turns 1.6 s into 229 s.</li>
+
+  <li>vLLM clamps every request against one shared budget in one unified batch, allowing several
+  partial prefills at once; SGLang carries exactly one asserted <code>chunked_req</code> and picks a
+  batch kind per iteration, which keeps radix-cache locking analysable at the cost of serialising
+  concurrent long prompts.</li>
+
+  <li>Defaults move: at <code>a556f3f</code> vLLM's budget is 8192 on an H100 API server and 2048 on
+  an A100 by explicit name check; at <code>7d89325</code> SGLang auto-tunes
+  <code>chunked_prefill_size</code> from GPU memory (2048–16384) and leaves
+  <code>--enable-mixed-chunk</code> off.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://arxiv.org/pdf/2308.16369">SARATHI: Efficient LLM Inference by Piggybacking
+  Decodes with Chunked Prefills</a> — the original chunk-plus-piggyback formulation. Linked directly
+  from vLLM's own tuning guide at <code>docs/configuration/optimization.md:L80</code>.</li>
+  <li><a href="https://arxiv.org/pdf/2401.08671">Taming Throughput-Latency Tradeoff in LLM Inference
+  with Sarathi-Serve</a> (OSDI '24) — the stall-free-batching scheduler and the ITL/throughput curves
+  this chapter's trade-off section restates. Also linked from the same vLLM doc line.</li>
+  <li><code>docs/configuration/optimization.md:L49-L81</code> in the vLLM tree — the maintainers'
+  own tuning advice, including "smaller values (e.g. 2048) achieve better ITL" and "for optimal
+  throughput, set <code>max_num_batched_tokens &gt; 8192</code>".</li>
+  <li>vLLM PR #17885, named in the comment at <code>vllm/engine/arg_utils.py:L2606-L2608</code>, is
+  the source of the A100-specific default. Worth reading for how a "bigger is better" default was
+  found to regress one card.</li>
+  <li>Next: <a href="../01-the-core-loop/01-06-pd-disaggregation.html">§1.6</a> takes the same problem
+  to its conclusion — if prefill and decode want different schedulers, give them different machines.
+  Chunked prefill is the single-node answer; disaggregation is the multi-node one, and they are not
+  mutually exclusive.</li>
+</ul></div></section>
+<div class="pager"><a href="01-04-the-scheduler.html"><div class="pager__k">← Previous</div><div class="pager__t">The scheduler: states, admission, preemption</div></a><a class="pager__next" href="01-06-pd-disaggregation.html"><div class="pager__k">Next →</div><div class="pager__t">Prefill–decode disaggregation</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles</a>
+<a href="#how-production-systems-do-it">How production systems do it</a>
+<a href="#worked-trace">Worked trace</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#key-takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>
