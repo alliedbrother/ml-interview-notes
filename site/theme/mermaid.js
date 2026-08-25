@@ -1,5 +1,4 @@
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
 
 const config = {
   fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
@@ -13,9 +12,24 @@ addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
 
 const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
 
-mermaid.registerLayoutLoaders(elkLayouts);
+/* ELK is fetched from a CDN at view time. A static import cannot be caught, so
+   one failed request would leave mermaid configured for a layout engine it does
+   not have — and mermaid reports that by writing "Syntax error in text" into the
+   page, blaming content that is perfectly valid. Load it dynamically and fall
+   back to the built-in dagre layout instead: a diagram laid out differently
+   beats a red box claiming the diagram is broken. */
+let layoutEngine = 'elk';
+try {
+  const elkLayouts = (await import(
+    'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs'
+  )).default;
+  mermaid.registerLayoutLoaders(elkLayouts);
+} catch (err) {
+  layoutEngine = 'dagre';
+  console.warn('[mermaid] ELK layout unavailable, falling back to dagre:', err);
+}
 mermaid.initialize({
-  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  startOnLoad: false, theme: 'base', look: 'classic', layout: layoutEngine,
   themeVariables: {
     fontFamily: "'DM Sans', system-ui, sans-serif",
     fontSize: '17px',

@@ -123,6 +123,22 @@ def main() -> int:
         check((OUT / "assets" / "prebuilt-bridge.css").is_file(),
               "missing assets/prebuilt-bridge.css")
 
+    # ---- mermaid loaders must degrade instead of blaming the content.
+    #      A static elk import cannot be caught, and mermaid reports a missing
+    #      layout engine as "Syntax error in text" — telling readers a perfectly
+    #      valid diagram is broken.
+    loaders = sorted(OUT.rglob("mermaid.js"))
+    check(bool(loaders), "no mermaid loader found in the output")
+    for loader in loaders:
+        src = loader.read_text(encoding="utf-8")
+        rel = loader.relative_to(OUT)
+        check("import elkLayouts from" not in src,
+              f"{rel}: static elk import — a CDN failure cannot be caught")
+        check("await import(" in src and "layout-elk" in src,
+              f"{rel}: elk is not loaded dynamically")
+        check("layoutEngine" in src and "'dagre'" in src,
+              f"{rel}: no dagre fallback when elk is unavailable")
+
     # ---- assets exist
     for asset in ("style.css", "page.js", "mermaid.js", "katex-init.js", "favicon.svg"):
         check((OUT / "assets" / asset).is_file(), f"missing asset assets/{asset}")
