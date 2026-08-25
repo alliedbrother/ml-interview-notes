@@ -1,0 +1,2271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPTQ, AWQ, SmoothQuant, and calibration — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="kernels">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i is-current" href="04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 4 · Quantization · 04-02</div>
+<h1>GPTQ, AWQ, SmoothQuant, and calibration</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>csrc/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Weights are boring. Take any trained transformer, look at a linear layer's weight matrix, and
+you find a well-behaved unimodal distribution you could quantize to 4 bits with a ruler. Then look at what
+flows <em>into</em> that layer and the floor drops out: a handful of feature channels carrying values 100&times;
+everything else, in the same channels for every token, and you cannot delete them because the model dies.
+GPTQ, AWQ and SmoothQuant are three different answers to that one asymmetry.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem: six dimensions that break everything</h2></div><div class="sec__body"><p>Quantize the weights of OPT-6.7B to INT8 per-channel and the model is fine. Quantize the
+<em>activations</em> of the same model to INT8 per-tensor and it produces garbage. That failure is not a bug
+in anyone's kernel; it is a property of the trained network, and Dettmers et&nbsp;al. measured it precisely in
+<a href="https://arxiv.org/abs/2208.07339">LLM.int8() (arXiv:2208.07339)</a>.</p>
+
+<p>Their finding, stated in their numbers:</p>
+
+<ul>
+  <li>Typical hidden-state values live in roughly <strong>[&minus;3.5, 3.5]</strong>. Outlier features are
+  <strong>3&ndash;20&times; larger</strong> than the largest magnitude in any other feature dimension.</li>
+  <li>They are not scattered. For a 6.7B transformer at sequence length 2048 there are about
+  <strong>150,000 outlier activations per sequence</strong> across the whole model &mdash; concentrated in only
+  <strong>6 hidden dimensions</strong>.</li>
+  <li>They emerge with scale. "At around 6.7B parameters, a phase shift occurs, and all transformer layers and
+  75% of all sequence dimensions are affected by extreme magnitude features."</li>
+  <li>They are load-bearing. Zeroing those outlier dimensions drops top-1 attention softmax probability mass by
+  more than <strong>20%</strong> and degrades validation perplexity by <strong>600&ndash;1000%</strong>. Zeroing the
+  same <em>number</em> of randomly chosen dimensions costs 0.3% of probability mass and about 0.1% perplexity.</li>
+</ul>
+
+<p>SmoothQuant later reported the ratio even more starkly on OPT-scale models: activation outliers around
+<strong>100&times;</strong> larger than most activation values, and &mdash; the fact everything in this chapter
+exploits &mdash; <em>"if one channel has an outlier, it persistently appears in all tokens"</em>
+(<a href="https://arxiv.org/abs/2211.10438">arXiv:2211.10438</a>).</p>
+
+<p>The engineering consequence is mechanical. A per-tensor INT8 quantizer sizes its step from the tensor
+maximum, so if one channel is 100&times; the rest then
+$\Delta = 100 \cdot \max|X_{\text{normal}}| / 127$ and every normal channel &mdash; 4090 of the 4096 in
+Llama-3-8B's residual stream &mdash; collapses into the bottom one or two integer codes. You spent 8 bits per
+value and learned almost nothing about 99.9% of them, while the outlier channel that actually matters is still
+quantized coarsely, because 8 bits split across a 100:1 range is 8 bits split across a 100:1 range.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Scope</span>
+  <p>The affine map $x \approx s(q - z)$, group shapes, and accumulation dtype are established in
+  <a href="../00-foundations/00-05-numerics.html#integer-and-block">&sect;0.5</a>; the axes of the design space
+  and the support inventory in <a href="04-01-the-design-space.html">&sect;4.1</a>. This chapter is about the three
+  algorithms that produce quantized checkpoints, and what they leave behind for the engine to consume. Kernels are
+  <a href="04-03-formats-and-kernels.html">&sect;4.3</a>; the economics are
+  <a href="04-04-when-quantization-pays.html">&sect;4.4</a>; the KV cache is
+  <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">&sect;2.5</a>.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: three moves against one asymmetry</h2></div><div class="sec__body"><p>Every method here starts from the same observation &mdash; weights are easy, activations are hard &mdash; and
+picks a different move.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card">
+    <span class="ve-card__k">GPTQ</span>
+    <h4>Absorb the error</h4>
+    <p>Don't fight the outliers. Quantize weights only, one column at a time, and use the calibration
+    covariance $XX^\top$ to push each column's rounding error into the columns not yet quantized.
+    Activations stay in bf16.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">AWQ</span>
+    <h4>Protect what matters</h4>
+    <p>Weight importance is set by the <em>activation</em> that multiplies it. Scale up the salient weight
+    channels before rounding so they land on a finer effective grid, and divide the matching activation
+    channels by the same factor. Weight-only again.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">SmoothQuant</span>
+    <h4>Move the difficulty</h4>
+    <p>Same per-channel rescaling identity, but aimed the other way: shrink the outlier activation channels
+    into the weights until both tensors are equally hard, so INT8 activations become viable at all.</p>
+  </div>
+</div>
+
+<p>The rescaling identity underneath AWQ and SmoothQuant is one line. For a linear layer $Y = XW$ with
+$X \in \mathbb{R}^{T \times C_{\text{in}}}$ and $W \in \mathbb{R}^{C_{\text{in}} \times C_{\text{out}}}$, pick any
+positive vector $s \in \mathbb{R}^{C_{\text{in}}}$. Then</p>
+
+<div class="math-display">$$ Y \;=\; XW \;=\; \big(X\,\mathrm{diag}(s)^{-1}\big)\,\big(\mathrm{diag}(s)\,W\big) \;=\; \hat{X}\hat{W} $$</div>
+
+<p>exactly, in exact arithmetic, for free. Nothing has been approximated. What changes is the <em>numerical
+range</em> of the two factors: $\hat{X}_{:,j} = X_{:,j}/s_j$ and $\hat{W}_{j,:} = s_j W_{j,:}$. Quantization
+error is a function of range, so this identity is a dial that moves error between the two operands. AWQ turns it
+one way ($s_j > 1$ on salient channels, to protect weights). SmoothQuant turns it the other way (to protect
+activations). That is the whole chapter in one equation.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; The migration, drawn to scale.</b>
+  Per-channel maxima for a toy 12-channel layer. Before: two activation channels at 100&times; and 60&times; the
+  rest, weights flat. After SmoothQuant with $\alpha = 0.5$: both operands sit at the geometric mean
+  $\sqrt{\max|X_j|\cdot\max|W_j|}$, so the activation's channel-to-channel spread falls from 100:1 to 10:1 while
+  the weights' rises from 1:1 to 10:1. Magnitudes are illustrative; the arithmetic is exact for the stated
+  $\alpha$.</p>
+  <svg viewBox="0 0 820 470" width="100%" role="img" aria-labelledby="smTitle smDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="smTitle">Per-channel activation and weight magnitudes before and after SmoothQuant</title>
+    <desc id="smDesc">Four bar panels. Top left, activations before smoothing: ten short bars of height one and
+    two tall spikes of height one hundred and sixty. Top right, weights before smoothing: twelve equal bars of
+    height one. Bottom left, activations after smoothing: the two spikes have fallen to ten and seven point
+    seven while the others are unchanged. Bottom right, weights after smoothing: two bars have risen to ten and
+    seven point seven while the others are unchanged.</desc>
+
+    <text x="20" y="22" fill="currentColor" fill-opacity="0.85" font-size="13" font-weight="600">BEFORE</text>
+    <text x="20" y="248" fill="currentColor" fill-opacity="0.85" font-size="13" font-weight="600">AFTER  s_j = max|X_j|^0.5 / max|W_j|^0.5</text>
+
+    <g stroke="currentColor" stroke-opacity="0.35" stroke-width="1.2">
+      <line x1="60" y1="200" x2="380" y2="200"/>
+      <line x1="460" y1="200" x2="780" y2="200"/>
+      <line x1="60" y1="426" x2="380" y2="426"/>
+      <line x1="460" y1="426" x2="780" y2="426"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.7" font-size="12">
+      <text x="60" y="52">activation  max|X_j|</text>
+      <text x="460" y="52">weight  max|W_j|</text>
+      <text x="60" y="278">activation  max|X_j| / s_j</text>
+      <text x="460" y="278">weight  s_j &middot; max|W_j|</text>
+    </g>
+
+    <!-- BEFORE activations: 12 channels, ch3=100, ch9=60, rest=1 ; scale 1.4 px per unit -->
+    <g fill="var(--plum)" fill-opacity="0.85">
+      <rect x="64" y="198.6" width="18" height="1.4"/>
+      <rect x="90" y="198.6" width="18" height="1.4"/>
+      <rect x="116" y="198.6" width="18" height="1.4"/>
+      <rect x="142" y="60" width="18" height="140"/>
+      <rect x="168" y="198.6" width="18" height="1.4"/>
+      <rect x="194" y="198.6" width="18" height="1.4"/>
+      <rect x="220" y="198.6" width="18" height="1.4"/>
+      <rect x="246" y="198.6" width="18" height="1.4"/>
+      <rect x="272" y="198.6" width="18" height="1.4"/>
+      <rect x="298" y="116" width="18" height="84"/>
+      <rect x="324" y="198.6" width="18" height="1.4"/>
+      <rect x="350" y="198.6" width="18" height="1.4"/>
+    </g>
+    <text x="151" y="52" fill="var(--plum)" font-size="11.5" text-anchor="middle">100</text>
+    <text x="307" y="108" fill="var(--plum)" font-size="11.5" text-anchor="middle">60</text>
+
+    <!-- BEFORE weights: all 1 -->
+    <g fill="var(--steel)" fill-opacity="0.85">
+      <rect x="464" y="198.6" width="18" height="1.4"/>
+      <rect x="490" y="198.6" width="18" height="1.4"/>
+      <rect x="516" y="198.6" width="18" height="1.4"/>
+      <rect x="542" y="198.6" width="18" height="1.4"/>
+      <rect x="568" y="198.6" width="18" height="1.4"/>
+      <rect x="594" y="198.6" width="18" height="1.4"/>
+      <rect x="620" y="198.6" width="18" height="1.4"/>
+      <rect x="646" y="198.6" width="18" height="1.4"/>
+      <rect x="672" y="198.6" width="18" height="1.4"/>
+      <rect x="698" y="198.6" width="18" height="1.4"/>
+      <rect x="724" y="198.6" width="18" height="1.4"/>
+      <rect x="750" y="198.6" width="18" height="1.4"/>
+    </g>
+    <text x="700" y="192" fill="var(--steel)" font-size="11.5" text-anchor="middle">all 1</text>
+
+    <!-- AFTER activations: ch3=10, ch9=7.75, rest=1 -->
+    <g fill="var(--plum)" fill-opacity="0.85">
+      <rect x="64" y="424.6" width="18" height="1.4"/>
+      <rect x="90" y="424.6" width="18" height="1.4"/>
+      <rect x="116" y="424.6" width="18" height="1.4"/>
+      <rect x="142" y="412" width="18" height="14"/>
+      <rect x="168" y="424.6" width="18" height="1.4"/>
+      <rect x="194" y="424.6" width="18" height="1.4"/>
+      <rect x="220" y="424.6" width="18" height="1.4"/>
+      <rect x="246" y="424.6" width="18" height="1.4"/>
+      <rect x="272" y="424.6" width="18" height="1.4"/>
+      <rect x="298" y="415.2" width="18" height="10.8"/>
+      <rect x="324" y="424.6" width="18" height="1.4"/>
+      <rect x="350" y="424.6" width="18" height="1.4"/>
+    </g>
+    <text x="151" y="404" fill="var(--plum)" font-size="11.5" text-anchor="middle">10</text>
+    <text x="307" y="408" fill="var(--plum)" font-size="11.5" text-anchor="middle">7.7</text>
+
+    <!-- AFTER weights: ch3=10, ch9=7.75 -->
+    <g fill="var(--steel)" fill-opacity="0.85">
+      <rect x="464" y="424.6" width="18" height="1.4"/>
+      <rect x="490" y="424.6" width="18" height="1.4"/>
+      <rect x="516" y="424.6" width="18" height="1.4"/>
+      <rect x="542" y="412" width="18" height="14"/>
+      <rect x="568" y="424.6" width="18" height="1.4"/>
+      <rect x="594" y="424.6" width="18" height="1.4"/>
+      <rect x="620" y="424.6" width="18" height="1.4"/>
+      <rect x="646" y="424.6" width="18" height="1.4"/>
+      <rect x="672" y="424.6" width="18" height="1.4"/>
+      <rect x="698" y="415.2" width="18" height="10.8"/>
+      <rect x="724" y="424.6" width="18" height="1.4"/>
+      <rect x="750" y="424.6" width="18" height="1.4"/>
+    </g>
+    <text x="551" y="404" fill="var(--steel)" font-size="11.5" text-anchor="middle">10</text>
+    <text x="707" y="408" fill="var(--steel)" font-size="11.5" text-anchor="middle">7.7</text>
+
+    <g fill="currentColor" fill-opacity="0.55" font-size="11">
+      <text x="60" y="222">channel-to-channel spread 100 : 1</text>
+      <text x="460" y="222">spread 1 : 1</text>
+      <text x="60" y="448">spread 10 : 1  &mdash; INT8 step 10x finer</text>
+      <text x="460" y="448">spread 10 : 1  &mdash; still trivially quantizable</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="gptq" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">GPTQ: layer-wise reconstruction with an inverse Hessian</h2></div><div class="sec__body"><p><a href="https://arxiv.org/abs/2210.17323">GPTQ (arXiv:2210.17323)</a> does not touch activations at all. It
+solves a different problem: given that you are going to round $W$ to a 3- or 4-bit grid anyway, what is the best
+possible rounding?</p>
+
+<p>"Best" needs a definition, and GPTQ's is the layer-wise reconstruction objective. For one linear layer with
+weight $W$ and a calibration input batch $X \in \mathbb{R}^{C_{\text{in}} \times N}$ ($N$ = total calibration
+tokens):</p>
+
+<div class="math-display">$$ \hat{W}^\star \;=\; \arg\min_{\hat{W}} \;\big\| WX - \hat{W}X \big\|_2^2 \qquad \text{s.t. } \hat{W}\ \text{on the quantization grid} $$</div>
+
+<p>Note what this is <em>not</em>: it is not $\|W - \hat{W}\|^2$. Round-to-nearest minimises that, and RTN is the
+baseline GPTQ beats. Minimising the output error instead means an individual weight is allowed to move far from
+its original value if doing so cancels error elsewhere &mdash; provided the layer's output on real data stays
+close.</p>
+
+<h3>Where the Hessian comes from</h3>
+
+<p>Expand the objective as a function of the perturbation $E = \hat{W} - W$. Since
+$\|EX\|_2^2 = \operatorname{tr}(E X X^\top E^\top)$, the objective is exactly quadratic in $E$ with Hessian</p>
+
+<div class="math-display">$$ H \;=\; 2\,X X^\top \;\in\; \mathbb{R}^{C_{\text{in}} \times C_{\text{in}}} $$</div>
+
+<p>This is the entire reason GPTQ needs calibration data: $H$ is the second-moment matrix of the layer's
+<em>inputs</em>. It says which input channels are large and which are correlated. Nothing about the loss
+function, the labels, or backpropagation enters &mdash; the Hessian here is of the local reconstruction
+objective, not of the training loss, which is why one forward pass over a few hundred sequences suffices.</p>
+
+<p>Because $H$ is shared across all output rows (every row of $W$ sees the same $X$), the problem decouples into
+$C_{\text{out}}$ independent problems over the $C_{\text{in}}$ input channels, all sharing one $H^{-1}$. That
+sharing is what makes GPTQ affordable.</p>
+
+<h3>The Optimal Brain Quantization update</h3>
+
+<p>GPTQ inherits its update rule from Optimal Brain Surgeon by way of Optimal Brain Quantization. Quantize
+weights one input-channel (column) at a time. When you quantize column $q$, you incur error
+$w_q - \mathrm{quant}(w_q)$; the optimal correction spreads that error over the columns
+<em>not yet quantized</em>, weighted by the inverse Hessian:</p>
+
+<div class="math-display">$$ w_q \;=\; \arg\min_q \frac{\big(\mathrm{quant}(w_q) - w_q\big)^2}{[H^{-1}]_{qq}}, \qquad \delta_F \;=\; -\,\frac{w_q - \mathrm{quant}(w_q)}{[H^{-1}]_{qq}}\;\cdot\;\big(H^{-1}\big)_{:,q} $$</div>
+
+<p>Read the second equation as: the scalar rounding residual, normalised by how "free" that coordinate is
+($[H^{-1}]_{qq}$ large means the objective barely cares about $q$), smeared over the remaining coordinates in
+proportion to the inverse-Hessian column. After the update the remaining columns are no longer the original
+weights &mdash; they have absorbed a debt that they will pay off when their turn comes. This is why a
+column-by-column sweep beats rounding everything at once: each column gets to correct for its predecessors.</p>
+
+<p>GPTQ's three practical departures from OBQ:</p>
+
+<ol>
+  <li><strong>Fixed order.</strong> OBQ picks the greedily-best next weight per row, which forces a different
+  $H^{-1}$ per row. GPTQ observes that for large models a <em>fixed</em> column order costs almost nothing, so
+  all rows can be quantized in lockstep against one shared $H^{-1}$. This turns per-weight bookkeeping into
+  batched matrix work.</li>
+  <li><strong>Dampening.</strong> $XX^\top$ from a finite calibration batch is often near-singular. GPTQ adds
+  $\lambda I$ with $\lambda$ set to 1% of the mean diagonal before inverting.</li>
+  <li><strong>Cholesky.</strong> The naive loop repeatedly removes a row/column from $H^{-1}$ and re-inverts,
+  which accumulates error until the matrix goes indefinite on a 175B model. Instead, note that the sequence of
+  $H^{-1}$ rows the algorithm actually consumes is precisely the rows of the Cholesky factor of $H^{-1}$. Compute
+  that factor <strong>once</strong>, up front, with a numerically stable routine, then just read rows off it. The
+  update becomes a rank-1 outer product against a precomputed triangular factor &mdash; stable and fast.</li>
+</ol>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; The GPTQ sweep for one layer.</b>
+  Shapes are Llama-3-8B's <code>gate_proj</code>: $W$ is $4096 \times 14336$, so $H$ is $4096\times4096$ and the
+  sweep runs 4096 columns in blocks. Everything left of the dashed boundary is frozen on the grid; everything
+  right of it is still float and still absorbing debt.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Calibration batch<br/>128 x 2048 tokens<br/>forward to this layer"] --> B["Accumulate H = 2 X Xt<br/>4096 x 4096 fp32 = 67 MB"]
+    B --> C["Damp: H += 0.01 mean diag I"]
+    C --> D{"desc_act ?"}
+    D -- "yes" --> E["Permute columns by<br/>descending diag H<br/>store g_idx 4096 int32"]
+    D -- "no" --> F["Natural order 0..4095"]
+    E --> G["Cholesky of H inverse<br/>computed ONCE"]
+    F --> G
+    G --> H["for block of 128 columns"]
+    H --> I["quantize column q to the grid<br/>using this group scale and zero"]
+    I --> J["residual r = w_q minus quant w_q"]
+    J --> K["update remaining columns<br/>delta = minus r over Hinv_qq times Hinv col q"]
+    K --> L{"more columns ?"}
+    L -- "yes" --> I
+    L -- "no" --> M["pack 8 x int4 per int32<br/>emit qweight scales qzeros g_idx"]
+  </script>
+</div>
+
+<h3>Cost, with real shapes</h3>
+
+<p>Take Llama-3-8B ($L=32$, $d=4096$, FFN intermediate 14336). The Hessian is $C_{\text{in}} \times C_{\text{in}}$
+in fp32, so it is the <em>input</em> dimension that hurts:</p>
+
+<ul>
+  <li><code>q_proj</code>, <code>gate_proj</code>, <code>up_proj</code>: $C_{\text{in}} = 4096 \Rightarrow$
+  $4096^2 \times 4 = 67$&nbsp;MB per Hessian, Cholesky $\approx 4096^3/3 = 2.3\times10^{10}$ flops.</li>
+  <li><code>down_proj</code>: $C_{\text{in}} = 14336 \Rightarrow$ $14336^2 \times 4 = 822$&nbsp;MB, Cholesky
+  $\approx 9.8\times10^{11}$ flops.</li>
+</ul>
+
+<p><em>Derived</em> from the shapes, not measured &mdash; but they explain GPTQ's operational shape: it runs
+layer-by-layer with one transformer block resident, and the Hessians are the memory peak. The reported wall-clock
+for OPT-175B and BLOOM-176B is roughly <strong>4 GPU hours</strong> at 3&ndash;4 bits
+(<a href="https://arxiv.org/abs/2210.17323">GPTQ paper</a>, calibrating on 128 random 2048-token segments of C4).</p>
+
+<h3>act-order, and what it costs at inference</h3>
+
+<p>The <code>--act-order</code> heuristic (serialised as <code>desc_act</code> in checkpoints) quantizes columns in
+order of decreasing $\mathrm{diag}(H)$ &mdash; that is, decreasing calibration activation energy. The logic is
+scheduling: a column quantized early has thousands of remaining columns to absorb its error; a column quantized
+last has none. So do the high-energy, high-cost columns first. The GPTQ repository reports it as decisive on the
+outlier-heavy OPT-66B: WikiText-2 perplexity <strong>9.55 &rarr; 9.34</strong> at 4 bits and
+<strong>14.16 &rarr; 9.95</strong> at 3 bits
+(<a href="https://github.com/IST-DASLab/gptq/blob/main/README.md">IST-DASLab/gptq README</a>).</p>
+
+<p>The bill arrives at serving time. With group-wise scales, the group a weight belongs to is determined by its
+<em>position</em> along the input axis. Permute the columns and the group boundaries no longer align with
+contiguous input channels, so the checkpoint must ship a per-input-channel group index <code>g_idx</code>, and
+the GEMM must gather scales through it. vLLM stores exactly that:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/auto_gptq.py:L380-L400</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Quantized weights
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // self.quant_config.pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        # Activation order
+        g_idx = RowvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,</code></pre>
+</div>
+
+<p>and at weight-prep time sorts it so the Marlin kernel can walk groups contiguously, keeping the permutation
+around as a separate tensor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/utils/marlin_utils.py:L436-L457</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -&gt; bool:
+    return (not act_order) or (act_order and not is_row_parallel)
+
+
+def marlin_repeat_scales_on_all_ranks(
+    act_order: bool, group_size: int, is_row_parallel: bool
+) -&gt; bool:
+    # Need to repeat scales on every rank if act_ordering or
+    # channelwise and RowParallelLinear
+    is_channelwise = group_size == -1
+    return act_order or (is_channelwise and is_row_parallel)
+
+
+def marlin_make_empty_g_idx(device: torch.device) -&gt; torch.Tensor:
+    return torch.nn.Parameter(
+        torch.empty(0, dtype=torch.int, device=device), requires_grad=False
+    )
+
+
+def marlin_sort_g_idx(g_idx: torch.Tensor) -&gt; tuple[torch.Tensor, torch.Tensor]:
+    g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
+    return g_idx[g_idx_sort_indices], g_idx_sort_indices
+</code></pre>
+</div>
+
+<p>Two real costs are visible in those two predicates. <code>marlin_repeat_scales_on_all_ranks</code> returns
+<code>True</code> whenever act-order is on: because the permutation scrambles which input channels land on which
+tensor-parallel rank, <strong>every rank must hold the full scale tensor</strong> rather than its shard. And
+<code>marlin_is_k_full</code> returns <code>False</code> for an act-order layer inside a
+<code>RowParallelLinear</code>, telling the kernel it is only seeing a slice of the reduction axis. Turning on
+<code>desc_act</code> is therefore not free at TP&gt;1 &mdash; it costs replicated scales and a constrained kernel
+path.</p>
+
+<p>Which is why <code>llm-compressor</code> offers a third setting, <code>actorder="weight"</code> &mdash; order
+the columns by weight statistics instead, so the permutation folds back into the stored layout and no
+<code>g_idx</code> ships at all. It "can improve accuracy without added latency", and it sits next to
+<code>dampening_frac</code> &mdash; the $\lambda$ of the previous section &mdash; as the two knobs the docs single
+out for tuning (<code>docs/features/quantization/llm_compressor/int4.md:L136-L138</code>).</p>
+
+<p>vLLM's compressed-tensors path only materialises <code>g_idx</code> for the group variant:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py:L63-L69</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.num_bits = num_bits
+        self.pack_factor = Fraction(32, num_bits)
+        self.strategy = strategy
+        self.symmetric = symmetric
+        self.group_size = -1 if group_size is None else group_size
+        self.has_g_idx = actorder == ActivationOrdering.GROUP
+        self.layer_name = layer_name</code></pre>
+</div></div></section>
+<section class="sec" id="awq" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">AWQ: salience is an activation property</h2></div><div class="sec__body"><p><a href="https://arxiv.org/abs/2306.00978">AWQ (arXiv:2306.00978)</a> starts from a diagnostic experiment
+rather than an objective. Quantize OPT-6.7B to INT3 with group size 128 by round-to-nearest and keep just
+<strong>1% of weight channels in FP16</strong>. Which 1%?</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Cited &mdash; AWQ (arXiv:2306.00978) Table 1. OPT-6.7B, INT3 group-128 RTN, WikiText-2 perplexity, with 1% of input channels held in FP16 under three selection rules.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Selection rule for the protected 1%</th><th>WikiText-2 ppl</th></tr></thead>
+      <tbody>
+        <tr><td>none (plain RTN, INT3-g128)</td><td class="num">23.54</td></tr>
+        <tr><td>by weight magnitude</td><td class="num">&asymp; RTN</td></tr>
+        <tr><td>by random choice</td><td class="num">&asymp; RTN</td></tr>
+        <tr><td>by <b>activation</b> magnitude</td><td class="num">11.39</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Halving the perplexity gap by choosing 1% of channels differently is the finding, and the direction is the
+counter-intuitive part: a large weight is not important, a weight that multiplies a large activation is. It falls
+straight out of &sect;1 &mdash; a persistent 100&times; activation channel means every weight in that input row
+contributes 100&times; more to the output, so its rounding error is amplified 100&times; too.</p>
+
+<h3>From mixed precision to pure INT4</h3>
+
+<p>Keeping 1% of channels in FP16 works but is a serving disaster: mixed dtypes inside one GEMM destroy the
+tiling. AWQ's contribution is achieving the same protection with a <em>uniform</em> INT4 weight, using the
+rescaling identity from &sect;2.</p>
+
+<p>Consider one weight $w$ multiplied by activation $x$. Quantize with step $\Delta$ (set by the group's
+max): $Q(w) = \Delta \cdot \mathrm{round}(w/\Delta)$, error bounded by $\Delta/2$, so the expected output error
+is $\mathbb{E}|\mathrm{RoundErr}| \cdot \Delta \cdot |x|$. Now scale: quantize $w s$ instead and divide the
+activation, giving $Q(ws)\cdot(x/s)$. The output error becomes</p>
+
+<div class="math-display">$$ \mathbb{E}|\mathrm{RoundErr}| \cdot \Delta' \cdot |x| \cdot \frac{1}{s}, \qquad \text{ratio to unscaled} \;=\; \frac{\Delta'}{\Delta}\cdot\frac{1}{s} $$</div>
+
+<p>where $\Delta'$ is the group's step <em>after</em> scaling. The whole trick is that $\Delta$ is set by the
+group maximum, and scaling up one channel out of 128 usually does not change that maximum &mdash; so
+$\Delta' \approx \Delta$ and the error on the scaled channel falls by $1/s$. You bought protection for the
+salient channel out of the slack in the group's shared scale.</p>
+
+<p>The catch, and the reason $s$ cannot simply be huge: if you scale enough channels enough, $\Delta'$ <em>does</em>
+grow, and every non-salient channel in the group pays. AWQ therefore does not solve for $s$ per channel. It
+constrains $s$ to a one-parameter family driven by the measured per-channel mean activation magnitude
+$s_X \in \mathbb{R}^{C_{\text{in}}}$:</p>
+
+<div class="math-display">$$ s \;=\; s_X^{\alpha}, \qquad \alpha^\star \;=\; \arg\min_{\alpha \in [0,1]} \big\| W X - Q\big(W \cdot \mathrm{diag}(s_X^\alpha)\big)\,\mathrm{diag}(s_X^\alpha)^{-1} X \big\|^2 $$</div>
+
+<p>and finds $\alpha^\star$ by a grid search over <strong>20 points</strong> in $[0,1]$, per layer. $\alpha = 0$
+is plain RTN; $\alpha = 1$ is full activation-proportional scaling. Each grid point costs one quantize-and-
+reconstruct pass over a cached calibration activation for that layer, which is why AWQ is cheap: no Hessian, no
+inverse, no Cholesky. It needs the calibration data only to compute one vector of per-channel activation means
+and to score 20 candidates.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; Why scaling one channel is free.</b>
+  The product $\hat{X}\hat{W}$ is identical to $XW$; only the grid alignment changes. A salient weight
+  that fell between two INT4 codes before scaling lands closer to a code after, because it now uses more of the
+  group's fixed range &mdash; while the group's step $\Delta$ is unchanged, since the group maximum is set by a
+  different channel.</p>
+  <svg viewBox="0 0 820 340" width="100%" role="img" aria-labelledby="awqTitle awqDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="awqTitle">AWQ per-channel scaling as an invariant factorisation</title>
+    <desc id="awqDesc">Top: the identity X W equals X divided by s, times s times W, with the product marked
+    unchanged. Bottom: two number lines showing an INT4 grid of equally spaced ticks. On the first line a weight
+    value sits midway between two ticks, with a large rounding residual. On the second line the same weight,
+    multiplied by four, sits close to a tick, with a small residual, on the same grid spacing.</desc>
+
+    <g fill="none" stroke="currentColor" stroke-opacity="0.35" stroke-width="1.3">
+      <rect x="40" y="34" width="120" height="56" rx="4"/>
+      <rect x="250" y="34" width="140" height="56" rx="4"/>
+      <rect x="410" y="34" width="140" height="56" rx="4"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.9" font-size="14" text-anchor="middle">
+      <text x="100" y="68">X &middot; W</text>
+      <text x="205" y="68">=</text>
+      <text x="320" y="62">X diag(s)</text>
+      <text x="320" y="80">&#8315;&#185;</text>
+      <text x="400" y="68">&middot;</text>
+      <text x="480" y="68">diag(s) W</text>
+    </g>
+    <text x="600" y="62" fill="var(--teal)" font-size="12.5">product: bit-exact identity</text>
+    <text x="600" y="82" fill="var(--copper)" font-size="12.5">ranges: moved, deliberately</text>
+
+    <text x="40" y="140" fill="currentColor" fill-opacity="0.75" font-size="12.5">INT4 group grid, step &Delta; set by the group maximum (a different channel)</text>
+
+    <!-- line 1: before -->
+    <line x1="60" y1="196" x2="760" y2="196" stroke="currentColor" stroke-opacity="0.4" stroke-width="1.3"/>
+    <g stroke="currentColor" stroke-opacity="0.4" stroke-width="1.3">
+      <line x1="60" y1="188" x2="60" y2="204"/><line x1="150" y1="188" x2="150" y2="204"/>
+      <line x1="240" y1="188" x2="240" y2="204"/><line x1="330" y1="188" x2="330" y2="204"/>
+      <line x1="420" y1="188" x2="420" y2="204"/><line x1="510" y1="188" x2="510" y2="204"/>
+      <line x1="600" y1="188" x2="600" y2="204"/><line x1="690" y1="188" x2="690" y2="204"/>
+    </g>
+    <circle cx="105" cy="196" r="6" fill="var(--plum)"/>
+    <text x="60" y="176" fill="currentColor" fill-opacity="0.7" font-size="12">before:  w = 0.5&Delta;</text>
+    <text x="122" y="228" fill="var(--plum)" font-size="12">residual 0.5&Delta; &mdash; worst case</text>
+
+    <!-- line 2: after -->
+    <line x1="60" y1="290" x2="760" y2="290" stroke="currentColor" stroke-opacity="0.4" stroke-width="1.3"/>
+    <g stroke="currentColor" stroke-opacity="0.4" stroke-width="1.3">
+      <line x1="60" y1="282" x2="60" y2="298"/><line x1="150" y1="282" x2="150" y2="298"/>
+      <line x1="240" y1="282" x2="240" y2="298"/><line x1="330" y1="282" x2="330" y2="298"/>
+      <line x1="420" y1="282" x2="420" y2="298"/><line x1="510" y1="282" x2="510" y2="298"/>
+      <line x1="600" y1="282" x2="600" y2="298"/><line x1="690" y1="282" x2="690" y2="298"/>
+    </g>
+    <circle cx="420" cy="290" r="6" fill="var(--teal)"/>
+    <text x="60" y="270" fill="currentColor" fill-opacity="0.7" font-size="12">after s = 4:  ws = 4&Delta;, exactly on a code</text>
+    <text x="440" y="322" fill="var(--teal)" font-size="12">residual 0 &mdash; and the 1/s in the activation restores the product</text>
+  </svg>
+</div>
+
+<p>Reported outcome, configuration stated: Llama-2-7B at INT4 group-128 reaches WikiText-2 perplexity
+<strong>5.60</strong> against RTN's <strong>5.73</strong>; OPT-6.7B at INT3-g128 is the 23.54 &rarr; 11.39 collapse
+above. The paper's serving companion TinyChat reports <strong>3.2&ndash;3.3&times;</strong> over an FP16 HuggingFace
+baseline &mdash; a different framework from the ones this book reads, so treat it as evidence that W4A16
+<em>can</em> be made fast, not as a vLLM number.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Rotation</span>
+  <p>A fourth family &mdash; QuaRot (<a href="https://arxiv.org/abs/2404.00456">arXiv:2404.00456</a>) and SpinQuant
+  (<a href="https://arxiv.org/abs/2405.16406">arXiv:2405.16406</a>) &mdash; attacks the same asymmetry by change of
+  basis rather than rescaling. Insert $QQ^\top = I$ between operands: $XW = (XQ)(Q^\top W)$. Fold $Q$ into the
+  preceding weight and $Q^\top$ into this one and the rotation is free at inference, while a Hadamard $Q$ smears
+  each outlier channel across all $d$ coordinates. The mechanics of the Hadamard transform, why the post-rotation
+  marginal is Gaussian, and how vLLM applies it are derived for the KV cache in
+  <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html#rotation">&sect;2.5</a>; the weight-side story is
+  the same transform on a different tensor.</p>
+</div></div></section>
+<section class="sec" id="smoothquant" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">SmoothQuant: making W8A8 possible at all</h2></div><div class="sec__body"><p>GPTQ and AWQ both leave activations in bf16, which is fine for W4A16 where the win is weight bandwidth. It is
+useless if you want W8A8 &mdash; INT8 tensor cores, roughly 2&times; the bf16 math throughput on an H100, and half
+the activation traffic. For that you must quantize $X$, and &sect;1 said that is where the model breaks.</p>
+
+<p><a href="https://arxiv.org/abs/2211.10438">SmoothQuant</a> takes the identity of &sect;2 and points it at the
+activations. Its choice of $s$ is a geometric interpolation between the two operands' per-channel maxima:</p>
+
+<div class="math-display">$$ s_j \;=\; \frac{\big(\max_t |X_{t,j}|\big)^{\alpha}}{\big(\max_k |W_{j,k}|\big)^{1-\alpha}}, \qquad \alpha \in [0,1] $$</div>
+
+<p>Substitute back and the arithmetic is clean. The smoothed activation channel maximum becomes
+$\max|X_j| / s_j = \max|X_j|^{1-\alpha}\max|W_j|^{\alpha}$, and the smoothed weight channel maximum becomes
+$s_j \max|W_j| = \max|X_j|^{\alpha}\max|W_j|^{1-\alpha}$. At $\alpha = 0.5$ these are the same number: the
+geometric mean. The difficulty has been split exactly in half. That is the picture in Figure&nbsp;1, and it is why
+the 100:1 activation spread becomes 10:1.</p>
+
+<p>$\alpha$ is the dial:</p>
+
+<ul>
+  <li>$\alpha = 0$: $s_j = 1/\max|W_j|$ &mdash; all difficulty pushed onto activations. Useless here.</li>
+  <li>$\alpha = 0.5$: the balanced point, and SmoothQuant's default across OPT and BLOOM.</li>
+  <li>$\alpha = 0.75$: used for GLM-130B, whose activation outliers are more extreme (about 30% of channels
+  affected), pushing more difficulty into the weights.</li>
+  <li>$\alpha \to 1$: activations become trivially quantizable and the weights inherit the outlier structure &mdash;
+  now the weights are the ones you cannot represent.</li>
+</ul>
+
+<h3>Why it costs nothing at runtime</h3>
+
+<p>$\mathrm{diag}(s)^{-1}$ is a per-input-channel rescale of $X$, and $X$ is always the output of something
+&mdash; an RMSNorm, or a previous linear. A per-channel scale on an RMSNorm output is exactly a rescale of its
+learned gain vector; on a linear output it is a rescale of that linear's output columns and bias. So SmoothQuant
+folds $\mathrm{diag}(s)^{-1}$ backwards into the previous operator's stored weights and $\mathrm{diag}(s)$
+forwards into $W$, offline. The published checkpoint contains no smoothing factors and the engine executes
+exactly the same graph it always did.</p>
+
+<p>This is why <code>grep -rni smooth</code> over
+<code>vllm/model_executor/layers/quantization/</code> and
+<code>python/sglang/srt/layers/quantization/</code> at the pinned SHAs returns nothing about SmoothQuant. There
+is no SmoothQuant runtime. There is only a W8A8 INT8 checkpoint whose activations happen to be quantizable,
+which lands in the ordinary INT8 schemes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_int8.py:L57-L86</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # WEIGHT
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                sum(output_partition_sizes), input_size_per_partition, dtype=torch.int8
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("weight", weight)
+
+        # WEIGHT SCALE
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            weight_scale = ChannelQuantScaleParameter(
+                data=torch.empty((sum(output_partition_sizes), 1), dtype=torch.float32),
+                output_dim=0,
+                weight_loader=weight_loader,
+            )
+        else:
+            assert self.strategy == QuantizationStrategy.TENSOR
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+        layer.register_parameter("weight_scale", weight_scale)
+
+        # INPUT SCALE
+        input_zero_point = None
+        input_scale = None</code></pre>
+</div>
+
+<p>An INT8 weight, a per-output-channel fp32 scale, and an <em>optional</em> input scale &mdash; present only when
+the checkpoint declares static activation quantization. Leave it out and the engine quantizes each token's
+activation vector on the fly from its own amax, which is what SGLang always does on GPU:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/w8a8_int8.py:L220-L235</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        x_q, x_scale = per_token_quant_int8(x)
+
+        x_q_2d = x_q.view(-1, x_q.shape[-1])
+        x_scale_2d = x_scale.view(-1, x_scale.shape[-1])
+        output_shape = [*x_q.shape[:-1], layer.weight.shape[1]]
+
+        output = int8_scaled_mm(
+            x_q_2d,
+            layer.weight,
+            x_scale_2d,
+            layer.weight_scale,
+            out_dtype=x.dtype,
+            bias=bias,
+        )
+
+        return output.view(output_shape)</code></pre>
+</div>
+
+<p>Per-token dynamic scaling already removes the token-to-token variation. What it cannot remove is the
+<em>channel-to-channel</em> spread inside a single token &mdash; a per-token scale is one number for all 4096
+channels of that token. SmoothQuant is precisely the missing half: it fixes the channel axis offline so that the
+per-token amax the kernel computes at runtime is a useful scale rather than a hostage to six dimensions.</p>
+
+<p>The reference recipe in vLLM's own docs shows the two algorithms composed, SmoothQuant first to make the
+activations quantizable and GPTQ second to place the weights:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/features/quantization/llm_compressor/int8_w8a8.md:L85-L94</span>
+    <span class="tag tag--vllm">vLLM docs</span>
+  </div>
+  <pre class="code-block"><code>from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import GPTQModifier
+from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+
+# Configure the quantization algorithms
+recipe = [
+    SmoothQuantModifier(smoothing_strength=0.8),
+    GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
+]</code></pre>
+</div>
+
+<p><code>smoothing_strength=0.8</code> is $\alpha$. Note it is higher than the paper's 0.5 default &mdash; the
+recipe is tuned for modern Llama-family models, and $\alpha$ is the first thing to sweep when a W8A8 conversion
+degrades.</p></div></section>
+<section class="sec" id="calibration" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Calibration: the input nobody version-controls</h2></div><div class="sec__body"><p>All three methods need data, but for different things, and confusing them leads to the wrong debugging move.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">What each algorithm extracts from the calibration set. Cited to the respective papers.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Method</th><th>Statistic estimated</th><th>Shape per layer</th><th>Sensitivity</th></tr></thead>
+      <tbody>
+        <tr><td>GPTQ</td><td>Second moment $H = 2XX^\top$</td><td>$C_{\text{in}} \times C_{\text{in}}$</td><td>Needs enough tokens for $XX^\top$ to be well-conditioned; hence the dampening term</td></tr>
+        <tr><td>AWQ</td><td>Per-channel mean $|X_j|$, plus 20 reconstruction scores</td><td>$C_{\text{in}}$ vector</td><td>A first moment over one axis &mdash; converges fast, but is exactly what shifts under domain change</td></tr>
+        <tr><td>SmoothQuant</td><td>Per-channel $\max_t |X_{t,j}|$</td><td>$C_{\text{in}}$ vector</td><td>A <em>maximum</em>: one unusual sequence can move it, and an unseen outlier channel is not smoothed at all</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>GPTQ's requirement is the heaviest in shape but the most forgiving in content: $XX^\top$ over 262,144 tokens
+(128 sequences &times; 2048, the GPTQ paper's C4 setting) is a well-averaged object. SmoothQuant's is the most
+fragile &mdash; a per-channel <strong>max</strong> estimated from a sample. If your deployment traffic activates a
+channel your calibration corpus never did, that channel's $s_j$ was computed as if it were ordinary, and it
+arrives at the INT8 quantizer unsmoothed.</p>
+
+<p>vLLM's documented defaults are 512 sequences at length 2048 from an instruction corpus, with the model's own
+chat template applied:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/features/quantization/llm_compressor/int4.md:L58-L74</span>
+    <span class="tag tag--vllm">vLLM docs</span>
+  </div>
+  <pre class="code-block"><code>from datasets import load_dataset
+
+NUM_CALIBRATION_SAMPLES = 512
+MAX_SEQUENCE_LENGTH = 2048
+
+# Load and preprocess the dataset
+ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+
+def preprocess(example):
+    return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+ds = ds.map(preprocess)</code></pre>
+</div>
+
+<p>and the accompanying advice is unusually direct about the failure mode:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/features/quantization/llm_compressor/int4.md:L131-L135</span>
+    <span class="tag tag--vllm">vLLM docs</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>- Start with 512 samples for calibration data, and increase if accuracy drops
+- Ensure the calibration data contains a high variety of samples to prevent overfitting towards a specific use case
+- Use a sequence length of 2048 as a starting point
+- Employ the chat template or instruction template that the model was trained with
+- If you've fine-tuned a model, consider using a sample of your training data for calibration</code></pre>
+</div>
+
+<p>Two of those five bullets are about distribution match, which is where the silent failures live. The
+canonical shape: calibrate on WikiText because every paper does, evaluate on WikiText perplexity, see a 0.1 delta,
+ship. Actual traffic is code completion and function calling &mdash; a token distribution with different activation
+statistics, different salient channels, and a different per-channel max. Nothing in that eval could have caught
+it, because the eval was drawn from the calibration distribution.</p>
+
+<p>The published evidence is real, and its size depends on the method. Williams and Aletras
+(<a href="https://aclanthology.org/2024.acl-long.544/">ACL 2024, arXiv:2311.09755</a>) ran nine models
+(LLaMA/Vicuna/OPT at three sizes) across five corpora &mdash; C4, CNN-DM, RedPajama, RefinedWeb, Wikipedia &mdash;
+with ten independently drawn 128&times;2048 calibration sets each. Their headline: "we find substantial variations
+in downstream task performance, contrasting existing work that suggests a greater level of robustness". On
+LLaMA-7B with SparseGPT (2:4 pruning), accuracy ranged from <strong>52.7% to 61.7% on RTE</strong> and
+<strong>66.4% to 73.0% on BoolQ</strong> across sets drawn from the <em>same</em> corpus. For 4-bit quantization
+the spread is smaller &mdash; OPT-6.7B varied about <strong>1.6 points with GPTQ</strong>, 0.9 with SpQR &mdash;
+but that is the same order as the accuracy delta most teams accept when they decide to ship.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Reproducibility</span>
+  <p>A 1.6-point spread from the random seed used to draw the calibration set means a single before/after eval
+  cannot distinguish "this algorithm is better" from "this draw was lucky". If you are comparing GPTQ against AWQ
+  on your own workload, hold the calibration set fixed across arms, and re-run at least one arm with a different
+  draw to bound the noise before believing the difference. The methodology for this belongs to
+  <a href="04-04-when-quantization-pays.html">&sect;4.4</a>.</p>
+</div></div></section>
+<section class="sec" id="production" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">What the engines actually consume</h2></div><div class="sec__body"><p>The algorithms are offline. Nothing in vLLM or SGLang runs GPTQ or AWQ. What the engines see is a directory of
+tensors, and their job is to reconstruct a GEMM from it.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; Offline algorithm to runtime artefact.</b>
+  The boundary is the checkpoint. Everything above it runs once on a workstation; everything below it runs on
+  every forward pass.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    CAL["Calibration corpus<br/>512 seqs x 2048 tokens"] --> ALG
+    subgraph ALG["Offline, once"]
+      G["GPTQ: H = 2 X Xt, Cholesky, column sweep"]
+      A["AWQ: per-channel mean abs X, grid search alpha"]
+      S["SmoothQuant: per-channel max abs X, fold s into prev op"]
+    end
+    ALG --> CKPT["Checkpoint on disk"]
+    CKPT --> W4["W4A16 artefacts<br/>qweight int32 packed 8x<br/>scales fp16 per group<br/>qzeros int32 packed<br/>g_idx int32 if desc_act"]
+    CKPT --> W8["W8A8 artefacts<br/>weight int8<br/>weight_scale fp32 per channel<br/>input_scale fp32 if static"]
+    W4 --> R4["Runtime: dequant inside the GEMM<br/>or materialise then torch.matmul"]
+    W8 --> R8["Runtime: per-token quantize x<br/>then int8_scaled_mm"]
+  </script>
+</div>
+
+<h3>The W4A16 artefact, sized</h3>
+
+<p>Take Llama-3-8B's <code>gate_proj</code>: $4096 \times 14336 = 58{,}720{,}256$ weights. At INT4 with group
+size 128, the checkpoint holds (all figures <em>derived</em> from the shapes and the layouts quoted below):</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; per-tensor storage for Llama-3-8B gate_proj under GPTQ/AWQ INT4-g128, from the parameter shapes in auto_gptq.py:L380-L400.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Tensor</th><th>Shape</th><th>dtype</th><th>Bytes</th></tr></thead>
+      <tbody>
+        <tr><td><code>qweight</code></td><td>512 &times; 14336</td><td>int32 (8 nibbles each)</td><td class="num">29,360,128</td></tr>
+        <tr><td><code>scales</code></td><td>32 &times; 14336</td><td>fp16</td><td class="num">917,504</td></tr>
+        <tr><td><code>qzeros</code></td><td>32 &times; 1792</td><td>int32</td><td class="num">229,376</td></tr>
+        <tr><td><code>g_idx</code> (desc_act only)</td><td>4096</td><td>int32</td><td class="num">16,384</td></tr>
+        <tr><td><b>total</b></td><td>&mdash;</td><td>&mdash;</td><td class="num">30,523,392</td></tr>
+        <tr><td>bf16 original</td><td>4096 &times; 14336</td><td>bf16</td><td class="num">117,440,512</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">4.16 bits</div><div class="kpi__l">effective per weight, not 4</div></div>
+  <div class="kpi"><div class="kpi__n">3.85&times;</div><div class="kpi__l">vs bf16, this tensor</div></div>
+  <div class="kpi"><div class="kpi__n">16 KB</div><div class="kpi__l">g_idx, the act-order tax</div></div>
+</div>
+
+<p>The 0.16 bits of overhead is the group metadata. Halve the group size to 64 and it doubles; go channel-wise
+($\texttt{group\_size} = -1$) and it nearly vanishes, at a real accuracy cost. That tradeoff is the granularity
+axis of <a href="../00-foundations/00-05-numerics.html#integer-and-block">&sect;0.5</a>, priced.</p>
+
+<h3>The packing, concretely</h3>
+
+<p>Eight INT4 values per int32. vLLM's generic packer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/utils/quant_utils.py:L561-L580</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def pack_quantized_values_into_int32(
+    w_q: torch.Tensor, wtype: ScalarType, packed_dim: int = 0
+):
+    # move dim to pack to the end
+    perm = (*[i for i in range(len(w_q.shape)) if i != packed_dim], packed_dim)
+    inv_perm = tuple(perm.index(i) for i in range(len(perm)))
+    w_q_perm = w_q.permute(perm)
+
+    pack_factor = 32 // wtype.size_bits
+    mask = (1 &lt;&lt; wtype.size_bits) - 1
+
+    new_shape_perm = list(w_q_perm.shape)
+    assert w_q_perm.shape[-1] % pack_factor == 0
+    new_shape_perm[-1] //= pack_factor
+
+    res = torch.zeros(new_shape_perm, dtype=torch.int32, device=w_q.device)
+    for i in range(pack_factor):
+        res |= (w_q_perm[..., i::pack_factor] &amp; mask) &lt;&lt; wtype.size_bits * i
+
+    return res.permute(inv_perm)</code></pre>
+</div>
+
+<p>GPTQ and AWQ do not agree on the layout. GPTQ packs along the <em>input</em> axis in natural nibble order.
+AWQ packs along the <em>output</em> axis in the interleaved order <code>[0, 4, 1, 5, 2, 6, 3, 7]</code> &mdash; a
+choice made so that a dequant kernel can unpack eight nibbles into two aligned halves with fewer shuffles. That
+order is hard-coded in both engines' dequant paths. vLLM's Triton reference kernel reconstructs it
+arithmetically &mdash; it is not the default path, which is the compiled
+<code>torch.ops._C.awq_dequantize</code>; the Triton version is selected only by
+<code>VLLM_USE_TRITON_AWQ=1</code> (<code>vllm/_custom_ops.py:L491-L505</code>), which makes it the readable
+statement of a layout both paths share:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/awq_triton.py:L48-L68</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Load the weights.
+    iweights = tl.load(qweight_ptr + offsets, masks, 0.0)
+    iweights = tl.interleave(iweights, iweights)
+    iweights = tl.interleave(iweights, iweights)
+    iweights = tl.interleave(iweights, iweights)
+
+    # Create reverse AWQ order as tensor: [0, 4, 1, 5, 2, 6, 3, 7]
+    # that will map given indices to the correct order.
+    reverse_awq_order_tensor = (
+        (tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]
+    ).reshape(8)
+
+    # Use this to compute a set of shifts that can be used to unpack and
+    # reorder the values in iweights and zeros.
+    shifts = reverse_awq_order_tensor * 4
+    shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_Y * BLOCK_SIZE_X, 8))
+    shifts = tl.reshape(shifts, (BLOCK_SIZE_Y, BLOCK_SIZE_X * 8))
+
+    # Unpack and reorder: shift out the correct 4-bit value and mask.
+    iweights = (iweights &gt;&gt; shifts) &amp; 0xF
+</code></pre>
+</div>
+
+<p>Three <code>tl.interleave</code> calls turn each int32 lane into eight copies of itself; the shift vector then
+extracts a different nibble from each copy, in AWQ's order. The dequantization itself is one line further down
+&mdash; <code>iweights = (iweights - zeros) * scales</code>, the affine map of
+<a href="../00-foundations/00-05-numerics.html#integer-and-block">&sect;0.5</a> &mdash; and that is the entire
+runtime cost of AWQ. There is no AWQ scaling at inference. The scales were folded into the weights offline, just
+like SmoothQuant's.</p>
+
+<h3>Where the two engines diverge</h3>
+
+<p>At the pinned SHAs the structural difference is that vLLM has collapsed the format-specific configs into two,
+deferring kernel choice to a selector, while SGLang keeps a config class per (format, kernel) pair:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/__init__.py:L139-L152</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    method_to_config: dict[str, type[QuantizationConfig]] = {
+        "awq": AutoAWQConfig,
+        "awq_marlin": AutoAWQConfig,
+        "auto_awq": AutoAWQConfig,
+        "fp8": Fp8Config,
+        "fbgemm_fp8": FBGEMMFp8Config,
+        "fp_quant": FPQuantConfig,
+        "modelopt": ModelOptFp8Config,
+        "modelopt_fp4": ModelOptNvFp4Config,
+        "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_mixed": ModelOptMixedPrecisionConfig,
+        "auto_gptq": AutoGPTQConfig,
+        "gptq": AutoGPTQConfig,
+        "gptq_marlin": AutoGPTQConfig,</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/__init__.py:L83-L88</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    "awq": AWQConfig,
+    "awq_marlin": AWQMarlinConfig,
+    "bitsandbytes": BitsAndBytesConfig,
+    "gguf": GGUFConfig,
+    "gptq": GPTQConfig,
+    "gptq_marlin": GPTQMarlinConfig,</code></pre>
+</div>
+
+<p>The consequence is behavioural. In vLLM, <code>--quantization awq</code> and
+<code>--quantization awq_marlin</code> construct the same object and
+<code>AutoAWQConfig.get_quant_method</code> picks Marlin or the fallback <em>per layer</em>, via
+<code>check_marlin_supported</code> and <code>check_marlin_supports_layer</code>. In SGLang the flag picks the
+class, and therefore the kernel family, for the whole model. One layer Marlin cannot serve &mdash; after tile
+padding &mdash; degrades that layer alone in vLLM; in SGLang it means you should have chosen <code>awq</code>
+up front.</p>
+
+<p>A second divergence, in the non-Marlin AWQ path. vLLM switches strategy on token count:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/auto_awq.py:L919-L937</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.qzeros
+        pack_factor = self.quant_config.pack_factor
+        out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
+        # num_tokens &gt;= threshold
+        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() &gt;= 256
+        # Batch invariant mode requires torch.matmul path
+        # for Triton override
+        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
+            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+            out = torch.matmul(reshaped_x, out)
+        else:
+            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros, pack_factor)
+        if bias is not None:
+            out.add_(bias)
+        return out.reshape(out_shape)</code></pre>
+</div>
+
+<p>Below 256 tokens, fuse the dequant into a specialised GEMM &mdash; the layer is memory-bound on weights, so
+reading 4 bits instead of 16 is the whole win. At or above 256 tokens, materialise the full FP16 weight once and
+call cuBLAS, because the GEMM is now compute-bound and one dequant amortised over 256+ rows is cheaper than a
+hand-written kernel that cannot match cuBLAS on math throughput. This is exactly the ridge-point argument of
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> written as an
+<code>if</code>. SGLang's equivalent path has no such branch:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/hardware_backend/gpu/quantization/awq_kernels.py:L94-L105</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.qzeros
+        pack_factor = self.quant_config.pack_factor
+        out_shape = x.shape[:-1] + (qweight.shape[-1] * pack_factor,)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        out = awq_dequantize(qweight, scales, qzeros)
+        out = torch.matmul(reshaped_x, out)
+
+        if bias is not None:
+            out.add_(bias)
+        return out.reshape(out_shape)</code></pre>
+</div>
+
+<p>Always dequantize, always <code>torch.matmul</code>. That is the wrong choice at batch 1 &mdash; you materialise
+a 117&nbsp;MB fp16 tensor to multiply it by a single row &mdash; and it is why SGLang's non-Marlin AWQ path is a
+compatibility fallback rather than a serving path. Both engines expect Marlin to handle the real workload
+(<a href="04-03-formats-and-kernels.html">&sect;4.3</a>).</p>
+
+<p>SGLang resolves the act-order/tensor-parallel collision the other way &mdash; sharded scales kept, shuffle
+optimisation dropped:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/gptq/schemes/gptq_linear.py:L67-L78</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        self.kernel.use_shuffle = True
+        scale_and_zero_size = input_size // group_size
+        scale_and_zero_input_dim = None
+        if (
+            input_size != input_size_per_partition
+            and self.quant_config.group_size != -1
+        ):
+            if self.quant_config.desc_act:
+                self.kernel.use_shuffle = False
+            else:
+                scale_and_zero_size = input_size_per_partition // group_size
+                scale_and_zero_input_dim = 0</code></pre>
+</div>
+
+<p><code>input_size != input_size_per_partition</code> means a row-parallel layer whose reduction axis is
+sharded. Read the branch carefully: only the <em>else</em> arm &mdash; no <code>desc_act</code> &mdash; sets
+<code>scale_and_zero_size = input_size_per_partition // group_size</code> and
+<code>scale_and_zero_input_dim = 0</code>, which is what makes the scales a shard. Under
+<code>desc_act</code> both stay at their defaults (<code>input_size // group_size</code> and
+<code>None</code>), so SGLang <em>also</em> replicates the full scale and zero-point tensors on every rank
+&mdash; and additionally sets <code>use_shuffle = False</code>. Same problem, strictly worse concession: vLLM
+pays replicated scales and a <code>is_k_full=False</code> kernel path, SGLang pays replicated scales
+<em>and</em> loses the shuffle optimisation.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: an AWQ checkpoint reaching a GEMM</h2></div><div class="sec__body"><p>One <code>gate_proj</code> of a 4-bit AWQ Llama-3-8B, from <code>quant_config.json</code> to the kernel call, in
+vLLM at <code>a556f3f</code>.</p>
+
+<ol>
+  <li><strong><code>AutoAWQConfig.from_config</code></strong>
+  (<code>auto_awq.py:L238-L253</code>) reads <code>w_bit</code>/<code>bits</code>,
+  <code>q_group_size</code>/<code>group_size</code>, <code>zero_point</code>, and
+  <code>modules_to_not_convert</code>, and sets <code>pack_factor = 32 // weight_bits = 8</code>. Note it accepts
+  either key spelling &mdash; AutoAWQ and llm-compressor disagree on the field names.</li>
+
+  <li><strong><code>AutoAWQConfig.get_quant_method</code></strong>
+  (<code>auto_awq.py:L285-L331</code>) checks <code>is_layer_skipped</code> against
+  <code>modules_to_not_convert</code>, then <code>check_marlin_supported(self.quant_type, self.group_size,
+  self.zero_point)</code>. For uint4 with group 128 and zero points on an H100 this passes, so the layer gets
+  <code>AutoAWQMarlinLinearMethod</code>. It is called with
+  <code>allow_tile_padding=True</code>, so tile-misalignment alone is fixed by padding at weight prep rather
+  than rejected; if <code>check_marlin_supports_layer</code> still fails it
+  logs <code>"Layer '%s' is not supported by AutoAWQMarlin. Falling back to unoptimized AWQ kernels."</code> and
+  returns <code>AutoAWQLinearMethod</code> instead.</li>
+
+  <li><strong><code>create_weights</code></strong> (<code>auto_awq.py:L453-L491</code>) allocates the checkpoint
+  layout, not the kernel layout: <code>qweight</code> is
+  <code>(4096, 14336//8) = (4096, 1792)</code> int32 with <code>packed_dim=1</code> &mdash; packed along the
+  <em>output</em> axis, the AWQ convention. <code>qzeros</code> is <code>(32, 1792)</code>,
+  <code>scales</code> is <code>(32, 14336)</code>.</li>
+
+  <li><strong>Weights load.</strong> Nothing is transformed yet; the parameter classes only route shards.</li>
+
+  <li><strong><code>process_weights_after_loading</code> &rarr; <code>_convert_awq_to_standard_format</code></strong>
+  (<code>auto_awq.py:L93-L168</code>) unpacks every int32 into eight nibbles, undoes the
+  <code>[0,4,1,5,2,6,3,7]</code> interleave, and repacks along the input axis so the layout matches GPTQ's:</li>
+</ol>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/auto_awq.py:L113-L127</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # --- Convert qweight: (K, N // pack) packed_dim=1 → (K // pack, N) packed_dim=0
+    qw = getattr(layer, w_q_name).data
+    K, N_packed = qw.shape
+    N = N_packed * pack_factor
+
+    # Unpack int32 → individual values, fix AWQ ordering
+    unpacked = (qw.unsqueeze(-1) &gt;&gt; shifts) &amp; mask  # (K, N_packed, pack_factor)
+    unpacked = unpacked[:, :, reverse_order]
+    unpacked = unpacked.reshape(K, N)  # (K, N)
+
+    # Repack along input dim (dim 0)
+    unpacked = unpacked.reshape(K // pack_factor, pack_factor, N)
+    new_qw = (unpacked.to(torch.int32) &lt;&lt; shifts[None, :, None]).sum(
+        dim=1, dtype=torch.int32
+    )</code></pre>
+</div>
+
+<ol start="6">
+  <li><strong>Marlin repack.</strong> <code>MarlinLinearKernel.process_weights_after_loading</code>
+  (<code>vllm/model_executor/kernels/linear/mixed_precision/marlin.py:L128-L146</code>) calls
+  <code>ops.gptq_marlin_repack</code> to shuffle into Marlin's tile order, and
+  <code>marlin_permute_scales</code> for the scales. AWQ has no <code>g_idx</code>, so
+  <code>marlin_make_empty_g_idx</code> supplies zero-length placeholders &mdash; the kernel signature requires the
+  tensors to exist.</li>
+
+  <li><strong>Forward.</strong> <code>apply_weights</code> calls <code>apply_gptq_marlin_linear</code>:</li>
+</ol>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/kernels/linear/mixed_precision/marlin.py:L229-L250</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        c = self.config
+        w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
+
+        # `process_weights_after_loading` will ensure w_zp and w_gidx are not
+        #  None for marlin
+
+        return apply_gptq_marlin_linear(
+            input=x,
+            weight=w_q,
+            weight_scale=w_s,
+            weight_zp=w_zp,  # type: ignore
+            g_idx=w_gidx,  # type: ignore
+            g_idx_sort_indices=layer.g_idx_sort_indices,
+            workspace=self.workspace,
+            wtype=c.weight_type,
+            input_size_per_partition=c.partition_weight_shape[0],
+            output_size_per_partition=c.partition_weight_shape[1],
+            is_k_full=self.is_k_full,
+            input_global_scale=getattr(layer, "input_global_scale", None),
+            bias=bias,
+            input_dtype=c.act_type,
+        )</code></pre>
+</div>
+
+<p>The GPTQ path is the same function with the same arguments; the only difference is that <code>w_gidx</code> and
+<code>g_idx_sort_indices</code> are non-empty when <code>desc_act</code> was set. Once the checkpoint is loaded,
+"GPTQ" and "AWQ" are the same kernel with different numbers in it. The algorithms differ entirely offline.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h3>desc_act plus tensor parallelism</h3>
+<p>The most common surprise. A <code>desc_act: true</code> checkpoint at TP=1 is fine; at TP=8 the same file
+forces <code>marlin_repeat_scales_on_all_ranks</code> to <code>True</code>, so every rank stores the full scale
+tensor instead of its $1/8$ shard, and <code>marlin_is_k_full</code> goes <code>False</code> for every
+row-parallel layer. If a quantized model shows a smaller-than-expected memory win at high TP, check
+<code>desc_act</code> in <code>quantize_config.json</code> first.</p>
+
+<h3>Group size &minus;1 silently disables act-order</h3>
+<p>vLLM normalises this on construction, with the reason in a comment:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/auto_gptq.py:L117-L121</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        super().__init__()
+        if desc_act and group_size == -1:
+            # In this case, act_order == True is the same as act_order == False
+            # (since we have only one group per output channel)
+            desc_act = False</code></pre>
+</div>
+
+<p>Correct &mdash; with one group there are no group boundaries to misalign &mdash; but it means a config claiming
+<code>desc_act: true</code> may produce a layer with no <code>g_idx</code> at all. Do not infer the runtime
+behaviour from the JSON.</p>
+
+<h3>Shapes that do not divide</h3>
+<p>SGLang raises a specific error when the output dimension is not a multiple of the pack factor after sharding:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/gptq/schemes/gptq_linear.py:L55-L60</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if output_size_per_partition % self.quant_config.pack_factor.numerator != 0:
+            raise ValueError(
+                "The output size is not aligned with the quantized "
+                "weight shape. This can be caused by too large "
+                "tensor parallel size."
+            )</code></pre>
+</div>
+
+<p>The message names the real cause. A 4-bit checkpoint packs 8 values per int32; if $C_{\text{out}}/\text{TP}$
+is not a multiple of 8 the shard cannot be cut on an int32 boundary. Lower TP, or use a checkpoint whose fused
+QKV/MLP widths divide.</p>
+
+<h3>A W8A8 conversion that loses a few points</h3>
+<p>Symptom: GSM8K drops several points after an INT8 conversion that looked fine on perplexity. Debug order:
+(1) sweep <code>smoothing_strength</code> &mdash; 0.5, 0.65, 0.8, 0.9 &mdash; because $\alpha$ is the only knob that
+directly trades activation error for weight error; (2) confirm the calibration corpus resembles the eval;
+(3) check whether the eval needs <code>add_bos_token=True</code>, which vLLM's own docs flag as a source of
+spurious degradation in quantized models (<code>docs/features/quantization/llm_compressor/int4.md:L126-L127</code>).
+Only after those three is "INT8 is not viable for this model" a supportable conclusion.</p>
+
+<h3>Calibrating on the eval set</h3>
+<p>The quiet one. If the calibration draw and the eval draw come from the same corpus, GPTQ's Hessian and
+SmoothQuant's channel maxima are fitted to the thing you are about to measure, and you will not see the
+degradation your users see. Hold out a genuinely different corpus for the eval, and where the deployment domain
+is known, calibrate on it &mdash; vLLM's docs say this outright for fine-tuned models
+(<code>docs/features/quantization/llm_compressor/int4.md:L135</code>).</p></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>No GPU is needed to check every claim this chapter makes about stored artefacts &mdash; a checkpoint's index
+file has all of it.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">inspect a published GPTQ checkpoint's artefacts, no GPU</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>pip install huggingface_hub
+python - &lt;&lt;'PY'
+from huggingface_hub import hf_hub_download
+import json
+repo = "TheBloke/Llama-2-7b-Chat-GPTQ"
+print(json.load(open(hf_hub_download(repo, "quantize_config.json"))))
+idx = hf_hub_download(repo, "model.safetensors.index.json")
+keys = json.load(open(idx))["weight_map"]
+for k in sorted(keys):
+    if "layers.0." in k:
+        print(k)
+PY</code></pre>
+</div>
+
+<p>Read off <code>bits</code>, <code>group_size</code>, <code>desc_act</code>, <code>sym</code>, then confirm the
+four tensors per linear: <code>qweight</code>, <code>qzeros</code>, <code>scales</code>, <code>g_idx</code>. Repeat
+for an AWQ repo (<code>TheBloke/Llama-2-7b-Chat-AWQ</code>, <code>quant_config.json</code>) and note the missing
+<code>g_idx</code> and the present <code>zero_point</code>. Then recompute the effective bits per weight from the
+shapes and check &sect;7's 4.16 against a real file.</p>
+
+<p>With a GPU, the flag to flip is the kernel selector. vLLM logs its choice
+(<code>"Using %s for AutoAWQMarlinLinearMethod"</code>, <code>auto_awq.py:L448-L450</code>); launch with
+<code>--quantization awq</code> and again with <code>--quantization awq_marlin</code> and confirm from the log
+that both resolve to the same config and diverge only when the Marlin support checks fail. Latency consequences
+are <a href="04-04-when-quantization-pays.html">&sect;4.4</a>.</p>
+
+<p>For the calibration experiment, run the <code>llm-compressor</code> INT4 recipe twice with different
+<code>ds.shuffle(seed=...)</code> values and evaluate both with the documented harness:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/features/quantization/llm_compressor/int4.md:L117-L123</span>
+    <span class="tag tag--vllm">vLLM docs</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>lm_eval --model vllm \
+  --model_args pretrained="./Meta-Llama-3-8B-Instruct-W4A16-G128",add_bos_token=true \
+  --tasks gsm8k \
+  --num_fewshot 5 \
+  --limit 250 \
+  --batch_size 'auto'</code></pre>
+</div>
+
+<p>The gap between the two seeds is your calibration noise floor. Any algorithm comparison smaller than that gap
+is not a result.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Read <code>vllm/model_executor/layers/quantization/auto_gptq.py:L366-L378</code>. Under what two conditions
+  does vLLM replicate the scale tensor on every tensor-parallel rank instead of sharding it? For Llama-3-8B's
+  <code>down_proj</code> at TP=8 with group size 128 and <code>desc_act: true</code>, how many extra bytes per rank
+  is that?</li>
+
+  <li>SmoothQuant with $\alpha = 0.5$ maps a channel with $\max|X_j| = 100$, $\max|W_j| = 1$ to a common value of
+  10. What does it map a channel with $\max|X_j| = 1$, $\max|W_j| = 100$ to &mdash; and what does that tell you
+  about applying SmoothQuant to a layer whose weights already have outlier channels?</li>
+
+  <li>AWQ's error-ratio argument assumes $\Delta' \approx \Delta$ after scaling one channel. Under what
+  circumstance does that assumption fail, and what does the grid search over $\alpha$ do about it? Give the group
+  size at which the assumption is weakest.</li>
+
+  <li>Predict, then verify: you load an AWQ checkpoint in vLLM with a prompt of 300 tokens and no other requests.
+  Which of the two branches in <code>auto_awq.py:L930-L934</code> runs during prefill, and which during the
+  subsequent decode steps? What does that imply about the per-step cost of a batch-1 decode on the non-Marlin
+  path?</li>
+
+  <li>GPTQ's Hessian is $2XX^\top$ over the layer's inputs. For Llama-3-8B, list the distinct
+  $C_{\text{in}}$ values across all linear layers and compute the fp32 Hessian size for each. Which single layer
+  type dominates the memory peak of a GPTQ run, and by what factor?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> <code>marlin_repeat_scales_on_all_ranks</code>
+    (<code>utils/marlin_utils.py:L440-L446</code>) returns <code>True</code> if <code>act_order</code> is set,
+    <em>or</em> if the layer is channel-wise (<code>group_size == -1</code>) and row-parallel.
+    <code>down_proj</code> is row-parallel, so at TP=8 the input axis is sharded
+    ($14336 \to 1792$ per rank) and the output axis is not ($C_{\text{out}} = 4096$). The scale tensor is
+    <code>(scales_and_zp_size, output_size_per_partition)</code>
+    (<code>auto_gptq.py:L412-L417</code>). Sharded, <code>scales_and_zp_size = 1792/128 = 14</code>, so
+    $14 \times 4096$ fp16 = 114,688 B. Replicated, the code sets
+    <code>scales_and_zp_size = input_size // group_size = 112</code>, so $112 \times 4096$ fp16 = 917,504 B.
+    Extra: 802,816 B per rank per layer, &times;32 layers &asymp; 25.7 MB per rank, for <code>down_proj</code>
+    alone.</p>
+
+    <p><b>2.</b> $s_j = 1^{0.5}/100^{0.5} = 0.1$, so $\max|X_j|/s_j = 10$ and $s_j\max|W_j| = 10$ &mdash; the same
+    geometric mean, reached from the other side. SmoothQuant is symmetric: it migrates difficulty in whichever
+    direction reduces the imbalance. On a layer with weight outliers and clean activations it will happily make
+    the activations <em>worse</em> to help the weights, which is not what you want for W8A8. This is one reason
+    $\alpha$ is tuned rather than fixed at 0.5.</p>
+
+    <p><b>3.</b> It fails when the scaled channel becomes the group maximum &mdash; i.e. when $s$ is large relative
+    to the ratio between the salient channel and the group's largest channel, or when many channels in the same
+    group are scaled at once. Then $\Delta'$ grows and every other channel in the group loses precision. The grid
+    search over $\alpha$ is exactly the mechanism that finds where this turns from net-positive to net-negative,
+    measured by actual reconstruction error rather than by the bound. The assumption is weakest at small group
+    size: with group 32, one scaled channel is 1/32 of the group and far more likely to dominate the max than at
+    group 128 or channel-wise.</p>
+
+    <p><b>4.</b> Prefill processes 300 tokens in one call, so <code>x.shape[:-1].numel() == 300 &gt;= 256</code>
+    and the <code>awq_dequantize</code> + <code>torch.matmul</code> branch runs. Each decode step processes 1
+    token, so <code>1 &gt;= 256</code> is false and the fused <code>awq_gemm</code> branch runs. Implication: on
+    the fallback path, batch-1 decode never materialises the fp16 weight and reads only the 4-bit tensor &mdash;
+    which is the entire memory-bandwidth win. SGLang's path
+    (<code>awq_kernels.py:L100-L101</code>) has no branch and dequantizes the whole weight every decode step,
+    reading and writing the full fp16 tensor each time &mdash; strictly worse than bf16 at batch 1.</p>
+
+    <p><b>5.</b> Llama-3-8B has $d = 4096$, $h = 32$, $h_{kv} = 8$, $d_h = 128$, FFN intermediate 14336. Distinct
+    $C_{\text{in}}$: 4096 for <code>q_proj</code>/<code>k_proj</code>/<code>v_proj</code>/<code>gate_proj</code>/
+    <code>up_proj</code>; 4096 for <code>o_proj</code> ($h \cdot d_h = 4096$); 14336 for <code>down_proj</code>. So
+    two values: 4096 and 14336. Hessians: $4096^2 \times 4 = 67$ MB and $14336^2 \times 4 = 822$ MB.
+    <code>down_proj</code> dominates by $(14336/4096)^2 = 12.25\times$, and it is the layer that decides whether a
+    GPTQ run fits.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The asymmetry is the whole story: weight distributions are benign, activation distributions have a handful
+  of persistent channels 3&ndash;100&times; everything else, and those channels are load-bearing &mdash; zeroing
+  them costs 600&ndash;1000% perplexity while zeroing the same number of random channels costs 0.1%
+  (<a href="https://arxiv.org/abs/2208.07339">LLM.int8()</a>). Every method here is a different concession to that
+  fact.</li>
+
+  <li>GPTQ optimises the wrong-looking thing on purpose. It minimises $\|WX - \hat{W}X\|^2$, not
+  $\|W - \hat{W}\|^2$, which is why it needs the input second moment $2XX^\top$ and why an individual weight may
+  end up far from its original value. The Cholesky reformulation is not an optimisation detail &mdash; it is what
+  keeps the algorithm numerically alive at 175B.</li>
+
+  <li>AWQ and SmoothQuant are the same identity $XW = (X\,\mathrm{diag}(s)^{-1})(\mathrm{diag}(s)W)$ pointed in
+  opposite directions. AWQ raises $s$ on salient channels to protect weights (W4A16); SmoothQuant lowers the
+  activation range to make INT8 activations representable (W8A8). Neither costs anything at runtime, because both
+  fold their scales into stored weights offline.</li>
+
+  <li>$\alpha$ is the only true dial in SmoothQuant, and it is not universal: 0.5 in the paper for OPT/BLOOM, 0.75
+  for GLM-130B, 0.8 in vLLM's own llm-compressor recipe. Sweeping it is the first move when a W8A8 conversion
+  degrades, before concluding the model cannot take INT8.</li>
+
+  <li>Calibration is an unversioned input with measurable variance. Across ten draws from one corpus, downstream
+  accuracy moved by about 1.6 points for GPTQ on OPT-6.7B and by 9 points for SparseGPT pruning on LLaMA-7B
+  (<a href="https://aclanthology.org/2024.acl-long.544/">Williams &amp; Aletras, ACL 2024</a>). Any A/B smaller
+  than your own seed-to-seed gap is noise.</li>
+
+  <li>Once loaded, GPTQ and AWQ checkpoints reach <em>the same</em> kernel entry point in vLLM
+  (<code>apply_gptq_marlin_linear</code>); the only structural difference is whether <code>g_idx</code> is empty.
+  The algorithmic distinction lives entirely offline. What the engine sees is packed int4, group scales, zero
+  points, and possibly a permutation &mdash; 4.16 effective bits per weight at group 128, not 4.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Dettmers, Lewis, Belkada, Zettlemoyer, <a href="https://arxiv.org/abs/2208.07339">LLM.int8(): 8-bit Matrix
+  Multiplication for Transformers at Scale</a> (arXiv:2208.07339) &mdash; the emergent-outlier measurement that
+  every later method cites. Section 4 is the one to read.</li>
+
+  <li>Frantar, Ashkboos, Hoefler, Alistarh, <a href="https://arxiv.org/abs/2210.17323">GPTQ: Accurate Post-Training
+  Quantization for Generative Pre-trained Transformers</a> (arXiv:2210.17323), and the reference implementation at
+  <a href="https://github.com/IST-DASLab/gptq">IST-DASLab/gptq</a> &mdash; the README's flag notes
+  (<code>--act-order</code>, <code>--true-sequential</code>, <code>--static-groups</code>) are the best available
+  documentation of what the serialised config fields mean.</li>
+
+  <li>Lin, Tang, Tang, Yang, Dang, Han, <a href="https://arxiv.org/abs/2306.00978">AWQ: Activation-aware Weight
+  Quantization for LLM Compression and Acceleration</a> (arXiv:2306.00978). Table 1 is the whole argument.</li>
+
+  <li>Xiao, Lin, Seznec, Wu, Demouth, Han, <a href="https://arxiv.org/abs/2211.10438">SmoothQuant: Accurate and
+  Efficient Post-Training Quantization for Large Language Models</a> (arXiv:2211.10438).</li>
+
+  <li>Williams &amp; Aletras, <a href="https://aclanthology.org/2024.acl-long.544/">On the Impact of Calibration
+  Data in Post-training Quantization and Pruning</a> (ACL 2024, arXiv:2311.09755) &mdash; the systematic study of
+  calibration-set variance across 9 models, 5 corpora, 4 methods.</li>
+
+  <li>Ashkboos et&nbsp;al., <a href="https://arxiv.org/abs/2404.00456">QuaRot</a> (arXiv:2404.00456) and Liu
+  et&nbsp;al., <a href="https://arxiv.org/abs/2405.16406">SpinQuant</a> (arXiv:2405.16406) &mdash; the
+  rotation-based alternative to rescaling; see
+  <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html#rotation">&sect;2.5</a> for the transform itself.</li>
+
+  <li><a href="https://github.com/vllm-project/llm-compressor">vllm-project/llm-compressor</a> &mdash; where AutoAWQ
+  and AutoGPTQ workflows have been consolidated; vLLM's own
+  <code>docs/features/quantization/auto_awq.md:L3-L5</code> marks AutoAWQ deprecated in favour of it.</li>
+</ul></div></section>
+<div class="pager"><a href="04-01-the-design-space.html"><div class="pager__k">← Previous</div><div class="pager__t">The design space: PTQ/QAT, weight-only, W+A, KV</div></a><a class="pager__next" href="04-03-formats-and-kernels.html"><div class="pager__k">Next →</div><div class="pager__t">Formats and kernels: FP8, INT8, INT4, Marlin, Machete</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem: six dimensions that break everything</a>
+<a href="#mental-model">Mental model: three moves against one asymmetry</a>
+<a href="#gptq">GPTQ: layer-wise reconstruction with an inverse Hessian</a>
+<a href="#awq">AWQ: salience is an activation property</a>
+<a href="#smoothquant">SmoothQuant: making W8A8 possible at all</a>
+<a href="#calibration">Calibration: the input nobody version-controls</a>
+<a href="#production">What the engines actually consume</a>
+<a href="#worked-trace">Worked trace: an AWQ checkpoint reaching a GEMM</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

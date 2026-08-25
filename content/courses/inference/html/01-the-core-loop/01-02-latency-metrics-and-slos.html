@@ -1,0 +1,1521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TTFT, TPOT, ITL, E2E, goodput — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="loop">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i is-current" href="01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 1 · The core serving loop · 01-02</div>
+<h1>TTFT, TPOT, ITL, E2E, goodput</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/benchmarks/serve.py</code></li><li><code>python/sglang/benchmark/serving.py</code></li><li><code>vllm/v1/metrics/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Two teams benchmark the same engine on the same hardware with the same prompts and report TPOTs that differ by 30%. Neither is lying. They started and stopped their clocks in different places — and every ambiguity in a latency definition is a place where a benchmark can be quietly, defensibly wrong.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>A dashboard says <code>mean TTFT = 180 ms</code>. Support says the product feels broken. Both are true.</p>
+
+<p>The mean is being computed over a distribution whose right tail is generated by a completely different mechanism than its body. In the body, TTFT is prefill compute: a 1,800-token prompt through Llama-3-70B, a fixed number of FLOPs, a stable number. In the tail, TTFT is <em>queueing</em> — the request sat in the waiting queue while other prefills ran ahead of it. Those two mechanisms have different scaling laws, and averaging across them produces a number that describes neither.</p>
+
+<p>Worse, the four metrics people quote are not four measurements of one thing. They are four different clocks with four different start and stop points, and at least three of them have more than one definition in common use. Consider a single concrete ambiguity that will recur through this chapter: <b>is the first token included in TPOT?</b></p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L607-L616</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            tpot = 0.0
+            if output_len &gt; 1:
+                latency_minus_ttft = outputs[i].latency - outputs[i].ttft
+                tpot = latency_minus_ttft / (output_len - 1)
+                tpots.append(tpot)
+            # Note: if output_len &lt;= 1, we regard tpot as 0 for goodput
+            all_tpots.append(tpot)
+            itls += outputs[i].itl
+            ttfts.append(outputs[i].ttft)
+            e2els.append(outputs[i].latency)</code></pre>
+</div>
+
+<p>vLLM's harness excludes it: it divides by <code>output_len - 1</code> after subtracting TTFT. The other definition in the wild — <code>E2E / output_len</code> — folds a 400 ms prefill into a 200-token generation and inflates the reported per-token cost by 2 ms. On a 20 ms baseline that is a 10% swing produced entirely by a choice of denominator. If you cannot say which one a number came from, the number is not comparable to anything.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Draw one request as a line in time and mark seven instants on it: the HTTP request arrives; it is tokenized and enters the waiting queue; the scheduler admits it; prefill finishes and the first token is emitted; tokens 2…N are emitted with gaps between them; the last token is emitted; the stream is closed. Every metric in this chapter is a span between two of those instants. That is the whole mental model — the difficulty is entirely in which two, and in whose clock.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — one request, with every latency metric drawn as a labelled span.</b>
+    Spans above the axis are what a client can see; spans below are what the engine records internally. Note that the two harnesses disagree about where E2E stops.</p>
+  <svg viewBox="0 0 780 340" width="100%" role="img" aria-label="Timeline of a single request annotated with TTFT, ITL, TPOT, E2E and the engine-internal queue, prefill and decode phases">
+    <!-- E2E bars -->
+    <rect x="72" y="22" width="576" height="17" rx="2" fill="#2f9a94" fill-opacity="0.16" stroke="#2f9a94" stroke-width="1"/>
+    <text x="80" y="34" font-family="monospace" font-size="11" fill="currentColor">E2EL as vLLM measures it: arrival to LAST TOKEN timestamp</text>
+    <rect x="72" y="46" width="618" height="17" rx="2" fill="#c47b3a" fill-opacity="0.16" stroke="#c47b3a" stroke-width="1"/>
+    <text x="80" y="58" font-family="monospace" font-size="11" fill="currentColor">E2EL as SGLang measures it: arrival to TERMINAL SSE FRAME</text>
+    <!-- TTFT -->
+    <rect x="72" y="76" width="320" height="17" rx="2" fill="#b8567a" fill-opacity="0.16" stroke="#b8567a" stroke-width="1"/>
+    <text x="80" y="88" font-family="monospace" font-size="11" fill="currentColor">TTFT = arrival to first token (queueing INCLUDED)</text>
+    <!-- ITL -->
+    <rect x="440" y="106" width="46" height="15" rx="2" fill="#7a8f2a" fill-opacity="0.22" stroke="#7a8f2a" stroke-width="1"/>
+    <text x="496" y="118" font-family="monospace" font-size="11" fill="currentColor">ITL = one sample per gap. Report the DISTRIBUTION, not a mean.</text>
+    <!-- axis -->
+    <line x1="60" y1="150" x2="740" y2="150" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>
+    <!-- ticks -->
+    <line x1="72" y1="140" x2="72" y2="160" stroke="currentColor" stroke-width="1.4"/>
+    <line x1="118" y1="140" x2="118" y2="160" stroke="currentColor" stroke-width="1.4"/>
+    <line x1="300" y1="140" x2="300" y2="160" stroke="currentColor" stroke-width="1.4"/>
+    <line x1="392" y1="136" x2="392" y2="164" stroke="#b8567a" stroke-width="1.8"/>
+    <line x1="440" y1="142" x2="440" y2="158" stroke="currentColor" stroke-width="1"/>
+    <line x1="486" y1="142" x2="486" y2="158" stroke="currentColor" stroke-width="1"/>
+    <line x1="532" y1="142" x2="532" y2="158" stroke="currentColor" stroke-width="1"/>
+    <line x1="578" y1="142" x2="578" y2="158" stroke="currentColor" stroke-width="1"/>
+    <text x="610" y="155" font-family="monospace" font-size="12" fill="currentColor">...</text>
+    <line x1="648" y1="136" x2="648" y2="164" stroke="#2f9a94" stroke-width="1.8"/>
+    <line x1="690" y1="140" x2="690" y2="160" stroke="#c47b3a" stroke-width="1.4"/>
+    <!-- event labels -->
+    <text x="72" y="177" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">arrival</text>
+    <text x="118" y="192" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">QUEUED</text>
+    <text x="300" y="177" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">SCHEDULED</text>
+    <text x="392" y="192" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">token 1</text>
+    <text x="463" y="177" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">token 2, 3, 4</text>
+    <text x="648" y="192" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">token N</text>
+    <text x="700" y="177" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">[DONE]</text>
+    <!-- engine phases -->
+    <rect x="118" y="212" width="182" height="17" rx="2" fill="#46586b" fill-opacity="0.16" stroke="#46586b" stroke-width="1"/>
+    <text x="126" y="224" font-family="monospace" font-size="10" fill="currentColor">vllm:request_queue_time_seconds</text>
+    <rect x="300" y="212" width="92" height="17" rx="2" fill="#46586b" fill-opacity="0.16" stroke="#46586b" stroke-width="1"/>
+    <text x="308" y="224" font-family="monospace" font-size="10" fill="currentColor">prefill_time</text>
+    <rect x="392" y="212" width="256" height="17" rx="2" fill="#46586b" fill-opacity="0.16" stroke="#46586b" stroke-width="1"/>
+    <text x="400" y="224" font-family="monospace" font-size="10" fill="currentColor">decode_time = last_token_ts - first_token_ts</text>
+    <!-- derived line -->
+    <text x="72" y="256" font-family="monospace" font-size="11" fill="currentColor">TPOT  = decode_time / (N - 1)          one scalar per REQUEST</text>
+    <text x="72" y="274" font-family="monospace" font-size="11" fill="currentColor">ITL   = t[k] - t[k-1]  for k in 2..N   N-1 scalars per REQUEST</text>
+    <text x="72" y="292" font-family="monospace" font-size="11" fill="currentColor">TPOT  = mean(ITL) for that request     ONLY if every chunk carries one token</text>
+    <text x="72" y="316" font-family="monospace" font-size="11" fill="currentColor">Prefill sets the pink span. Decode sets the green span. Queueing sets the tail of both.</text>
+  </svg>
+</div>
+
+<p>Two structural facts follow immediately from the picture, and they are the reason the rest of the chapter exists. First, <b>TTFT contains queueing</b>, so it is a function of load, not just of prompt length. Second, <b>TPOT is one number per request while ITL is many</b>, so a single 1.5-second stall inside a 500-token generation shows up as a 75× outlier in ITL and as a 15% bump in TPOT. Choosing between them is choosing what you want to be able to see.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the definitions, and the right percentile</h2></div><div class="sec__body"><h3>The definition table</h3>
+
+<p>Let a request arrive at $t_a$, be admitted by the scheduler at $t_s$, emit its $k$-th output token at $t_k$ for $k = 1 \dots N$, and have its stream closed at $t_c$. Then:</p>
+
+<div class="math-display">$$\mathrm{TTFT} = t_1 - t_a \qquad \mathrm{ITL}_k = t_k - t_{k-1} \;\; (k \ge 2) \qquad \mathrm{TPOT} = \frac{t_N - t_1}{N-1} \qquad \mathrm{E2EL} = t_N - t_a$$</div>
+
+<p>Note that $\mathrm{TPOT}$ is exactly the arithmetic mean of that request's $\mathrm{ITL}$ samples <em>when each streamed chunk carries exactly one token</em>, because the $N-1$ gaps telescope to $t_N - t_1$. Speculative decoding — one forward pass emitting several accepted tokens at once, <a href="../06-decoding-algorithms/06-02-speculative-decoding.html">§6.2</a> — along with chunk bundling and any proxy that coalesces SSE frames, breaks that identity, and both engines have code that exists solely to repair it.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The five metrics, with exact clock endpoints. "Alert on" is a recommendation, argued below.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Metric</th><th>Starts at</th><th>Stops at</th><th>Dominated by</th><th>Alert on</th></tr></thead>
+      <tbody>
+        <tr><td><b>TTFT</b></td><td>request arrival at the frontend</td><td>first output token</td><td>queueing at load; prefill FLOPs otherwise</td><td>p99</td></tr>
+        <tr><td><b>ITL</b></td><td>token $k-1$</td><td>token $k$</td><td>decode step time; scheduler interference</td><td>p99 <i>and</i> max</td></tr>
+        <tr><td><b>TPOT</b></td><td>first output token</td><td>last output token, &divide; $(N-1)$</td><td>batch size and decode step time</td><td>p50 and p99</td></tr>
+        <tr><td><b>E2EL</b></td><td>request arrival</td><td>last token (vLLM) / stream close (SGLang)</td><td>output length &times; TPOT, plus TTFT</td><td>p99, per output-length bucket</td></tr>
+        <tr><td><b>Goodput</b></td><td colspan="2">completed requests that met <i>all</i> SLO predicates, &divide; wall time</td><td>whichever SLO binds first</td><td>this is the capacity number</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Throughput needs its own disambiguation because there are four of them and they are not interchangeable: <b>request throughput</b> (req/s), <b>output token throughput</b> (generated tok/s), <b>total token throughput</b> (input + output tok/s), and <b>input token throughput</b>. Prefill dominates the input number and decode dominates the output number, so a system tuned for one can look terrible on the other. vLLM computes all but the input-only variant in one place:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L726-L734</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    metrics = BenchmarkMetrics(
+        completed=completed,
+        failed=len(failed_outputs),
+        total_input=total_input,
+        total_output=sum(actual_output_lens),
+        request_throughput=completed / dur_s,
+        request_goodput=good_completed / dur_s,
+        output_throughput=sum(actual_output_lens) / dur_s,
+        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,</code></pre>
+</div>
+
+<h3>Why TTFT p99 is a queueing measurement, not a compute measurement</h3>
+
+<p>Model one replica's prefill capacity as a single server with mean service time $S$ and utilisation $\rho = \lambda S$, where $\lambda$ is the arrival rate. For an M/M/1 queue the waiting time before service has mean $\mathbb{E}[W] = S\rho/(1-\rho)$ and tail $\Pr[W > t] = \rho\, e^{-(1-\rho)t/S}$, so the 99th percentile of waiting is</p>
+
+<div class="math-display">$$W_{p99} = \frac{S \ln(100\rho)}{1-\rho}, \qquad \mathrm{TTFT}_{p99} \approx S + W_{p99}.$$</div>
+
+<p>Take $S = 100$ ms as an illustrative prefill service time for a Llama-3-70B replica on a 1,800-token prompt. <b>The following table is derived arithmetic from the two formulas above — it is not a measurement,</b> and M/M/1 is optimistic because real prompt lengths make service times far more variable than exponential (Kingman's approximation scales the wait by $(C_a^2 + C_s^2)/2$, which exceeds 1 for any realistic length distribution). The arrival process itself — how burstiness is parameterised and how to measure your own — is <a href="../10-benchmarking/10-01-workload-characterization.html">§10.1</a>'s subject; the methodology for driving it is <a href="../10-benchmarking/10-03-honest-benchmarking.html">§10.3</a>.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — M/M/1 with S = 100 ms. Prefill compute is constant down every row; TTFT p99 grows 6&times;.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Utilisation $\rho$</th><th>Throughput (req/s)</th><th>Mean TTFT (ms)</th><th>TTFT p99 (ms)</th><th>Share that is queueing</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0.50</td><td class="num">5.0</td><td class="num">200</td><td class="num">882</td><td class="num">89%</td></tr>
+        <tr><td class="num">0.70</td><td class="num">7.0</td><td class="num">333</td><td class="num">1,516</td><td class="num">93%</td></tr>
+        <tr><td class="num">0.80</td><td class="num">8.0</td><td class="num">500</td><td class="num">2,291</td><td class="num">96%</td></tr>
+        <tr><td class="num">0.90</td><td class="num">9.0</td><td class="num">1,000</td><td class="num">4,600</td><td class="num">98%</td></tr>
+        <tr><td class="num">0.95</td><td class="num">9.5</td><td class="num">2,000</td><td class="num">9,207</td><td class="num">99%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Read the last column again. At any load you would actually run a fleet at, <b>90–99% of p99 TTFT is time the request spent doing nothing.</b> But do not read that as &ldquo;kernels do not matter&rdquo;, because $\rho = \lambda S$ — the queueing term is itself a function of service time, and the $1/(1-\rho)$ makes the coupling violent in both directions. At $\lambda = 9$ req/s, a prefill kernel 20% faster takes $S$ from 100 ms to 80 ms and therefore $\rho$ from 0.90 to 0.72, and p99 TTFT from 4,600 ms to $80\ln(72)/0.28 + 80 \approx 1{,}300$ ms: a 20% kernel win bought a 3.5&times; latency win. The same lever run backwards is what actually hurts — a 20% <em>regression</em> puts $\rho$ at 1.08 and the queue never drains at all. Adding a replica, which drops $\rho$ from 0.9 to 0.45, moves p99 TTFT to roughly 800 ms by exactly the same nonlinearity. <b>The lesson is not that compute is irrelevant; it is that near the knee, every quantity is leveraged by $1/(1-\rho)$ and none of it is visible in the mean</b> — which at $\rho = 0.9$ reads 1,000 ms while hiding a 4.6-second tail. <em>All derived from the two formulas above.</em></p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — the trade surface.</b> Throughput saturates linearly in $\rho$ while TTFT p99 diverges as $1/(1-\rho)$. Derived from the M/M/1 formulas above with S = 100 ms; shape, not measurement.</p>
+  <svg viewBox="0 0 760 360" width="100%" role="img" aria-label="Plot of TTFT p99 and request throughput against utilisation, showing throughput saturating while TTFT diverges">
+    <line x1="70" y1="300" x2="700" y2="300" stroke="currentColor" stroke-width="1.2"/>
+    <line x1="70" y1="300" x2="70" y2="30" stroke="currentColor" stroke-width="1.2"/>
+    <line x1="700" y1="300" x2="700" y2="30" stroke="currentColor" stroke-width="1.2" opacity="0.5"/>
+    <text x="385" y="336" font-family="monospace" font-size="11" fill="currentColor" text-anchor="middle">utilisation rho = arrival rate x prefill service time</text>
+    <text x="16" y="165" font-family="monospace" font-size="11" fill="#b8567a">TTFT p99</text>
+    <text x="712" y="165" font-family="monospace" font-size="11" fill="#2f9a94">req/s</text>
+    <text x="70" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.4</text>
+    <text x="168" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.5</text>
+    <text x="365" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.7</text>
+    <text x="463" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.8</text>
+    <text x="562" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.9</text>
+    <text x="611" y="316" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.95</text>
+    <text x="44" y="304" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">0s</text>
+    <text x="44" y="169" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">5s</text>
+    <text x="44" y="34" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">10s</text>
+    <!-- throughput: linear, saturating toward 10 req/s -->
+    <polyline points="70,192 168,165 365,111 463,84 562,57 611,44 660,35" fill="none" stroke="#2f9a94" stroke-width="2.2"/>
+    <!-- ttft p99: hockey stick -->
+    <polyline points="70,281 168,276 365,259 463,238 562,176 611,51 640,20" fill="none" stroke="#b8567a" stroke-width="2.2"/>
+    <circle cx="463" cy="238" r="4" fill="#b8567a"/>
+    <circle cx="562" cy="176" r="4" fill="#b8567a"/>
+    <text x="200" y="232" font-family="monospace" font-size="11" fill="currentColor">flat here: every extra req/s is nearly free</text>
+    <text x="330" y="252" font-family="monospace" font-size="11" fill="currentColor">|</text>
+    <text x="300" y="80" font-family="monospace" font-size="11" fill="currentColor">the knee: rho 0.9 to 0.95 buys +6% req/s for 2x TTFT p99</text>
+    <line x1="540" y1="88" x2="575" y2="165" stroke="currentColor" stroke-width="1" opacity="0.6"/>
+    <text x="90" y="60" font-family="monospace" font-size="11" fill="currentColor">Goodput is the throughput curve TRUNCATED where the</text>
+    <text x="90" y="76" font-family="monospace" font-size="11" fill="currentColor">latency curve crosses your SLO. That crossing is the</text>
+    <text x="90" y="92" font-family="monospace" font-size="11" fill="currentColor">only capacity number worth planning against.</text>
+  </svg>
+</div>
+
+<h3>Why ITL p99 is a scheduler measurement</h3>
+
+<p>Decode step time is remarkably stable: the same matrix shapes every step, no data-dependent branching. Left alone, a request's ITL samples would be a tight cluster. They are not tight in production, and the reason is interference — most commonly a long prefill admitted into the middle of an ongoing generation. Every decoding request in the batch waits for that prefill's forward pass.</p>
+
+<p>Work the arithmetic. Illustrative assumption: baseline ITL 20 ms, a 32k-token prefill admitted unchunked costs 1,500 ms, a generation of $N = 500$ tokens — so 499 inter-token gaps — eats exactly one such stall.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">1,500 ms</div><div class="kpi__l">max ITL — the stall, fully visible</div></div>
+  <div class="kpi"><div class="kpi__n">20 ms</div><div class="kpi__l">ITL p99 — the stall is 0.2% of gaps, invisible</div></div>
+  <div class="kpi"><div class="kpi__n">22.97 ms</div><div class="kpi__l">TPOT — the stall smeared over 500 tokens</div></div>
+</div>
+
+<p>Derived: $\mathrm{TPOT} = (498 \times 20 + 1500)/499 = 11{,}460/499 = 22.97$ ms. So a 75&times; stall that a user perceives as the text freezing appears as <b>+15% on TPOT</b> and as <b>nothing at all on ITL p99</b>, because one bad gap in 500 lives at the 99.8th percentile. The stall is only recoverable from <code>max(ITL)</code>, or from p99.9, or from noticing that TPOT's <em>median</em> moved. This is the single most useful thing to know about these metrics: <b>ITL p99 and TPOT p99 fail in opposite directions.</b> A rare-but-severe stall hides in ITL p99 and shows in TPOT p50; a universal mild slowdown shows in both. Track ITL max explicitly. <a href="../01-the-core-loop/01-05-chunked-prefill.html">§1.5</a> is the chapter that removes this failure mode by slicing prefills.</p>
+
+<h3>Percentile hygiene: which one, over what window, aggregated how</h3>
+
+<p>Three rules, each of which is violated constantly.</p>
+
+<p><b>Use p99, not p95, and not p999 — unless you can defend the choice.</b> The argument is about sample count, not about taste. A percentile estimated from $n$ samples has a standard error roughly $\sqrt{p(1-p)/n}$ in probability space; converting that to a latency error depends on how steep the distribution is at that point, and the tail of a queueing distribution is very steep. At 6 req/s over a 5-minute window you have $n = 1800$ requests, so p99 sits on the 18th-worst request — noisy but usable — and p999 sits between the 1st and 2nd worst, which is not an estimate, it is an anecdote. Widen the window to get p999 and you lose the ability to detect a two-minute incident. p95 is stable but, per the queueing table above, sits in a region where the curve is still flat and therefore fails to move until the system is already in trouble. p99 is the compromise, and the compromise is a function of your traffic rate; at 60 req/s, p999 becomes defensible.</p>
+
+<p><b>Never average percentiles.</b> Two replicas reporting p99 TTFT of 800 ms and 1,200 ms do not give the fleet a p99 of 1,000 ms — the fleet p99 could be anywhere from 800 ms to well above 1,200 ms depending on the request split. This is exactly why both engines export <em>histograms</em> rather than pre-computed quantiles: <code>histogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[5m])))</code> sums the bucket counters across replicas <em>first</em> and takes the percentile of the pooled distribution. Summing then quantiling is correct; quantiling then averaging is not. Any dashboard that stores a per-replica p99 as a gauge and averages it has thrown the fleet number away permanently.</p>
+
+<p><b>State the window and match it to the alert.</b> A p99 over a 5-minute rate window responds to an incident in about five minutes and is stable enough not to page on a single slow request. A p99 over 1 hour will not page at all during a 10-minute brownout, because 10 minutes of bad requests are only about 17% of the sample and the 99th percentile does not care. Percentile, window, and mean-time-to-detect are one decision, not three.</p>
+
+<h3>Goodput, throughput, and Little's Law</h3>
+
+<p>Throughput and latency are not independent quantities you can tune separately; they are tied by Little's Law. For a system in steady state with mean concurrency $\bar{L}$, arrival rate $\lambda$, and mean end-to-end latency $\bar{W}$:</p>
+
+<div class="math-display">$$\bar{L} = \lambda \bar{W}$$</div>
+
+<p>SGLang's harness computes exactly this and reports it as a first-class metric, using the sum of per-request E2E latencies divided by the wall-clock duration:</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">python/sglang/benchmark/serving.py:L1268</span><span class="tag tag--sglang">SGLang</span></div>
+  <pre class="code-block"><code>        concurrency=np.sum(e2e_latencies) / dur_s,</code></pre>
+</div>
+
+<p>This is worth internalising because it kills a whole class of wishful capacity planning. Suppose your SLO caps E2EL at 12 s and you need 240 req/s. Little's Law says the fleet must sustain $240 \times 12 = 2{,}880$ concurrent requests <em>at that latency</em>. Whether that is achievable is a KV-cache question, not a FLOPs question — 2,880 concurrent requests at 2,000 tokens each is 5.8 M tokens of KV cache, which <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a> will turn into gigabytes. If the memory is not there, the requests queue, $\bar{W}$ rises, and Little's Law rebalances by making your latency worse rather than your concurrency higher. You cannot choose all three of $\lambda$, $\bar{W}$, and $\bar{L}$.</p>
+
+<p>Goodput is what makes the equation actionable, because it is the only one of these quantities that has an SLO baked into it. Throughput counts every completed request; goodput counts only those that met the predicate. The gap between them is pure waste — GPU time spent producing answers that arrived too late to be useful. In the table above, at $\rho = 0.95$ a replica delivers 9.5 req/s of throughput; if the SLO is p99 TTFT under 900 ms and the p99 there is 9.2 s, then well over 1% of requests violate and the honest goodput is <em>zero</em> under a strict reading, or 9.5 req/s under a per-request reading where 96% pass. Which reading you use is a decision you must make explicitly — vLLM's harness takes the per-request reading, counting each request that satisfies every declared bound and dividing by wall time.</p>
+
+<h3>The trade surface, stated plainly</h3>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">BATCHING</span><h4>Throughput up, ITL down</h4><p>A decode step at batch 64 costs barely more wall time than at batch 8 — the GEMMs are memory-bound either way — so tokens/s rises nearly 8&times;. But every request in the batch waits for the slowest part of that step, and a bigger batch means more chances to admit an interfering prefill. Throughput is bought with ITL variance.</p></div>
+  <div class="ve-card"><span class="ve-card__k">ADMISSION</span><h4>Your TTFT is their TTFT</h4><p>Admitting aggressively drains the waiting queue, so newly admitted requests get excellent TTFT. It also grows the running batch, slowing every decode step, which lengthens every in-flight request, which raises $\rho$, which lengthens the queue for everyone behind. TTFT is not a per-request property; it is a property of the admission policy applied to the whole fleet.</p></div>
+  <div class="ve-card"><span class="ve-card__k">IMPOSSIBLE</span><h4>Pick two</h4><p>At fixed hardware you cannot maximise TTFT p99, ITL p99, and throughput simultaneously. Every knob in <a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a> and <a href="../01-the-core-loop/01-05-chunked-prefill.html">§1.5</a> — max batch size, chunk size, preemption policy, P/D split — is a choice of which one to sacrifice.</p></div>
+</div>
+
+<h3>Writing an SLO a capacity plan can be built from</h3>
+
+<p>An SLO with no workload attached is not an SLO. "p99 TTFT under 1 second" is satisfiable by any GPU ever made if the prompts are 10 tokens and the arrival rate is 0.1 req/s, and satisfiable by none of them at 100k-token prompts and 50 req/s. A well-formed SLO names five things: <b>metric</b>, <b>percentile</b>, <b>window</b>, <b>workload distribution</b>, and <b>offered load</b>.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Well-formed</span>
+  <p>Over rolling 5-minute windows, per replica, at a Poisson arrival rate of 6.0 req/s, on a workload whose input length is lognormal with median 1,800 and p95 12,000 tokens and whose output length has median 220 and p95 900 tokens: <b>p99 TTFT &le; 900 ms</b> and <b>p99 ITL &le; 60 ms</b> and <b>max ITL &le; 400 ms</b>. Equivalently: <b>goodput &ge; 5.94 req/s</b> against the predicate (TTFT &le; 900 ms AND E2EL &le; 900 + 220&times;60 = 14,100 ms).</p>
+</div>
+
+<p>The goodput restatement is the operationally useful one, because it is a single scalar you can divide total demand by. If peak demand is 240 req/s and one replica delivers 5.94 req/s of goodput at that workload, you need 41 replicas. Sizing on raw throughput instead — a replica with $S = 100$ ms tops out at $1/S = 10$ req/s — would have told you 24 replicas, and every one of those 24 would be sitting at $\rho = 1.0$, off the right-hand edge of the queueing table, where nothing meets a 900 ms TTFT bound and the waiting queue grows without limit. The 17-replica gap between 24 and 41 is the price of the SLO, and it is invisible to any throughput number. The cost-per-million-tokens arithmetic that turns replica counts into money is in <a href="../10-benchmarking/10-05-profiling-and-capacity.html">§10.5</a>.</p></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems measure and export these</h2></div><div class="sec__body"><h3>Both harnesses have moved. Check where you are pointing.</h3>
+
+<p>At the pinned SHAs, both projects' canonical serving benchmarks have been relocated behind deprecation shims. vLLM's is a hard error:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">benchmarks/benchmark_serving.py:L5-L17</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>if __name__ == "__main__":
+    print("""DEPRECATED: This script has been moved to the vLLM CLI.
+
+Please use the following command instead:
+    vllm bench serve
+
+For help with the new command, run:
+    vllm bench serve --help
+
+Alternatively, you can run the new command directly with:
+    python -m vllm.entrypoints.cli.main bench serve --help
+""")
+    sys.exit(1)</code></pre>
+</div>
+
+<p>SGLang's still works but warns. The live implementations are <code>vllm/benchmarks/serve.py</code> (2,368 lines) and <code>python/sglang/benchmark/serving.py</code> (2,752 lines); <code>python/sglang/bench_serving.py</code> is now a 22-line re-export that emits a <code>FutureWarning</code>. Any blog post or CI job citing the old paths is describing code that no longer runs.</p>
+
+<h3>Where the clocks are actually read</h3>
+
+<p>In vLLM's client harness the request clock starts immediately before the HTTP POST, and — critically — <code>output.latency</code> stops at the last <em>content</em> timestamp, not at stream close:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/lib/endpoint_request_func.py:L197-L257, L230-L243, L256-L257</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    st = time.perf_counter()
+    output.start_time = st
+    most_recent_timestamp = st
+# ...
+                                text = choices[0].get("text")
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp - most_recent_timestamp)
+
+                                most_recent_timestamp = timestamp
+# ...
+                output.generated_text = generated_text
+                output.latency = most_recent_timestamp - st</code></pre>
+</div>
+
+<p>SGLang's OpenAI-compatible backend recomputes <code>latency</code> at the <em>top</em> of the chunk loop, before the <code>[DONE]</code> check, and assigns that value after the loop ends:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/serving.py:L323-L358, L338-L341, L356-L358</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                        chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                        latency = time.perf_counter() - st
+                        if chunk == "[DONE]":
+                            pass
+                        else:
+# ...
+                                if ttft == 0.0:
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+# ...
+                    output.generated_text = generated_text
+                    output.success = True
+                    output.latency = latency</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Genuine divergence</span>
+  <p>vLLM's E2EL stops at the last token; SGLang's includes the terminal <code>[DONE]</code> SSE frame. Since both then compute TPOT as <code>(latency - ttft) / (output_len - 1)</code> — <code>vllm/benchmarks/serve.py:L607-L611</code> and <code>python/sglang/benchmark/serving.py:L1134-L1135</code> — SGLang's TPOT carries one extra network round-trip amortised over <em>N</em>&minus;1 tokens, and its E2EL carries it whole. On a 200-token generation with a 5 ms trailing frame that is +0.025 ms on TPOT (negligible) and +5 ms on E2EL (usually negligible, but not if you are comparing E2EL numbers across harnesses at the millisecond level). <b>Do not compare E2EL from the two harnesses without correcting for this.</b></p>
+</div>
+
+<h3>The ITL definition difference that actually matters</h3>
+
+<p>vLLM appends one ITL sample per <em>streamed chunk</em>. SGLang's native backend appends one per <em>token</em>, dividing the observed chunk gap by the number of new tokens the chunk carried:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/serving.py:L749-L761</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                                if ttft == 0.0:
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                # Decoding phase
+                                else:
+                                    num_new_tokens = output_len - last_output_len
+                                    if num_new_tokens == 0:
+                                        continue
+                                    chunk_gap = timestamp - most_recent_timestamp
+                                    adjust_itl = chunk_gap / num_new_tokens
+                                    output.itl.extend([adjust_itl] * num_new_tokens)</code></pre>
+</div>
+
+<p>The consequence is sharp. Under speculative decoding, where one forward pass can emit 3–4 accepted tokens in one chunk, vLLM's ITL distribution is a distribution of <em>chunk gaps</em> — it will look 3–4&times; worse than SGLang's <em>per-token amortised</em> distribution on the same engine behaviour. SGLang applies the same correction a second time in <code>calculate_metrics</code>, re-tokenizing each chunk to get an exact token count when spec-decode is active (<code>python/sglang/benchmark/serving.py:L1136-L1147</code>). SGLang also reports a statistic vLLM does not: <code>max_itl_ms=np.max(itls or 0) * 1000</code> at <code>python/sglang/benchmark/serving.py:L1261</code> — precisely the statistic the stall arithmetic above said you need. And it reports mean concurrency via Little's Law, <code>concurrency=np.sum(e2e_latencies) / dur_s</code> at <code>python/sglang/benchmark/serving.py:L1268</code>.</p>
+
+<h3>Goodput exists in one harness only</h3>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L622-L645</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if goodput_config_dict:
+        valid_metrics = []
+        slo_values = []
+
+        if "ttft" in goodput_config_dict:
+            valid_metrics.append(ttfts)
+            slo_values.append(
+                goodput_config_dict["ttft"] / MILLISECONDS_TO_SECONDS_CONVERSION
+            )
+        if "tpot" in goodput_config_dict:
+            valid_metrics.append(all_tpots)
+            slo_values.append(
+                goodput_config_dict["tpot"] / MILLISECONDS_TO_SECONDS_CONVERSION
+            )
+        if "e2el" in goodput_config_dict:
+            valid_metrics.append(e2els)
+            slo_values.append(
+                goodput_config_dict["e2el"] / MILLISECONDS_TO_SECONDS_CONVERSION
+            )
+
+        for req_metric in zip(*valid_metrics):
+            is_good_req = all([s &gt;= r for s, r in zip(slo_values, req_metric)])
+            if is_good_req:
+                good_completed += 1</code></pre>
+</div>
+
+<p>Three observations. The predicate is a conjunction over per-request scalars, so a request must satisfy <em>every</em> declared SLO to count. The allowed metric names are exactly <code>["ttft", "tpot", "e2el"]</code> (<code>vllm/benchmarks/serve.py:L1432-L1445</code>) — <b>ITL is deliberately absent</b>, because goodput is defined per request and ITL is per gap; you would have to choose an aggregation, and the harness declines to choose for you. And requests with <code>output_len &lt;= 1</code> are given <code>tpot = 0.0</code> via <code>all_tpots</code>, which means they always pass a TPOT SLO. Grepping SGLang's harness for <code>goodput</code> at this SHA returns nothing: <b>SGLang's serving benchmark has no goodput support.</b> If you need goodput on SGLang you compute it from the per-request dump yourself.</p>
+
+<h3>The Prometheus surface, and why bucket edges decide what you can see</h3>
+
+<p>Both engines export latency histograms. Because <code>histogram_quantile()</code> interpolates linearly <em>within</em> a bucket, a percentile is only as precise as the bucket that contains it. That makes the hard-coded bucket edges a load-bearing design decision, and the two projects made opposite choices.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/loggers.py:L829-L854</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        histogram_inter_token_latency = self._histogram_cls(
+            name="vllm:inter_token_latency_seconds",
+            documentation="Histogram of inter-token latency in seconds.",
+            buckets=[
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+# ... 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+            ],
+            labelnames=labelnames,
+        )</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/observability/metrics_collector.py:L1671-L1683</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if bucket_inter_token_latency is None:
+            bucket_inter_token_latency = [
+                0.002,
+                0.004,
+                0.006,
+                0.008,
+                0.010,
+                0.015,
+                0.020,
+                0.025,
+                0.030,
+                0.035,
+                0.040,</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Bucket trap</span>
+  <p>vLLM's lowest ITL bucket edge is <b>10 ms</b>. A healthy Llama-3-8B replica decodes well under that. Every observation lands in the first bucket, and <code>histogram_quantile(0.99, vllm:inter_token_latency_seconds_bucket)</code> returns a linear interpolation inside <code>[0, 0.01]</code> that carries no information about the real shape — p50 and p99 will both be "somewhere under 10 ms". SGLang's edges start at <b>2 ms</b> with 5 ms spacing to 40 ms and resolve that region properly. The trade runs the other way on TTFT: vLLM's TTFT buckets start at <b>0.001 s</b> (<code>vllm/v1/metrics/loggers.py:L796-L822</code>) versus SGLang's <b>0.1 s</b> (<code>python/sglang/srt/observability/metrics_collector.py:L1623-L1642</code>), so vLLM resolves sub-100 ms TTFT and SGLang cannot. SGLang's buckets are overridable through server args; vLLM's are literals in the source. Check the edges against your actual latencies <em>before</em> you write an alert rule.</p>
+</div>
+
+<p>vLLM additionally exports the phase decomposition drawn under the axis in Figure 1 — <code>vllm:request_queue_time_seconds</code>, <code>vllm:request_prefill_time_seconds</code>, <code>vllm:request_decode_time_seconds</code>, <code>vllm:request_inference_time_seconds</code> and <code>vllm:e2e_request_latency_seconds</code>, all sharing one bucket list whose lowest edge is <b>0.3 s</b> (<code>vllm/v1/metrics/loggers.py:L889-L926</code>). It also exports a per-request TPOT histogram, <code>vllm:request_time_per_output_token_seconds</code> (<code>vllm/v1/metrics/loggers.py:L859-L886</code>), which SGLang has no equivalent of — SGLang exports <code>sglang:time_to_first_token_seconds</code>, <code>sglang:inter_token_latency_seconds</code>, <code>sglang:e2e_request_latency_seconds</code> and <code>sglang:queue_time_seconds</code> only. If you want TPOT percentiles from SGLang you must derive them.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">What each engine exports at the pinned SHAs. Read from <code>vllm/v1/metrics/loggers.py</code> and <code>python/sglang/srt/observability/metrics_collector.py</code> this session; no numbers, so nothing here is measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Quantity</th><th>vLLM series</th><th>SGLang series</th><th>Lowest bucket edge (vLLM / SGLang)</th></tr></thead>
+      <tbody>
+        <tr><td>TTFT</td><td><code class="c-vllm">vllm:time_to_first_token_seconds</code></td><td><code class="c-sglang">sglang:time_to_first_token_seconds</code></td><td class="num">1 ms / 100 ms</td></tr>
+        <tr><td>ITL</td><td><code class="c-vllm">vllm:inter_token_latency_seconds</code></td><td><code class="c-sglang">sglang:inter_token_latency_seconds</code></td><td class="num">10 ms / 2 ms</td></tr>
+        <tr><td>TPOT (per request)</td><td><code class="c-vllm">vllm:request_time_per_output_token_seconds</code></td><td><span class="pill pill--blocked">absent</span></td><td class="num">10 ms / &mdash;</td></tr>
+        <tr><td>E2EL</td><td><code class="c-vllm">vllm:e2e_request_latency_seconds</code></td><td><code class="c-sglang">sglang:e2e_request_latency_seconds</code></td><td class="num">300 ms / 100 ms</td></tr>
+        <tr><td>Queue wait</td><td><code class="c-vllm">vllm:request_queue_time_seconds</code></td><td><code class="c-sglang">sglang:queue_time_seconds</code></td><td class="num">300 ms / 0 ms</td></tr>
+        <tr><td>Prefill / decode split</td><td><code class="c-vllm">vllm:request_prefill_time_seconds</code>, <code class="c-vllm">…decode_time…</code></td><td><code class="c-sglang">sglang:per_stage_req_latency_seconds</code></td><td class="num">300 ms / 1 ms</td></tr>
+        <tr><td>Buckets user-tunable</td><td>no &mdash; literals in source</td><td>yes &mdash; via server args</td><td class="num">&mdash;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Two entries deserve comment. SGLang's <code>sglang:queue_time_seconds</code> opens with a <code>0.000</code> edge and reaches 3,000 s across 40 buckets (<code>python/sglang/srt/observability/metrics_collector.py:L686-L732</code>) — a deliberately enormous range, because queue time is the one quantity that can grow without bound under overload and you want the histogram to keep resolving instead of pinning at <code>+Inf</code>. And SGLang's per-stage histogram uses generated exponential edges, <code>exponential_buckets(start=0.001, width=1.62, length=30)</code> at <code>python/sglang/srt/observability/metrics_collector.py:L733-L739</code>, which is the principled choice for a quantity spanning many orders of magnitude: constant <em>relative</em> resolution everywhere, so <code>histogram_quantile</code> has bounded percentage error at every latency instead of excellent error in one decade and useless error in the next.</p>
+
+<p>Arrival processes differ too, which matters because $\rho$ in the queueing argument is an arrival-rate concept. vLLM samples inter-arrival gaps from a Gamma distribution with a tunable <code>burstiness</code> shape parameter that reduces to Poisson at 1.0 (<code>vllm/benchmarks/serve.py:L455-L467</code>); SGLang samples exponential only (<code>python/sglang/benchmark/serving.py:L1090</code>). Burstiness below 1 raises $C_a^2$ and therefore raises queueing at the same mean rate. Open- versus closed-loop methodology is <a href="../10-benchmarking/10-03-honest-benchmarking.html">§10.3</a>'s subject.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: where the engine reads its clocks</h2></div><div class="sec__body"><p>Follow one streaming request through vLLM's server-side instrumentation. The clock starts in the frontend, not the engine core.</p>
+
+<ol>
+<li><code>OutputProcessor.add_request</code> constructs a <code>RequestState</code> carrying <code>RequestStateStats(arrival_time=arrival_time)</code> — <code>vllm/v1/engine/output_processor.py:L183</code>, fed from <code>request.arrival_time</code> at <code>vllm/v1/engine/output_processor.py:L276</code>. That is $t_a$.</li>
+<li>Each engine-core step produces an <code>IterationStats</code>, whose <code>iteration_timestamp = time.time()</code> is stamped at construction (<code>vllm/v1/metrics/stats.py:L429</code>) and reused as "now" for the whole batch via <code>_time_since</code>:
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">vllm/v1/metrics/stats.py:L449-L451</span><span class="tag tag--vllm">vLLM</span></div>
+  <pre class="code-block"><code>    def _time_since(self, start: float) -&gt; float:
+        """Calculate an interval relative to this iteration's timestamp."""
+        return self.iteration_timestamp - start</code></pre>
+</div></li>
+<li><code>IterationStats.update_from_output</code> fires TTFT on the first output batch for the request, and ITL on every later one — but note that the two use <b>different clocks</b>: TTFT against the frontend's <code>iteration_timestamp</code>, ITL against the engine core's own timestamp.
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">vllm/v1/metrics/stats.py:L465-L502, L494-L502</span><span class="tag tag--vllm">vLLM</span></div>
+  <pre class="code-block"><code>        if is_prefilling:
+            if output.prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(output.prefill_stats)
+
+            first_token_latency = self._time_since(req_stats.arrival_time)
+            self.time_to_first_tokens_iter.append(first_token_latency)
+# ...
+        # Process the batch-level "new tokens" engine core event
+        if is_prefilling:
+            req_stats.first_token_ts = engine_core_timestamp
+        else:
+            itl = engine_core_timestamp - req_stats.last_token_ts
+            self.inter_token_latencies_iter.append(itl)
+
+        req_stats.last_token_ts = engine_core_timestamp</code></pre>
+</div>
+So <code>vllm:time_to_first_token_seconds</code> includes tokenization, IPC to the engine core, and the return hop; <code>vllm:inter_token_latency_seconds</code> includes none of that. They are not on the same ruler, which is exactly right for their purposes but means you cannot add them.</li>
+<li><code>update_from_events</code> records <code>queued_ts</code> on the QUEUED event and <code>scheduled_ts</code> on the first SCHEDULED event, explicitly ignoring re-scheduling after preemption (<code>vllm/v1/metrics/stats.py:L518-L522</code>).</li>
+<li>On finish, <code>update_from_finished_request</code> computes the whole decomposition, with the comments spelling out that preemptions land inside whichever phase they occurred in:
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">vllm/v1/metrics/stats.py:L537-L560</span><span class="tag tag--vllm">vLLM</span></div>
+  <pre class="code-block"><code>        e2e_latency = self._time_since(req_stats.arrival_time)
+
+        # Queued interval is from first QUEUED event to first SCHEDULED
+        queued_time = req_stats.scheduled_ts - req_stats.queued_ts
+
+        # Prefill interval is from first SCHEDULED to first NEW_TOKEN
+        # Any preemptions during prefill is included in the interval
+        prefill_time = req_stats.first_token_ts - req_stats.scheduled_ts
+
+        # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
+        # Any preemptions during decode are included
+        decode_time = req_stats.last_token_ts - req_stats.first_token_ts
+
+        # Inference interval is from first SCHEDULED to last NEW_TOKEN
+        # Any preemptions during prefill or decode are included
+        inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
+
+        # Do not count the token generated by the prefill phase
+        mean_time_per_output_token = (
+            decode_time / (req_stats.num_generation_tokens - 1)
+            if req_stats.num_generation_tokens - 1 &gt; 0
+            else 0
+        )</code></pre>
+</div></li>
+<li><code>PrometheusStatLogger.record</code> drains the per-iteration lists into the histograms — <code>vllm/v1/metrics/loggers.py:L1216-L1219</code> for TTFT and ITL, <code>vllm/v1/metrics/loggers.py:L1253-L1255</code> for per-request TPOT.</li>
+</ol>
+
+<p>SGLang's equivalent path runs entirely in <code>TokenizerManager</code>. <code>set_created_time</code> is called when the request state is registered (<code>python/sglang/srt/managers/tokenizer_manager.py:L3369</code>), <code>set_first_token_time</code> on the first output batch (<code>python/sglang/srt/managers/tokenizer_manager.py:L2402-L2403</code>), and <code>collect_metrics</code> observes TTFT once then ITL thereafter (<code>python/sglang/srt/managers/tokenizer_manager.py:L2823-L2841</code>). The definitions are one-liners:</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">python/sglang/srt/observability/req_time_stats.py:L473-L483</span><span class="tag tag--sglang">SGLang</span></div>
+  <pre class="code-block"><code>    def get_interval(self):
+        return time.perf_counter() - self.last_time
+
+    def get_first_token_latency(self):
+        return self.first_token_time - self.created_time
+
+    def get_e2e_latency(self):
+        return self.finished_time - self.created_time
+
+    def get_decode_latency(self):
+        return self.finished_time - self.first_token_time</code></pre>
+</div>
+
+<p>And the per-token amortisation seen in the harness is mirrored in the exporter, which increments the bucket by <code>num_new_tokens</code> while adding the un-divided interval to <code>_sum</code> — so <code>rate(sum)/rate(count)</code> still yields a correct mean per-token ITL:</p>
+
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">python/sglang/srt/observability/metrics_collector.py:L1822-L1835</span><span class="tag tag--sglang">SGLang</span></div>
+  <pre class="code-block"><code>    def observe_inter_token_latency(
+        self, labels: Dict[str, str], internval: float, num_new_tokens: int
+    ):
+        adjusted_interval = internval / num_new_tokens
+
+        # A faster version of the Histogram::observe which observes multiple values at the same time.
+        # reference: https://github.com/prometheus/client_python/blob/v0.21.1/prometheus_client/metrics.py#L639
+        his = self.histogram_inter_token_latency.labels(**labels)
+        his._sum.inc(internval)
+
+        for i, bound in enumerate(his._upper_bounds):
+            if adjusted_interval &lt;= bound:
+                his._buckets[i].inc(num_new_tokens)
+                break</code></pre>
+</div>
+
+<p>Both engines therefore measure server-side TTFT from <em>frontend arrival</em>, not from scheduler admission. That is the honest choice — it is what the user waits — and it is why <code>vllm:request_queue_time_seconds</code> exists as a separate series: it is the term you subtract to isolate compute.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">HIDDEN QUEUE</span><h4>--max-concurrency erases client-side queueing from TTFT</h4><p>Both harnesses gate requests behind a semaphore acquired <em>before</em> the request function runs — <code>vllm/benchmarks/serve.py:L964-L972</code>, <code>python/sglang/benchmark/serving.py:L1380-L1385</code>. The clock <code>st = time.perf_counter()</code> is set inside that function. So time spent waiting on the client-side limiter is invisible: TTFT reports only the server's share. Set <code>--max-concurrency</code> below the server's capacity and you can drive apparent TTFT p99 down while the real end-to-end wait rises. Report the concurrency limit alongside every TTFT number, or the number is meaningless.</p></div>
+  <div class="ve-card"><span class="ve-card__k">MEAN ITL</span><h4>Reporting mean ITL destroys the only signal it carries</h4><p>The reason ITL is collected per gap is that its <em>shape</em> is the scheduler's fingerprint. Collapsing it to a mean produces a number nearly identical to TPOT and throws away the stalls. If a report gives you one ITL number and it is a mean, it has told you nothing that TPOT did not.</p></div>
+  <div class="ve-card"><span class="ve-card__k">FAILURE STATS</span><h4>Failed requests silently improve your percentiles</h4><p><code>calculate_metrics</code> only accumulates from <code>outputs[i].success</code>. A request that dies mid-stream contributes nothing to TTFT, ITL, or E2EL. Under overload — where you most want the tail — failures rise and the surviving population is biased toward fast requests. vLLM at least surfaces the count and prints up to ten errors (<code>vllm/benchmarks/serve.py:L661-L666</code>); always read <code>failed</code> before reading p99.</p></div>
+  <div class="ve-card"><span class="ve-card__k">CHUNK COUNTING</span><h4>The token count and the gap count disagree</h4><p>When the endpoint does not return usage, vLLM re-tokenizes the generated text to get <code>output_len</code>, with an explicit warning in the source: <i>"this may inflate the output token count slightly"</i> (<code>vllm/benchmarks/serve.py:L595-L604</code>). TPOT's denominator then comes from re-tokenization while ITL's sample count comes from chunk arrivals. The two disagree, so <code>mean(ITL) != TPOT</code> and neither is wrong — they are answering different questions.</p></div>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I did not locate any place at these SHAs where either engine exports a <em>maximum</em> ITL as a Prometheus series, only histograms. The straggler helper <code>check_time_to_first_token_straggler</code> at <code>python/sglang/srt/observability/metrics_collector.py:L1807-L1820</code> reads the TTFT histogram's own buckets to decide whether a value exceeds the running p99, which is the closest thing I found, and it applies to TTFT only. If you need max-ITL alerting, plan on deriving it from a request dump. Reader should re-check <code>vllm/v1/metrics/loggers.py</code> and <code>python/sglang/srt/observability/</code> before relying on this.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Run the same workload through both harnesses and diff the definitions rather than the numbers. Start a server, then:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell — vLLM harness, with an explicit goodput SLO</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm bench serve --backend vllm --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --dataset-name random --random-input-len 1800 --random-output-len 220 \
+  --num-prompts 500 --request-rate 6.0 --burstiness 1.0 \
+  --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,90,99 \
+  --goodput ttft:900 e2el:14100 \
+  --save-result --result-filename run-vllm.json</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell — SGLang harness, same workload</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python -m sglang.benchmark.serving --backend sglang-oai \
+  --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --dataset-name random --random-input-len 1800 --random-output-len 220 \
+  --num-prompts 500 --request-rate 6.0 --output-file run-sgl.jsonl</code></pre>
+</div>
+
+<p>Three things to do with the output. (1) Compare <code>mean_itl_ms</code> against <code>mean_tpot_ms</code> within a single run — if they differ by more than a percent, chunks are carrying more than one token. (2) Scrape <code>/metrics</code> and run <code>histogram_quantile(0.99, rate(vllm:inter_token_latency_seconds_bucket[5m]))</code>; if the answer is suspiciously round and under 10 ms, you have hit the bucket floor described above. (3) Re-run with <code>--burstiness 0.3</code> at the same <code>--request-rate</code> and watch TTFT p99 move while throughput does not — that is $C_a^2$ in Kingman's formula, visible.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read the file.</b> Open <code>vllm/benchmarks/serve.py</code> and find <code>check_goodput_args</code>. Which metric names are accepted, and why is <code>itl</code> not among them even though <code>--percentile-metrics</code> accepts it?</li>
+<li><b>Definition arithmetic.</b> A request has TTFT 400 ms, generates 101 tokens, and its last token arrives 2,400 ms after arrival. Give TPOT under both definitions in this chapter, and state the percentage error of the wrong one.</li>
+<li><b>Predict, then verify.</b> A generation of 1,000 tokens has baseline ITL 15 ms and suffers three 800 ms stalls. Predict ITL p50, ITL p99, ITL max, and TPOT before computing them. Which of the four would page you?</li>
+<li><b>Predict, then verify.</b> You set <code>--max-concurrency 8</code> against a server that can comfortably run 64 concurrent requests, at <code>--request-rate inf</code>. Predict what happens to reported TTFT p99, to reported request throughput, and to the real time a request would wait if it were a user. Then check your prediction against <code>vllm/benchmarks/serve.py:L964-L972</code>.</li>
+<li><b>Design.</b> Rewrite this SLO so a capacity plan can be built from it: <i>"p95 latency under 2 seconds."</i> Name every missing element and supply a defensible value for each.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> <code>VALID_NAMES = ["ttft", "tpot", "e2el"]</code> at <code>vllm/benchmarks/serve.py:L1435</code>. Goodput is a per-request predicate — one boolean per completed request — and ITL produces $N-1$ samples per request. Admitting it would force the harness to pick an aggregation (max? p99 within the request? mean, which is just TPOT?), and each choice implies a different SLO. TPOT is the per-request aggregation of ITL that the harness already commits to.</p>
+    <p><b>2.</b> Excluding the first token: $(2400 - 400)/100 = 20.0$ ms. Including it: $2400/101 = 23.76$ ms. The inclusive definition is 18.8% higher. On a short generation the error is worse still: at 11 tokens it would be $2000/10 = 200$ vs $2400/11 = 218$ ms, +9%; at 2 tokens, $2000/1 = 2000$ vs $2400/2 = 1200$ ms — the two definitions do not even agree in sign of error, which is why the denominator must always be stated.</p>
+    <p><b>3.</b> 999 gaps: 996 at 15 ms, 3 at 800 ms. p50 = 15 ms. p99 is the 989th ordered gap, still 15 ms — three outliers are 0.3% of samples, below the p99 cut. Max = 800 ms. TPOT $= (996 \times 15 + 3 \times 800)/999 = (14940 + 2400)/999 = 17.36$ ms, i.e. +15.7% on baseline. Nothing but <b>max ITL</b> would page you, and a TPOT p50 alert with a tight-enough threshold would catch it as a secondary signal. This is the chapter's central asymmetry.</p>
+    <p><b>4.</b> Reported TTFT p99 falls, because at most 8 requests are ever in flight server-side and the server's queue never builds; the semaphore in <code>limited_request_func</code> is acquired before <code>st</code> is set, so the wait is not measured. Reported request throughput also falls — you have capped concurrency well below the knee. Real user wait rises without bound, because the arrival rate is infinite and the client-side queue grows monotonically. This configuration produces the best-looking TTFT numbers and the worst possible service.</p>
+    <p><b>5.</b> Missing: <i>which</i> latency (TTFT? E2EL? they differ by output length &times; TPOT); the measurement window; the input and output length distributions; the offered load and its arrival process; whether it is per replica or fleet-wide; and how failures are counted. A defensible rewrite: "Per replica, over rolling 5-minute windows, at Poisson 6 req/s with input length median 1,800 / p95 12,000 tokens and output length median 220 / p95 900 tokens, p95 TTFT &le; 800 ms and p95 E2EL &le; 12 s, with failed requests counted as violations; equivalently goodput &ge; 5.7 req/s."</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>At any utilisation worth running, 90–99% of TTFT p99 is queueing, not prefill compute — derived from M/M/1 with a 100 ms service time. That does not make compute irrelevant: because $\rho = \lambda S$, a 20% faster prefill is a 3.5&times; p99 win at $\rho = 0.9$, and a 20% slower one makes the queue unstable. Everything near the knee is leveraged by $1/(1-\rho)$.</li>
+<li>ITL p99 and TPOT p50 fail in opposite directions. A rare severe stall is invisible to ITL p99 (one bad gap in 500 is the 99.8th percentile) and visible as a 15% shift in TPOT's median. Track <code>max</code> ITL — SGLang's harness reports it, vLLM's does not.</li>
+<li>vLLM stops its E2EL clock at the last content token; SGLang stops it at the terminal SSE frame. TPOT inherits the difference, divided by $N-1$. Cross-harness E2EL comparisons need this correction.</li>
+<li>vLLM's ITL samples are per streamed chunk; SGLang's are per token, chunk gap divided by token count, in both the harness and the Prometheus exporter. Under speculative decoding the same engine behaviour produces ITL distributions that differ by the acceptance length.</li>
+<li>Histogram bucket edges bound what a percentile can tell you. vLLM's ITL floor is 10 ms — above a healthy decode rate — while SGLang's is 2 ms; on TTFT the ordering reverses (1 ms vs 100 ms). Check the edges before writing the alert rule.</li>
+<li>An SLO without an attached workload distribution and offered load is unfalsifiable. Restate it as goodput — completed requests meeting every predicate, per second — and it becomes a number you can divide peak demand by.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><b>DistServe</b>, Zhong et al., <a href="https://arxiv.org/pdf/2401.09670">arXiv:2401.09670</a> — the goodput framing this book uses, and the paper vLLM's own <code>--goodput</code> help text points at (<code>vllm/benchmarks/serve.py:L1786-L1788</code>). The companion post is at <a href="https://hao-ai-lab.github.io/blogs/distserve">hao-ai-lab.github.io/blogs/distserve</a>.</li>
+<li><b>Orca: A Distributed Serving System for Transformer-Based Generative Models</b>, Yu et al., OSDI '22 — the origin of iteration-level scheduling, which is what makes ITL a scheduler-dependent quantity in the first place. Covered in <a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a>.</li>
+<li><b>vLLM production metrics documentation</b>, <a href="https://docs.vllm.ai/en/latest/usage/metrics.html">docs.vllm.ai/en/latest/usage/metrics.html</a> — the exported series list; cross-check it against <code>vllm/v1/metrics/loggers.py</code>, which is authoritative and moves faster than the docs.</li>
+<li><b>vLLM RFC: V1 metrics</b>, <a href="https://github.com/vllm-project/vllm/issues/10582">vllm-project/vllm#10582</a> — the design discussion behind the V1 stat-logger architecture, including why TTFT and ITL end up on different clocks.</li>
+<li><b>Kingman's formula</b> — for the general-arrival, general-service correction $\mathbb{E}[W] \approx \frac{\rho}{1-\rho}\cdot\frac{C_a^2+C_s^2}{2}\cdot S$. Lognormal prompt lengths push $C_s^2$ well above 1, so the M/M/1 table in this chapter understates real queueing.</li>
+<li>Continue to <a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a> for why batching moves these numbers, <a href="../01-the-core-loop/01-05-chunked-prefill.html">§1.5</a> for the fix to ITL stalls, <a href="../10-benchmarking/10-03-honest-benchmarking.html">§10.3</a> for warmup, saturation, and open- versus closed-loop, and <a href="../09-serving-system/09-05-observability-and-failure.html">§9.5</a> for turning these series into alerts.</li>
+</ul></div></section>
+<div class="pager"><a href="01-01-prefill-vs-decode.html"><div class="pager__k">← Previous</div><div class="pager__t">Prefill and decode are two different computers</div></a><a class="pager__next" href="01-03-continuous-batching.html"><div class="pager__k">Next →</div><div class="pager__t">Static, dynamic, and continuous batching</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: the definitions, and the right percentile</a>
+<a href="#production">How production systems measure and export these</a>
+<a href="#worked-trace">Worked trace: where the engine reads its clocks</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

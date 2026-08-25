@@ -1,0 +1,1860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline parallelism and bubbles — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i is-current" href="05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 5 · Parallelism and distributed inference · 05-02</div>
+<h1>Pipeline parallelism and bubbles</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/distributed/</code></li><li><code>python/sglang/srt/managers/scheduler_pp_mixin.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Tensor parallelism runs out of road twice: once when the KV heads run out
+(<a href="05-01-tensor-parallelism.html">&sect;5.1</a>), and once when you leave the node and the
+all-reduces have to cross a 400&nbsp;Gb/s link instead of NVLink. Pipeline parallelism is the
+answer to both, and it buys you exactly one thing &mdash; capacity. It will not make a single
+token come back faster, and the arithmetic below says so unambiguously.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Llama-3-70B in bf16 is 131&nbsp;GiB of weights. One H100 SXM has 80&nbsp;GB. Eight of them,
+on one node, with NVLink between them, hold it comfortably at TP=8: 16.4&nbsp;GiB of weights per
+GPU, ~52&nbsp;GiB left over for KV. That configuration works and it is what most people run.</p>
+
+<p>Double the context or the concurrency and you need sixteen GPUs. There is no sixteen-GPU node.
+You have two nodes and 400&nbsp;Gb/s InfiniBand NDR between them (50&nbsp;GB/s per direction,
+<a href="https://www.nvidia.com/en-us/networking/quantum2/">NVIDIA Quantum-2 NDR</a>, cited). Two
+things go wrong at once if you answer "TP=16".</p>
+
+<p><b>The KV heads run out.</b> Llama-3-70B has $h_{kv}=8$. Past TP=8 the KV heads are
+replicated, not split &mdash; <a href="05-01-tensor-parallelism.html">&sect;5.1</a> owns this. Each
+of the sixteen GPUs still stores a full KV head's worth of every layer. You bought eight more
+GPUs and the per-token KV footprint per GPU did not move.</p>
+
+<p><b>The all-reduces cross the wire.</b> A Llama block does two all-reduces &mdash; after
+<code>o_proj</code>, after <code>down_proj</code> &mdash; so $L=80$ means 160 collectives per forward
+pass on $[T, 8192]$ bf16 tensors. Ring all-reduce moves $2\frac{N-1}{N}M$ bytes out of every rank:
+at $T=64$ and $N=8$ that is 1.84&nbsp;MB per collective and <b>294&nbsp;MB per rank per decode
+step</b>. Over NVLink at 450&nbsp;GB/s per direction
+(<a href="https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-datasheet">H100
+datasheet</a>: 900&nbsp;GB/s bidirectional, cited) that is 0.65&nbsp;ms against a 5.2&nbsp;ms step.
+Over 50&nbsp;GB/s InfiniBand it is 5.9&nbsp;ms &mdash; more than the compute, before counting 320
+synchronisation latencies. <b>Derived</b>, not measured.</p>
+
+<p>And if you try PP on a model whose vLLM implementation was never wired for it, you get this
+instead of a server:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L1423-L1430</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        pipeline_parallel_size = parallel_config.pipeline_parallel_size
+        if pipeline_parallel_size &gt; 1 and not self.registry.is_pp_supported_model(
+            self.architectures, self
+        ):
+            raise NotImplementedError(
+                "Pipeline parallelism is not supported for this model. "
+                "Supported models implement the `SupportsPP` interface."
+            )</code></pre>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Tensor parallelism cuts every weight matrix the short way and makes eight GPUs cooperate on
+one layer. Pipeline parallelism cuts the <em>stack</em>: GPU&nbsp;0 owns layers 0&ndash;19,
+GPU&nbsp;1 owns 20&ndash;39, and so on. No matrix is split, so no collective is needed inside a
+layer; the only thing that ever leaves a stage is the activation at the seam, a point-to-point send
+of shape $[T, d]$. That is why the wire cost collapses: TP pays $2L$ collectives per forward pass,
+PP pays $S-1$ sends. For Llama-3-70B at $L=80$, $S=4$, that is 160 all-reduces versus 3 sends.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the two cuts, for Llama-3-70B.</b>
+    TP splits inside a block and pays a collective twice per block; PP splits between blocks and
+    pays one point-to-point send per seam. Shapes are per decode step at 64 rows.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    E["embed_tokens<br/>[64, 8192] bf16"] --> S0
+    S0["Stage 0 &mdash; PP rank 0<br/>layers 0..19<br/>34.2 GB weights"] -->|"send hidden_states + residual<br/>2 x [64, 8192] = 2.1 MB"| S1
+    S1["Stage 1 &mdash; PP rank 1<br/>layers 20..39<br/>34.2 GB weights"] -->|"2.1 MB p2p"| S2
+    S2["Stage 2 &mdash; PP rank 2<br/>layers 40..59<br/>34.2 GB weights"] -->|"2.1 MB p2p"| S3
+    S3["Stage 3 &mdash; PP rank 3<br/>layers 60..79 + norm<br/>34.2 GB + lm_head 2.1 GB"] --> O["sample<br/>next_token_ids [64]"]
+    S0 -.->|"inside a stage, TP=8 would add<br/>2 all-reduces per block x 20 blocks<br/>= 73.4 MB per rank"| S0
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles</h2></div><div class="sec__body"><h3>What actually crosses the seam</h3>
+
+<p>Read the model, not the paper. vLLM's Llama returns this when it is not the last stage:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L408-L434</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+# ...
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )</code></pre>
+</div>
+
+<p><b>Two</b> tensors, not one. The second is the un-added residual, and it exists because both
+engines fuse the residual add into the next RMSNorm. SGLang's Llama does the identical thing and
+leaves a note about it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/llama.py:L427-L437</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if self.pp_group.is_first_rank:
+            if input_embeds is None:
+                hidden_states = self.embed_tokens(input_ids)
+            else:
+                hidden_states = input_embeds
+            residual = None
+        else:
+            assert pp_proxy_tensors is not None
+            # FIXME(@ying): reduce the number of proxy tensors by not fusing layer norms
+            hidden_states = pp_proxy_tensors["hidden_states"]
+            residual = pp_proxy_tensors["residual"]</code></pre>
+</div>
+
+<p>So the seam payload is $2 \cdot T \cdot d \cdot b$ bytes: at $d=8192$, $b=2$, that is
+<b>32&nbsp;KiB per token per seam</b>. Compare against TP=8's $160 \times 2\frac{7}{8} d b =
+4.375$&nbsp;MiB per rank per token. <b>140&times;</b>, derived.</p>
+
+<p>Both engines then shard that seam send across the TP group and rebuild it with a local
+all-gather:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/parallel_state.py:L1057-L1064</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        for key, tensor in zip(tensor_keys, tensor_list):
+            if tensor.numel() == 0:
+                continue
+
+            if self._should_use_all_gather(
+                key, tensor.numel(), all_gather_group, all_gather_tensors
+            ):
+                tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]</code></pre>
+</div>
+
+<p>With <code>all_gather_group=get_tp_group()</code> (<code>vllm/v1/worker/gpu_worker.py:L1134-L1138</code>)
+each of the eight TP ranks pushes 1/8 of the seam tensor over its own NIC and the receiving node
+all-gathers over NVLink. The cross-node bytes per rank per token drop to 4&nbsp;KiB. SGLang passes
+<code>attn_tp_group</code> for the same reason
+(<code>python/sglang/srt/managers/scheduler_pp_mixin.py:L1044-L1052</code>).</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Wire bytes per decode token, Llama-3-70B ($L=80$, $d=8192$, bf16). <b>Derived</b> from ring-all-reduce volume $2\frac{N-1}{N}M$ and the two-tensor seam above; bandwidths cited from vendor specs.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Configuration</th><th class="num">Collectives / sends per token</th><th class="num">Bytes out per rank per token</th><th class="num">Time at 50 GB/s</th></tr></thead>
+      <tbody>
+        <tr><td>TP=8, all-reduce</td><td class="num">160</td><td class="num">4.375 MiB</td><td class="num">91.8 &micro;s</td></tr>
+        <tr><td>PP=4, seam send</td><td class="num">1 (per stage)</td><td class="num">32 KiB</td><td class="num">0.66 &micro;s</td></tr>
+        <tr><td>PP=4 &times; TP=8, sharded seam</td><td class="num">1 (per stage)</td><td class="num">4 KiB</td><td class="num">0.08 &micro;s</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h3>The bubble</h3>
+
+<p>Define $S$ = number of stages, $M$ = number of micro-batches, $t$ = time one stage takes on one
+micro-batch (assume balanced stages). In the naive GPipe schedule, micro-batch $j$ enters stage $s$
+at time $(s + j)t$, so the last micro-batch leaves the last stage at $(S - 1 + M)t$. Makespan:</p>
+
+<div class="math-display">$$ T_{\text{total}} = (M + S - 1)\, t $$</div>
+
+<p>Total device-time is $S \cdot T_{\text{total}}$; useful device-time is $S \cdot M \cdot t$.
+The idle fraction &mdash; the <b>bubble</b> &mdash; is</p>
+
+<div class="math-display">$$ \beta = 1 - \frac{S M t}{S (M + S - 1) t} = \frac{S - 1}{S + M - 1} $$</div>
+
+<p>At $S=4$: $M=1$ gives $\beta = 75\%$, $M=4$ gives $42.9\%$, $M=16$ gives $15.8\%$, $M=64$ gives
+$4.5\%$. The training remedy is simply "make $M$ big".</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the naive schedule at $S=4$, $M=4$.</b> Each cell is
+  one mean stage-slot of $t = 10.34$&nbsp;ms (Llama-3-70B: 138.6&nbsp;GB of decode weight traffic
+  &mdash; 131&nbsp;GiB minus the embedding table &mdash; over 4 stages at 3.35&nbsp;TB/s;
+  <b>derived</b>). 28 cells of device-time, 16 busy, 12 idle: $\beta = 3/7 = 42.9\%$.</p>
+  <svg viewBox="0 0 960 300" width="100%" role="img" aria-label="Gantt chart of a four-stage pipeline with four micro-batches, showing the triangular fill and drain bubbles">
+    <g font-family="monospace" font-size="12">
+      <text x="16" y="26" fill="var(--text-dim)">slot</text>
+      <text x="140" y="26" fill="var(--text-dim)">0</text>
+      <text x="250" y="26" fill="var(--text-dim)">1</text>
+      <text x="360" y="26" fill="var(--text-dim)">2</text>
+      <text x="470" y="26" fill="var(--text-dim)">3</text>
+      <text x="580" y="26" fill="var(--text-dim)">4</text>
+      <text x="690" y="26" fill="var(--text-dim)">5</text>
+      <text x="800" y="26" fill="var(--text-dim)">6</text>
+
+      <text x="16" y="62" fill="var(--text)">stage 0</text>
+      <rect x="130" y="42" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="168" y="62" fill="var(--teal)">mb0</text>
+      <rect x="240" y="42" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="278" y="62" fill="var(--teal)">mb1</text>
+      <rect x="350" y="42" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="388" y="62" fill="var(--teal)">mb2</text>
+      <rect x="460" y="42" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="498" y="62" fill="var(--teal)">mb3</text>
+      <rect x="570" y="42" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="600" y="62" fill="var(--plum)">idle</text>
+      <rect x="680" y="42" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="710" y="62" fill="var(--plum)">idle</text>
+      <rect x="790" y="42" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="820" y="62" fill="var(--plum)">idle</text>
+
+      <text x="16" y="102" fill="var(--text)">stage 1</text>
+      <rect x="130" y="82" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="160" y="102" fill="var(--plum)">idle</text>
+      <rect x="240" y="82" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="278" y="102" fill="var(--teal)">mb0</text>
+      <rect x="350" y="82" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="388" y="102" fill="var(--teal)">mb1</text>
+      <rect x="460" y="82" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="498" y="102" fill="var(--teal)">mb2</text>
+      <rect x="570" y="82" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="608" y="102" fill="var(--teal)">mb3</text>
+      <rect x="680" y="82" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="710" y="102" fill="var(--plum)">idle</text>
+      <rect x="790" y="82" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="820" y="102" fill="var(--plum)">idle</text>
+
+      <text x="16" y="142" fill="var(--text)">stage 2</text>
+      <rect x="130" y="122" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="160" y="142" fill="var(--plum)">idle</text>
+      <rect x="240" y="122" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="270" y="142" fill="var(--plum)">idle</text>
+      <rect x="350" y="122" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="388" y="142" fill="var(--teal)">mb0</text>
+      <rect x="460" y="122" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="498" y="142" fill="var(--teal)">mb1</text>
+      <rect x="570" y="122" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="608" y="142" fill="var(--teal)">mb2</text>
+      <rect x="680" y="122" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="718" y="142" fill="var(--teal)">mb3</text>
+      <rect x="790" y="122" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="820" y="142" fill="var(--plum)">idle</text>
+
+      <text x="16" y="182" fill="var(--text)">stage 3</text>
+      <rect x="130" y="162" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="160" y="182" fill="var(--plum)">idle</text>
+      <rect x="240" y="162" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="270" y="182" fill="var(--plum)">idle</text>
+      <rect x="350" y="162" width="104" height="30" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.4" stroke-dasharray="4 3"/><text x="380" y="182" fill="var(--plum)">idle</text>
+      <rect x="460" y="162" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="498" y="182" fill="var(--teal)">mb0</text>
+      <rect x="570" y="162" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="608" y="182" fill="var(--teal)">mb1</text>
+      <rect x="680" y="162" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="718" y="182" fill="var(--teal)">mb2</text>
+      <rect x="790" y="162" width="104" height="30" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="828" y="182" fill="var(--teal)">mb3</text>
+
+      <line x1="130" y1="208" x2="454" y2="208" stroke="var(--plum)" stroke-width="1.5"/>
+      <text x="130" y="228" fill="var(--plum)">fill: (S-1) = 3 slots</text>
+      <line x1="570" y1="208" x2="894" y2="208" stroke="var(--plum)" stroke-width="1.5"/>
+      <text x="570" y="228" fill="var(--plum)">drain: (S-1) = 3 slots</text>
+      <text x="130" y="262" fill="var(--text-dim)">makespan = (M + S - 1) t = 7 x 10.34 ms = 72.4 ms</text>
+      <text x="130" y="282" fill="var(--text-dim)">bubble = (S-1)/(S+M-1) = 3/7 = 42.9%</text>
+    </g>
+  </svg>
+</div>
+
+<h3>Why the training remedy does not transfer to decode</h3>
+
+<p>In training, $t$ scales down with $M$ because the forward pass is compute-bound: half the
+tokens, half the FLOPs, half the time. The bubble shrinks and the makespan barely moves.</p>
+
+<p>Decode is not compute-bound. A decode step is
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">below the ridge point</a>
+&mdash; ~98% of the traffic is reading weights, and weight traffic is <em>independent of batch
+size</em>. So halving a decode micro-batch does not halve $t$; it leaves $t$ essentially unchanged.
+Feed the formula that fact:</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The inversion</span>
+  <p>Split one decode batch of 64 sequences into $M=4$ micro-batches of 16 at $S=4$. Each stage
+  still costs $t \approx 10.34$&nbsp;ms because it still reads all 34.6&nbsp;GB of its weights.
+  Makespan goes from $4t$ to $(4+4-1)t = 7t$ and throughput <b>falls by 43%</b>. GPipe's remedy
+  makes inference strictly worse. <b>Derived.</b></p>
+</div>
+
+<p>Nor is there a smaller unit to split: in decode each sequence contributes exactly one token per
+step, and you cannot subdivide a token. What both engines do instead is <b>batch-level
+pipelining</b>: keep $S$ <em>independent</em> batches in flight, drawn from the continuous-batching
+queue (<a href="../01-the-core-loop/01-03-continuous-batching.html">&sect;1.3</a>), and let each
+stage work on a different one. There is no fill/drain per step because the stream never ends. The
+bubble does not leave the formula &mdash; it moves into a <em>load</em> condition: if fewer than $S$
+batches exist, stages idle.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the decode case at $S=4$.</b> Independent
+  batches B0, B1, &hellip; enter stage 0 every slot. Only the first $S-1$ slots are a bubble; after
+  that every stage is busy every slot. Slot $= t = 10.34$&nbsp;ms. Token latency is $4t = 41.4$&nbsp;ms
+  <em>whether or not</em> the pipeline is full. <b>Derived.</b></p>
+  <svg viewBox="0 0 960 320" width="100%" role="img" aria-label="Gantt chart of batch-level pipelining in decode, showing a three-slot fill bubble and then a fully saturated steady state">
+    <g font-family="monospace" font-size="12">
+      <text x="16" y="26" fill="var(--text-dim)">slot</text>
+      <text x="140" y="26" fill="var(--text-dim)">0</text>
+      <text x="250" y="26" fill="var(--text-dim)">1</text>
+      <text x="360" y="26" fill="var(--text-dim)">2</text>
+      <text x="470" y="26" fill="var(--text-dim)">3</text>
+      <text x="580" y="26" fill="var(--text-dim)">4</text>
+      <text x="690" y="26" fill="var(--text-dim)">5</text>
+      <text x="800" y="26" fill="var(--text-dim)">6</text>
+
+      <rect x="130" y="36" width="324" height="164" rx="6" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.3"/>
+      <rect x="460" y="36" width="434" height="164" rx="6" fill="var(--olive-dim)" stroke="var(--olive)" stroke-opacity="0.3"/>
+
+      <text x="16" y="62" fill="var(--text)">stage 0</text>
+      <rect x="138" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="166" y="63" fill="var(--teal)">B0</text>
+      <rect x="248" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="276" y="63" fill="var(--teal)">B1</text>
+      <rect x="358" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="386" y="63" fill="var(--teal)">B2</text>
+      <rect x="468" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="496" y="63" fill="var(--teal)">B3</text>
+      <rect x="578" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="606" y="63" fill="var(--teal)">B4</text>
+      <rect x="688" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="716" y="63" fill="var(--teal)">B5</text>
+      <rect x="798" y="44" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="826" y="63" fill="var(--teal)">B6</text>
+
+      <text x="16" y="102" fill="var(--text)">stage 1</text>
+      <rect x="138" y="84" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="248" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="276" y="103" fill="var(--teal)">B0</text>
+      <rect x="358" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="386" y="103" fill="var(--teal)">B1</text>
+      <rect x="468" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="496" y="103" fill="var(--teal)">B2</text>
+      <rect x="578" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="606" y="103" fill="var(--teal)">B3</text>
+      <rect x="688" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="716" y="103" fill="var(--teal)">B4</text>
+      <rect x="798" y="84" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="826" y="103" fill="var(--teal)">B5</text>
+
+      <text x="16" y="142" fill="var(--text)">stage 2</text>
+      <rect x="138" y="124" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="248" y="124" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="358" y="124" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="386" y="143" fill="var(--teal)">B0</text>
+      <rect x="468" y="124" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="496" y="143" fill="var(--teal)">B1</text>
+      <rect x="578" y="124" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="606" y="143" fill="var(--teal)">B2</text>
+      <rect x="688" y="124" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="716" y="143" fill="var(--teal)">B3</text>
+      <rect x="798" y="124" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="826" y="143" fill="var(--teal)">B4</text>
+
+      <text x="16" y="182" fill="var(--text)">stage 3</text>
+      <rect x="138" y="164" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="248" y="164" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="358" y="164" width="88" height="28" rx="4" fill="none" stroke="var(--plum)" stroke-opacity="0.45" stroke-dasharray="4 3"/>
+      <rect x="468" y="164" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="496" y="183" fill="var(--teal)">B0</text>
+      <rect x="578" y="164" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="606" y="183" fill="var(--teal)">B1</text>
+      <rect x="688" y="164" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="716" y="183" fill="var(--teal)">B2</text>
+      <rect x="798" y="164" width="88" height="28" rx="4" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.6"/><text x="826" y="183" fill="var(--teal)">B3</text>
+
+      <text x="140" y="222" fill="var(--plum)">fill bubble: S-1 = 3 slots, once</text>
+      <text x="470" y="222" fill="var(--olive)">steady state: every stage busy, bubble = 0</text>
+      <text x="140" y="256" fill="var(--text-dim)">B0 enters at slot 0, leaves at slot 3: latency = S t = 41.4 ms</text>
+      <text x="140" y="276" fill="var(--text-dim)">one batch retires per slot: throughput = 1 / t = 96.7 batches/s</text>
+      <text x="140" y="296" fill="var(--text-dim)">at load &lt; S in-flight batches the diagonal never fills and the bubble returns</text>
+    </g>
+  </svg>
+</div>
+
+<h3>Capacity, not latency &mdash; the blunt version</h3>
+
+<p>Let $W$ be the weight bytes read per forward pass and $B_{\text{HBM}}$ the per-GPU bandwidth.
+With balanced stages, $t = W / (S \cdot B_{\text{HBM}})$, so</p>
+
+<div class="math-display">$$ T_{\text{token}} = S\,t = \frac{W}{B_{\text{HBM}}}, \qquad \text{throughput} = \frac{1}{t} = \frac{S\,B_{\text{HBM}}}{W} $$</div>
+
+<p>$S$ cancels out of the latency. <b>Pipeline parallelism does not reduce per-token latency at
+all.</b> A token still traverses all 80 layers, and the total weight bytes it forces off HBM is the
+same $W$ whether those bytes sit on one GPU or sixteen. What $S$ buys is throughput, linearly, and
+the ability to host $S\times$ the parameters.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">41.4 ms</div><div class="kpi__l">70B decode-step floor, PP=1, PP=4 or PP=8 &mdash; identical (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">4&times;</div><div class="kpi__l">throughput at PP=4, saturated</div></div>
+  <div class="kpi"><div class="kpi__n">140&times;</div><div class="kpi__l">less wire traffic per token than TP=8</div></div>
+</div>
+
+<p>TP, by contrast, <em>does</em> cut latency: at TP=8 each GPU reads $W/8$ concurrently, giving
+$T_{\text{token}} = 5.17$&nbsp;ms plus collective time. That is the entire trade. TP buys latency at
+the cost of a link fast enough to carry 160 collectives; PP buys capacity and throughput at no link
+cost and no latency benefit.</p></div></section>
+<section class="sec" id="kv-and-the-decision-rule" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">KV per stage, and when to pick PP</h2></div><div class="sec__body"><p>Each stage allocates KV only for its own layers. Both engines resolve a
+<code>[start_layer, end_layer)</code> range at load time and size the pool from it. SGLang makes it
+explicit:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/model_runner_components/layer_setup.py:L132-L151</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    pp_range = _resolve_pp_layer_range(model=model, model_num_layers=model_num_layers)
+    num_effective_layers = pp_range.end_layer - pp_range.start_layer
+# ...
+    return ModelLayerInfo(
+        start_layer=pp_range.start_layer,
+        end_layer=pp_range.end_layer,
+        num_effective_layers=num_effective_layers,
+    )</code></pre>
+</div>
+
+<p>and <code>num_effective_layers</code> is what the KV pool is sized with
+(<code>python/sglang/srt/model_executor/pool_configurator.py:L150-L160</code>,
+<code>python/sglang/srt/mem_cache/kv_cache_configurator.py:L1123</code>). vLLM gets there
+structurally: <code>get_kv_cache_spec</code> walks the attention modules actually present in the
+static forward context, and on a PP rank the absent ones are
+<code>PPMissingLayer</code>&nbsp;&mdash; <code>torch.nn.Identity</code> subclasses with no attention
+inside (<code>vllm/v1/worker/gpu_model_runner.py:L7896-L7909</code>).</p>
+
+<p>For Llama-3-70B, per token per layer the KV is $2 \cdot h_{kv} \cdot d_h \cdot b = 2 \cdot 8
+\cdot 128 \cdot 2 = 4$&nbsp;KiB, so 320&nbsp;KiB for the whole 80-layer stack. That divides by $S$.
+Here is why it matters, on 16 H100s at <code>--gpu-memory-utilization 0.9</code> &mdash; an
+H100 80GB reports 79.65&nbsp;GiB (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>),
+so 71.69&nbsp;GiB usable, of which 3&nbsp;GiB is reserved for activations and graphs:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Llama-3-70B KV capacity, 16 &times; H100 80GB. <b>Derived</b> from $W = 131$&nbsp;GiB, $h_{kv}=8$, $d_h=128$, bf16. KV-head replication past TP=8 is the mechanism from <a href="05-01-tensor-parallelism.html">&sect;5.1</a>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Layout</th><th class="num">GPUs</th><th class="num">Weights / GPU</th><th class="num">KV / token / GPU</th><th class="num">KV pool tokens</th><th class="num">Seqs at 8k</th></tr></thead>
+      <tbody>
+        <tr><td>TP=8 (baseline, 1 node)</td><td class="num">8</td><td class="num">16.38 GiB</td><td class="num">40 KiB</td><td class="num">1.37 M</td><td class="num">167</td></tr>
+        <tr><td>TP=16</td><td class="num">16</td><td class="num">8.19 GiB</td><td class="num">40 KiB</td><td class="num">1.59 M</td><td class="num">193</td></tr>
+        <tr><td>TP=8 &times; PP=2</td><td class="num">16</td><td class="num">8.19 GiB</td><td class="num">20 KiB</td><td class="num">3.17 M</td><td class="num">387</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Doubling TP from 8 to 16 buys <b>16%</b> more concurrency, because past $h_{kv}=8$ every extra
+rank stores a replicated KV head and only the weight shard shrinks. Adding a pipeline stage instead
+buys <b>132%</b>, on the same sixteen GPUs, over the slow link. This is the most under-appreciated
+property of PP in serving.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; layer-to-stage map, Llama-3-70B at PP=4.</b>
+  Grey dashed entries are <code>PPMissingLayer</code> stubs: allocated as
+  <code>torch.nn.Identity</code>, zero parameters, zero KV. Weight bytes per block are 1.711&nbsp;GB
+  (7 matrices at $d=8192$, $d_{ff}=28672$, bf16); the per-stage totals below are taken from the
+  131&nbsp;GiB checkpoint size instead, which works out to 1.706&nbsp;GB per block &mdash; a 0.3%
+  difference that moves no conclusion. <b>Derived.</b></p>
+  <svg viewBox="0 0 960 400" width="100%" role="img" aria-label="A map of 80 Llama-3-70B layers assigned to four pipeline stages with per-stage weight bytes and KV bytes per token">
+    <g font-family="monospace" font-size="12">
+      <text x="16" y="22" fill="var(--text-dim)">get_pp_indices(80, rank, 4) partitions [20, 20, 20, 20]</text>
+
+      <rect x="16" y="38" width="222" height="286" rx="6" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.45"/>
+      <text x="30" y="62" fill="var(--teal)">PP rank 0</text>
+      <text x="30" y="84" fill="var(--text)">embed_tokens  2.10 GB</text>
+      <text x="30" y="106" fill="var(--text)">layers[0..19]  real</text>
+      <text x="30" y="128" fill="var(--text-dim)">layers[20..79] stub</text>
+      <text x="30" y="150" fill="var(--text-dim)">norm      PPMissingLayer</text>
+      <text x="30" y="172" fill="var(--text-dim)">lm_head   PPMissingLayer</text>
+      <line x1="30" y1="188" x2="224" y2="188" stroke="var(--border-bright)"/>
+      <text x="30" y="212" fill="var(--text)">stored    36.2 GB</text>
+      <text x="30" y="234" fill="var(--text)">read/step 34.1 GB</text>
+      <text x="30" y="248" fill="var(--text)">slot      10.19 ms</text>
+      <text x="30" y="272" fill="var(--plum)">KV/token  80 KiB</text>
+      <text x="30" y="292" fill="var(--text-dim)">(20 layers x 4 KiB)</text>
+      <text x="30" y="314" fill="var(--text-dim)">out: 2 x [T, 8192]</text>
+
+      <rect x="252" y="38" width="222" height="286" rx="6" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.45"/>
+      <text x="266" y="62" fill="var(--teal)">PP rank 1</text>
+      <text x="266" y="84" fill="var(--text-dim)">embed_tokens  stub</text>
+      <text x="266" y="106" fill="var(--text)">layers[20..39] real</text>
+      <text x="266" y="128" fill="var(--text-dim)">layers[0..19]  stub</text>
+      <text x="266" y="150" fill="var(--text-dim)">layers[40..79] stub</text>
+      <text x="266" y="172" fill="var(--text-dim)">norm, lm_head  stub</text>
+      <line x1="266" y1="188" x2="460" y2="188" stroke="var(--border-bright)"/>
+      <text x="266" y="212" fill="var(--text)">stored    34.1 GB</text>
+      <text x="266" y="234" fill="var(--text)">read/step 34.1 GB</text>
+      <text x="266" y="248" fill="var(--text)">slot      10.19 ms</text>
+      <text x="266" y="272" fill="var(--plum)">KV/token  80 KiB</text>
+      <text x="266" y="292" fill="var(--text-dim)">(20 layers x 4 KiB)</text>
+      <text x="266" y="314" fill="var(--text-dim)">in/out: 2 x [T, 8192]</text>
+
+      <rect x="488" y="38" width="222" height="286" rx="6" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.45"/>
+      <text x="502" y="62" fill="var(--teal)">PP rank 2</text>
+      <text x="502" y="84" fill="var(--text-dim)">embed_tokens  stub</text>
+      <text x="502" y="106" fill="var(--text)">layers[40..59] real</text>
+      <text x="502" y="128" fill="var(--text-dim)">layers[0..39]  stub</text>
+      <text x="502" y="150" fill="var(--text-dim)">layers[60..79] stub</text>
+      <text x="502" y="172" fill="var(--text-dim)">norm, lm_head  stub</text>
+      <line x1="502" y1="188" x2="696" y2="188" stroke="var(--border-bright)"/>
+      <text x="502" y="212" fill="var(--text)">stored    34.1 GB</text>
+      <text x="502" y="234" fill="var(--text)">read/step 34.1 GB</text>
+      <text x="502" y="248" fill="var(--text)">slot      10.19 ms</text>
+      <text x="502" y="272" fill="var(--plum)">KV/token  80 KiB</text>
+      <text x="502" y="292" fill="var(--text-dim)">(20 layers x 4 KiB)</text>
+      <text x="502" y="314" fill="var(--text-dim)">in/out: 2 x [T, 8192]</text>
+
+      <rect x="724" y="38" width="222" height="286" rx="6" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.5"/>
+      <text x="738" y="62" fill="var(--copper)">PP rank 3</text>
+      <text x="738" y="84" fill="var(--text-dim)">embed_tokens  stub</text>
+      <text x="738" y="106" fill="var(--text)">layers[60..79] real</text>
+      <text x="738" y="128" fill="var(--text-dim)">layers[0..59]  stub</text>
+      <text x="738" y="150" fill="var(--text)">norm      RMSNorm</text>
+      <text x="738" y="172" fill="var(--text)">lm_head   2.10 GB</text>
+      <line x1="738" y1="188" x2="932" y2="188" stroke="var(--border-bright)"/>
+      <text x="738" y="212" fill="var(--text)">stored    36.2 GB</text>
+      <text x="738" y="234" fill="var(--text)">read/step 36.2 GB</text>
+      <text x="738" y="248" fill="var(--copper)">slot      10.81 ms</text>
+      <text x="738" y="272" fill="var(--plum)">KV/token  80 KiB</text>
+      <text x="738" y="292" fill="var(--text-dim)">(20 layers x 4 KiB)</text>
+      <text x="738" y="314" fill="var(--text-dim)">out: next_token_ids</text>
+
+      <text x="16" y="352" fill="var(--text-dim)">full-stack KV = 320 KiB/token; per stage = 80 KiB. Slowest stage sets the slot: 10.81 ms.</text>
+      <text x="16" y="374" fill="var(--text-dim)">This is why get_pp_indices puts leftover layers on the middle partitions, never the last.</text>
+    </g>
+  </svg>
+</div>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">Rule 1</span><h4>Crossing a node boundary</h4><p>If any parallel dimension must span nodes and you do not have NVLink between them, that dimension is PP. TP stays inside the node. This is not a preference; it is the 140&times; volume ratio.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Rule 2</span><h4>Past $h_{kv}$</h4><p>Once TP would exceed the model's KV-head count, extra TP ranks stop dividing KV. Spend the next factor on PP instead.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Rule 3</span><h4>Memory-bound, not latency-bound</h4><p>If your SLO is throughput or concurrency and TPOT has headroom, PP is free capacity. If TPOT is the binding constraint, PP gives you nothing &mdash; and $S-1$ extra hops of latency.</p></div>
+</div></div></section>
+<section class="sec" id="how-production-systems-do-it" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM: layer stubbing plus a future queue in the engine core</h3>
+
+<p>Layer assignment is one function. Note the docstring's reasoning about <em>where</em> the
+remainder goes &mdash; it is the balance argument from Figure 4:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/utils.py:L127-L142</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def get_pp_indices(
+    num_hidden_layers: int, pp_rank: int, pp_size: int
+) -&gt; tuple[int, int]:
+    """Try to evenly distribute layers across partitions.
+
+    If the number of layers is not divisible by the number of partitions,
+    the remaining layers are evenly distributed across all but the last
+    partition. The last partition is excluded because it often contains an
+    additional norm layer and we are attempting to balance compute.
+
+    If `pp_size &gt; 2` and the number of remaining layers is
+    `0 &lt; x &lt;= pp_size - 2` then the remaining layers are evenly distributed
+    across the middle partitions. The first and last partitions are excluded
+    because they contain the input and output embeddings respectively and we
+    are attempting to reduce maximum memory consumption across partitions.
+    """</code></pre>
+</div>
+
+<p>Every model then builds a full-length <code>ModuleList</code> in which the foreign layers are
+placeholders, so state-dict keys and layer indices stay global:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/utils.py:L819-L862, L852-L863</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class PPMissingLayer(torch.nn.Identity):
+    """
+    A placeholder layer for missing layers in a pipeline parallel model.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, *args, **kwargs):
+        """Return the first arg from args or the first value from kwargs."""
+        return args[0] if args else next(iter(kwargs.values()))
+# ...
+    start_layer, end_layer = get_pp_indices(
+        num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
+    )
+
+    modules = torch.nn.ModuleList(
+        [PPMissingLayer() for _ in range(start_layer)]
+        + get_offloader().wrap_modules(
+            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+        )
+        + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
+    )</code></pre>
+</div>
+
+<p>The pipelining itself lives in the engine core, not the worker. <code class="c-vllm">max_concurrent_batches</code>
+is the whole scheduler-side contract:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/vllm.py:L583-L594</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @property
+    def max_concurrent_batches(self) -&gt; int:
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        # Async scheduling requires 2 concurrent batches to overlap.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if self.scheduler_config.async_scheduling:
+            if self.use_v2_model_runner:
+                return pp_size + 1
+            # V1 Model Runner does not fully support async scheduling with PP.
+            if pp_size &lt;= 1:
+                return 2
+        return pp_size</code></pre>
+</div>
+
+<p>That number sizes a <code>deque</code> of in-flight futures, and
+<code>step_with_batch_queue</code> prefers filling the pipeline over collecting results:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L205-L215</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Setup batch queue for pipeline parallelism.
+        # Batch queue for scheduled batches. This enables us to asynchronously
+        # schedule and execute batches, and is required by pipeline parallelism
+        # to eliminate pipeline bubbles.
+        self.batch_queue_size = vllm_config.max_concurrent_batches
+        self.batch_queue: (
+            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
+        ) = None
+        if self.batch_queue_size &gt; 1:
+            logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
+            self.batch_queue = deque(maxlen=self.batch_queue_size)</code></pre>
+</div>
+
+<h3>SGLang: a scheduler process per stage, running a ring</h3>
+
+<p>SGLang does not centralise. Every PP stage runs its own <code>Scheduler</code> with its own event
+loop, and requests, activations and sampled tokens all travel around the ring stage-to-stage. The
+docstring of <code class="c-sglang">event_loop_pp</code> is the clearest single description of
+inference-time pipelining in either repository:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_pp_mixin.py:L69-L92</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def event_loop_pp(self: Scheduler):
+        """
+        A scheduler loop for pipeline parallelism.
+        Notes:
+        1. Each stage runs in the same order and is notified by the previous stage.
+        2. We use async send but sync recv to avoid desynchronization while minimizing the communication overhead.
+        3. We can use async batch depth to buffer the outputs in the last stage for to allow overlapping the GPU computation and CPU processing and avoid last PP rank staggler.
+
+        Unified Schedule:
+        ====================================================================
+        Stage P
+        recv ith req from previous stage
+        recv ith proxy from previous stage
+        run ith batch
+        recv prev (i+1)% mb_size th outputs
+        process batch result of prev (i+1)% mb_size th batch (can be run in parallel with the curr batch GPU computation)
+        send ith req to next stage
+        send ith proxy to next stage
+        send current stage's outputs to next stage(can be stashed and delayed to send later)
+
+        the above order can be optimized and reordered to minimize communication-related CPU stall and overhead bubbles.
+
+        ====================================================================
+        """</code></pre>
+</div>
+
+<p>The in-flight count is explicit, and can exceed $S$:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_pp_mixin.py:L561-L573</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def init_pp_loop_state(self: Scheduler):
+        self.pp_loop_size: int = self.ps.pp_size + get_parallel().pp_async_batch_depth
+        # In CP mode, attention weights are duplicated, eliminating the need for the attention TP all-gather operation.
+        self.require_attn_tp_allgather = (
+            not get_parallel().enable_dsa_prefill_context_parallel
+        )
+        self.mbs = [None] * self.pp_loop_size
+        self.last_mbs = [None] * self.pp_loop_size
+        self.running_mbs = [
+            ScheduleBatch(reqs=[], batch_is_full=False)
+            for _ in range(self.pp_loop_size)
+        ]
+        self.mb_metadata: List[Optional[PPBatchMetadata]] = [None] * self.pp_loop_size</code></pre>
+</div>
+
+<p><code>--pp-async-batch-depth</code> (default 0,
+<code>python/sglang/srt/server_args.py:L1054-L1056</code>) adds slots beyond $S$ so the last rank can
+buffer sampled tokens and overlap its CPU post-processing with the next GPU batch &mdash; the
+"staggler" in the docstring. It is a bubble that only exists in inference: the last stage does the
+sampling and detokenisation handoff no other stage does, so its slot is systematically longer.</p>
+
+<p><b>Where they differ, and why.</b> vLLM keeps one scheduler and treats the pipeline as an
+asynchronous execution backend: the scheduler never knows which stage a batch is on, only that a
+future has not resolved. Preemption and prefix-cache bookkeeping stay in one place, at the cost of a
+scheduler-to-worker round trip per stage. SGLang replicates the scheduler per stage and forwards the
+<em>request objects themselves</em> down the ring (<code>_pp_send_pyobj_to_next_stage</code>,
+<code>scheduler_pp_mixin.py:L967-L982</code>): no central coordinator, cheaper per step, but every
+stage must independently reach the same batching decision &mdash; which is why the pipeline
+demultiplexes message kinds to survive the resulting reordering:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_pp_mixin.py:L1056-L1065</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _pp_recv_typed_dict(
+        self: Scheduler,
+        expected_kind: str = "default",
+        all_gather_group: Optional = None,
+    ) -&gt; Dict[str, torch.Tensor]:
+        """Receive a typed tensor dict, demultiplexing by msg_type.
+
+        If a message of the wrong kind is received, it's stashed in the queue
+        and we continue receiving until we get the expected kind.
+        """</code></pre>
+</div>
+
+<h3>The admission consequence</h3>
+
+<p>With $S$ batches in flight, a single stage's running batch can only be $1/S$ of the engine's
+total concurrency, or the pipeline oversubscribes the KV pool. SGLang encodes exactly that:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L1059-L1065, L3217-L3220</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if not get_parallel().pp_max_micro_batch_size:
+            get_context().override(
+                "scheduler.pp_max_micro_batch_size_default",
+                pp_max_micro_batch_size=max(
+                    self.max_running_requests // self.ps.pp_size, 1
+                ),
+            )
+# ...
+    def get_num_allocatable_reqs(self, running_bs):
+        res = get_parallel().pp_max_micro_batch_size - running_bs
+        res = min(res, self.req_to_token_pool.available_size())
+        return res
+</code></pre>
+</div>
+
+<p>Set <code>--max-running-requests 256</code> at PP=4 and each micro-batch admits at most 64.
+Forget this and you will conclude PP "made batching worse" when what actually happened is that your
+per-step batch got divided by $S$ while your total concurrency did not.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace</h2></div><div class="sec__body"><p>One decode step for one batch through vLLM at PP=2, TP=8, in call order.</p>
+
+<ol>
+  <li><code>EngineCore.step_with_batch_queue</code> (<code>vllm/v1/engine/core.py:L624-L680</code>)
+  finds <code>len(batch_queue) &lt; 2</code>, calls <code>self.scheduler.schedule()</code>, then
+  <code>execute_model(scheduler_output, non_block=True)</code> and pushes the future. Because the
+  queue is not yet full it returns <code>None</code> immediately &mdash; the scheduler schedules a
+  <em>second</em> batch before collecting the first.</li>
+
+  <li>On PP rank 0, <code>Worker.execute_model</code>
+  (<code>vllm/v1/worker/gpu_worker.py:L1098-L1103</code>) sees <code>is_first_rank</code>, skips the
+  receive, and calls <code>self.model_runner.execute_model(...)</code> with
+  <code>intermediate_tensors=None</code>.</li>
+
+  <li><code>GPUModelRunner._preprocess</code> (<code>gpu_model_runner.py:L3733-L3739</code>) keeps
+  <code>intermediate_tensors = None</code> for the first rank. <code>LlamaModel.forward</code>
+  embeds the tokens, runs layers 0&ndash;39 via
+  <code>islice(self.layers, self.start_layer, self.end_layer)</code>, and because
+  <code>not get_pp_group().is_last_rank</code> returns
+  <code>IntermediateTensors({"hidden_states": ..., "residual": ...})</code>
+  (<code>llama.py:L430-L433</code>).</li>
+
+  <li>Back in the worker, the result is an <code>IntermediateTensors</code>, so the branch at
+  <code>gpu_worker.py:L1127-L1138</code> fires: <code>isend_tensor_dict</code> with
+  <code>all_gather_group=get_tp_group()</code>. Each of the 8 TP ranks slices its 1/8 of both
+  tensors (<code>parallel_state.py:L1061-L1064</code>) and posts a non-blocking
+  <code>torch.distributed.isend</code> to the matching rank on the next node.
+  <code>execute_model</code> returns <code>None</code> &mdash; rank 0 produces no sampler output at
+  all.</li>
+
+  <li>On PP rank 1, <code>Worker.execute_model</code> hits
+  <code>not get_pp_group().is_first_rank</code> and calls <code>irecv_tensor_dict</code>, wrapping
+  the handles in an <code>AsyncIntermediateTensors</code> so the receive overlaps with the
+  runner's own input preparation.</li>
+
+  <li><code>GPUModelRunner.sync_and_gather_intermediate_tensors</code>
+  (<code>gpu_model_runner.py:L3472-L3500</code>) copies the arrivals into the persistent buffers and,
+  if sequence parallelism scattered the residual, all-gathers it back over the TP group first.</li>
+
+  <li>Layers 40&ndash;79 run, <code>self.norm</code> is a real <code>RMSNorm</code> on this rank,
+  <code>lm_head</code> produces logits, the sampler runs, and a real
+  <code>ModelRunnerOutput</code> comes back &mdash; which is what the future in step 1 finally
+  resolves to.</li>
+</ol></div></section>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Ring deadlock</span>
+  <p>Every stage sending before receiving is safe on CUDA and fatal elsewhere. SGLang's comment is
+  the clearest statement of the failure I have found in either tree
+  (<code>python/sglang/srt/managers/scheduler_pp_mixin.py:L1230-L1241</code>): <em>"if every PP rank
+  sends first, all ranks block waiting for a receiver and the ring deadlocks."</em> The fix is
+  parity-ordered send/recv: <code>send_first = (not is_xpu()) or ((self.ps.pp_rank % 2) == 0)</code>.
+  Symptom is a hang with no error, all ranks at 0% SM utilisation.</p>
+</div>
+
+<p><b>PP is incompatible with the things that make a single-stage engine fast.</b> SGLang refuses to
+start:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L9245-L9253</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if self.pp_size &gt; 1:
+            assert (
+                self.disable_overlap_schedule and self.speculative_algorithm is None
+            ), "Pipeline parallelism is not compatible with overlap schedule, speculative decoding"
+            assert self.min_free_slots_delay is None, (
+                "--min-free-slots-delay is not supported with pipeline "
+                "parallelism: allocatable slots per microbatch are bounded by "
+                "pp-max-micro-batch-size, so the threshold may never be reached"
+            )</code></pre>
+</div>
+
+<p>The overlap scheduler and PP want the same resource &mdash; another batch in flight &mdash; and
+fight over it. Speculative decoding (<a href="../06-decoding-algorithms/06-02-speculative-decoding.html">&sect;6.2</a>) is worse: draft-then-verify needs the sampled token back at the
+<em>start</em> of the model, an extra full lap of the ring per round. Piecewise CUDA graphs are also
+off (<code>python/sglang/srt/server_args.py:L4640</code>).</p>
+
+<p><b>Uneven partitions.</b> $L=80$ divides by 2, 4, 5, 8, 10 but not 3, 6, 7. At PP=6 vLLM logs
+<em>"Hidden layers were unevenly partitioned: [...]. This can be manually overridden using the
+VLLM_PP_LAYER_PARTITION environment variable"</em>
+(<code>vllm/distributed/utils.py:L160-L166</code>). The slowest stage sets the slot time, so the
+[13,13,13,14,14,13] split the code produces runs at the 14-layer stage's pace on every stage &mdash;
+4.8% of your throughput lost to a rounding decision. If your stages have different KV footprints or a heavy
+<code>lm_head</code>, tune the partition by hand.</p>
+
+<p><b>Preemption gets harder.</b> With several batches in flight, a request the scheduler thinks it
+has finished may still be mid-pipeline:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L159-L165</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # With overlapping batches (async scheduling or PP), a step may
+            # still be writing a freed request's KV blocks. A consumer KV
+            # Connector can reallocate and fill those blocks via a load that
+            # isn't ordered against that write, so defer freeing them.
+            multiple_inflight_batches = self.vllm_config.max_concurrent_batches &gt; 1
+            if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
+                self.defer_block_free = True</code></pre>
+</div>
+
+<p><b>"PP made my TPOT worse."</b> Yes. It always will, by the seam latency plus the per-stage
+Python and launch overhead. If your dashboard shows unchanged-to-slightly-worse TPOT and much higher
+throughput after enabling PP, the system is working correctly.</p></div></section>
+<section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">two nodes, 8 &times; H100 each</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: TP inside the node, PP across nodes.
+vllm serve meta-llama/Meta-Llama-3-70B-Instruct \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --max-model-len 8192 --gpu-memory-utilization 0.9
+
+# Confirm the layer split from the worker log prefixes (Worker_PP0_TP0 ... Worker_PP1_TP7),
+# set by multiproc_executor.py:L1065-L1080.
+
+# Force a deliberately unbalanced split and watch the slot time follow the slowest stage:
+VLLM_PP_LAYER_PARTITION=48,32 vllm serve meta-llama/Meta-Llama-3-70B-Instruct \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2
+
+# SGLang: same shape. Note the mandatory --disable-overlap-schedule.
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-70B-Instruct \
+  --tp-size 8 --pp-size 2 --disable-overlap-schedule \
+  --nnodes 2 --node-rank 0 --dist-init-addr $HEAD:5000
+
+# Raise the in-flight count past pp_size to hide the last-rank sampling stall:
+  --pp-async-batch-depth 1
+
+# Retune admission: at pp_size=2 each micro-batch defaults to max_running_requests // 2.
+  --pp-max-micro-batch-size 128</code></pre>
+</div>
+
+<p>The measurement worth taking: sweep request rate from 1 to saturation at PP=1 and PP=2 on the
+same total GPU count, plotting TPOT and output-token throughput separately. The prediction from
+&sect;5.2.3 is that the TPOT curves nearly coincide (PP slightly worse) while the throughput ceiling
+roughly doubles &mdash; and that at low rate PP is <em>slower</em>, because the pipeline never
+fills.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Derive the bubble fraction for $S=8$, $M=1$, and explain in one sentence why an inference
+  engine at PP=8 serving a single user sees exactly this number.</li>
+
+  <li>Read <code>vllm/distributed/utils.py:L156-L170</code>. For $L=80$, $S=6$, write out the
+  <code>partitions</code> list the code produces. Which rank is the bottleneck, and what fraction of
+  aggregate throughput is lost relative to a perfectly balanced split?</li>
+
+  <li>Llama-3-8B ($L=32$, $d=4096$, $h_{kv}=8$, $d_h=128$) at PP=4. Compute (a) KV bytes per token
+  per stage, (b) seam bytes per token, (c) the ratio of seam bytes to the per-stage weight bytes
+  read during one decode step. What does (c) tell you about the link speed you need?</li>
+
+  <li>Predict what happens if you launch SGLang with <code>--pp-size 2</code> and leave the overlap
+  scheduler enabled, then verify against
+  <code>python/sglang/srt/server_args.py:L9245-L9248</code>. Now predict the same for vLLM with
+  <code>--pipeline-parallel-size 2 --async-scheduling</code> and check
+  <code>vllm/config/vllm.py:L588-L594</code> &mdash; why is the answer different?</li>
+
+  <li>You have 32 H100s across 4 nodes and want to serve a 405B-parameter model in fp8
+  (~405&nbsp;GB of weights) at 128k context. Propose a TP&times;PP factorisation and justify each
+  factor from the three rules in &sect;5.2.4.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> $\beta = (8-1)/(8+1-1) = 7/8 = 87.5\%$. A single user generates one token per step,
+    which is one batch in flight; with $S=8$ stages and one batch, seven stages idle at every
+    instant. This is the load-dependent bubble of Figure 3 with the diagonal never filling.</p>
+
+    <p><b>2.</b> $80 // 6 = 13$, remainder $80 \bmod 6 = 2$. The loop
+    <code>for i in range(2, remaining + 2)</code> increments <code>partitions[-2]</code> and
+    <code>partitions[-3]</code>, giving <code>[13, 13, 13, 14, 14, 13]</code>. Ranks 3 and 4 are the
+    bottleneck at 14 layers. Slot time is set by 14 layers instead of the ideal 13.33, so aggregate
+    throughput is $13.33/14 = 95.2\%$ of balanced &mdash; 4.8% lost.</p>
+
+    <p><b>3.</b> (a) $2 \cdot 8 \cdot 128 \cdot 2 = 4$&nbsp;KiB per layer per token; 8 layers per
+    stage $\Rightarrow$ <b>32&nbsp;KiB per token per stage</b> (128&nbsp;KiB for the full stack).
+    (b) $2 \cdot 4096 \cdot 2 = 16$&nbsp;KiB per token per seam. (c) 8B weights are ~15.0&nbsp;GB of
+    decode traffic, so a stage reads ~3.75&nbsp;GB. Ratio $= 16\,\text{KiB} / 3.75\,\text{GB}
+    \approx 4.3 \times 10^{-6}$. Even a 10&nbsp;GbE link (1.25&nbsp;GB/s) moves the seam in
+    13&nbsp;&micro;s against a 1.12&nbsp;ms stage &mdash; about 1%. PP tolerates almost any link;
+    what it does <em>not</em> tolerate is high per-message latency at small $S \cdot t$.</p>
+
+    <p><b>4.</b> SGLang raises <code>AssertionError: Pipeline parallelism is not compatible with
+    overlap schedule, speculative decoding</code> at argument-validation time &mdash; the server
+    never starts. vLLM does not error: <code>max_concurrent_batches</code> returns
+    <code>pp_size + 1</code> under the V2 model runner (async scheduling and PP compose there), and
+    for the V1 runner the comment says async scheduling with PP is not fully supported, so it falls
+    through to plain <code>pp_size</code> &mdash; async scheduling is silently ignored rather than
+    rejected. Different philosophies: SGLang fails loudly, vLLM degrades quietly.</p>
+
+    <p><b>5.</b> TP=8 within each node (NVLink, and 405B has $h_{kv}=8$ so TP=8 is exactly the point
+    where KV-head splitting stops paying &mdash; Rule 2), PP=4 across nodes (Rule 1: the only thing
+    crossing the InfiniBand fabric is a $2 \times [T, 16384]$ seam). Weights per GPU
+    $\approx 405/32 = 12.7$&nbsp;GB, leaving ~50&nbsp;GiB for KV, and PP=4 divides the per-token KV
+    by 4 &mdash; which is what makes 128k context affordable (Rule 3: this deployment is
+    memory-bound, and the 4 extra hops of latency are the price).</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="key-takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The seam carries <b>two</b> tensors, not one &mdash; <code>hidden_states</code> and the
+  unfused <code>residual</code> &mdash; so budget $2 T d b$ bytes per boundary, and know that both
+  engines shard that send across the TP group and all-gather it locally, cutting cross-node bytes by
+  another factor of TP.</li>
+
+  <li>$T_{\text{token}} = W / B_{\text{HBM}}$ with $S$ cancelled out. Any argument that PP reduces
+  latency is wrong; PP multiplies throughput and hostable parameters, and adds $S-1$ hops.</li>
+
+  <li>GPipe's micro-batching remedy inverts in decode: stage time is set by weight traffic, which
+  does not shrink when the micro-batch does, so splitting a decode batch into $M$ pieces multiplies
+  makespan by $(M+S-1)/M$ for nothing. The engines pipeline <em>independent batches</em> instead,
+  which turns the bubble from a per-step tax into a low-load phenomenon.</li>
+
+  <li>KV divides by $S$ and keeps dividing past $h_{kv}$, where TP stops. On 16 H100s, TP=16 buys
+  16% more concurrent sequences over TP=8; TP=8&times;PP=2 buys 132%.</li>
+
+  <li>$S$ batches in flight is a scheduling contract, not an implementation detail: vLLM sizes a
+  future deque by <code>max_concurrent_batches</code>, SGLang divides
+  <code>max_running_requests</code> by <code>pp_size</code> to get
+  <code>pp_max_micro_batch_size</code>. Both change what "batch size" means in your logs.</li>
+
+  <li>PP is mutually exclusive with the overlap scheduler, speculative decoding and piecewise CUDA
+  graphs in SGLang at this SHA. You are trading engine features for capacity, not getting capacity
+  for free.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Huang et al., <a href="https://arxiv.org/abs/1811.06965">GPipe: Efficient Training of Giant
+  Neural Networks using Pipeline Parallelism</a> (2018) &mdash; the source of the
+  $(S-1)/(S+M-1)$ bubble.</li>
+  <li>Narayanan et al., <a href="https://arxiv.org/abs/2104.04473">Efficient Large-Scale Language
+  Model Training on GPU Clusters Using Megatron-LM</a> (2021) &mdash; interleaved 1F1B, which
+  reduces the bubble to $\frac{1}{v}\frac{S-1}{M}$ for $v$ model chunks per device. Nothing in
+  either serving engine implements it, for the reason in &sect;5.2.3.</li>
+  <li>Narayanan et al., <a href="https://arxiv.org/abs/1806.03377">PipeDream</a> (2018) &mdash;
+  asynchronous 1F1B; the batch-level pipelining the engines use is closer to this than to GPipe.</li>
+  <li>vLLM PR <a href="https://github.com/vllm-project/vllm/pull/4412">#4412</a> &mdash; the original
+  pipeline-parallel implementation, including the discussion of why the batch queue lives in the
+  engine core.</li>
+  <li>SGLang PR <a href="https://github.com/sgl-project/sglang/pull/5724">#5724</a> &mdash; the
+  pipeline-parallel scheduler loop that became <code>scheduler_pp_mixin.py</code>.</li>
+  <li>Neighbouring chapters: <a href="05-01-tensor-parallelism.html">&sect;5.1</a> (tensor
+  parallelism and the $h_{kv}$ wall), <a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>
+  (DP and EP), <a href="05-04-collectives-and-topology.html">&sect;5.4</a> (what the collectives
+  actually cost on real topologies),
+  <a href="05-05-worker-orchestration.html">&sect;5.5</a> (how the ranks get launched and wired),
+  <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> (the KV sizing formula
+  used above).</li>
+</ul></div></section>
+<div class="pager"><a href="05-01-tensor-parallelism.html"><div class="pager__k">← Previous</div><div class="pager__t">Tensor parallelism</div></a><a class="pager__next" href="05-03-data-and-expert-parallelism.html"><div class="pager__k">Next →</div><div class="pager__t">Data parallelism, attention-DP, expert parallelism</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles</a>
+<a href="#kv-and-the-decision-rule">KV per stage, and when to pick PP</a>
+<a href="#how-production-systems-do-it">How production systems do it</a>
+<a href="#worked-trace">Worked trace</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#key-takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

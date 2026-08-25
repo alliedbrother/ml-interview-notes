@@ -1,0 +1,2010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CUDA graphs and kernel-launch overhead — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i is-current" href="08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 8 · Compilation and runtime · 08-01</div>
+<h1>CUDA graphs and kernel-launch overhead</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/cudagraph_dispatcher.py</code></li><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/model_executor/cuda_graph_config.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A Llama-3-8B decode step has a hard floor of 4.48&nbsp;ms set by HBM bandwidth. An eager
+PyTorch forward at TP=8 cannot even <em>issue</em> its kernels in that time. CUDA graphs close the gap by
+replacing hundreds of launches with one &mdash; and the price is that every buffer address and every tensor
+shape must be frozen forever.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the number this book has been carrying since <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>:
+Llama-3-8B in bf16 is 15.0&nbsp;GB of weights, and reading them once at H100 SXM's 3.35&nbsp;TB/s costs
+<b>4.48&nbsp;ms</b>. That is the bandwidth-bound floor of a batch-1 decode step. Nothing you do to the
+kernels gets under it.</p>
+
+<p>Now count the launches it takes to get there. Read vLLM's Llama decoder layer
+(<code>vllm/model_executor/models/llama.py:L310-L327</code>) and its two children
+(<code>L221-L231</code> for attention, <code>L115-L119</code> for the MLP) and enumerate the ops that
+actually reach the driver:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Kernels per Llama-3-8B decoder layer as vLLM composes it &mdash; <b>derived</b> by reading
+  <code>llama.py</code>, with fused RMSNorm+residual, fused QKV and fused gate/up. Counts move with your build's fusion passes.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Op</th><th>Kernels</th><th>Weight bytes read (bf16)</th><th>HBM time at 3.35 TB/s</th></tr></thead>
+      <tbody>
+        <tr><td><code>input_layernorm</code> (add + RMSNorm, fused)</td><td class="num">1</td><td class="num">8 KB</td><td class="num">~0</td></tr>
+        <tr><td><code>qkv_proj</code> (4096 &rarr; 6144)</td><td class="num">1</td><td class="num">50.3 MB</td><td class="num">15.0 &micro;s</td></tr>
+        <tr><td><code>rotary_emb</code> (q and k, one kernel)</td><td class="num">1</td><td class="num">&mdash;</td><td class="num">~0</td></tr>
+        <tr><td>KV-cache write (<code>reshape_and_cache</code>)</td><td class="num">1</td><td class="num">&mdash;</td><td class="num">~0</td></tr>
+        <tr><td>attention</td><td class="num">1</td><td class="num">KV only</td><td class="num">context-dependent</td></tr>
+        <tr><td><code>o_proj</code> (4096 &rarr; 4096)</td><td class="num">1</td><td class="num">33.6 MB</td><td class="num">10.0 &micro;s</td></tr>
+        <tr><td><code>post_attention_layernorm</code></td><td class="num">1</td><td class="num">8 KB</td><td class="num">~0</td></tr>
+        <tr><td><code>gate_up_proj</code> (4096 &rarr; 2&times;14336)</td><td class="num">1</td><td class="num">234.9 MB</td><td class="num">70.1 &micro;s</td></tr>
+        <tr><td><code>SiluAndMul</code></td><td class="num">1</td><td class="num">&mdash;</td><td class="num">~0</td></tr>
+        <tr><td><code>down_proj</code> (14336 &rarr; 4096)</td><td class="num">1</td><td class="num">117.4 MB</td><td class="num">35.0 &micro;s</td></tr>
+        <tr><td><b>per layer</b></td><td class="num"><b>10</b></td><td class="num"><b>436 MB</b></td><td class="num"><b>130 &micro;s</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Thirty-two layers gives <b>320 kernels</b>. Add the embedding gather, the final norm, the LM-head GEMM
+and the sampling chain (temperature scale, penalties, top-k, top-p, softmax, multinomial, gather) and you
+land at roughly <b>330 launches per decoded token</b> at TP=1. At TP=8 each layer also carries two
+all-reduces &mdash; after <code>o_proj</code> and after <code>down_proj</code> &mdash; so the count rises
+to about <b>395</b>, while the GPU work <em>falls</em> by 8&times; because the weights are sharded.</p>
+
+<h3>The launch-overhead number, finally measured on H100</h3>
+
+<p><a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> raised this as an open question
+and pointed here: the only published per-launch figures were NVIDIA's Tesla V100 / CUDA 10.1 numbers
+(2.9 / 9.6 / 3.8 / 3.4&nbsp;&micro;s), and the microsecond <em>scale</em> was sound but the value on modern
+hardware was unknown. There is now a better source. Vellaisamy et&nbsp;al.,
+<em>Characterizing and Optimizing LLM Inference Workloads on CPU-GPU Coupled Architectures</em>
+(ISPASS 2025, arXiv:2504.11750), Table&nbsp;V, measures <code>cudaLaunchKernel</code> with a null kernel
+on PyTorch 2.4.1 / CUDA 12.6 / driver 560.35.03:</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">2374.6 ns</div><div class="kpi__l">nullKernel launch overhead, Intel + H100 (cited)</div></div>
+  <div class="kpi"><div class="kpi__n">1235.2 ns</div><div class="kpi__l">nullKernel <em>duration</em> on the same H100 (cited)</div></div>
+  <div class="kpi"><div class="kpi__n">2771.6 ns</div><div class="kpi__l">same measurement on GH200 (cited)</div></div>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">Flag resolved</span>
+  <p>The <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> Unverified flag is discharged
+  for the <em>driver</em> layer: 2.37&nbsp;&micro;s per <code>cudaLaunchKernel</code> on H100 with a CUDA&nbsp;12.6
+  driver. It is <b>not</b> discharged for the framework layers above it. NVIDIA's current
+  <em>CUDA Graph Best Practice for PyTorch</em> guide breaks per-launch cost into Language Transitions
+  (10&ndash;100&nbsp;&micro;s), Runtime Processing (5&ndash;20&nbsp;&micro;s), Driver Operations
+  (5&ndash;15&nbsp;&micro;s) and Hardware Submission (1&ndash;5&nbsp;&micro;s) &mdash; ranges, on unnamed
+  hardware, with no configuration given. Treat the 2.37&nbsp;&micro;s as a hard <em>lower bound</em> on
+  what a graph removes and the rest as an unquantified multiple of it.</p>
+</div>
+
+<h3>Deriving the gap</h3>
+
+<p>A launch is asynchronous, so launch cost only hurts when the CPU cannot stay ahead of the GPU. Define
+the <b>host budget per kernel</b> as the GPU time available divided by the number of launches:</p>
+
+<div class="math-display">$$ B_{\text{host}} \;=\; \frac{T_{\text{GPU}}}{N_{\text{kernels}}} $$</div>
+
+<p>where $T_{\text{GPU}}$ is the device-side time of one decode step and $N_{\text{kernels}}$ the launches in
+it. If the host cost per kernel exceeds $B_{\text{host}}$, the GPU starves and the step is launch-bound.
+Two cases, both arithmetic:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap"><b>Derived.</b> Llama-3-8B bf16 on H100 SXM, batch 1, weight-read floor only.
+  Launch cost is the <em>cited</em> driver-only 2.374 &micro;s; the framework layers on top are unquantified and additive.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Config</th><th>Weights/rank</th><th>$T_{\text{GPU}}$</th><th>$N_{\text{kernels}}$</th><th>$B_{\text{host}}$</th><th>Driver-only host time</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>TP=1</td><td class="num">15.0 GB</td><td class="num">4.48 ms</td><td class="num">330</td><td class="num">13.6 &micro;s</td><td class="num">0.78 ms (17%)</td><td>marginal &mdash; any framework cost above 11 &micro;s/op tips it</td></tr>
+        <tr><td>TP=8</td><td class="num">1.88 GB</td><td class="num">0.56 ms</td><td class="num">395</td><td class="num">1.42 &micro;s</td><td class="num">0.94 ms (168%)</td><td><b>launch-bound before Python is even considered</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Read the second row again. At TP=8 the bare driver API needs 0.94&nbsp;ms of CPU time to issue a step
+whose GPU work is 0.56&nbsp;ms. The step cannot finish faster than 0.94&nbsp;ms no matter how good the
+kernels are, and the GPU sits idle at least <b>40%</b> of the time. Tensor parallelism shrinks $T_{\text{GPU}}$
+and <em>grows</em> $N_{\text{kernels}}$; the two effects multiply. This is why the graph question gets
+sharper, not softer, as you scale out.</p>
+
+<p>There is a device-side floor too. That same H100 measurement puts an <em>empty</em> kernel's duration at
+1.235&nbsp;&micro;s. Multiply by 330 and you get <b>0.41&nbsp;ms</b> &mdash; 9% of the 4.48&nbsp;ms step
+that is pure per-kernel dispatch even with an infinitely fast CPU. Graphs shrink that too, because the
+driver walks a pre-built node list instead of re-ingesting each launch.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one Llama-3-8B decode step at TP=8, eager versus replayed.</b>
+  Derived from the table above: 395 launches, 2.374 &micro;s of driver time each (cited), 0.56 ms of device work.
+  The eager lane is host-bound; the graph lane is not. Bar widths are to scale within each lane.</p>
+  <svg viewBox="0 0 900 330" width="100%" role="img" aria-labelledby="tlTitle tlDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="tlTitle">Decode step timeline with and without CUDA graphs</title>
+    <desc id="tlDesc">Two pairs of lanes. In the eager pair the CPU lane is packed solid with 395 launch
+    blocks totalling 940 microseconds while the GPU lane shows short kernel bars separated by idle gaps,
+    finishing only when the CPU finishes at 940 microseconds. In the graph pair the CPU lane has one small
+    block of a few microseconds and the GPU lane is a single continuous 560 microsecond bar.</desc>
+
+    <g fill="currentColor" fill-opacity="0.85" font-size="12.5">
+      <text x="14" y="34">EAGER &mdash; 395 separate launches</text>
+      <text x="14" y="196">CUDA GRAPH &mdash; one cudaGraphLaunch</text>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.6" font-size="11">
+      <text x="14" y="66">CPU</text><text x="14" y="118">GPU</text>
+      <text x="14" y="228">CPU</text><text x="14" y="280">GPU</text>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.25" stroke-width="1">
+      <line x1="60" y1="140" x2="866" y2="140"/>
+      <line x1="60" y1="302" x2="866" y2="302"/>
+    </g>
+
+    <rect x="60" y="48" width="806" height="26" fill="currentColor" fill-opacity="0.34"/>
+    <g stroke="currentColor" stroke-opacity="0.75" stroke-width="0.7">
+      <line x1="94" y1="48" x2="94" y2="74"/><line x1="128" y1="48" x2="128" y2="74"/>
+      <line x1="162" y1="48" x2="162" y2="74"/><line x1="196" y1="48" x2="196" y2="74"/>
+      <line x1="230" y1="48" x2="230" y2="74"/><line x1="264" y1="48" x2="264" y2="74"/>
+      <line x1="298" y1="48" x2="298" y2="74"/><line x1="332" y1="48" x2="332" y2="74"/>
+      <line x1="366" y1="48" x2="366" y2="74"/><line x1="400" y1="48" x2="400" y2="74"/>
+      <line x1="434" y1="48" x2="434" y2="74"/><line x1="468" y1="48" x2="468" y2="74"/>
+      <line x1="502" y1="48" x2="502" y2="74"/><line x1="536" y1="48" x2="536" y2="74"/>
+      <line x1="570" y1="48" x2="570" y2="74"/><line x1="604" y1="48" x2="604" y2="74"/>
+      <line x1="638" y1="48" x2="638" y2="74"/><line x1="672" y1="48" x2="672" y2="74"/>
+      <line x1="706" y1="48" x2="706" y2="74"/><line x1="740" y1="48" x2="740" y2="74"/>
+      <line x1="774" y1="48" x2="774" y2="74"/><line x1="808" y1="48" x2="808" y2="74"/>
+      <line x1="842" y1="48" x2="842" y2="74"/>
+    </g>
+    <text x="463" y="90" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.8">395 x 2.374 us of cudaLaunchKernel = 940 us, saturated</text>
+
+    <g fill="currentColor" fill-opacity="0.62">
+      <rect x="60" y="100" width="20" height="26"/><rect x="94" y="100" width="20" height="26"/>
+      <rect x="128" y="100" width="20" height="26"/><rect x="162" y="100" width="20" height="26"/>
+      <rect x="196" y="100" width="20" height="26"/><rect x="230" y="100" width="20" height="26"/>
+      <rect x="264" y="100" width="20" height="26"/><rect x="298" y="100" width="20" height="26"/>
+      <rect x="332" y="100" width="20" height="26"/><rect x="366" y="100" width="20" height="26"/>
+      <rect x="400" y="100" width="20" height="26"/><rect x="434" y="100" width="20" height="26"/>
+      <rect x="468" y="100" width="20" height="26"/><rect x="502" y="100" width="20" height="26"/>
+      <rect x="536" y="100" width="20" height="26"/><rect x="570" y="100" width="20" height="26"/>
+      <rect x="604" y="100" width="20" height="26"/><rect x="638" y="100" width="20" height="26"/>
+      <rect x="672" y="100" width="20" height="26"/><rect x="706" y="100" width="20" height="26"/>
+      <rect x="740" y="100" width="20" height="26"/><rect x="774" y="100" width="20" height="26"/>
+      <rect x="808" y="100" width="20" height="26"/><rect x="842" y="100" width="24" height="26"/>
+    </g>
+    <text x="463" y="158" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.8">560 us of real work stretched over 940 us &mdash; 380 us of idle gaps, 40 percent</text>
+
+    <rect x="60" y="210" width="14" height="26" fill="currentColor" fill-opacity="0.34"/>
+    <text x="82" y="228" font-size="11" fill="currentColor" fill-opacity="0.8">one launch</text>
+
+    <rect x="60" y="262" width="480" height="26" fill="currentColor" fill-opacity="0.62"/>
+    <text x="300" y="320" text-anchor="middle" font-size="11" fill="currentColor" fill-opacity="0.8">560 us, continuous &mdash; the bandwidth floor, reached</text>
+    <text x="556" y="280" font-size="11" fill="currentColor" fill-opacity="0.6">step ends here</text>
+  </svg>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A CUDA graph is a recording. You put a stream into capture mode, run the forward pass exactly as
+normal, and every kernel launch that would have gone to the GPU instead becomes a <em>node</em> in a
+directed acyclic graph, with its grid, block, shared-memory size and <b>argument bytes</b> &mdash; pointers
+included &mdash; copied verbatim. Nothing executes. When you close capture you hold a graph; you then
+<em>instantiate</em> it into an executable object, which is the driver pre-resolving the node list into
+something it can submit in one shot. From then on, <code>replay()</code> submits the whole DAG with a
+single API call.</p>
+
+<p>Three phases, three very different costs. Capture is a real forward pass with recording overhead.
+Instantiation is a one-time driver walk that builds the executable. Replay is the only one on the hot
+path, and it is roughly one launch's worth of host work for the entire model.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; capture, instantiate, replay, and where each engine sits.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["STARTUP: allocate persistent buffers<br/>input_ids, positions, seq_lens, block_table<br/>at max_bs = 512, addresses frozen for the process"] --> B
+    B["WARMUP: run the forward eagerly 1 to 2 times<br/>loads kernels, sizes workspaces, runs autotuners<br/>vLLM cudagraph_num_of_warmups forced to 1 at startup<br/>SGLang hardcodes 2"] --> C
+    C["CAPTURE: torch.cuda.graph on a side stream<br/>395 launches become 395 graph nodes<br/>pointer args baked in, nothing executes<br/>gc frozen, allocations routed to the graph pool"] --> D
+    D["INSTANTIATE: driver builds the executable<br/>memory comes out of one shared pool<br/>largest shape captured first so smaller reuse it"] --> E
+    E["one graph per shape bucket<br/>vLLM 51 buckets on H100, SGLang 36"] --> F
+    F["REPLAY per step: copy this step's tensors<br/>into the SAME buffers, then graph.replay<br/>one cudaGraphLaunch for the whole model"] --> F
+  </script>
+</div>
+
+<p>Everything hard about CUDA graphs follows from one sentence in that diagram: <b>pointer args baked
+in</b>. The graph does not know it is a model. It knows a list of kernels and a blob of argument bytes.
+Change where a tensor lives and the graph silently reads the old address.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What capture actually constrains</h2></div><div class="sec__body"><h3>1. Addresses are frozen, so buffers must be persistent and written in place</h3>
+
+<p>The capture path copies each kernel's argument bytes, which for a PyTorch op means the
+<code>data_ptr()</code> of every tensor. A replay reads whatever is at those addresses <em>now</em>. So the
+model runner must allocate one set of buffers at startup, at the maximum shape, and each step copy the
+current values into them rather than allocating fresh tensors.</p>
+
+<p>SGLang makes this an explicit registry with a per-field policy for what happens to the padded tail:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/cuda_graph_buffer_registry.py:L70-L91</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class PaddingPolicy(Enum):
+    """How to handle ``raw_n &lt; padded_n`` for a slot.
+
+    KEEP_PAD      — Leave the padded region as-is (caller proves the
+                    padded tail will not be read).
+    FILL_SENTINEL — Reset the padded region to ``slot.pad_value`` before
+                    copy (e.g. ``seq_lens`` filled with
+                    ``seq_len_fill_value``).
+    ZERO          — Reset the padded region to ``0`` (e.g.
+                    ``out_cache_loc`` / ``req_pool_indices`` — padded
+                    rows must point at slot 0 so dummy attention reads
+                    land harmlessly).
+    FOREACH_COPY  — Always copy ``raw_n`` from src; padded region is
+                    left as whatever the previous replay (or the init
+                    zeros) wrote. Caller is responsible for proving
+                    safety.
+    FILL_ONCE     — Fill the whole buffer to ``pad_value`` once at alloc;
+                    never reset per iter (e.g. ``encoder_lens`` init to
+                    ``encoder_len_fill_value``, copied head-only with the
+                    tail kept).
+    """</code></pre>
+</div>
+
+<p>vLLM takes the opposite structural choice: its <code>CUDAGraphWrapper</code> deliberately owns no
+buffers &mdash; <em>"CUDAGraphWrapper does not store persistent buffers or copy any runtime inputs into
+that buffers for replay. We assume implementing them is done outside of the wrapper"</em>
+(<code>vllm/compilation/cuda_graph.py:L161-L164</code>). The persistent buffers live in the model runner
+instead. What the wrapper does keep is an audit trail:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/cuda_graph.py:L346-L356</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if self.is_debugging_mode:
+            # check if the input addresses are the same
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            assert new_input_addresses == entry.input_addresses, (
+                f"Input addresses for cudagraphs are different "
+                f"during replay. Expected {entry.input_addresses}, "
+                f"got {new_input_addresses}"
+            )</code></pre>
+</div>
+
+<p>That assertion only fires under <code>VLLM_LOGGING_LEVEL=DEBUG</code>. Without it, an address mismatch
+is not an error &mdash; it is silently wrong output. Memorise the flag.</p>
+
+<p>The same constraint reaches into the attention backends, which is why
+<a href="../03-attention-kernels/03-04-flashinfer-and-backends.html#cuda-graphs">&sect;3.4</a> owns
+<code>AttentionCGSupport</code> &mdash; the four-level enum (<code>ALWAYS</code> /
+<code>UNIFORM_BATCH</code> / <code>UNIFORM_SINGLE_TOKEN_DECODE</code> / <code>NEVER</code>) by which each
+metadata builder declares how much capture it tolerates. This chapter uses it only as an input to mode
+resolution.</p>
+
+<h3>2. Shapes are frozen, so you need one graph per shape</h3>
+
+<p>A kernel node's grid dimensions are part of the recording. Change the batch size and the grid is wrong.
+So both engines capture a discrete ladder of batch sizes and round every real batch <em>up</em> to the next
+rung. vLLM generates the ladder from one rule:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/vllm.py:L2041-L2053</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    cudagraph_capture_sizes = [
+                        i for i in [1, 2, 4] if i &lt;= max_cudagraph_capture_size
+                    ]
+                if max_cudagraph_capture_size &gt;= 8:
+                    # Step size 8 for small batch sizes, up to 256(not included)
+                    cudagraph_capture_sizes += list(
+                        range(8, min(max_cudagraph_capture_size + 1, 256), 8)
+                    )
+                if max_cudagraph_capture_size &gt;= 256:
+                    # Step size 16 for larger batch sizes
+                    cudagraph_capture_sizes += list(
+                        range(256, max_cudagraph_capture_size + 1, 16)
+                    )</code></pre>
+</div>
+
+<p>with <code>max_cudagraph_capture_size = min(max_num_seqs &times; decode_query_len &times; 2, 512)</code>
+(1024 on data-center Blackwell), per <code>vllm/config/compilation.py:L692-L706</code>. On an H100 with a
+default <code>max_num_seqs</code> that gives <b>51 buckets</b>:
+<code>[1, 2, 4, 8, 16, &hellip;, 248, 256, 272, &hellip;, 512]</code>.</p>
+
+<p>SGLang's ladder is a different shape, from <code>python/sglang/srt/server_args.py:L5179-L5185</code>:
+<code>[1, 2, 4, 8, 12] + range(16, 257, 8) + range(272, 512, 16) + range(512, max_bs + 1, 32)</code>, with
+<code>max_bs</code> defaulting to 256 at TP&lt;4 on an 80&nbsp;GB card and 512 at TP&ge;4
+(<code>server_args.py:L4894-L4903</code>). That is <b>36 buckets</b> at TP=1.</p>
+
+<p>The extra <code>12</code> rung matters more than it looks. A batch of 9 pads to 12 in SGLang
+(25% of rows fake) and to 16 in vLLM (43.8% fake) &mdash; the worst relative waste anywhere on the vLLM
+ladder.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the bottom of both bucket ladders, with the padding waste at every batch size.</b>
+  Derived from the two generators cited above. Shaded blocks are padded rows: real work the GPU does and throws away.
+  Note that the two ladders diverge only between 9 and 12, and that the waste is worst where the ladder is coarsest relative to the batch.</p>
+  <svg viewBox="0 0 900 300" width="100%" role="img" aria-labelledby="ladTitle ladDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="ladTitle">CUDA graph batch-size bucket ladders for vLLM and SGLang</title>
+    <desc id="ladDesc">A number line from batch 1 to 32. vLLM rungs sit at 1, 2, 4, 8, 16, 24 and 32.
+    SGLang adds a rung at 12. Above the line, bars show for each real batch size how many rows get padded:
+    batch 9 wastes seven rows out of sixteen in vLLM but only three out of twelve in SGLang; batch 17 wastes
+    seven out of twenty-four in both.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.30" stroke-width="1">
+      <line x1="70" y1="200" x2="866" y2="200"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.55" font-size="10.5">
+      <text x="70" y="222" text-anchor="middle">1</text>
+      <text x="95" y="222" text-anchor="middle">2</text>
+      <text x="146" y="222" text-anchor="middle">4</text>
+      <text x="248" y="222" text-anchor="middle">8</text>
+      <text x="350" y="222" text-anchor="middle">12</text>
+      <text x="452" y="222" text-anchor="middle">16</text>
+      <text x="656" y="222" text-anchor="middle">24</text>
+      <text x="860" y="222" text-anchor="middle">32</text>
+      <text x="468" y="244" text-anchor="middle">batch size, 25.5 px per request</text>
+    </g>
+
+    <g stroke="currentColor" stroke-opacity="0.85" stroke-width="2">
+      <line x1="70" y1="192" x2="70" y2="208"/><line x1="95" y1="192" x2="95" y2="208"/>
+      <line x1="146" y1="192" x2="146" y2="208"/><line x1="248" y1="192" x2="248" y2="208"/>
+      <line x1="452" y1="192" x2="452" y2="208"/><line x1="656" y1="192" x2="656" y2="208"/>
+      <line x1="860" y1="192" x2="860" y2="208"/>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.85" stroke-width="2" stroke-dasharray="3 3">
+      <line x1="350" y1="192" x2="350" y2="208"/>
+    </g>
+
+    <text x="14" y="196" font-size="11" fill="currentColor" fill-opacity="0.7">rungs</text>
+    <text x="356" y="186" font-size="10.5" fill="currentColor" fill-opacity="0.7">SGLang only</text>
+
+    <g fill="currentColor" fill-opacity="0.85" font-size="11.5">
+      <text x="14" y="52">vLLM</text>
+      <text x="14" y="130">SGLang</text>
+    </g>
+
+    <rect x="70" y="60" width="382" height="22" fill="currentColor" fill-opacity="0.20"/>
+    <rect x="299" y="34" width="153" height="22" fill="currentColor" fill-opacity="0.45"/>
+    <text x="458" y="50" font-size="11" fill="currentColor" fill-opacity="0.85">batch 9 pads to 16: 7 of 16 rows wasted, 43.8 percent</text>
+    <rect x="70" y="60" width="229" height="22" fill="currentColor" fill-opacity="0.10"/>
+    <text x="458" y="76" font-size="11" fill="currentColor" fill-opacity="0.7">real rows: 9</text>
+
+    <rect x="70" y="138" width="280" height="22" fill="currentColor" fill-opacity="0.20"/>
+    <rect x="299" y="112" width="51" height="22" fill="currentColor" fill-opacity="0.45"/>
+    <text x="358" y="128" font-size="11" fill="currentColor" fill-opacity="0.85">batch 9 pads to 12: 3 of 12 rows wasted, 25.0 percent</text>
+    <text x="358" y="154" font-size="11" fill="currentColor" fill-opacity="0.7">real rows: 9</text>
+
+    <text x="70" y="272" font-size="11.5" fill="currentColor" fill-opacity="0.8">Below the ridge (I* = 295 on H100) the padded rows ride along in the same weight read and cost almost nothing.</text>
+    <text x="70" y="290" font-size="11.5" fill="currentColor" fill-opacity="0.8">Above it they cost real FLOPs: padding 300 to 304 adds 64 GFLOP, about 65 us at peak bf16.</text>
+  </svg>
+</div>
+
+<p>Now price that waste, because the answer is counter-intuitive. A decode GEMM at batch $B$ reads
+$2N$ bytes of bf16 weights and does $2BN$ FLOPs, so its arithmetic intensity is $\approx B$&nbsp;FLOP/byte.
+H100's ridge is $I^{*} = 295$ (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>),
+so <b>every decode GEMM below batch 295 is bandwidth-bound and its time does not depend on $B$ at all</b>.
+Padding 9 rows up to 16 re-reads the same 15.0&nbsp;GB of weights and costs essentially nothing. The padded
+rows do not touch attention either, because vLLM zeroes their sequence lengths
+(<code>vllm/v1/worker/gpu_model_runner.py:L2252-L2255</code>) and points their block table at a reserved
+null block:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2410-L2412</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # Fill unused block table entries with NULL_BLOCK_ID (null block)
+            # for CUDAGraph padding. Block 0 is reserved for padding.
+            blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)</code></pre>
+</div>
+
+<p>Padding only becomes expensive above the ridge, where the extra rows are real FLOPs: at batch 300
+padded to 304, the four fake rows add $2 \times 4 \times 8.03\times10^{9} = 64$&nbsp;GFLOP, about
+65&nbsp;&micro;s at 989.4&nbsp;TFLOP/s. A box that lives at batch 300+ should think about the step size;
+one that lives at batch 8 should not.</p>
+
+<h3>3. No host-side control flow, which is why prefill mostly is not captured</h3>
+
+<p>A graph has no <code>if</code>. Whatever branch the Python took during capture is baked in forever.
+Decode survives this because every request contributes exactly one token: the shape is $(B, 1)$, the
+control flow is identical every step, and only <em>values</em> in persistent buffers change. Prefill does
+not &mdash; sequence lengths differ per request and per step, and the token count ranges over the whole
+chunked-prefill budget, so capturing it means one graph per token-count bucket with buckets thousands
+wide. Which is exactly how SGLang describes its opt-in prefill capture; note the last sentence:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/cuda_graph_config.py:L55-L64</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # full for prefill captures one whole-forward graph per num_tokens
+    # bucket with a fixed request-slot count; replay pads num_tokens up to
+    # the nearest captured bucket. Opt-in: the padding waste is the
+    # operator's call.
+    Phase.PREFILL: (
+        Backend.FULL,
+        Backend.BREAKABLE,
+        Backend.TC_PIECEWISE,
+        Backend.DISABLED,
+    ),</code></pre>
+</div></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How the two engines dispatch</h2></div><div class="sec__body"><p>Both engines have converged on the same shape &mdash; a per-phase mode, resolved at startup against what
+the attention backend tolerates &mdash; and disagree on almost every name.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">vLLM</span>
+    <h4>One enum, five modes</h4>
+    <p><code>CUDAGraphMode</code> at <code>vllm/config/compilation.py:L53-L64</code> is
+    <code>NONE</code> / <code>PIECEWISE</code> / <code>FULL</code>, plus two tuple-valued composites
+    <code>FULL_DECODE_ONLY = (FULL, NONE)</code> and <code>FULL_AND_PIECEWISE = (FULL, PIECEWISE)</code>
+    whose first element is the decode mode and second the mixed-batch mode. Default is
+    <code>FULL_AND_PIECEWISE</code>, set by optimization level O2
+    (<code>vllm/config/vllm.py:L317</code>, default <code>optimization_level</code> at
+    <code>L435</code>): full graphs for pure decode, piecewise for anything with prefill in it.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">SGLang</span>
+    <h4>Two phases, four backends</h4>
+    <p><code>cuda_graph_config.py:L38-L45</code> defines <code>full</code> / <code>breakable</code> /
+    <code>tc_piecewise</code> / <code>disabled</code>, chosen independently for <code>decode</code> and
+    <code>prefill</code> (<code>L122-L131</code>). Defaults: decode <code>full</code>, prefill
+    <code>breakable</code> on CUDA. Configured with one JSON blob,
+    <code>--cuda-graph-config '{"decode":{"backend":"full","max_bs":256}}'</code>, or the per-phase
+    convenience flags <code>--cuda-graph-backend-decode</code>, <code>--cuda-graph-max-bs-decode</code>.</p>
+  </div>
+</div>
+
+<p>vLLM's runtime dispatch is a lookup, not a computation. <code>CudagraphDispatcher</code> precomputes an
+array from every batch size to its padded rung &mdash;</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/cudagraph_dispatcher.py:L82-L91</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
+        for end, start in zip(
+            capture_sizes + [max_size + 1],
+            [0] + capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self._bs_to_padded_graph_size[bs] = start
+                else:
+                    self._bs_to_padded_graph_size[bs] = end</code></pre>
+</div>
+
+<p>&mdash; and every step it builds a <code>BatchDescriptor</code> (padded token count, request count,
+uniform flag, LoRA state) and looks it up in one of two key sets. Miss both and you run eager:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/cudagraph_dispatcher.py:L307-L324</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if CUDAGraphMode.FULL in allowed_modes:
+            # check if key exists for full cudagraph
+            batch_desc_to_check = batch_desc
+            if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, batch_desc_to_check
+
+        if CUDAGraphMode.PIECEWISE in allowed_modes:
+            # also check if the relaxed key exists for more "general"
+            # piecewise cudagraph
+            batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
+            if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+                return CUDAGraphMode.PIECEWISE, batch_desc_to_check
+
+        assert CUDAGraphMode.NONE in allowed_modes, (
+            f"No matching cudagraph found and NONE is not in "
+            f"allowed_modes={allowed_modes}"
+        )
+        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)</code></pre>
+</div>
+
+<p>The <code>replace(batch_desc, num_reqs=None, uniform=False)</code> line is the interesting one: a
+piecewise graph is keyed only on token count, so a uniform decode batch can fall back to a more general
+graph. A full graph cannot &mdash; the dispatcher's own comment says <em>"FULL mode needs exact num_reqs
+because FA3's scheduler_metadata computation depends on it"</em>
+(<code>vllm/v1/cudagraph_dispatcher.py:L199-L202</code>). Piecewise buys generality; full buys the last
+of the launch overhead. <a href="08-02-torch-compile.html">&sect;8.2</a> owns why the pieces exist at all.</p>
+
+<h3>Startup: capture is why your server takes a minute to come up</h3>
+
+<p>Capture runs once per bucket, and both engines walk the ladder backwards for the same reason:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L6959-L6961</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Trigger CUDA graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py:L1065-L1068</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Reverse so cuda graphs share memory better.
+        capture_range = (
+            tqdm.tqdm(list(reversed(self.capture_bs)))
+            if get_parallel().tp_rank == 0</code></pre>
+</div>
+
+<p>Each bucket is warmed first &mdash; SGLang hardcodes two passes
+(<code>runner_backend/full_cuda_graph_backend.py:L105-L107</code>), vLLM does one. Do not read that
+number off the dataclass: <code>cudagraph_num_of_warmups</code> declares a default of 0
+(<code>vllm/config/compilation.py:L643</code>), but startup overwrites it with
+<code>cudagraph_num_of_warmups = 1</code> on every path that is not <code>enforce_eager</code>
+(<code>vllm/config/vllm.py:L1601-L1608</code>), so the live value on a serving process is 1. On top of
+that vLLM runs a separate <code>kernel_warmup()</code> before capture
+(<code>gpu_worker.py:L726-L728</code>) &mdash; and garbage collection is frozen throughout
+(<code>vllm/compilation/cuda_graph.py:L286-L292</code>: <em>"running gc again and again across layers will
+make the cudagraph capture very slow"</em>). vLLM's own estimate of the total is in a source comment:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L7041-L7048</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        # This usually takes 5~20 seconds.
+        logger.info_once(
+            "Graph capturing finished in %.0f secs, took %.2f GiB",
+            elapsed_time,
+            cuda_graph_size / (1 &lt;&lt; 30),
+        )</code></pre>
+</div>
+
+<h3>Memory: the graph pool comes out of the KV cache</h3>
+
+<p>The pool is real, and vLLM subtracts it from the KV budget before the block manager ever sees it &mdash;
+which is the direct link back to <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_worker.py:L559-L563</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.available_kv_cache_memory_bytes = (
+            self.requested_memory
+            - profile_result.non_kv_cache_memory
+            - cudagraph_memory_estimate_applied
+        )</code></pre>
+</div>
+
+<p>The estimate is not a guess &mdash; vLLM captures the two largest buckets on a throwaway KV cache, uses
+the first as the shared-pool cost and the second as the marginal per-graph cost, and extrapolates:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L6878-L6885</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    first_capture = mem_samples[0]
+                    # Use at least 1 MiB per graph for driver overhead
+                    per_graph = max(
+                        mem_samples[1] if len(mem_samples) &gt; 1 else 0, 1 &lt;&lt; 20
+                    )
+
+                    shared_memory_estimate[mode] = first_capture
+                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)</code></pre>
+</div>
+
+<p>Read the model that implies, for one runtime mode: <b>pool = (cost of the largest graph) + (N&minus;1)
+&times; (marginal cost per graph, floored at 1 MiB)</b>. With 51 decode buckets that floor alone is
+50&nbsp;MiB of pure bookkeeping, and the shared part is the largest shape's activation working set.
+Under the default <code>FULL_AND_PIECEWISE</code> there are two modes, and they are combined
+asymmetrically &mdash; <code>max(shared_memory_estimate.values()) + sum(per_graph_estimate.values())</code>
+(<code>gpu_model_runner.py:L6926-L6931</code>) &mdash; because the two mode's graphs overlay in one pool at
+runtime and are never replayed concurrently, so the shared part must not be double-counted while the
+per-graph parts must. SGLang accounts the same budget but splits it six ways, one per capture family:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/graph_memory_usage.py:L5-L12</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>GRAPH_MEMORY_USAGE_KEYS = (
+    "prefill",
+    "decode",
+    "target_verify",
+    "draft_prefill",
+    "draft_decode",
+    "draft_extend",
+)</code></pre>
+</div>
+
+<p>Four of those six are speculative decoding. EAGLE does not share the target model's graphs: it has its
+own runners (<code>python/sglang/srt/speculative/eagle_draft_cuda_graph_runner.py</code>,
+<code>eagle_draft_extend_cuda_graph_runner.py</code>) because the draft forward has a different shape and a
+different number of steps &mdash; see <a href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html">&sect;6.4</a>.
+Turning on speculation multiplies your capture time and your graph pool.</p></div></section>
+<section class="sec" id="beyond-launch-overhead" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Capture changes device-side cost too</h2></div><div class="sec__body"><p>The standard one-line explanation &mdash; <em>CUDA graphs remove CPU launch overhead</em> &mdash; is
+incomplete, and SGLang's all-reduce config proves it. <a href="../05-parallelism/05-04-collectives-and-topology.html">&sect;5.4</a>
+noted the anomaly: the tuned dispatch table carries <b>two different sets of size thresholds, one for graph
+mode and one for eager mode</b>. If capture only removed host work, the crossover between two collective
+algorithms &mdash; both of which pay the same host cost &mdash; would not move.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/distributed/device_communicators/configs/custom_all_reduce_v2.py:L191-L205</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        3: config(
+            3,
+            graph=(1.250 * MB, 1.250 * MB, 128.0 * MB),
+            eager=(3.000 * MB, 3.000 * MB, 16.00 * MB),
+        ),
+        4: config(
+            4,
+            graph=(384.0 * KB, 384.0 * KB, 128.0 * MB),
+            eager=(896.0 * KB, 896.0 * KB, 32.00 * MB, Range(0, 32 * MB)),
+        ),
+        5: config(
+            5,
+            graph=(192.0 * KB, 192.0 * KB, 32.00 * MB),
+            eager=(384.0 * KB, 384.0 * KB, 32.00 * MB, Range(0, 32 * MB)),
+        ),</code></pre>
+</div>
+
+<p>That is the Hopper table (<code>_sm90_configs</code>), world sizes 3, 4 and 5. Three things are
+systematic across the whole file. First, <b>the one-shot-push threshold is lower under capture in every
+single row where the two differ</b> &mdash; SM90 at TP=3, 4, 5: 1.25 vs 3.0&nbsp;MB, 384 vs 896&nbsp;KB,
+192 vs 384&nbsp;KB; and SM100 at TP=2 through 8, all seven rows: 8 vs 16&nbsp;MB, 4 vs 8, 2.25 vs 3.0,
+1.5 vs 2.0, 1.0 vs 1.25, 0.625 vs 1.0, 0.5 vs 0.75&nbsp;MB
+(<code>configs/custom_all_reduce_v2.py:L129-L172</code>). Ten rows, one direction &mdash; that is not
+noise. Second, the two-shot ceiling before NCCL takes over is <em>higher</em> under capture: 128&nbsp;MB
+versus 16&nbsp;MB at SM90 TP=3 and versus 32&nbsp;MB at TP=4. Third, multicast is restricted or disabled
+under capture at exactly the sizes where it is enabled in eager mode &mdash; SM90 TP=4 has no graph
+<code>mc</code> range at all against an eager <code>Range(0, 32 * MB)</code>, and SM100 TP=8 has
+<code>Range(8 * MB, 128 * MB)</code> against <code>Range(0, 128 * MB)</code>.</p>
+
+<p>The mechanism is in the JIT'd kernel, and it is a data-path change, not a launch-count change:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/jit/csrc/distributed/custom_all_reduce.cuh:L611-L641</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    const auto local_workspace = data.pull_workspaces[data.rank];
+    if (algo == "1shot_pull") {
+      // first copy to workspace
+      if (!use_graph) cuda_memcpy(local_workspace, in_.data_ptr());
+      const auto kernel = (pull_mode == Graph) ? kernel_pull&lt;1, Graph&gt;
+                          : pull_mode == Eager ? kernel_pull&lt;1, Eager&gt;
+                                               : kernel_pull&lt;1, Multicast&gt;;
+      // then launch kernel to reduce and write to output
+      LaunchKernel(num_blocks, choose_block_size(num_vecs), stream)  //
+          .enable_pdl(kUsePDL)(kernel, params);
+    } else /* 2shot_pull */ {
+# ...
+      // first copy to workspace
+      if (!use_graph) cuda_memcpy(local_workspace, in_.data_ptr());
+# ...
+      // finally copy from workspace to output
+      if (!use_graph) cuda_memcpy(out.data_ptr(), local_workspace);
+    }</code></pre>
+</div>
+
+<p>A pull-based all-reduce needs every rank's contribution to sit at an address its peers can read. In
+eager mode the input tensor is wherever the allocator put it this step, so the rank must first
+<code>cuda_memcpy</code> it into symmetric memory &mdash; and two-shot must copy the reduced result back
+out. Under capture the input's address is <em>fixed by definition</em>, so it can be exported through
+<code>cudaIpc</code> handles after capture and written into a device-side pointer table that the captured
+kernel dereferences at replay: <em>"CUDA-graph inputs are exchanged from Python after capture &hellip; and
+written into a device-side pointer table (graph_params); the kernel captured in the graph dereferences its
+row at replay time"</em> (<code>custom_all_reduce_v2.py:L13-L16</code>). The communicator calls it what it
+is &mdash; <em>"graph zero-copy input registration"</em> (<code>L171-L173</code>).</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">What each algorithm actually costs per rank, for a message of $S$ bytes.
+  <b>Derived</b> by counting the <code>cuda_memcpy</code> calls in the kernel dispatch above.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Algorithm</th><th>Eager: extra local HBM traffic</th><th>Eager: extra kernels</th><th>Graph</th></tr></thead>
+      <tbody>
+        <tr><td><code>1shot_push</code></td><td class="num">0</td><td class="num">0</td><td>no graph mode at all</td></tr>
+        <tr><td><code>1shot_pull</code></td><td class="num">2S (in-copy)</td><td class="num">1</td><td class="num">0</td></tr>
+        <tr><td><code>2shot_pull</code></td><td class="num">4S (in + out)</td><td class="num">2</td><td class="num">0</td></tr>
+        <tr><td><code>2shot_pull</code> multicast</td><td class="num">4S</td><td class="num">2</td><td>still 4S &mdash; multicast reads the workspace VA</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Every threshold shift in the table falls out of that one column. Push gets nothing from capture: it
+never touches the workspace, so there is no copy to elide, and the kernel refuses a graph row outright
+&mdash; <code>RuntimeCheck(!use_graph, "Push mode doesn't have graph mode optimization")</code> at
+<code>custom_all_reduce.cuh:L577-L578</code>. (Push is still <em>chosen</em> under capture when the
+message is small enough; <code>_pick_algo</code> returns it with <code>_PullMode.EAGER</code>, which is
+what keeps that <code>RuntimeCheck</code> from firing.) So capture makes the pull family cheaper by
+$\Theta(S)$ while leaving push unchanged, and the push/pull crossover moves <em>down</em>. Removing an
+$\Theta(S)$ term from two-shot is also why it keeps beating NCCL four times further out under capture.
+And multicast still routes through the workspace (its address is
+<code>multicast_ptr + pull_ws_offset</code>, <code>custom_all_reduce_v2.py:L253-L254</code>), so it cannot use
+the zero-copy path &mdash; which is why zero-copy two-shot wins the small sizes under capture and multicast
+is pushed up to 8&nbsp;MB.</p>
+
+<p>The last twist: the choice is made <em>during capture</em> and then frozen into the graph.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/distributed/device_communicators/custom_all_reduce_v2.py:L299-L316</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _can_use_graph(self) -&gt; bool:
+        # `_graph_mode_allowed` is only set inside `capture()`, so the eager
+        # hot path never reaches the cudart capture query. During capture,
+        # warm-up runs execute immediately and must not consume a
+        # graph_params row (it would be dereferenced before registration).
+        return (
+            self._graph_mode_allowed
+            and not is_in_tc_piecewise_cuda_graph()
+            and torch.cuda.is_current_stream_capturing()
+        )
+
+    def _pick_algo(
+        self, nbytes: int, can_use_graph: bool
+    ) -&gt; Tuple[Optional[AllReduceAlgo], _PullMode]:
+        heuristic = self.config.graph if can_use_graph else self.config.eager
+        default_mode = _PullMode.GRAPH if can_use_graph else _PullMode.EAGER</code></pre>
+</div>
+
+<p>Two identical servers, the same TP degree, the same 512&nbsp;KB message, running <em>different
+collectives</em> &mdash; at SM90 TP=4 the eager side is still under its 896&nbsp;KB one-shot-push
+threshold while the captured side is over its 384&nbsp;KB one and falls through to zero-copy two-shot
+pull, because one was capturing and one was not. Note also that the piecewise path is
+excluded (<code>is_in_tc_piecewise_cuda_graph()</code>) and multi-node groups are forced back to eager
+pull, because IPC registration is node-local (<code>L170-L176</code>).</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">The real statement</span>
+  <p>Capture is not a launch optimisation. It is an <b>address-stability contract</b>, and address
+  stability is a resource device-side code can spend. Here it buys cross-rank zero-copy, removing
+  $\Theta(S)$ bytes of HBM traffic and two kernels from every two-shot all-reduce. A secondary effect is
+  plausible and worth measuring: because one <code>cudaGraphLaunch</code> issues a rank's whole step, the
+  arrival skew between ranks at a device-side semaphore barrier should be smaller than when each rank's
+  host thread issues 400 launches independently &mdash; and two-shot pays that skew twice while one-shot
+  pays it once. I have not found a measurement of that skew in either repo; the copy-elimination
+  explanation is the one the source supports.</p>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the same 2 MB two-shot all-reduce at SM90 TP=4, eager versus captured.</b>
+  Both lanes run <code>2shot_pull</code>; the device-side difference is the two copy stages the eager
+  lane cannot skip, not the host launch. Sizes traced through <code>_pick_algo</code> against the
+  <code>_sm90_configs</code> row for world size 4.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    S["down_proj output, 2 MB bf16<br/>at whatever address the allocator gave it"] --> E0
+    S --> G0
+    E0["EAGER PATH<br/>_pick_algo reads config.eager = 896 KB, 896 KB, 32 MB, mc 0 to 32 MB<br/>2 MB is over both 896 KB thresholds<br/>lands on TWO_SHOT_PULL, pull mode Multicast"] --> E1
+    E1["cuda_memcpy 2 MB into pull_workspace<br/>extra kernel, 4 MB of local HBM traffic"] --> E2
+    E2["kernel_pull 2 Multicast<br/>reduces inside the workspace"] --> E3
+    E3["cuda_memcpy 2 MB workspace to output<br/>extra kernel, 4 MB more"] --> OUT
+    G0["GRAPH PATH<br/>_pick_algo reads config.graph = 384 KB, 384 KB, 128 MB, no mc range<br/>2 MB is over both 384 KB thresholds and mc is empty<br/>lands on TWO_SHOT_PULL, pull mode Graph"] --> G1
+    G1["_allocate_graph_row records data_ptr<br/>after capture: cudaIpc handles exchanged<br/>peer pointers written to graph_params"] --> G2
+    G2["kernel_pull 2 Graph<br/>dereferences graph_params row<br/>reads peers input tensors directly, no memcpy"] --> OUT
+    OUT["reduced tensor<br/>graph path moved 8 MB less per rank"]
+  </script>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: batch 13, TP=1, vLLM</h2></div><div class="sec__body"><p>Thirteen decode requests arrive at <code>execute_model</code>. Follow the shape.</p>
+
+<ol>
+  <li><code>_prepare_inputs</code> writes 13 rows into the persistent buffers and zeroes the rest:
+  <code>self.seq_lens[13:].fill_(0)</code> (<code>gpu_model_runner.py:L2252-L2255</code>). The buffers
+  themselves were allocated at startup for 512 and have never moved.</li>
+  <li><code>dispatch_cudagraph(13)</code> (<code>gpu_model_runner.py:L4099-L4110</code>) calls
+  <code>CudagraphDispatcher.dispatch</code>.</li>
+  <li><code>_create_padded_batch_descriptor</code> reads
+  <code>_bs_to_padded_graph_size[13] = 16</code> &mdash; the next rung on
+  <code>[1, 2, 4, 8, 16, 24, &hellip;]</code> &mdash; and builds
+  <code>BatchDescriptor(num_tokens=16, num_reqs=16, uniform=True, has_lora=False)</code>
+  (<code>cudagraph_dispatcher.py:L132-L156</code>). Three fake rows.</li>
+  <li>The descriptor is in <code>cudagraph_keys[FULL]</code>, so dispatch returns
+  <code>(FULL, desc)</code>.</li>
+  <li><code>_build_attention_metadata</code> runs with <code>num_reqs=13, num_reqs_padded=16</code>. The
+  three padded rows get <code>seq_len = 0</code> and <code>block_table = NULL_BLOCK_ID</code>
+  (<code>L2410-L2412</code>). Attention will read nothing for them.</li>
+  <li><code>set_forward_context(..., cudagraph_runtime_mode=FULL, batch_descriptor=desc)</code>
+  (<code>L4545-L4556</code>) publishes the decision.</li>
+  <li>Inside the model, <code>CUDAGraphWrapper.__call__</code> reads the forward context, sees its own
+  mode matches, finds the entry for this descriptor, and calls <code>entry.cudagraph.replay()</code>
+  (<code>cuda_graph.py:L360-L361</code>). <b>One</b> host-side submission for 330 kernels.</li>
+  <li>The GPU reads 15.0&nbsp;GB of weights once for all 16 rows &mdash; the same 4.48&nbsp;ms it would
+  have taken for 13. The three padded rows cost nothing measurable because batch 16 is far below the
+  $I^{*} = 295$ ridge.</li>
+</ol>
+
+<p>Now flip one thing: give one request a two-token query while
+<code>uniform_decode_query_len</code> is 1. The batch is no longer uniform, the FULL key misses,
+<code>replace(batch_desc, num_reqs=None, uniform=False)</code> finds the PIECEWISE key instead, and the
+step runs as a chain of per-piece graphs with attention outside them. Same tokens, different runtime
+mode, because of one query length.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h4>An allocation during capture, or during replay</h4>
+<p>PyTorch reroutes allocations into the graph pool during capture, but any code that grows a workspace
+on its first big shape will grow it again at some replay and hand a captured kernel a stale pointer.
+vLLM sizes every workspace during warmup and then forbids growth:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/workspace.py:L187-L193</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            if self._locked:
+                raise AssertionError(
+                    f"Workspace is locked but allocation from '{get_caller_info()}' "
+                    f"requires {required_bytes / _MB:.2f} MB, current size is "
+                    f"{current_size / _MB:.2f} MB. "
+                    "Workspace growth is not allowed after locking."
+                )</code></pre>
+</div>
+
+<p><code>lock_workspace()</code> is called at the end of <code>capture_model</code>
+(<code>gpu_model_runner.py:L7035-L7037</code>). If it fires, a kernel wanted a bigger scratch buffer at a
+shape warmup never exercised; the fix is to make warmup cover that shape.</p>
+
+<h4>Capture happening where it should not</h4>
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/monitor.py:L94-L99</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    global cudagraph_capturing_enabled
+    if not cudagraph_capturing_enabled:
+        raise RuntimeError(
+            "CUDA graph capturing detected at an inappropriate "
+            "time. This operation is currently disabled."
+        )</code></pre>
+</div>
+<p>vLLM flips this off after <code>capture_model</code> returns, so a lazy capture in the steady state
+is loud rather than silent &mdash; a graph captured mid-serving would record whatever happened to be in
+the persistent buffers at that moment.</p>
+
+<h4>A backend that cannot be captured downgrades your mode without failing</h4>
+<p>At startup vLLM takes the minimum <code>AttentionCGSupport</code> over every attention group
+(<code>gpu_model_runner.py:L7303-L7317</code>) and feeds it to
+<code>resolve_cudagraph_mode_and_sizes</code>, which quietly rewrites your mode:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/compilation.py:L1404-L1412</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # attempt to resolve the full cudagraph related mode
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            logger.warning(msg)</code></pre>
+</div>
+
+<p>You asked for <code>FULL</code>, you got <code>FULL_DECODE_ONLY</code>, and the only trace is a
+<code>logger.warning</code> that begins <code>"CUDAGraphMode.FULL is not supported with &lt;backend&gt;
+backend (support: &hellip;)"</code>. Grep your startup log for that string before believing a benchmark.
+The same function raises outright &mdash; not warns &mdash; if the resolved mode still wants full graphs
+and the backend is <code>NEVER</code> (<code>vllm/config/compilation.py:L1463-L1472</code>).</p>
+
+<h4>Two switches for the same thing, and only one of them works</h4>
+<p>SGLang carries a legacy boolean alongside the new per-phase config, and its own source documents the
+trap:</p>
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L3878-L3882</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            self.disable_cuda_graph = True
+            # cuda_graph_config was already parsed from the legacy boolean, so
+            # flipping the boolean alone would not stop graph capture.
+            self.cuda_graph_config.decode.backend = Backend.DISABLED
+            self.cuda_graph_config.prefill.backend = Backend.DISABLED</code></pre>
+</div>
+<p>Setting <code>disable_cuda_graph</code> after the config resolution pipeline has run does nothing.
+Use <code>--cuda-graph-backend-decode=disabled</code>.</p>
+
+<h4>You cannot step through a replay</h4>
+<p>Once a graph is captured there is no Python frame to break on, no NVTX range you can add without
+recapturing, and a wrong result gives you no stack. Both engines ship an escape hatch. vLLM's is
+<code>--enforce-eager</code> (<code>gpu_worker.py:L730-L732</code> skips <code>capture_model</code>
+entirely). SGLang's is better: it keeps the capture/replay <em>path</em> but breaks the graph at every op,
+so bugs that only appear under graph dispatch still reproduce:</p>
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L1955-L1959</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    debug_cuda_graph: A[
+        bool,
+        "Enable debug/eager mode for CUDA graph using breakable CUDA graph. When enabled, graph breaks are inserted so every operation runs eagerly while still going through the CUDA graph capture / replay path. Useful for debugging CUDA graph capture / replay issues.",
+        NS("exec.graph"),
+    ] = False</code></pre>
+</div>
+<p>If a bug disappears under <code>--enforce-eager</code> but survives
+<code>--debug-cuda-graph</code>, it is a dispatch or buffer-lifetime bug, not a kernel bug. That bisection
+is worth the flag on its own.</p>
+
+<h4>Capture OOM at startup</h4>
+<p>The pool is allocated after the KV cache is sized, so an under-estimate surfaces as a capture
+failure, not a serving failure. SGLang's message is the checklist:</p>
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/runner_backend_utils/__init__.py:L14-L21</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>CUDA_GRAPH_CAPTURE_FAILED_MSG = (
+    "Possible solutions:\n"
+    "1. set --mem-fraction-static to a smaller value (e.g., 0.8 or 0.7)\n"
+    "2. set --cuda-graph-max-bs-decode to a smaller value (e.g., 16)\n"
+    "3. disable decode CUDA graph by --cuda-graph-backend-decode=disabled. "
+    "(Not recommended. Huge performance loss)\n"
+    "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
+)</code></pre>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. Price the graphs on your own box.</b> Run the same model twice and diff time-per-output-token:</p>
+<div class="code-file">
+  <div class="code-file__hd"><span class="src">shell</span><span class="tag tag--shell">shell</span></div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --port 8000
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --port 8001 --enforce-eager
+
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30000
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30001 \
+  --cuda-graph-backend-decode=disabled</code></pre>
+</div>
+<p>Benchmark at batch 1 and again at your TP degree. The derivation above predicts the gap widens
+sharply with TP.</p>
+
+<p><b>2. Read the padding you are actually paying.</b> Turn on <code>cudagraph_metrics</code> in vLLM's
+observability config: <code>gpu_model_runner.py:L4149-L4156</code> records a <code>CUDAGraphStat</code>
+per step and <code>vllm/compilation/cuda_graph.py:L33-L120</code> aggregates it into a table of unpadded
+tokens, padded tokens, paddings, mode and count. If most steps pad 9&rarr;16, add rungs with
+<code>-O.cudagraph_capture_sizes</code> (vLLM) or <code>--cuda-graph-bs-decode</code> (SGLang &mdash;
+<code>--cuda-graph-bs</code> still parses but is a deprecated alias, <code>server_args.py:L8869-L8876</code>);
+if most pad 300&rarr;304, do not bother.</p>
+
+<p><b>3. Watch the startup cost.</b> Grep for <code>Graph capturing finished in</code> (vLLM) or the
+<code>Capturing batches (bs=... avail_mem=... GB)</code> progress bar (SGLang,
+<code>decode_cuda_graph_runner.py:L1094-L1096</code>), then halve
+<code>--cuda-graph-max-bs-decode</code> and watch both shrink.</p>
+
+<p><b>4. Account for every microsecond.</b> <a href="../LABS.html">Lab 10 &mdash;
+<code>10-profile-a-decode-step</code></a> is where you replace every derived number on this page with a measured one:
+capture one iteration under <code>torch.profiler</code>, sum the kernel durations, sum the gaps, and
+compare against the 4.48&nbsp;ms floor. Do it with graphs on and off. That is also the place to measure
+the per-launch overhead this chapter had to cite from a paper.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read and answer.</b> Open <code>vllm/v1/cudagraph_dispatcher.py</code>. With
+  <code>cudagraph_capture_sizes = [1, 2, 4, 8, 16]</code> and <code>max_cudagraph_capture_size = 16</code>,
+  what does <code>_bs_to_padded_graph_size</code> contain for indices 0 through 16? What happens to a
+  batch of 17?</li>
+
+  <li><b>Arithmetic.</b> Llama-3-70B (L=80, d=8192, h=64, h_kv=8) in bf16 is about 141&nbsp;GB. At TP=8
+  that is 17.6&nbsp;GB per rank, so 5.26&nbsp;ms of weight read. Using the same per-layer kernel count plus
+  two all-reduces per layer, compute $N_{\text{kernels}}$ and $B_{\text{host}}$. Is an eager decode step
+  launch-bound at TP=8 for the 70B? Why is the answer different from the 8B?</li>
+
+  <li><b>Predict, then verify.</b> SGLang's SM90 table gives TP=4 a graph one-shot-push threshold of
+  384&nbsp;KB and an eager one of 896&nbsp;KB. Predict which algorithm a 512&nbsp;KB all-reduce takes in
+  each mode, then trace <code>_pick_algo</code> in
+  <code>custom_all_reduce_v2.py:L310-L324</code> to check. Now predict what a 512&nbsp;KB all-reduce does
+  inside a <em>piecewise</em> graph, and find the line that decides it.</li>
+
+  <li><b>Predict, then verify.</b> You run vLLM with an attention backend whose builder reports
+  <code>AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE</code> and you enable speculative decoding with 3
+  draft tokens. Which mode does <code>resolve_cudagraph_mode_and_sizes</code> leave you in, and what
+  exactly gets logged? Trace <code>vllm/config/compilation.py:L1441-L1458</code>.</li>
+
+  <li><b>Design.</b> Your workload is 90% batch-6 decode and 10% batch-200. You have 1&nbsp;GiB of GPU
+  memory to spend on graphs. Using vLLM's estimate model &mdash; largest graph plus 1&nbsp;MiB minimum per
+  additional graph &mdash; propose a <code>-O.cudagraph_capture_sizes</code> list and justify each rung against the
+  roofline argument in &sect;8.1.3.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> Index 0 &rarr; 0 (the loop's first window starts at 0 with <code>bs == start</code>);
+    1&rarr;1, 2&rarr;2, 3&rarr;4, 4&rarr;4, 5..8&rarr;8, 9..16&rarr;16. A batch of 17 exceeds
+    <code>max_size</code>, so <code>dispatch</code> returns
+    <code>(CUDAGraphMode.NONE, BatchDescriptor(17))</code> at
+    <code>cudagraph_dispatcher.py:L274-L281</code> and the step runs eager. Note the asymmetry: too big
+    means no graph at all, not a fallback to the largest one.</p>
+
+    <p><b>2.</b> 80 layers &times; 12 kernels (10 + 2 all-reduces) = 960, plus about 11 head/tail = 971.
+    $B_{\text{host}} = 5260 / 971 = 5.42\ \mu\text{s}$. Driver-only host time is
+    $971 \times 2.374 = 2.31$&nbsp;ms against 5.26&nbsp;ms of GPU work &mdash; 44%, so the driver alone does
+    <em>not</em> make it launch-bound, unlike the 8B's 168%. The difference is that the 70B has 2.4&times;
+    the kernels but 9.4&times; the per-rank bytes: bigger models per rank give the host more slack. The
+    framework layers can still close that 5.42&nbsp;&micro;s budget, which is why 70B servers still capture.</p>
+
+    <p><b>3.</b> Eager: 512&nbsp;KB &le; 896&nbsp;KB, so <code>ONE_SHOT_PUSH</code> with
+    <code>_PullMode.EAGER</code>. Graph: 512&nbsp;KB &gt; 384&nbsp;KB, so the push branch is skipped; the
+    pull threshold is also 384&nbsp;KB so that is skipped; SM90 TP=4 has <code>num_mc_blocks = 32</code>
+    but the graph heuristic has no <code>mc</code> range, so multicast is skipped; it lands on
+    <code>TWO_SHOT_PULL</code> with <code>_PullMode.GRAPH</code>. Inside a piecewise graph,
+    <code>_can_use_graph</code> returns <code>False</code> because of
+    <code>not is_in_tc_piecewise_cuda_graph()</code> (<code>L306</code>) &mdash; so a piecewise-captured
+    all-reduce uses the <em>eager</em> table and the eager data path, copies and all.</p>
+
+    <p><b>4.</b> <code>uniform_decode_query_len = 1 + 3 = 4 &gt; 1</code> and
+    <code>UNIFORM_SINGLE_TOKEN_DECODE.value = 1 &lt; UNIFORM_BATCH.value = 2</code>, so the spec-decode
+    branch fires: <code>PIECEWISE</code> if attention is in <code>splitting_ops</code>, otherwise
+    <code>NONE</code>. The log line starts <code>"CUDAGraphMode.&lt;name&gt; is not supported with
+    spec-decode for attention backend &lt;name&gt; (support: &hellip;)"</code>. The enum name is exactly
+    right: single-token decode is not uniform-batch decode.</p>
+
+    <p><b>5.</b> Something like <code>[1, 2, 4, 6, 8, 200, 208]</code>. A rung exactly at 6 for the 90%
+    case, a rung exactly at 200 for the 10% case &mdash; not because the padding costs FLOPs (200 is still
+    below the ridge) but because a <em>miss</em> above the largest rung drops you to eager entirely. Do not
+    spend rungs between 8 and 200: you have no traffic there and each costs at least 1&nbsp;MiB plus
+    capture time. The dominant memory term is the 208-graph itself, not the count.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The launch-overhead question has a number now: <b>2374.6&nbsp;ns per <code>cudaLaunchKernel</code>
+  on H100 with CUDA 12.6</b> (ISPASS 2025, Table&nbsp;V), and 1235.2&nbsp;ns for an empty kernel's
+  duration. Everything above the driver &mdash; PyTorch dispatch, Python &mdash; is additional and still
+  unquantified on named hardware.</li>
+
+  <li>Whether you are launch-bound is a ratio, not a constant: GPU time per step divided by kernels per
+  step. Tensor parallelism attacks it from both sides, so <b>TP=8 Llama-3-8B is launch-bound on driver
+  cost alone (0.94&nbsp;ms of launches for 0.56&nbsp;ms of work)</b> while TP=1 is merely marginal.</li>
+
+  <li>Capture freezes addresses and shapes. Everything else in this chapter &mdash; persistent buffers,
+  copy-into-place, the bucket ladder, the padded null blocks, why prefill is opt-in &mdash; is a
+  consequence of those two words.</li>
+
+  <li>Bucket padding is nearly free below the roofline ridge, because the padded rows ride along in a
+  weight read that was going to happen anyway. It becomes real above batch 295. Spend your rungs where your
+  traffic is, not where the waste percentage looks worst.</li>
+
+  <li><b>"Graphs remove CPU launch overhead" is incomplete.</b> Capture is an address-stability contract,
+  and SGLang spends it on cross-rank zero-copy: a captured two-shot all-reduce skips two full-size
+  <code>cuda_memcpy</code> stages and two kernels that the eager path cannot avoid. That is why the tuned
+  crossover table has separate graph and eager columns, why the crossover is uniformly lower under capture,
+  and why the same message size takes different algorithms in the two modes.</li>
+
+  <li>The graph pool is subtracted from the KV cache budget before the block manager sees a byte, and
+  speculative decoding multiplies both the pool and the startup time by the number of capture families.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Vellaisamy, Labonte, Chakraborty, Turner, Sury, Shen, <em>Characterizing and Optimizing LLM
+  Inference Workloads on CPU-GPU Coupled Architectures</em>, ISPASS 2025
+  (<a href="https://arxiv.org/abs/2504.11750">arXiv:2504.11750</a>). Table&nbsp;V is the H100 / CUDA 12.6
+  null-kernel launch measurement this chapter leans on.</li>
+  <li>NVIDIA, <em>CUDA Graph Best Practice for PyTorch</em>
+  (<a href="https://docs.nvidia.com/dl-cuda-graph/latest/cuda-graph-basics/introduction.html">docs.nvidia.com</a>).
+  The current per-launch overhead breakdown by layer; ranges only, no hardware named.</li>
+  <li>NVIDIA, <em>Getting Started with CUDA Graphs</em>
+  (<a href="https://developer.nvidia.com/blog/cuda-graphs/">developer.nvidia.com/blog/cuda-graphs</a>).
+  The original V100 / CUDA 10.1 post whose 2.9 / 9.6 / 3.8 / 3.4&nbsp;&micro;s figures propagated
+  everywhere, including into <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a>.</li>
+  <li>vLLM PR discussion for the <code>CUDAGraphMode</code> / dispatcher rework
+  (<a href="https://github.com/vllm-project/vllm/pull/20059">vllm-project/vllm#20059</a>) &mdash; where
+  full and piecewise capture stopped being a boolean.</li>
+  <li>SGLang issue tracker for the per-phase config
+  (<a href="https://github.com/sgl-project/sglang/pull/15927">sgl-project/sglang#15927</a>, referenced by
+  name in <code>server_args.py:L4956-L4958</code> for the prefill <code>max_bs</code> default).</li>
+  <li><a href="08-02-torch-compile.html">&sect;8.2</a> for how the pieces of a piecewise graph get
+  produced; <a href="../03-attention-kernels/03-04-flashinfer-and-backends.html#cuda-graphs">&sect;3.4</a>
+  for <code>AttentionCGSupport</code> and the metadata-buffer contract;
+  <a href="../05-parallelism/05-04-collectives-and-topology.html">&sect;5.4</a> for the all-reduce cost
+  model this chapter's finding modifies;
+  <a href="../10-benchmarking/10-04-batch-invariance.html">&sect;10.4</a> for what fixed shapes do to
+  reproducibility.</li>
+</ul></div></section>
+<div class="pager"><a href="../07-architectures/07-05-lora-and-pooling-models.html"><div class="pager__k">← Previous</div><div class="pager__t">LoRA serving, embeddings, rerankers, pooling</div></a><a class="pager__next" href="08-02-torch-compile.html"><div class="pager__k">Next →</div><div class="pager__t">torch.compile, Inductor, piecewise capture</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">What capture actually constrains</a>
+<a href="#production">How the two engines dispatch</a>
+<a href="#beyond-launch-overhead">Capture changes device-side cost too</a>
+<a href="#worked-trace">Worked trace: batch 13, TP=1, vLLM</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

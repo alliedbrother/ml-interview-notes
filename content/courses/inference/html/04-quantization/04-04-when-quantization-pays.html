@@ -1,0 +1,1819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>When quantization pays — and when it does not — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="kernels">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i is-current" href="04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 4 · Quantization · 04-04</div>
+<h1>When quantization pays — and when it does not</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/kernels/</code></li><li><code>python/sglang/benchmark/one_batch.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">You swapped a bf16 checkpoint for a 4-bit one, batch-1 latency fell by a factor of
+three, and aggregate throughput under load went <em>down</em>. Nothing is broken. You moved a
+workload across a boundary that the roofline predicted, and this chapter derives where that
+boundary is, what the other three boundaries are, and how to price the accuracy you spent
+getting there.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Two deployments, one model, one card. Llama-3-8B on an H100 SXM.</p>
+
+<p><b>Deployment A</b> is an interactive coding assistant. Two or three concurrent streams, and
+the number the users feel is inter-token latency. Quantizing the weights to INT4 group-128 with
+Marlin takes the decode step from a bandwidth floor of 4.48&nbsp;ms to about 1.15&nbsp;ms
+(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>'s floor,
+recomputed at 4.125 bits per stored weight). That is close to a pure win.</p>
+
+<p><b>Deployment B</b> is a batch summarisation job. Five hundred concurrent sequences, and the
+number that matters is tokens per second per GPU. Same checkpoint, same kernel, same card, and
+the step time is now <em>worse</em> than bf16 — by a fixed 0.45&nbsp;ms per step, at every batch
+size above roughly 270. At this batch that is about 6%; the penalty in milliseconds never shrinks,
+only its share of a growing step does. The dequantisation you are paying for on every forward pass
+no longer buys any bandwidth back, because bandwidth stopped being the constraint.</p>
+
+<p>Both statements come from the same two-term model, and neither is a measurement — I have no
+GPU. What follows derives the model, marks its boundaries, then separates it from the
+<em>other</em> reason people quantize: quantization frees VRAM, VRAM buys concurrency, and
+concurrency buys throughput on an axis where the step-time argument is silent.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Standing on</span>
+  <p><a href="04-01-the-design-space.html">&sect;4.1</a> owns the design space and
+  $B^{*} = I^{*}b_w/2$. <a href="04-02-gptq-awq-smoothquant.html">&sect;4.2</a> owns GPTQ, AWQ and
+  SmoothQuant. <a href="04-03-formats-and-kernels.html">&sect;4.3</a> owns the kernels and
+  $M^{*} = (b_{\text{eff}}/8)\cdot P/(2\beta)$. This chapter owns the decision and the
+  measurement methodology, and re-derives none of them.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A decode step does two things that can overlap: it streams weights out of HBM, and it issues
+math. Quantization changes both terms, but not in the same way. Weight-only schemes divide the
+<em>memory</em> term and add a constant to the <em>compute</em> term. Weight-and-activation
+schemes divide the memory term <em>and</em> the compute term, because they unlock a faster tensor
+core. So the two families have different shapes: weight-only wins big and then fades to a loss;
+W8A8 wins a constant factor everywhere and never fades.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; decode step time against batch size, Llama-3-8B on H100 SXM.</b>
+  <b>Derived</b> from $t = \max\!\left(W b_w/\beta,\; 2WB/P + W c/D\right)$ with $W = 7.50$ B streamed
+  parameters, $\beta = 3.35$ TB/s, $P_{\text{bf16}} = 989.4$ TFLOP/s, $P_{\text{fp8}} = 1978.9$
+  TFLOP/s. Not measured. Log batch axis.</p>
+  <svg viewBox="0 0 900 470" width="100%" role="img" aria-label="Log-x line chart of decode step time in milliseconds against batch size for bf16, W4A16 and W8A8-FP8. The W4A16 line is lowest and flat at 1.15 milliseconds until batch 47, then rises and crosses W8A8 at batch 118 and crosses bf16 at batch 266, ending above bf16 at batch 1024.">
+    <!-- axes -->
+    <line x1="96" y1="396" x2="856" y2="396" stroke="var(--border-bright)" stroke-width="1"/>
+    <line x1="96" y1="56" x2="96" y2="396" stroke="var(--border-bright)" stroke-width="1"/>
+    <g font-family="monospace" font-size="11" fill="var(--text-dim)">
+      <line x1="96" y1="311" x2="856" y2="311" stroke="var(--grid-line)"/>
+      <line x1="96" y1="226" x2="856" y2="226" stroke="var(--grid-line)"/>
+      <line x1="96" y1="141" x2="856" y2="141" stroke="var(--grid-line)"/>
+      <text x="88" y="400" text-anchor="end">0</text>
+      <text x="88" y="315" text-anchor="end">4</text>
+      <text x="88" y="230" text-anchor="end">8</text>
+      <text x="88" y="145" text-anchor="end">12</text>
+      <text x="88" y="60" text-anchor="end">16</text>
+      <text x="96" y="416" text-anchor="middle">1</text>
+      <text x="248" y="416" text-anchor="middle">4</text>
+      <text x="400" y="416" text-anchor="middle">16</text>
+      <text x="552" y="416" text-anchor="middle">64</text>
+      <text x="704" y="416" text-anchor="middle">256</text>
+      <text x="856" y="416" text-anchor="middle">1024</text>
+      <text x="476" y="438" text-anchor="middle" fill="var(--text)">batch size B (concurrent decoding sequences)</text>
+      <text x="30" y="40" fill="var(--text)">step time (ms)</text>
+    </g>
+
+    <!-- regime bands -->
+    <line x1="619" y1="56" x2="619" y2="396" stroke="var(--steel)" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.7"/>
+    <line x1="708" y1="56" x2="708" y2="396" stroke="var(--steel)" stroke-width="1" stroke-dasharray="4 4" stroke-opacity="0.7"/>
+
+    <!-- curves -->
+    <polyline points="96.0,300.9 719.7,300.9 856.0,66.1" fill="none" stroke="var(--steel)" stroke-width="2.5"/>
+    <polyline points="96.0,348.4 719.7,348.4 856.0,231.1" fill="none" stroke="var(--teal)" stroke-width="2.5"/>
+    <polyline points="96.0,371.5 517.2,371.5 856.0,56.6" fill="none" stroke="var(--copper)" stroke-width="2.5"/>
+
+    <!-- crossing markers -->
+    <circle cx="619" cy="348.4" r="4.5" fill="var(--bg)" stroke="var(--plum)" stroke-width="2"/>
+    <circle cx="708" cy="300.9" r="4.5" fill="var(--bg)" stroke="var(--plum)" stroke-width="2"/>
+
+    <g font-family="monospace" font-size="11">
+      <text x="112" y="294" fill="var(--steel)">bf16 &mdash; 4.48 ms floor</text>
+      <text x="112" y="342" fill="var(--teal)">W8A8 FP8 &mdash; 2.24 ms floor</text>
+      <text x="112" y="365" fill="var(--copper)">W4A16 g128 &mdash; 1.15 ms floor</text>
+      <text x="613" y="50" text-anchor="middle" fill="var(--plum)">B = 118</text>
+      <text x="613" y="150" text-anchor="middle" fill="var(--text-dim)">W8A8 takes</text>
+      <text x="613" y="164" text-anchor="middle" fill="var(--text-dim)">the lead</text>
+      <text x="714" y="50" text-anchor="middle" fill="var(--plum)">B = 266</text>
+      <text x="790" y="150" text-anchor="middle" fill="var(--text-dim)">W4A16 becomes</text>
+      <text x="790" y="164" text-anchor="middle" fill="var(--text-dim)">a loss vs bf16</text>
+      <text x="852" y="86" text-anchor="end" fill="var(--copper)">bf16 + 0.45 ms</text>
+      <text x="852" y="251" text-anchor="end" fill="var(--teal)">exactly 2x bf16</text>
+    </g>
+    <g font-family="monospace" font-size="11" fill="var(--text-dim)">
+      <text x="356" y="80" text-anchor="middle">REGIME I &mdash; weight-bandwidth-bound</text>
+      <text x="356" y="94" text-anchor="middle">fewest weight bytes wins</text>
+      <text x="664" y="112" text-anchor="middle">REGIME II</text>
+      <text x="783" y="80" text-anchor="middle">REGIME III &mdash; compute-bound</text>
+      <text x="783" y="94" text-anchor="middle">fastest tensor core wins</text>
+    </g>
+  </svg>
+</div>
+
+<p>Read the right-hand edge. At batch 1024 the W4A16 curve sits <em>above</em> bf16 by a fixed
+0.45&nbsp;ms and stays there. That gap is the dequantisation work, which is proportional to the
+number of weights and therefore constant in $B$, while the useful math grows linearly. Weight-only
+quantization does not become slightly less good at large batch; it becomes a permanent tax.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: two terms and three regimes</h2></div><div class="sec__body"><p>Model one decode step as a memory pipe and a math pipe that overlap:</p>
+
+<div class="math-display">$$ t(B) \;=\; \max\!\left(\underbrace{\frac{W\,b_w}{\beta}}_{\text{weight stream}},\;\;
+\underbrace{\frac{2WB}{P}}_{\text{mma}} \;+\; \underbrace{\frac{W c}{D}}_{\text{dequant}}\right) $$</div>
+
+<p>$W$ is the number of parameters streamed per token; $b_w$ bytes per stored weight; $\beta$ HBM
+bandwidth; $B$ the number of decoding sequences in the batch; $P$ the peak of the tensor-core
+instruction the kernel <em>actually issues</em>; $c$ the number of non-tensor instruction slots
+spent per weight converting it back to the mma's input type; $D$ the non-tensor issue throughput.
+Dequantisation sits inside the compute term because it runs on the CUDA cores, competes with the
+mma for issue slots, and — crucially — is hidden underneath the weight stream only while the
+weight stream is the longer of the two.</p>
+
+<p>For Llama-3-8B, <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>
+established $W = 7.50$&nbsp;B streamed parameters (the embedding table is gathered, not streamed),
+giving 15.01&nbsp;GB in bf16 and the 4.48&nbsp;ms floor. Everything below reuses that $W$.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">One assumption, stated once</span>
+  <p>Every quantized figure in this chapter applies the scheme to all 7.50&nbsp;B streamed
+  parameters, output head included. Most published W4A16 checkpoints leave the head in bf16
+  (<a href="04-01-the-design-space.html#first-principles">&sect;4.1.3</a>), which is 0.53&nbsp;B of
+  the 7.50: the W4A16 floor becomes 1.40&nbsp;ms instead of 1.15, the 8B capacity rows below lose
+  about 1.5&nbsp;GiB of KV pool, and none of the crossovers move, because the dequantisation
+  constant and the memory term shrink together. The 70B rows are insensitive to it &mdash; the head
+  is 0.7% of that model.</p>
+</div>
+
+<h3>Counting <span class="math-inline">$c$</span> from the kernel, not from intuition</h3>
+
+<p>Marlin's INT4-to-BF16 conversion is two specialisations in <code>dequant.h</code>, and you can
+count instructions off the page:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/dequant.h:L173-L199</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;&gt;
+__device__ inline void dequant&lt;nv_bfloat162, vllm::kU4B8.id(), true&gt;(
+    int q, nv_bfloat162* frag_b) {
+  static constexpr uint32_t MASK = 0x000f000f;
+  static constexpr uint32_t EX = 0x43004300;
+
+  // Guarantee that the `(a &amp; b) | c` operations are LOP3s.
+  // clang-format off
+  int lo = lop3&lt;(0xf0 &amp; 0xcc) | 0xaa&gt;(q, MASK, EX);
+  q &gt;&gt;= 4;
+  int hi = lop3&lt;(0xf0 &amp; 0xcc) | 0xaa&gt;(q, MASK, EX);
+  // clang-format on
+
+  frag_b[0] = *reinterpret_cast&lt;nv_bfloat162*&gt;(&amp;lo);
+  frag_b[1] = *reinterpret_cast&lt;nv_bfloat162*&gt;(&amp;hi);
+}
+
+template &lt;&gt;
+__device__ inline void dequant&lt;nv_bfloat162, vllm::kU4B8.id(), false&gt;(
+    int q, nv_bfloat162* frag_b) {
+  dequant&lt;nv_bfloat162, vllm::kU4B8.id(), true&gt;(q, frag_b);
+
+  static constexpr uint32_t SUB = 0x43084308;
+
+  frag_b[0] = __hsub2(frag_b[0], *reinterpret_cast&lt;const nv_bfloat162*&gt;(&amp;SUB));
+  frag_b[1] = __hsub2(frag_b[1], *reinterpret_cast&lt;const nv_bfloat162*&gt;(&amp;SUB));
+}</code></pre>
+</div>
+
+<p>Four weights come out of one 32-bit <code>q</code>. Producing them costs two
+<code>lop3</code>s and one shift; removing the INT4 zero-offset costs two <code>__hsub2</code>;
+applying the group scale costs the three instructions of <code>scale()</code> at
+<code>csrc/libtorch_stable/quantization/marlin/marlin_template.h:L104-L116</code> (a
+<code>num2num2</code> broadcast plus two <code>__hmul2</code>). Eight non-tensor instructions per
+four weights: <b>$c = 2$</b>. A GPTQ-symmetric INT4 checkpoint with bf16 activations takes exactly
+this path — <code>dequant_skip_flop</code> at
+<code>csrc/libtorch_stable/quantization/marlin/marlin_template.h:L348-L354</code> is false when
+there are no zero-points and the scalar type is <code>nv_bfloat16</code>.</p>
+
+<p>For $D$, take the H100 SXM datasheet FP32 vector rate of 67 TFLOP/s. Counting an FMA as two
+FLOP, that is $D = 33.5\times10^{12}$ instruction-lanes per second, roughly 30 times slower than
+the bf16 tensor core's 989.4 TFLOP/s. Then</p>
+
+<div class="math-display">$$ t_{\text{deq}} \;=\; \frac{W c}{D} \;=\; \frac{7.50\times10^{9}\times 2}{33.5\times10^{12}} \;=\; 0.448~\text{ms}. $$</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">What this model assumes</span>
+  <p>That dequantisation issue slots and mma issue slots add rather than overlap, and that the
+  FP32 vector rate is a fair proxy for the <code>lop3</code>/<code>__hsub2</code>/<code>__hmul2</code>
+  mix. Both are approximations that no arithmetic can settle. What is <em>not</em> an approximation
+  is the sign: above the ridge, W4A16 issues the same bf16 <code>mma</code> instructions as bf16
+  and additionally issues dequantisation, so it cannot be faster. The magnitude of the penalty is
+  what <a href="../LABS.html">Lab 06</a> measures.</p>
+</div>
+
+<h3>The three regimes</h3>
+
+<p>Instantiate the model for the three schemes on an H100. The memory terms are $15.01/3.35 = 4.48$
+ms (bf16), $7.50/3.35 = 2.24$ ms (8-bit) and $7.50 \times 0.5156/3.35 = 1.15$ ms (INT4 group-128,
+$b_{\text{eff}} = 4.125$ bits). The mma slopes are $2W/P$: 15.16&nbsp;&micro;s per unit of batch
+on bf16 tensor cores and 7.58&nbsp;&micro;s on fp8 tensor cores. Setting curves equal gives the
+boundaries.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The three regimes for Llama-3-8B on H100 SXM. <b>Derived</b> from the
+  two-term model above; speedups are ratios of derived step times, not measurements.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Regime</th><th>Batch</th><th>Binding constraint</th><th>bf16</th><th>W4A16</th><th>W8A8 FP8</th><th>Winner</th></tr></thead>
+      <tbody>
+        <tr><td>I</td><td class="num">B &lt; 118</td><td>weight bandwidth</td><td class="num">4.48 ms</td><td class="num">1.15&ndash;2.24 ms</td><td class="num">2.24 ms</td><td>W4A16 (up to 3.9&times;)</td></tr>
+        <tr><td>II</td><td class="num">118 &ndash; 266</td><td>mixed</td><td class="num">4.48 ms</td><td class="num">2.24&ndash;4.48 ms</td><td class="num">2.24 ms</td><td>W8A8 (2.0&times;)</td></tr>
+        <tr><td>III</td><td class="num">B &gt; 266</td><td>tensor-core issue</td><td class="num">15.16B &micro;s</td><td class="num">15.16B &micro;s + 0.45 ms</td><td class="num">7.58B &micro;s</td><td>W8A8 (2.0&times;); W4A16 is a loss</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">3.9&times;</div><div class="kpi__l">W4A16 over bf16 at B = 1</div></div>
+  <div class="kpi"><div class="kpi__n">B = 118</div><div class="kpi__l">W8A8 overtakes W4A16</div></div>
+  <div class="kpi"><div class="kpi__n">B = 266</div><div class="kpi__l">W4A16 falls behind bf16</div></div>
+  <div class="kpi"><div class="kpi__n">2.00&times;</div><div class="kpi__l">W8A8 over bf16, every B</div></div>
+</div>
+
+<p>Three consequences worth stating separately.</p>
+
+<p><b>W8A8-FP8's speedup is batch-invariant.</b> It halves the memory term and halves the compute
+term, so it halves $\max(\cdot,\cdot)$ whatever the argmax is. That is why it is the boring,
+correct default for throughput-oriented serving: no crossover to reason about.</p>
+
+<p><b>W4A16's advantage decays before its own ridge.</b> Setting $2WB/P + Wc/D = Wb_w/\beta$
+gives $B = 47$, not the $M^{*} \approx 76$ that
+<a href="04-03-formats-and-kernels.html">&sect;4.3</a> derives. The 29-sequence difference is the
+dequantisation constant eating into the memory-bound headroom; $M^{*}$ is the crossover with
+dequantisation assumed free, and it is the right number for the kernel dispatcher (which cares
+about tile shape) and the wrong one for the deployment (which cares about wall clock).</p>
+
+<p><b>The bf16 ridge at $B^{*} = 295$ is not where W4A16 dies.</b> W4A16 stops paying at 266,
+before bf16 itself becomes compute-bound, because it is racing bf16's <em>floor</em>, not bf16's
+slope. Between 266 and 295 both curves are flat-versus-rising, and the quantized one is already
+above.</p></div></section>
+<section class="sec" id="capacity" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The other axis: capacity, not latency</h2></div><div class="sec__body"><p>Everything above holds $B$ fixed. But the reason most people quantize a 70B model is that they
+cannot hold $B$ fixed — the weights leave no room for KV cache, so $B$ is capped at something
+useless. This is a different effect with a different unit, and conflating the two is the most
+common analysis error in this area.</p>
+
+<p>Use <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>'s budget
+exactly: $C = 79.65$ GiB per H100, $u = 0.92$ (<code>vllm/config/cache.py:L80-L87</code>), and a
+6.0&nbsp;GiB allowance for activations, CUDA graphs and non-torch memory. That leaves
+67.28&nbsp;GiB for weights plus KV, per GPU.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Concurrency ceiling, not latency. <b>Derived</b> from the budget above;
+  KV in bf16, 128 KiB/token for 8B and 320 KiB/token for 70B (divided by TP degree). Requests are 8k
+  tokens. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Deployment</th><th>Weight format</th><th class="num">weights GiB/GPU</th><th class="num">KV pool GiB</th><th class="num">resident tokens</th><th class="num">8k requests</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3-8B, TP=1</td><td>bf16</td><td class="num">14.96</td><td class="num">52.32</td><td class="num">428,613</td><td class="num">52</td></tr>
+        <tr><td>Llama-3-8B, TP=1</td><td>fp8 W8</td><td class="num">7.48</td><td class="num">59.80</td><td class="num">489,877</td><td class="num">59</td></tr>
+        <tr><td>Llama-3-8B, TP=1</td><td>INT4 g128</td><td class="num">3.86</td><td class="num">63.42</td><td class="num">519,552</td><td class="num">63</td></tr>
+        <tr><td>Llama-3-70B, TP=2</td><td>bf16</td><td class="num">65.70</td><td class="num">1.57</td><td class="num">10,310</td><td class="num">1</td></tr>
+        <tr><td>Llama-3-70B, TP=2</td><td>fp8 W8</td><td class="num">32.85</td><td class="num">34.43</td><td class="num">225,612</td><td class="num">27</td></tr>
+        <tr><td>Llama-3-70B, TP=2</td><td>INT4 g128</td><td class="num">16.94</td><td class="num">50.34</td><td class="num">329,898</td><td class="num">40</td></tr>
+        <tr><td>Llama-3-70B, TP=8</td><td>bf16</td><td class="num">16.43</td><td class="num">50.85</td><td class="num">1,333,049</td><td class="num">162</td></tr>
+        <tr><td>Llama-3-70B, TP=8</td><td>INT4 g128</td><td class="num">4.23</td><td class="num">63.04</td><td class="num">1,652,638</td><td class="num">201</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The 8B rows move by 21%. The 70B TP=2 rows move by a factor of 40. That is the whole capacity
+argument in two lines: <b>quantization buys concurrency in proportion to how much of your VRAM the
+weights were eating.</b> When weights are 22% of the budget (8B), freeing three quarters of them
+buys you a fifth more sequences. When weights are 98% of the budget (70B at TP=2), freeing three
+quarters of them is the difference between a server that cannot hold two requests and one that
+holds forty.</p>
+
+<p>And the throughput consequence is not the step-time ratio. Going from $B=1$ to $B=40$ at
+Llama-3-70B multiplies decode throughput by close to 40, because
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>'s
+memory-bound step time barely moves with $B$ in Regime I. The per-step effect in &sect;4.4.3 is
+worth 2&ndash;4&times;; this one is worth 40&times;, and it is invisible to a batch-1 latency
+benchmark.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; two independent axes.</b> Left: step time at fixed
+  batch, which does not care how much VRAM is free. Right: concurrency ceiling, which does not care
+  how fast the GEMM is. Both <b>derived</b> above; a scheme can win on one and lose on the other.</p>
+  <svg viewBox="0 0 900 340" width="100%" role="img" aria-label="Two panels. Left panel: horizontal bars of decode step time at batch 1 for bf16 4.48 ms, W8A8 2.24 ms, W4A16 1.15 ms. Right panel: horizontal bars of concurrent 8k requests for Llama-3-70B at tensor parallel 2, bf16 1 request, fp8 27 requests, INT4 40 requests.">
+    <text x="40" y="30" font-family="monospace" font-size="12" fill="var(--teal)">AXIS A &mdash; per-step latency (Llama-3-8B, B = 1)</text>
+    <text x="490" y="30" font-family="monospace" font-size="12" fill="var(--copper)">AXIS B &mdash; concurrency ceiling (70B, TP = 2)</text>
+    <rect x="30" y="44" width="410" height="270" rx="6" fill="var(--teal-dim)" stroke="var(--teal)" stroke-opacity="0.3"/>
+    <rect x="480" y="44" width="390" height="270" rx="6" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.3"/>
+
+    <g font-family="monospace" font-size="11" fill="var(--text)">
+      <text x="48" y="88">bf16</text>
+      <rect x="130" y="74" width="290" height="22" rx="3" fill="var(--steel)" fill-opacity="0.55"/>
+      <text x="428" y="90" text-anchor="end" fill="var(--text)">4.48 ms</text>
+
+      <text x="48" y="140">W8A8</text>
+      <rect x="130" y="126" width="145" height="22" rx="3" fill="var(--teal)" fill-opacity="0.55"/>
+      <text x="283" y="142">2.24 ms</text>
+
+      <text x="48" y="192">W4A16</text>
+      <rect x="130" y="178" width="75" height="22" rx="3" fill="var(--copper)" fill-opacity="0.55"/>
+      <text x="213" y="194">1.15 ms</text>
+
+      <text x="48" y="240" fill="var(--text-dim)">Same 80 GB card either way.</text>
+      <text x="48" y="256" fill="var(--text-dim)">Freeing VRAM changes nothing</text>
+      <text x="48" y="272" fill="var(--text-dim)">on this axis: the step still</text>
+      <text x="48" y="288" fill="var(--text-dim)">streams the same bytes.</text>
+    </g>
+
+    <g font-family="monospace" font-size="11" fill="var(--text)">
+      <text x="498" y="88">bf16</text>
+      <rect x="580" y="74" width="7" height="22" rx="2" fill="var(--steel)" fill-opacity="0.55"/>
+      <text x="595" y="90">1 request</text>
+
+      <text x="498" y="140">fp8 W8</text>
+      <rect x="580" y="126" width="189" height="22" rx="3" fill="var(--teal)" fill-opacity="0.55"/>
+      <text x="777" y="142">27</text>
+
+      <text x="498" y="192">INT4</text>
+      <rect x="580" y="178" width="280" height="22" rx="3" fill="var(--copper)" fill-opacity="0.55"/>
+      <text x="856" y="194" text-anchor="end" fill="var(--bg)">40</text>
+
+      <text x="498" y="240" fill="var(--text-dim)">A 4x faster kernel changes</text>
+      <text x="498" y="256" fill="var(--text-dim)">nothing on this axis. Only</text>
+      <text x="498" y="272" fill="var(--text-dim)">bytes of resident weight do.</text>
+      <text x="498" y="288" fill="var(--text-dim)">40x more sequences in flight.</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="moe" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The MoE special case: routing divides the batch</h2></div><div class="sec__body"><p>Everything so far assumed every weight sees every row of the batch. In a mixture-of-experts
+layer it does not, and that single fact makes expert weights the best quantization target in any
+large model.</p>
+
+<p>Take the routed-expert share of the parameters, derived from the published configs. Qwen3-30B-A3B
+(<code>num_hidden_layers</code> 48, <code>hidden_size</code> 2048, <code>num_experts</code> 128,
+<code>num_experts_per_tok</code> 8, <code>moe_intermediate_size</code> 768) has
+$128 \times 3 \times 2048 \times 768 \times 48 = 28.99$&nbsp;B expert parameters out of 30.53&nbsp;B
+total — <b>95.0%</b>. DeepSeek-V3 (61 layers, 3 dense, 256 routed experts,
+<code>moe_intermediate_size</code> 2048, $d = 7168$) has 653.9&nbsp;B of 670.9&nbsp;B —
+<b>97.5%</b>. Both totals reconcile with the published 30.5B/3.0B and 671B/37B headline figures,
+which is the check that the arithmetic is right.</p>
+
+<p>Now the part that matters. Under roughly uniform routing, a batch of $B$ decoding sequences
+sends $B k / E$ rows to each expert, where $k$ is <code>num_experts_per_tok</code> and $E$ the
+expert count. The expert GEMM's effective $M$ is therefore</p>
+
+<div class="math-display">$$ M_e \;=\; \frac{B\,k}{E}, \qquad\text{so the expert layer stays memory-bound until}\qquad
+B^{*}_{\text{MoE}} \;=\; M^{*}\cdot\frac{E}{k}. $$</div>
+
+<p>With $M^{*} \approx 76$ for W4A16 from <a href="04-03-formats-and-kernels.html">&sect;4.3</a>:
+Qwen3-30B-A3B has $E/k = 16$, so its expert layers stay in Regime I up to $B \approx 1{,}216$;
+DeepSeek-V3 has $E/k = 32$, so up to $B \approx 2{,}432$. The dense attention projections in the
+same models crossed at 76. <b>Routing buys the expert weights a winning region 16 to 32 times
+wider than the dense layers get.</b></p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; why experts stay memory-bound.</b> Qwen3-30B-A3B at
+  a serving batch of 512. <b>Derived</b> from $M_e = Bk/E$ with $E = 128$, $k = 8$ read from the
+  published config.</p>
+  <svg viewBox="0 0 900 250" width="100%" role="img" aria-label="A batch of 512 rows enters a router and fans out to 128 experts, each receiving 32 rows on average, which is below the 76-row crossover, while the dense attention projections see all 512 rows, well above it.">
+    <rect x="30" y="60" width="150" height="56" rx="6" fill="var(--steel-dim)" stroke="var(--steel)" stroke-opacity="0.5"/>
+    <g font-family="monospace" font-size="12" fill="var(--text)">
+      <text x="44" y="84">batch B = 512</text>
+      <text x="44" y="102">hidden 2048</text>
+    </g>
+    <line x1="180" y1="88" x2="250" y2="88" stroke="var(--border-bright)" stroke-width="1.5"/>
+    <rect x="250" y="62" width="110" height="52" rx="6" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.5"/>
+    <text x="266" y="93" font-family="monospace" font-size="12" fill="var(--text)">router k=8</text>
+
+    <g stroke="var(--copper)" stroke-opacity="0.5" stroke-width="1.2" fill="none">
+      <path d="M360 88 L470 40"/><path d="M360 88 L470 76"/><path d="M360 88 L470 112"/><path d="M360 88 L470 168"/>
+    </g>
+    <g font-family="monospace" font-size="11" fill="var(--text)">
+      <rect x="470" y="26" width="230" height="28" rx="4" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.4"/>
+      <text x="484" y="45">expert 0    M_e = 32 rows</text>
+      <rect x="470" y="62" width="230" height="28" rx="4" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.4"/>
+      <text x="484" y="81">expert 1    M_e = 32 rows</text>
+      <rect x="470" y="98" width="230" height="28" rx="4" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.4"/>
+      <text x="484" y="117">expert 2    M_e = 32 rows</text>
+      <text x="484" y="146" fill="var(--text-dim)">...  125 more  ...</text>
+      <rect x="470" y="154" width="230" height="28" rx="4" fill="var(--copper-dim)" stroke="var(--copper)" stroke-opacity="0.4"/>
+      <text x="484" y="173">expert 127  M_e = 32 rows</text>
+    </g>
+    <line x1="716" y1="26" x2="716" y2="182" stroke="var(--copper)" stroke-dasharray="4 4" stroke-opacity="0.6"/>
+    <g font-family="monospace" font-size="11">
+      <text x="730" y="72" fill="var(--copper)">32 &lt; M* = 76</text>
+      <text x="730" y="90" fill="var(--text-dim)">memory-bound:</text>
+      <text x="730" y="106" fill="var(--text-dim)">W4A16 still wins</text>
+    </g>
+    <g font-family="monospace" font-size="11">
+      <rect x="250" y="196" width="450" height="30" rx="4" fill="var(--steel-dim)" stroke="var(--steel)" stroke-opacity="0.4"/>
+      <text x="266" y="216" fill="var(--text)">dense attention projections   M = 512 rows, all of them</text>
+      <text x="730" y="216" fill="var(--steel)">512 &gt;&gt; 76</text>
+    </g>
+  </svg>
+</div>
+
+<p>Both engines encode exactly this asymmetry as first-class configuration. In vLLM the online
+shorthand table splits the spec by layer kind, and two entries deliberately leave dense linear
+layers alone:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/quantization.py:L138-L147</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    ),
+    # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+    "int8_per_channel_weight_only": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # Online NVFP4 on MoE with per-token dynamic activation scales (Blackwell +
+    # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
+    "nvfp4_per_token": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kNvfp4Static),
+    ),</code></pre>
+</div>
+
+<p>The container is <code>QuantSpec(weight=..., activation=...)</code> at
+<code>vllm/config/quantization.py:L65-L77</code>, and <code>QuantizationConfigArgs</code> carries
+one for <code>linear</code> and one for <code>moe</code>. Leaving <code>linear</code> at
+<code>None</code> means "inherit the method's default", which for an online scheme is
+unquantized — so <code>--quantization int8_per_channel_weight_only</code> quantizes 95% of a
+Qwen3-30B-A3B's bytes and touches none of the layers that would have been pushed past their ridge.</p>
+
+<p><code class="c-sglang">SGLang</code> reaches the same place by a different route: a config class
+per mixed scheme rather than a per-layer-kind spec. <code>W4AFp8Config</code> dispatches on the
+layer's Python type:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/w4afp8.py:L93-L105</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -&gt; Optional[QuantizeMethodBase]:
+        from sglang.srt.layers.linear import LinearBase
+        from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
+
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, self.ignored_layers):
+                return UnquantizedLinearMethod()
+            return Fp8LinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return W4AFp8MoEMethod(self)
+        return None</code></pre>
+</div>
+
+<p>FP8 (W8A8) on the dense linear layers — which are compute-bound at serving batch, and where
+faster tensor cores are the only thing that helps — and INT4 weights with FP8 activations on the
+experts, which are memory-bound at the same batch. That is Figure 1's regime table applied twice
+within one model. SGLang's registry at
+<code>python/sglang/srt/layers/quantization/__init__.py:L71-L101</code> lists three such
+MoE-targeted mixed schemes (<code>w4afp8</code>, <code>quark_int4fp8_moe</code>,
+<code>mxfp_w4a8</code>). The difference is ergonomic, not architectural: vLLM lets you compose an
+arbitrary pair on the command line, SGLang ships pre-validated pairs.</p></div></section>
+<section class="sec" id="accuracy" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Measuring accuracy honestly</h2></div><div class="sec__body"><p>The performance side of this chapter is arithmetic. The accuracy side is not, and it is where
+most quantization decisions are actually made badly. This section is the book's methodology; other
+chapters point here.</p>
+
+<h3>Perplexity is the wrong statistic</h3>
+
+<p>Perplexity averages the log-likelihood over every token in a corpus. Quantization error is not
+distributed that way: it changes a small number of high-leverage decisions and leaves the rest
+alone. <em>Accuracy is Not All You Need</em>
+(<a href="https://arxiv.org/abs/2407.09141">arXiv:2407.09141</a>) makes the sharper version of the
+point — even <em>aggregate accuracy</em> is too coarse. Their finding is that a compressed model
+can match the baseline's benchmark score while a substantial fraction of individual answers
+<em>flip</em>, correct-to-incorrect and incorrect-to-correct, and that these flips correlate
+strongly with KL divergence from the baseline's output distribution. Their conclusion, quoted from
+the abstract, is that "compression techniques should also be evaluated using distance metrics",
+and they propose KL divergence and flip rate.</p>
+
+<p>The practical form: run the same prompts through both servers and report score delta, flip rate,
+and mean per-token KL. Zero score delta with a 12% flip rate has changed your product; a
+1-point delta with a 2% flip rate mostly has not.</p>
+
+<h3>Degradation is task-dependent, and not in the obvious direction</h3>
+
+<p>Two published sweeps disagree with the folk model, which is worth knowing before you pick an
+eval. <em>Exploring the Trade-Offs</em>
+(<a href="https://arxiv.org/abs/2409.11055">arXiv:2409.11055</a>), covering 1B to 405B across four
+quantization methods and 13 datasets, reports that quantized models "often struggle with
+instruction-following and hallucination detection", that an MT-Bench LLM judge "highlights
+significant performance declines in Coding and STEM tasks", and — the counterintuitive one — that
+"hard tasks do not always experience the largest accuracy losses, indicating that quantization
+magnifies a model's inherent weaknesses rather than simply correlating with task difficulty".</p>
+
+<p><em>Quantization Hurts Reasoning?</em>
+(<a href="https://arxiv.org/abs/2504.04823">arXiv:2504.04823</a>) sweeps DeepSeek-R1-distilled Qwen
+and Llama from 1.5B to 70B on AIME, MATH-500, GPQA and LiveCodeBench, finds W8A8 and W4A16
+near-lossless with severe degradation below that, and explicitly refutes a widely repeated claim:
+"Contrary to expectations, quantized models do not exhibit increased output lengths." Generation
+length is not a cheap proxy for reasoning damage.</p>
+
+<p>The operational conclusion is not "reasoning degrades more". It is: <b>your eval must be the
+task you serve.</b> Quantization amplifies whatever your model was already weakest at, and no
+published table tells you what that is for your fine-tune.</p>
+
+<h3>How many samples make a difference real</h3>
+
+<p>Accuracy on $n$ questions is a binomial proportion. At $p = 0.80$ and $n = 1319$ (the full GSM8K
+test set), the standard error is $\sqrt{0.8 \times 0.2 / 1319} = 1.10$ percentage points. A 95%
+confidence interval on a single score is therefore $\pm 2.16$ pp. Comparing two independent runs
+inflates the error by $\sqrt{2}$: the smallest difference GSM8K can resolve at 95% confidence is
+<b>3.1 pp</b>. To resolve 1 pp at 95% confidence with 80% power you would need about 25,000
+questions per arm. GSM8K has 1,319.</p>
+
+<p>Two escapes. First, evaluate <em>paired</em> — same questions, both models, McNemar's test on
+the discordant pairs. The standard error becomes $\sqrt{f/n}$ where $f$ is the flip rate; at
+$f = 0.10$ that is 0.87 pp, resolving a 1.7 pp difference. This is the same flip statistic
+arXiv:2407.09141 argues for, arrived at from the statistics side. Second, stop trying to resolve
+1 pp. If your decision changes at 1 pp of GSM8K, the decision is not about accuracy.</p>
+
+<h3>What a project actually accepts</h3>
+
+<p>The only accuracy thresholds that ship inside either repository are vLLM's GSM8K CI gates. The
+TurboQuant KV-cache configs are the cleanest example, because the same model appears at four
+aggressiveness levels:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/evals/gsm8k/configs/Qwen3-4B-TQ-k8v4.yaml:L1-L5 + tests/evals/gsm8k/configs/Qwen3-4B-TQ-t3nc.yaml:L1-L5</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>model_name: "Qwen/Qwen3-4B"
+accuracy_threshold: 0.80
+num_questions: 1319
+num_fewshot: 5
+server_args: "--kv-cache-dtype turboquant_k8v4 --max-model-len 4096"
+# ---
+model_name: "Qwen/Qwen3-4B"
+accuracy_threshold: 0.75
+num_questions: 1319
+num_fewshot: 5
+server_args: "--kv-cache-dtype turboquant_3bit_nc --max-model-len 4096"</code></pre>
+</div>
+
+<p>Four configs, four floors: <code>k8v4</code> and <code>t4nc</code> at 0.80,
+<code>k3v4nc</code> at 0.78, <code>t3nc</code> at 0.75. Going from 4-bit to 3-bit KV buys a lower
+bar by 5 points, and a maintainer wrote that number down. That is the concrete answer to "what
+does a project consider acceptable degradation" — but read what the harness does with it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/evals/gsm8k/test_gsm8k_correctness.py:L176-L192</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        measured_metric = results["accuracy"]
+        expected_metric = eval_config["accuracy_threshold"]
+        tol = eval_config.get("tolerance", 0.08)
+# ...
+        assert measured_metric &gt;= expected_metric - tol, (
+            f"GSM8K metric too low: {measured_metric:.4f} &lt; "
+            f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
+        )</code></pre>
+</div>
+
+<p>The default tolerance is 0.08 — eight percentage points, which at $n = 1319$ is
+<b>7.3 standard errors</b>. None of the TurboQuant configs override it. So the effective gate on
+<code>t3nc</code> is 0.67, not 0.75. This is a regression smoke test designed not to flake, not an
+accuracy measurement, and treating vLLM's CI as evidence that a scheme is lossless would be a
+misreading of its own source.</p>
+
+<p>The eval's own shape limits it further. <code>evaluate_gsm8k</code> defaults to
+<code>max_tokens: int = 256</code>, <code>temperature: float = 0.0</code>,
+<code>num_shots: int = 5</code> (<code>tests/evals/gsm8k/gsm8k_eval.py:L210-L223</code>), and
+scores by extracting the last integer in the completion
+(<code>tests/evals/gsm8k/gsm8k_eval.py:L68-L77</code>). A 256-token cap cannot observe
+long-generation drift, greedy decoding cannot observe distribution-tail damage, and last-integer
+extraction cannot observe a formatting regression. All three are real quantization failure modes,
+and this harness is blind to them by construction. It is a good gate for what it gates.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: two deployments through the procedure</h2></div><div class="sec__body"><div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the operational procedure.</b> Thresholds are the
+  derived boundaries of &sect;4.4.3 for an H100 SXM; $B^{*}_{\text{MoE}} = M^{*}E/k$ from
+  &sect;4.4.5. <a href="04-01-the-design-space.html">&sect;4.1</a>'s tree selects from the design
+  space; this one starts from a measured workload.</p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Measure first<br/>steady-state concurrency B<br/>from the running service"] --> B{"Do bf16 weights leave<br/>room for the KV you need?"}
+    B -- no --> C["CAPACITY case<br/>quantize weights as hard as accuracy allows<br/>70B TP2: 1 request becomes 40<br/>latency argument does not apply yet"]
+    C --> A2["re-measure B after the change<br/>it will be much larger"]
+    A2 --> D
+    B -- yes --> D{"Is the model MoE?"}
+    D -- yes --> E{"B below M-star times E over k<br/>1216 for Qwen3-30B-A3B"}
+    E -- yes --> F["W4A16 on experts only<br/>int8_per_channel_weight_only or nvfp4_per_token<br/>or SGLang w4afp8<br/>leave dense linear at FP8"]
+    E -- no --> G["W8A8 FP8 everywhere<br/>experts included"]
+    D -- no --> H{"B below 118?"}
+    H -- yes --> I["W4A16 group-128<br/>up to 3.9x at batch 1<br/>advantage decays from B = 47"]
+    H -- no --> J{"B below 266?"}
+    J -- yes --> K["W8A8 FP8<br/>flat 2.0x at every batch"]
+    J -- no --> L["W8A8 FP8 only<br/>W4A16 here costs 0.45 ms per step<br/>and buys nothing back"]
+    F --> M["Accuracy gate<br/>paired eval on YOUR task<br/>report delta, flip rate, KL"]
+    G --> M
+    I --> M
+    K --> M
+    L --> M
+    M -- fails --> N["back off one rung<br/>finer group, 8-bit, or exempt layers"]
+    N --> M
+    M -- passes --> O["ship, then re-check<br/>when the batch shape moves"]
+  </script>
+</div>
+
+<p><b>Deployment A, the coding assistant.</b> Steady-state concurrency measured at 3. Llama-3-8B
+bf16 fits with 52 requests of headroom, so the capacity branch is skipped. Not MoE. $B = 3$ is far
+below 118, so W4A16 group-128. In vLLM this is not an online shorthand — there is no INT4 entry in
+<code>_ONLINE_SHORTHANDS</code> — so it means loading a GPTQ, AWQ or compressed-tensors checkpoint.
+<code>get_quantization_config</code> maps the checkpoint's <code>quant_method: "gptq"</code> through
+<code>vllm/model_executor/layers/quantization/__init__.py:L150-L152</code> to
+<code>AutoGPTQConfig</code>, whose <code>AutoGPTQLinearMethod</code> calls
+<code>choose_mp_linear_kernel</code> and lands on Marlin
+(<a href="04-03-formats-and-kernels.html">&sect;4.3</a> owns that walk). Predicted step time
+1.15&nbsp;ms against bf16's 4.48. The accuracy gate is a paired run on the team's own code-review
+prompts, not GSM8K.</p>
+
+<p><b>Deployment B, the summarisation batch.</b> Steady-state concurrency measured at 480.
+Llama-3-8B bf16 fits. Not MoE. 480 is above 266, so Regime III: W8A8-FP8. On an H100 the fp8
+tensor cores exist, so the weights go through a native fp8 GEMM rather than through Marlin —
+<code>MarlinFP8ScaledMMLinearKernel</code> at
+<code>vllm/model_executor/kernels/linear/scaled_mm/marlin.py:L29-L45</code> announces itself as the
+"FP8 Marlin kernel for GPUs that lack FP8 hardware support", so it is the fallback, not the path.
+Predicted step time 3.64&nbsp;ms against bf16's 7.28, and the W4A16 checkpoint that made
+Deployment A fast would have cost 7.73&nbsp;ms here.</p>
+
+<p>That the engines think in these regimes is visible in the dispatch itself. The FlashInfer
+blockscale FP8 path branches on $M$ and registers <em>both</em> branches into the compiled graph
+so the choice can be made per call:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/kernels/linear/scaled_mm/flashinfer.py:L304-L316</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    condition = input.shape[0] &lt; 32
+
+    # PyTorch's torch.compile cannot handle input-dependent control flow in standard
+    # Python conditionals. torch.cond() explicitly registers both code paths in the
+    # computation graph, allowing torch.compile to capture both branches.
+    # without torch.cond, the M &lt; 32 condition won't be able to be captured by torch
+    # compile
+    return torch.cond(
+        condition,
+        run_flashinfer_deepgemm_swapAB,
+        run_deepgemm,
+        (input, weight, weight_scale),
+    )</code></pre>
+</div></div></section>
+<section class="sec" id="pitfalls" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><b>Benchmarking the wrong batch size.</b> <code>vllm bench latency</code> defaults to
+<code>--batch-size 8</code>, <code>--input-len 32</code>, <code>--output-len 128</code>
+(<code>vllm/benchmarks/latency.py:L34-L52</code>). Batch 8 is deep in Regime I, where every
+weight-only scheme looks excellent. If your service runs at concurrency 300, that benchmark is
+measuring a workload you do not have, and it will tell you to ship W4A16 into the one regime where
+it loses. Sweep the batch axis or do not run it.</p>
+
+<p><b>Benchmarking the wrong phase.</b> <code>latency.py</code> times
+<code>llm.generate(...)</code> end to end and reports percentiles over whole-batch completions
+(<code>vllm/benchmarks/latency.py:L125-L167</code>). Prefill and decode are on opposite sides of
+the roofline, so a single blended number is exactly the statistic that cannot answer this
+chapter's question. SGLang's harness separates them by construction:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/one_batch.py:L784-L807</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    model_runner.synchronize()
+    tic = time.perf_counter()
+    next_token_ids, _, batch = model_runner.extend(reqs)
+    model_runner.synchronize()
+    prefill_latency = time.perf_counter() - tic
+# ...
+    tot_latency += prefill_latency
+    throughput = input_len * batch_size / prefill_latency
+    rank_print(
+        f"Prefill. latency: {prefill_latency:6.5f} s, throughput: {throughput:9.2f} token/s"
+    )
+    measurement_results["prefill_latency"] = prefill_latency
+    measurement_results["prefill_throughput"] = throughput</code></pre>
+</div>
+
+<p>and reports <code>median_decode_latency</code> separately at
+<code>python/sglang/benchmark/one_batch.py:L855-L865</code>, with <code>--batch-size</code>
+accepting a list (<code>python/sglang/benchmark/one_batch.py:L215-L226</code>). It drives
+<code>ModelRunner</code> directly — no HTTP, no scheduler — which makes it the closest thing
+either repository has to a clean measurement of Figure 1.</p>
+
+<p><b>A stale error message that sends you in a circle.</b>
+<a href="04-03-formats-and-kernels.html">&sect;4.3</a> found this and it is worth repeating here
+because it bites during exactly this kind of experiment. When a tensor-parallel split makes a shard
+awkward, Marlin refuses:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/utils/marlin_utils.py:L178-L186</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Validate output_size_per_partition
+    if output_size_per_partition % GPTQ_MARLIN_MIN_THREAD_N != 0:
+        raise ValueError(
+            f"Weight output_size_per_partition = "
+            f"{output_size_per_partition} is not divisible by "
+            f" min_thread_n = {GPTQ_MARLIN_MIN_THREAD_N}. "
+            "Consider reducing tensor_parallel_size or running "
+            "with --quantization gptq."
+        )</code></pre>
+</div>
+
+<p>The first suggestion works. The second does not, at <code>a556f3f</code>:
+<code>vllm/model_executor/layers/quantization/__init__.py:L150-L152</code> maps
+<code>"auto_gptq"</code>, <code>"gptq"</code> and <code>"gptq_marlin"</code> to the same
+<code>AutoGPTQConfig</code>, whose docstring is "Config class for AutoGPTQ quantization using
+Marlin kernels", and <code>override_quantization_method</code>
+(<code>vllm/model_executor/layers/quantization/auto_gptq.py:L219-L238</code>) accepts all four
+aliases including <code>"marlin"</code> and returns <code>"auto_gptq"</code> for every one. There is
+no non-Marlin GPTQ path left to fall back to; the flag takes the identical route and raises the
+identical error. The message is a fossil from when <code>gptq</code> and <code>gptq_marlin</code>
+were separate classes — which they still are in <code class="c-sglang">SGLang</code>
+(<code>python/sglang/srt/layers/quantization/__init__.py:L86-L88</code> registers
+<code>GPTQConfig</code> and <code>GPTQMarlinConfig</code> separately), so the advice is correct
+there and stale here.</p>
+
+<p>Note also that this error is now rarer than it looks: <code>marlin_padded_nk</code>
+(<code>vllm/model_executor/layers/quantization/utils/marlin_utils.py:L221-L242</code>) zero-pads
+awkward $(n, k)$ up to the cheaper thread-tile family and warns rather than refusing — "Marlin
+requires thread-tile padding for some weight shapes in this model. Activations and/or outputs of
+the padded layers are padded/sliced on every forward; performance may be degraded." A warning you
+scrolled past is a performance regression you will later blame on the quantization scheme.</p>
+
+<p><b>Comparing against the wrong baseline.</b> The only comparison that answers this chapter's
+question is quantized-versus-bf16 <em>on the same engine, same SHA, same flags, same batch</em>.
+Against a number from a blog post you are confounding the scheme with the kernel, the scheduler and
+the hardware. Even <a href="https://arxiv.org/abs/2411.02355">arXiv:2411.02355</a> is a prior, not
+a substitute.</p>
+
+<p><b>Running the deprecated shim.</b> <code>benchmarks/benchmark_latency.py</code> at the vLLM repo
+root prints "DEPRECATED: This script has been moved to the vLLM CLI" and exits 1
+(<code>benchmarks/benchmark_latency.py:L1-L17</code>). The real code is
+<code>vllm/benchmarks/latency.py</code>, reached as <code>vllm bench latency</code>. SGLang has the
+mirror-image shim: <code>python/sglang/bench_one_batch.py:L1-L19</code> re-exports
+<code>sglang.benchmark.one_batch</code> with a <code>FutureWarning</code>.</p></div></section>
+<section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>You need a GPU for any of this; I did not have one. <a href="../LABS.html">Lab 06</a> is the
+structured version. The minimum honest experiment is three commands per scheme.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Sweep the batch axis and find your own crossover</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># 1. Decode step time versus batch, prefill excluded. SGLang, direct ModelRunner.
+python -m sglang.benchmark.one_batch \
+  --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --batch-size 1 8 32 64 128 256 512 --input-len 512 --output-len 32
+# read "Decode.  median latency:" for each batch size; that is Figure 1's y-axis.
+
+# 2. Repeat with a W4A16 checkpoint and with online FP8.
+python -m sglang.benchmark.one_batch --model-path &lt;gptq-int4-model&gt; --batch-size 1 8 32 64 128 256 512 --input-len 512 --output-len 32
+python -m sglang.benchmark.one_batch --model-path meta-llama/Meta-Llama-3-8B-Instruct --quantization fp8 --batch-size 1 8 32 64 128 256 512 --input-len 512 --output-len 32
+
+# 3. The capacity axis, which step time cannot show you. Read the KV-blocks line at startup.
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct 2&gt;&amp;1 | grep -i "GPU KV cache size"
+
+# 4. Closed-loop serving at a fixed concurrency, both schemes.
+vllm bench serve --model &lt;model&gt; --dataset-name random \
+  --random-input-len 1024 --random-output-len 256 \
+  --max-concurrency 256 --num-prompts 2000
+
+# 5. The accuracy gate, run against both servers on the same questions.
+python tests/evals/gsm8k/gsm8k_eval.py --port 8000 --num-questions 1319</code></pre>
+</div>
+
+<p>Step 4's <code>--max-concurrency</code> is a client-side semaphore
+(<code>vllm/benchmarks/serve.py:L1588-L1599</code>): it caps in-flight requests independently of
+<code>--request-rate</code>, which is what lets you put the server at a chosen point on Figure 1's
+x-axis instead of wherever the arrival process happens to land it. Pin it, or you are measuring a
+queue rather than a kernel.</p>
+
+<p>Step 5 gives you a score, not a comparison. For the flip rate, keep the per-question
+<code>preds</code> array from both runs — <code>gsm8k_eval.py</code> already builds it before
+reducing to <code>np.mean(np.array(preds) == np.array(labels))</code> at
+<code>tests/evals/gsm8k/gsm8k_eval.py:L189-L200</code> — and count the positions where the two
+runs disagree.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read and answer.</b> Open <code>vllm/config/quantization.py</code> and list every entry in
+  <code>_ONLINE_SHORTHANDS</code> that sets <code>moe</code> but not <code>linear</code>. For each,
+  say which regime of Figure 1 the dense linear layers must be in for that choice to be the right
+  one.</li>
+
+  <li><b>Derive.</b> Recompute the three regime boundaries for Llama-3-70B at TP=8. Per GPU,
+  $W = 8.75$&nbsp;B streamed parameters. Does the ordering of the schemes change? Does
+  $B^{*}$ change? Explain in one sentence why the answer to the second question is what it is.</li>
+
+  <li><b>Derive.</b> DeepSeek-V3 has $E = 256$ routed experts and $k = 8$. At what serving batch do
+  its expert GEMMs leave Regime I for W4A16? Now suppose you deploy with expert parallelism across
+  16 GPUs, so each GPU holds 16 experts. Does $M_e$ per expert change? Does the answer to the first
+  part change?</li>
+
+  <li><b>Predict, then verify.</b> Predict the sign and rough magnitude of the W4A16-versus-bf16
+  step-time difference at batch 512 for Llama-3-8B on an H100. Then run exercise 1's command list
+  on real hardware and check. If your measured penalty is much larger than 0.45&nbsp;ms, name two
+  mechanisms in <a href="04-03-formats-and-kernels.html">&sect;4.3</a> that could explain it.</li>
+
+  <li><b>Statistics.</b> A colleague reports that the INT4 build scores 0.79 on GSM8K against the
+  bf16 build's 0.81 and concludes the quantization cost two points. Both runs used the full 1,319
+  questions. What is the 95% confidence interval on that difference under an unpaired analysis?
+  What extra number would you ask them for, and how would it change the conclusion?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> <code>int8_per_channel_weight_only</code> and <code>nvfp4_per_token</code>
+    (<code>vllm/config/quantization.py:L138-L147</code>); both carry only a <code>moe</code> field,
+    and the comments say so explicitly. Leaving dense linear unquantized is right when those layers
+    are in Regime III — compute-bound at the serving batch — where weight-only quantization is a
+    net loss, while the experts remain in Regime I because routing divides their effective $M$ by
+    $E/k$.</p>
+
+    <p><b>2.</b> Memory terms scale down by 8 and so does the mma term, because both are
+    proportional to $W$. The boundaries are ratios of the two, so <em>every</em> boundary is
+    unchanged: 47, 118, 266. $B^{*} = I^{*}b_w/2$ contains no model term at all. Tensor parallelism
+    moves the absolute latencies, not the crossovers — which is exactly why the crossovers are worth
+    memorising and the latencies are not. (Communication cost, which Part 5 owns, is the term this
+    model omits.)</p>
+
+    <p><b>3.</b> $B^{*}_{\text{MoE}} = 76 \times 256/8 = 2{,}432$. Under expert parallelism each GPU
+    holds 16 of the 256 experts, but the routing fraction per expert is unchanged — a token still
+    picks 8 of 256 — so $M_e = Bk/E = B/32$ regardless of placement. The answer to the first part is
+    unchanged. What EP changes is the all-to-all traffic and the load-balance variance, not the
+    arithmetic intensity of an individual expert GEMM.</p>
+
+    <p><b>4.</b> Positive sign, roughly 0.45&nbsp;ms: W4A16 issues the same bf16 <code>mma</code>
+    instructions plus dequantisation. A much larger measured penalty would point at (a) Marlin
+    thread-tile zero-padding, which <code>marlin_padded_nk</code> warns about once at load and then
+    pays on every forward, or (b) falling off Marlin onto a slower mixed-precision kernel entirely
+    — check the "Using ... for AutoGPTQLinearMethod" log line to see which kernel was chosen.</p>
+
+    <p><b>5.</b> Standard error per score $\approx 1.1$ pp; unpaired difference standard error
+    $\approx 1.56$ pp; 95% CI on a 2 pp difference is roughly $\pm 3.1$ pp, i.e. $[-1.1, +5.1]$ —
+    consistent with zero. Ask for the flip rate on the same 1,319 questions. A 3% flip rate means
+    the models are nearly the same model and the 2 points are noise; a 15% flip rate means they
+    behave very differently and the equal-ish scores are a coincidence of two large offsetting flip
+    populations, which is precisely
+    <a href="https://arxiv.org/abs/2407.09141">arXiv:2407.09141</a>'s finding.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>Weight-only quantization divides one term of $\max(\text{bytes}/\beta,\ \text{FLOP}/P)$ and
+  adds a constant to the other. W8A8 divides both. That structural difference, not any accuracy
+  argument, is why W4A16 has a crossover and W8A8-FP8 does not.</li>
+
+  <li>Above roughly $B = 266$ on an H100, W4A16 issues the same bf16 <code>mma</code> instructions
+  as bf16 plus about 0.45&nbsp;ms of dequantisation per Llama-3-8B decode step. It is not
+  "diminishing returns"; it is a permanent tax that grows no smaller as batch grows.</li>
+
+  <li>Capacity and latency are orthogonal. Freeing 49&nbsp;GiB of weights on a 70B at TP=2 takes the
+  concurrency ceiling from 1 request to 40 — a 40&times; throughput effect that a batch-1 latency
+  benchmark cannot see, and that no kernel improvement can substitute for.</li>
+
+  <li>MoE routing divides the effective GEMM height by $E/k$, so expert weights stay memory-bound to
+  batch sizes 16&ndash;32&times; beyond where dense layers cross over — while being 95&ndash;97.5% of
+  the parameters. Both engines ship MoE-only quantization specs for exactly this reason.</li>
+
+  <li>GSM8K at 1,319 questions resolves about 3 percentage points between independent runs, and
+  vLLM's CI gate adds another 8 points of tolerance on top. Any claim that a scheme is "lossless"
+  based on that pipeline is a claim about CI stability, not about accuracy.</li>
+
+  <li>Report score delta, flip rate and KL together, paired on identical prompts. Equal scores with
+  a high flip rate is the failure mode the literature was written to warn about, and it is invisible
+  to every aggregate metric.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://arxiv.org/abs/2411.02355">arXiv:2411.02355</a> — <em>"Give Me BF16 or Give Me
+  Death"? Accuracy-Performance Trade-Offs in LLM Quantization</em>, Kurtic, Marques, Pandit, Kurtz,
+  Alistarh. Over 500,000 evaluations across the Llama-3.1 family; the largest published sweep.</li>
+
+  <li><a href="https://arxiv.org/abs/2407.09141">arXiv:2407.09141</a> — <em>Accuracy is Not All You
+  Need</em>. The flips-and-KL argument, and the methodological source for &sect;4.4.6.</li>
+
+  <li><a href="https://arxiv.org/abs/2409.11055">arXiv:2409.11055</a> — <em>Exploring the
+  Trade-Offs: Quantization Methods, Task Difficulty, and Model Size</em>. 1B to 405B, four methods,
+  13 datasets.</li>
+
+  <li><a href="https://arxiv.org/abs/2504.04823">arXiv:2504.04823</a> — <em>Quantization Hurts
+  Reasoning?</em> Also the source for the negative result on output length.</li>
+
+  <li><code>docs/features/quantization/online.md</code> in the vLLM tree — the online-quantization
+  schema referenced from <code>QuantizationConfigArgs</code>'s docstring; the canonical description
+  of the <code>linear</code>/<code>moe</code> split.</li>
+
+  <li><code>tests/evals/gsm8k/README.md</code> — how to run vLLM's accuracy CI locally, including
+  the standalone <code>gsm8k_eval.py</code> path against an already-running server.</li>
+
+  <li>SGLang's developer-guide page <code>benchmark_and_profiling.mdx</code> — the comparison table
+  of <code>bench_serving</code>, <code>bench_one_batch_server</code>,
+  <code>bench_offline_throughput</code> and <code>bench_one_batch</code>, with the note that the
+  last is for "kernel-level latency profiling of a single static batch".</li>
+
+  <li><a href="../LABS.html">Lab 06 — quantization tradeoff</a>. Every number in this chapter is
+  derived; the lab is where they become measured.</li>
+</ul></div></section>
+<div class="pager"><a href="04-03-formats-and-kernels.html"><div class="pager__k">← Previous</div><div class="pager__t">Formats and kernels: FP8, INT8, INT4, Marlin, Machete</div></a><a class="pager__next" href="../05-parallelism/05-01-tensor-parallelism.html"><div class="pager__k">Next →</div><div class="pager__t">Tensor parallelism</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: two terms and three regimes</a>
+<a href="#capacity">The other axis: capacity, not latency</a>
+<a href="#moe">The MoE special case: routing divides the batch</a>
+<a href="#accuracy">Measuring accuracy honestly</a>
+<a href="#worked-trace">Worked trace: two deployments through the procedure</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

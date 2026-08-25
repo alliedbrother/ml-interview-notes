@@ -1,0 +1,2238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speculative decoding and the correctness proof — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i is-current" href="06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 6 · Decoding algorithms · 06-02</div>
+<h1>Speculative decoding and the correctness proof</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/sample/rejection_sampler.py</code></li><li><code>vllm/v1/spec_decode/</code></li><li><code>python/sglang/srt/speculative/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A batch-1 decode step on an H100 spends 4.48 ms streaming 15 GB of weights to
+produce one token, using 0.34% of the machine's arithmetic. Speculative decoding is the trick
+that spends the other 99.66% — and the remarkable part is that it does so without changing the
+output distribution by a single bit of probability mass.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is the number that starts everything, taken from
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>. Llama-3-8B in
+bf16 streams 7.50 B parameters per token — 15.01 GB — because the input embedding table is
+gathered rather than streamed. At the H100 SXM's 3.35 TB/s that is a hard floor of
+<strong>4.48 ms per decode step at batch 1</strong>, or 223 tokens per second, and roughly 98%
+of that traffic is weights.</p>
+
+<p>Now count the arithmetic in that same step. One token through 7.50 B matmul parameters is
+$2 \times 7.50\times10^{9} = 15.0$ GFLOP. At 989.4 TFLOP/s that is 15.2 µs of tensor-core work
+inside a 4,480 µs step. The GPU is idle, in the only sense that matters, for 4,465 µs out of
+every 4,480.</p>
+
+<p>Write the arithmetic intensity of a whole decode step as a function of $T$, the number of
+token positions in the step:</p>
+
+<div class="math-display">$$I(T) = \frac{2 N_{\text{stream}} T}{\text{bytes}_{\text{weights}}} = \frac{1.500\times10^{10}\,T}{1.501\times10^{10}} = 0.999\,T.$$</div>
+
+<p><em>Derived.</em> In bf16 a parameter costs two bytes and buys two FLOPs, so the two constants
+cancel and <strong>the arithmetic intensity of a decode step is numerically equal to the number
+of token positions in it</strong>. The H100's ridge of $I^{*} = 295$ FLOP/byte therefore reads,
+for this model, as a ridge at <strong>295 token positions per step</strong>. Below it, the step
+time is a constant 4.48 ms no matter how many positions you push through. That is the entire
+opportunity: positions 2 through 295 of a decode step are free.</p>
+
+<p>The catch is causality. You cannot compute token $t+1$ until you have token $t$, so a plain
+decode loop can only ever put one position per sequence into the step. Speculative decoding
+breaks the dependency by <em>guessing</em> the next $\kappa$ tokens from something cheap, then
+checking all $\kappa+1$ of them in a single target pass. The guessing is easy. The hard part —
+the part this chapter is about — is checking them in a way that provably leaves the output
+distribution untouched.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>One target step produces a probability distribution at <em>every</em> position you feed it,
+not just the last one. That is a property of causal attention, not a feature anyone added: run
+the model over <code>[x₁ … x_t, x̃₁, x̃₂, x̃₃]</code> and position $t$ tells you the true
+distribution for $x̃_1$, position $t{+}1$ tells you the true distribution for $x̃_2$ given
+$x̃_1$, and so on. If the guesses happen to be right, you have just validated four tokens for
+the price of one weight stream. If they are wrong, you find out at the first wrong one and throw
+away everything after it.</p>
+
+<p>So the loop becomes: draft $\kappa$ tokens cheaply, verify all $\kappa+1$ positions in one
+target pass, keep a random-length prefix, repeat. Figure 1 puts real numbers on both timelines.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — plain decode against draft-then-verify, drawn to scale over 21 ms.</b>
+    All step times <em>derived</em> from the §0.4 bandwidth floor: target Llama-3-8B (15.01 GB streamed,
+    4.48 ms), draft Llama-3.2-1B (2.47 GB streamed, 0.74 ms), verify pass 4.49 ms because the three extra
+    positions add roughly 7 MB each of activation, KV-write and logit traffic to a 15.01 GB stream.
+    Token counts assume
+    an acceptance rate of 0.70, which is an assumption, not a measurement.</p>
+  <svg viewBox="0 0 960 330" width="100%" role="img" aria-labelledby="tlTitle tlDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="tlTitle">Timeline comparison of plain decode and speculative decode</title>
+    <desc id="tlDesc">Two horizontal timelines over 21 milliseconds. The top track shows four
+    plain decode steps of 4.48 milliseconds each, emitting four tokens. The bottom track shows
+    three speculative steps, each three draft passes of 0.74 milliseconds followed by one verify
+    pass of 4.49 milliseconds, emitting an expected 7.6 tokens.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.13" stroke-width="1">
+      <line x1="110" y1="45" x2="110" y2="270"/>
+      <line x1="300" y1="45" x2="300" y2="270"/>
+      <line x1="490" y1="45" x2="490" y2="270"/>
+      <line x1="680" y1="45" x2="680" y2="270"/>
+      <line x1="870" y1="45" x2="870" y2="270"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="middle">
+      <text x="110" y="292">0 ms</text>
+      <text x="300" y="292">5</text>
+      <text x="490" y="292">10</text>
+      <text x="680" y="292">15</text>
+      <text x="870" y="292">20</text>
+    </g>
+
+    <text x="16" y="72" fill="currentColor" fill-opacity="0.85" font-size="12.5">plain decode</text>
+    <text x="16" y="88" fill="currentColor" fill-opacity="0.55" font-size="11.5">batch 1</text>
+    <g fill="var(--plum)" fill-opacity="0.30" stroke="var(--plum)" stroke-width="1.4">
+      <rect x="110" y="60" width="168" height="42" rx="3"/>
+      <rect x="280.2" y="60" width="168" height="42" rx="3"/>
+      <rect x="450.4" y="60" width="168" height="42" rx="3"/>
+      <rect x="620.6" y="60" width="168" height="42" rx="3"/>
+      <rect x="790.8" y="60" width="117" height="42" rx="3"/>
+    </g>
+    <g fill="currentColor" font-size="11.5" text-anchor="middle">
+      <text x="194" y="86">target 4.48</text>
+      <text x="364" y="86">target 4.48</text>
+      <text x="534" y="86">target 4.48</text>
+      <text x="704" y="86">target 4.48</text>
+      <text x="849" y="86" fill-opacity="0.5">target…</text>
+    </g>
+    <g fill="var(--plum)" font-size="11.5" text-anchor="middle">
+      <text x="194" y="120">+1 tok</text>
+      <text x="364" y="120">+1</text>
+      <text x="534" y="120">+1</text>
+      <text x="704" y="120">+1</text>
+    </g>
+    <text x="912" y="86" fill="var(--plum)" font-size="12.5">4 tokens</text>
+
+    <text x="16" y="182" fill="currentColor" fill-opacity="0.85" font-size="12.5">speculative</text>
+    <text x="16" y="198" fill="currentColor" fill-opacity="0.55" font-size="11.5">κ = 3</text>
+    <g fill="var(--copper)" fill-opacity="0.34" stroke="var(--copper)" stroke-width="1.2">
+      <rect x="110" y="170" width="27" height="42" rx="2"/>
+      <rect x="138.1" y="170" width="27" height="42" rx="2"/>
+      <rect x="166.2" y="170" width="27" height="42" rx="2"/>
+      <rect x="365" y="170" width="27" height="42" rx="2"/>
+      <rect x="393.1" y="170" width="27" height="42" rx="2"/>
+      <rect x="421.2" y="170" width="27" height="42" rx="2"/>
+      <rect x="620" y="170" width="27" height="42" rx="2"/>
+      <rect x="648.1" y="170" width="27" height="42" rx="2"/>
+      <rect x="676.2" y="170" width="27" height="42" rx="2"/>
+      <rect x="875" y="170" width="27" height="42" rx="2"/>
+    </g>
+    <g fill="var(--teal)" fill-opacity="0.30" stroke="var(--teal)" stroke-width="1.4">
+      <rect x="194.3" y="170" width="169.6" height="42" rx="3"/>
+      <rect x="449.3" y="170" width="169.6" height="42" rx="3"/>
+      <rect x="704.3" y="170" width="169.6" height="42" rx="3"/>
+    </g>
+    <g fill="currentColor" font-size="11.5" text-anchor="middle">
+      <text x="279" y="196">verify 4 pos, 4.49</text>
+      <text x="534" y="196">verify 4 pos, 4.49</text>
+      <text x="789" y="196">verify 4 pos, 4.49</text>
+    </g>
+    <g fill="var(--copper)" font-size="11" text-anchor="middle">
+      <text x="151" y="160">3 drafts, 0.74 each</text>
+    </g>
+    <g fill="var(--teal)" font-size="11.5" text-anchor="middle">
+      <text x="279" y="230">+2.53 tok</text>
+      <text x="534" y="230">+2.53</text>
+      <text x="789" y="230">+2.53</text>
+    </g>
+    <text x="912" y="196" fill="var(--teal)" font-size="12.5">7.6 tokens</text>
+
+    <line x1="194.3" y1="248" x2="363.9" y2="248" stroke="currentColor" stroke-opacity="0.45" stroke-width="1"/>
+    <text x="279" y="264" fill="currentColor" fill-opacity="0.6" font-size="11" text-anchor="middle">one weight stream — same 15 GB as a 1-token step</text>
+  </svg>
+</div>
+
+<p>The verify block is the same width as a plain decode block because it moves the same bytes.
+That is the whole argument. The three narrow copper blocks are the price: three sequential
+passes over a 1B draft model, 2.21 ms, which is why the speculative step is 6.70 ms rather than
+4.48. You pay 50% more wall clock per step and get 2.53× more tokens out of it.</p></div></section>
+<section class="sec" id="the-algorithm" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">The algorithm, stated precisely</h2></div><div class="sec__body"><p>Fix a prefix. Let $V$ be the vocabulary, $p(\cdot)$ the target model's next-token
+distribution, and $q(\cdot)$ the draft's. Both are probability distributions on $V$; nothing
+else is assumed about $q$. Let $\kappa$ be the number of drafted tokens. vLLM calls it
+<code>num_speculative_tokens</code>. SGLang's equivalent is <code>speculative_num_steps</code> —
+<em>not</em> <code>speculative_num_draft_tokens</code>, which is the verify-window length: for chain
+drafting SGLang overwrites it with <code>speculative_num_steps + 1</code> whenever
+<code>speculative_eagle_topk == 1</code>
+(<code>python/sglang/srt/arg_groups/speculative_hook.py:L674-L683</code>). That off-by-one is what
+makes SGLang's KV reservation in §6.2.9 come out at $\kappa+1$ rather than $\kappa$.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">PSEUDOCODE — the real thing is vllm/v1/sample/rejection_sampler.py:L394-L507</span>
+    <span class="tag tag--pseudo">pseudocode</span>
+  </div>
+  <pre class="code-block"><code>def spec_step(prefix, target, draft, kappa):
+    # 1. DRAFT. kappa sequential cheap forward passes.
+    xs, qs = [], []
+    for i in range(kappa):
+        q_i = draft(prefix + xs)             # distribution over V
+        xs.append(sample(q_i)); qs.append(q_i)
+
+    # 2. VERIFY. ONE target pass over all kappa+1 positions.
+    #    ps[i] is p(. | prefix + xs[:i]) -- the true conditional,
+    #    because causal attention gives a distribution at every position.
+    ps = target(prefix + xs)                 # kappa+1 distributions
+
+    # 3. ACCEPT / REJECT, left to right, stop at the first rejection.
+    out = []
+    for i in range(kappa):
+        x = xs[i]
+        u = uniform(0, 1)
+        if u &lt; min(1, ps[i][x] / qs[i][x]):
+            out.append(x)                    # accept
+        else:
+            residual = relu(ps[i] - qs[i])   # elementwise max(0, .)
+            out.append(sample(residual / residual.sum()))
+            return out                       # DISCARD ps[i+1:] -- see below
+    # 4. BONUS. All kappa accepted, so ps[kappa] is conditioned on a
+    #    prefix that actually happened. Free extra token.
+    out.append(sample(ps[kappa]))
+    return out</code></pre>
+</div>
+
+<p>Three things in that listing are load-bearing and are the three things implementations get
+wrong. First, the acceptance test uses the ratio $p_i(x)/q_i(x)$ at the <em>drafted token
+only</em> — not a threshold on $p$, not a top-$k$ membership test. Second, on rejection you must
+resample from the <em>residual</em> $\max(0, p-q)$, not from $p$. Third, on rejection you must
+discard every later position, even though the target already computed distributions for them,
+because those distributions were conditioned on a prefix that did not happen.</p>
+
+<p>Steps 3 and 4 are the whole of <code>rejection_sample</code> in vLLM and of
+<code>speculative_sampling_classic_kernel</code> in SGLang. Everything else in both codebases is
+plumbing.</p></div></section>
+<section class="sec" id="the-proof" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The proof: the emitted distribution is exactly p</h2></div><div class="sec__body"><p>The claim is not "approximately $p$", not "$p$ in expectation over many steps", not "$p$ up
+to a bounded divergence". It is that the single token emitted at each position is drawn from
+exactly $p$, for any $q$ whatsoever. Here is the argument, with every symbol defined.</p>
+
+<h3>One position</h3>
+
+<p>Fix a position and drop the index. Let $X$ be the token this procedure emits. Two events
+partition the sample space: <em>accept</em> (the drafted token survives the coin flip) and
+<em>reject</em>. Compute the probability of emitting a specific token $x \in V$ under each.</p>
+
+<p><strong>Accept branch.</strong> To emit $x$ by acceptance, the draft must have proposed $x$
+— probability $q(x)$ — and the coin must have landed under the acceptance ratio — probability
+$\min\!\big(1, p(x)/q(x)\big)$. These are independent given $x$, so</p>
+
+<div class="math-display">$$\mathbb{P}(\text{accept},\, X = x) \;=\; q(x)\cdot\min\!\left(1, \frac{p(x)}{q(x)}\right) \;=\; \min\big(q(x),\, p(x)\big).$$</div>
+
+<p>The rewriting is the first small miracle: multiplying a probability by a clamped ratio is
+just a minimum. If $q(x) = 0$ the token is never proposed and the left side is $0$, which is
+also $\min(0, p(x))$ — so the identity holds on all of $V$ with no case split.</p>
+
+<p>Summing over $x$ gives the acceptance probability:</p>
+
+<div class="math-display">$$A \;\equiv\; \mathbb{P}(\text{accept}) \;=\; \sum_{x \in V} \min\big(p(x), q(x)\big) \;=\; 1 - D_{\mathrm{TV}}(p, q),$$</div>
+
+<p>where $D_{\mathrm{TV}}(p,q) = \tfrac{1}{2}\sum_x |p(x)-q(x)|$ is total variation distance.
+<strong>The per-token acceptance rate is one minus the total-variation distance between draft and
+target</strong>, which is the correct way to think about "draft quality" and the quantity every
+draft-training objective is secretly optimising (<a href="06-03-draft-sources.html">§6.3</a>,
+<a href="06-04-eagle-medusa-mtp.html">§6.4</a>).</p>
+
+<p><strong>Reject branch.</strong> On rejection we sample from the normalised residual</p>
+
+<div class="math-display">$$p'(x) \;=\; \frac{\max\big(0,\, p(x) - q(x)\big)}{Z}, \qquad Z \;=\; \sum_{y \in V} \max\big(0,\, p(y) - q(y)\big).$$</div>
+
+<p>Now the second and larger miracle. Use the elementary identity
+$\max(0, a - b) = a - \min(a, b)$, valid for all reals:</p>
+
+<div class="math-display">$$Z \;=\; \sum_{x} \Big[p(x) - \min\big(p(x), q(x)\big)\Big] \;=\; \underbrace{\sum_x p(x)}_{=\,1} \;-\; \underbrace{\sum_x \min\big(p(x),q(x)\big)}_{=\,A} \;=\; 1 - A.$$</div>
+
+<p><strong>The residual mass equals the rejection probability exactly.</strong> This is not a
+tuning choice; it is forced, and it is forced by the single fact that $p$ and $q$ both sum to
+one. It is why the algorithm has no free parameter and no correction factor.</p>
+
+<h3>Adding the branches</h3>
+
+<div class="math-display">$$\begin{aligned}
+\mathbb{P}(X = x) &= \mathbb{P}(\text{accept},\, X=x) \;+\; \mathbb{P}(\text{reject})\cdot p'(x) \\[2pt]
+&= \min\big(p(x), q(x)\big) \;+\; (1-A)\cdot\frac{\max\big(0,\, p(x)-q(x)\big)}{Z} \\[2pt]
+&= \min\big(p(x), q(x)\big) \;+\; \max\big(0,\, p(x)-q(x)\big) &&\text{since } Z = 1-A \\[2pt]
+&= \min\big(p(x), q(x)\big) \;+\; p(x) - \min\big(p(x), q(x)\big) \\[2pt]
+&= p(x). \qquad\blacksquare
+\end{aligned}$$</div>
+
+<p>Every line is an identity. There is no inequality, no limit, no assumption on $q$ beyond
+being a distribution on $V$. A uniform draft, an n-gram table, a draft model trained on a
+different corpus — all of them emit exactly $p$. <strong>A bad draft costs throughput and
+nothing else.</strong> Speculative decoding is not a quality/speed trade-off; it is a
+speed/compute trade-off wearing a probabilistic disguise.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — one accept/reject decision as probability mass.</b>
+    A five-token toy vocabulary. Teal is $\min(p,q)$, the mass that accepting delivers correctly.
+    Copper is $\max(0, p-q)$, the residual the rejection branch must supply. Plum is
+    $\max(0, q-p)$, draft mass that gets thrown away. The copper and plum totals are equal —
+    both are $D_{\mathrm{TV}}(p,q)$ — which is the proof in one picture.</p>
+  <svg viewBox="0 0 940 430" width="100%" role="img" aria-labelledby="pqTitle pqDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="pqTitle">Draft and target distributions with accepted mass and residual</title>
+    <desc id="pqDesc">Paired bar chart over five tokens. For each token a draft bar q and a target
+    bar p are drawn side by side. The overlapping portion, the elementwise minimum, is shaded teal
+    and totals 0.65. The part of p above q is shaded copper and totals 0.35. The part of q above p
+    is shaded plum and also totals 0.35.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.12" stroke-width="1">
+      <line x1="80" y1="330" x2="880" y2="330"/>
+      <line x1="80" y1="270" x2="880" y2="270"/>
+      <line x1="80" y1="210" x2="880" y2="210"/>
+      <line x1="80" y1="150" x2="880" y2="150"/>
+      <line x1="80" y1="90" x2="880" y2="90"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="end">
+      <text x="72" y="334">0.0</text>
+      <text x="72" y="274">0.1</text>
+      <text x="72" y="214">0.2</text>
+      <text x="72" y="154">0.3</text>
+      <text x="72" y="94">0.4</text>
+    </g>
+    <line x1="80" y1="60" x2="80" y2="330" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.3"/>
+    <line x1="80" y1="330" x2="880" y2="330" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.3"/>
+
+    <g fill="var(--teal)" fill-opacity="0.45" stroke="var(--teal)" stroke-width="1.3">
+      <rect x="105" y="240" width="42" height="90"/><rect x="157" y="240" width="42" height="90"/>
+      <rect x="235" y="180" width="42" height="150"/><rect x="287" y="180" width="42" height="150"/>
+      <rect x="365" y="270" width="42" height="60"/><rect x="417" y="270" width="42" height="60"/>
+      <rect x="495" y="270" width="42" height="60"/><rect x="547" y="270" width="42" height="60"/>
+      <rect x="625" y="300" width="42" height="30"/><rect x="677" y="300" width="42" height="30"/>
+    </g>
+    <g fill="var(--copper)" fill-opacity="0.55" stroke="var(--copper)" stroke-width="1.3">
+      <rect x="157" y="90" width="42" height="150"/>
+      <rect x="417" y="210" width="42" height="60"/>
+    </g>
+    <g fill="var(--plum)" fill-opacity="0.40" stroke="var(--plum)" stroke-width="1.3">
+      <rect x="235" y="60" width="42" height="120"/>
+      <rect x="495" y="180" width="42" height="90"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.75" font-size="11" text-anchor="middle">
+      <text x="126" y="346">q</text><text x="178" y="346">p</text>
+      <text x="256" y="346">q</text><text x="308" y="346">p</text>
+      <text x="386" y="346">q</text><text x="438" y="346">p</text>
+      <text x="516" y="346">q</text><text x="568" y="346">p</text>
+      <text x="646" y="346">q</text><text x="698" y="346">p</text>
+    </g>
+    <g fill="currentColor" font-size="12.5" text-anchor="middle">
+      <text x="152" y="368">token A</text>
+      <text x="282" y="368">token B</text>
+      <text x="412" y="368">token C</text>
+      <text x="542" y="368">token D</text>
+      <text x="672" y="368">token E</text>
+    </g>
+    <g fill="currentColor" fill-opacity="0.55" font-size="10.5" text-anchor="middle">
+      <text x="152" y="384">p .40 q .15</text>
+      <text x="282" y="384">p .25 q .45</text>
+      <text x="412" y="384">p .20 q .10</text>
+      <text x="542" y="384">p .10 q .25</text>
+      <text x="672" y="384">p .05 q .05</text>
+    </g>
+
+    <g font-size="12">
+      <rect x="745" y="98" width="14" height="14" fill="var(--teal)" fill-opacity="0.45" stroke="var(--teal)"/>
+      <text x="767" y="110" fill="currentColor">min(p,q) — accepted</text>
+      <text x="767" y="126" fill="var(--teal)">total = 0.65 = α</text>
+      <rect x="745" y="146" width="14" height="14" fill="var(--copper)" fill-opacity="0.55" stroke="var(--copper)"/>
+      <text x="767" y="158" fill="currentColor">max(0, p−q) — residual</text>
+      <text x="767" y="174" fill="var(--copper)">total = 0.35 = 1 − α = Z</text>
+      <rect x="745" y="194" width="14" height="14" fill="var(--plum)" fill-opacity="0.40" stroke="var(--plum)"/>
+      <text x="767" y="206" fill="currentColor">max(0, q−p) — wasted</text>
+      <text x="767" y="222" fill="var(--plum)">total = 0.35 = D_TV</text>
+    </g>
+    <text x="745" y="256" fill="currentColor" fill-opacity="0.8" font-size="12">teal + copper = p, exactly,</text>
+    <text x="745" y="272" fill="currentColor" fill-opacity="0.8" font-size="12">column by column.</text>
+  </svg>
+</div>
+
+<h3>Chaining the positions</h3>
+
+<p>The per-position result composes by induction on the position index. Suppose positions
+$1..i-1$ were all accepted. Then the emitted prefix is exactly $\tilde{x}_1..\tilde{x}_{i-1}$,
+which is exactly the prefix the target conditioned on when it produced $p_i$ in the single
+verify pass. So $p_i$ is the correct conditional for the sequence that actually happened, and
+the one-position argument applies verbatim: position $i$ emits from $p_i$.</p>
+
+<p>At the first rejection, say position $j$, the emitted token comes from the residual at $j$
+and — by the same argument — is distributed as $p_j$ given the accepted prefix. But
+$p_{j+1}, \dots, p_{\kappa}$ were computed conditioned on $\tilde{x}_j$, and $\tilde{x}_j$ was
+just rejected. Those distributions are conditionals of a sequence that does not exist.
+<strong>This is why the tail must be discarded, and it is the single most common way a
+speculative implementation silently biases its output.</strong> If all $\kappa$ are accepted,
+$p_{\kappa+1}$ <em>was</em> conditioned on a prefix that happened, so sampling it is free and
+correct — that is the bonus token, and the reason the exponent in
+$\mathbb{E}[\text{tokens}]$ is $\kappa+1$ and not $\kappa$.</p></div></section>
+<section class="sec" id="greedy" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Greedy as a degenerate case</h2></div><div class="sec__body"><p>Set temperature to zero. Then $p = \delta_{a}$ where $a = \arg\max_x p(x)$, and with greedy
+drafting $q = \delta_{d}$ where $d$ is the draft's argmax. The acceptance ratio collapses:</p>
+
+<ul>
+  <li>If $d = a$: $p(d)/q(d) = 1/1 = 1$, accept with probability 1.</li>
+  <li>If $d \ne a$: $p(d) = 0$, accept with probability 0.</li>
+  <li>Residual on rejection: $\max(0, \delta_a - \delta_d) = \delta_a$, normalised to $\delta_a$
+      — emit the target's argmax.</li>
+</ul>
+
+<p>So the entire probabilistic machinery degenerates to "accept while the draft matches the
+target's argmax; on mismatch, emit the target's argmax". vLLM implements exactly that as a
+separate kernel rather than deriving it at runtime:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/rejection_sampler.py:L743-L761</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    rejected = False
+    for pos in range(num_draft_tokens):
+        if not rejected:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos).to(tl.int32)
+            # ...
+            else:
+                token_id = target_argmax_id
+                rejected = draft_token_id != target_argmax_id
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                token_id,
+            )</code></pre>
+</div>
+
+<p>Note the elegance of <code>token_id = target_argmax_id</code> being assigned
+unconditionally: on acceptance the argmax <em>equals</em> the draft token, so one store covers
+both branches.</p>
+
+<p>Is greedy speculative decoding bit-identical to greedy plain decoding? Only under two
+conditions that production violates routinely. First, argmax ties: <code>torch.argmax</code>
+returns the lowest index among equal maxima, and a draft that picked a different tied token is
+rejected — the emitted token is still the target's argmax, so the <em>distribution</em> is
+unchanged, but a downstream diff against a non-speculative run needs the same tie-break.
+Second, and much worse: the logits the target produces at position $i$ of a $(\kappa{+}1)$-token
+verify pass are not bitwise the logits the same model produces for the same prefix in a
+1-token decode step, because the GEMM shape differs, the split-K reduction order differs, and
+floating-point addition is not associative. Near a near-tie that flips the argmax and the two
+runs diverge forever. This is batch invariance, and it is
+<a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>'s whole subject. SGLang
+carries the tensor-parallel version of the same hazard in a comment:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/speculative/eagle_utils.py:L859-L872</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Sync sampling results across TP ranks: different GPUs may
+        # produce slightly different target_probs due to floating-point
+        # non-determinism in softmax/top_k/top_p, causing different
+        # sampled tokens. Broadcast from rank 0 to ensure consistency.
+        tp_group = (
+            get_parallel().attn_tp_group
+            if is_dp_attention_enabled()
+            else get_tp_group()
+        )
+        if tp_group.world_size &gt; 1:
+            tp_group.broadcast(predict, src=0)
+            tp_group.broadcast(accept_index, src=0)
+            tp_group.broadcast(num_correct_drafts, src=0)</code></pre>
+</div>
+
+<p>Without that broadcast, two ranks accept different numbers of tokens, their sequence lengths
+diverge, and the next collective deadlocks. The ROCm branch above it (L745-L758) does the same
+for the greedy path because "the per-rank draft tokens can differ".</p></div></section>
+<section class="sec" id="economics" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The economics, derived</h2></div><div class="sec__body"><h3>Expected tokens per step</h3>
+
+<p>Model per-token acceptance as i.i.d. Bernoulli($\alpha$). This is an approximation — real
+acceptance decays with position because errors compound — and vLLM's synthetic-acceptance
+harness makes the position dependence explicit by taking per-position <em>unconditional</em>
+rates $r_i = \mathbb{P}(\text{first } i \text{ all accepted})$ and converting them to conditional
+rates:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/spec_decode/utils.py:L598-L601</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def unconditional_to_conditional_rates(rates: list[float]) -&gt; list[float]:
+    """Convert per-position unconditional rates to per-position conditional
+    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
+    return [p / q if q &gt; 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]</code></pre>
+</div>
+
+<p>The i.i.d. model is the case $r_i = \alpha^i$, under which all conditional rates equal
+$\alpha$. Let $n \in \{0,\dots,\kappa\}$ be the number of accepted draft tokens. The loop stops
+at the first rejection, so $\mathbb{P}(n \ge i) = \alpha^{i}$, and exactly one extra token is
+always emitted — the recovered token on rejection, or the bonus token on full acceptance.
+Therefore</p>
+
+<div class="math-display">$$\mathbb{E}[\text{tokens per step}] = 1 + \mathbb{E}[n] = 1 + \sum_{i=1}^{\kappa}\mathbb{P}(n \ge i) = \sum_{i=0}^{\kappa}\alpha^{i} = \frac{1-\alpha^{\kappa+1}}{1-\alpha}.$$</div>
+
+<p>Write $E$ for that quantity. Note $E \le \kappa+1$ always, with equality only at
+$\alpha = 1$. You can never emit more than $\kappa+1$ tokens from one verify pass.</p>
+
+<h3>Cost per step, and the naive speedup</h3>
+
+<p>Let $t_T$ be one target step and $t_D$ one draft step, and $c = t_D/t_T$. Chain drafting is
+$\kappa$ <em>sequential</em> draft passes, so the step costs $t_T(1 + \kappa c)$ and</p>
+
+<div class="math-display">$$\text{speedup} = \frac{E}{1 + \kappa c} = \frac{1-\alpha^{\kappa+1}}{(1-\alpha)(1+\kappa c)}.$$</div>
+
+<p>Derive $c$ rather than guessing it. In the memory-bound regime time is bytes over bandwidth,
+so $c$ is the ratio of streamed weight bytes. Llama-3.2-1B ($L=16$, $d=2048$, $h=32$,
+$h_{kv}=8$, $d_h=64$, FFN 8192, tied embeddings) streams $16 \times 60.8\text{M} = 973$ M
+transformer parameters plus a $128{,}256 \times 2048 = 263$ M output head — 1.236 B parameters,
+2.47 GB, and $2.47/3.35 = 0.74$ ms. Against Llama-3-8B's 4.48 ms that is
+$c = 0.165$. <em>Derived.</em></p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived from $E/(1+\kappa c)$ with $c = 0.165$. $\alpha$ is a swept parameter, not a measurement — Lab 08 is where you measure it. Batch 1, short context, Llama-3-8B target with a Llama-3.2-1B draft on one H100 SXM.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>κ</th><th>cost 1+κc</th><th>E at α=0.5</th><th>speedup</th><th>E at α=0.7</th><th>speedup</th><th>E at α=0.85</th><th>speedup</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">1.165</td><td class="num">1.50</td><td class="num">1.29×</td><td class="num">1.70</td><td class="num">1.46×</td><td class="num">1.85</td><td class="num">1.59×</td></tr>
+        <tr><td class="num">2</td><td class="num">1.330</td><td class="num">1.75</td><td class="num">1.32×</td><td class="num">2.19</td><td class="num">1.65×</td><td class="num">2.57</td><td class="num">1.93×</td></tr>
+        <tr><td class="num">3</td><td class="num">1.495</td><td class="num">1.88</td><td class="num">1.25×</td><td class="num">2.53</td><td class="num"><b>1.70×</b></td><td class="num">3.19</td><td class="num">2.13×</td></tr>
+        <tr><td class="num">4</td><td class="num">1.660</td><td class="num">1.94</td><td class="num">1.17×</td><td class="num">2.77</td><td class="num">1.67×</td><td class="num">3.71</td><td class="num">2.23×</td></tr>
+        <tr><td class="num">5</td><td class="num">1.825</td><td class="num">1.97</td><td class="num">1.08×</td><td class="num">2.94</td><td class="num">1.61×</td><td class="num">4.15</td><td class="num"><b>2.28×</b></td></tr>
+        <tr><td class="num">7</td><td class="num">2.155</td><td class="num">1.99</td><td class="num">0.92×</td><td class="num">3.14</td><td class="num">1.46×</td><td class="num">4.85</td><td class="num">2.25×</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Two readings. First, $\kappa$ has an interior optimum, and it moves right as $\alpha$ rises:
+the marginal token from lengthening the draft is worth $\alpha^{\kappa+1}$ and decays
+geometrically, while the marginal cost $c$ is constant. Doubling $\kappa$ past the optimum is
+a pure loss. Second, at $\alpha = 0.5$ with this draft the whole thing is barely worth the
+complexity, and at $\kappa=7$ it is a net loss. Solving $E = 1 + \kappa c$ for $\kappa = 3$,
+$c = 0.165$ gives a break-even acceptance rate of $\alpha^{*} \approx 0.34$: below that, a
+1B draft for an 8B target makes the server slower. <em>Derived.</em></p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Cited</span>
+  <p>Leviathan et al. (<a href="https://arxiv.org/abs/2211.17192">arXiv:2211.17192</a>) introduced
+  this acceptance rule and report 2×–3× wall-clock speedup for T5-XXL 11B with smaller T5 drafts,
+  with outputs identical in distribution to the unaccelerated model. Chen et al.
+  (<a href="https://arxiv.org/abs/2302.01318">arXiv:2302.01318</a>) independently derived the same
+  rule and report roughly 2–2.5× on Chinchilla 70B with a 4B draft, batch 1, on XSum and HumanEval.
+  Both are batch-1, single-request results. Neither transfers to a loaded server, for the reason
+  below.</p>
+</div>
+
+<h3>When speculation loses</h3>
+
+<p>The naive formula assumes the verify pass is free, which is true only while the step is
+memory-bound. Reintroduce the roofline. Let $T^{*} = 295$ be the ridge in token positions
+(§0.4, re-derived at the top of this chapter) and $B$ the batch size. Normalise all times by the
+bandwidth floor $W/\beta$. A step containing $T$ positions costs $\max(1, T/T^{*})$. Plain decode
+puts $B$ positions in the step; verify puts $B(\kappa{+}1)$; the draft model, being a scaled
+copy, costs $c\max(1, B/T^{*})$ per pass. Then</p>
+
+<div class="math-display">$$S(B) \;=\; \frac{E \cdot \max\!\big(1, \tfrac{B}{T^{*}}\big)}{\max\!\big(1, \tfrac{B(\kappa+1)}{T^{*}}\big) \;+\; \kappa c \cdot \max\!\big(1, \tfrac{B}{T^{*}}\big)}.$$</div>
+
+<p>Three regimes fall out. For $B \le T^{*}/(\kappa{+}1)$ both maxima are 1 and
+$S = E/(1+\kappa c)$ — the textbook formula, valid only here. For $B \ge T^{*}$ everything is
+compute-bound and the maxima cancel:</p>
+
+<div class="math-display">$$S_{\infty} = \frac{E}{(\kappa+1) + \kappa c} \;<\; \frac{\kappa+1}{\kappa+1} = 1.$$</div>
+
+<p><strong>Speculation can never help a compute-bound step.</strong> $E \le \kappa+1$ is a
+theorem, $\kappa c > 0$ is arithmetic, so $S_\infty < 1$ unconditionally. The tokens were only
+ever free because they were riding a weight stream you had already paid for; once you are paying
+per FLOP, you are paying for $\kappa+1$ tokens' worth of compute and collecting $E$ of them, plus
+$\kappa$ draft passes on top. In the middle regime, setting $S(B) = 1$ gives the crossing:</p>
+
+<div class="math-display">$$B_{\text{break-even}} \;=\; \frac{T^{*}\,\big(E - \kappa c\big)}{\kappa + 1} \;=\; \frac{295\,(2.533 - 0.495)}{4} \;\approx\; 150 \text{ concurrent sequences}$$</div>
+
+<p>for $\kappa=3$, $c=0.165$, $\alpha=0.70$. <em>Derived.</em> Beyond about 150 concurrent
+sequences on one H100, this configuration is making Llama-3-8B slower, and by $B = 295$ it has
+given away 44% of the machine's throughput.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — speedup against batch size, with the break-even crossings marked.</b>
+    <em>Derived</em> from $S(B)$ above with $T^{*}=295$, $\kappa=3$, $c=0.165$, short context. The
+    shaded band on the left is where the whole step is still bandwidth-bound and the drafted
+    positions are genuinely free; the dashed vertical at 295 is the ridge, past which every curve
+    is flat and below 1.</p>
+  <svg viewBox="0 0 940 430" width="100%" role="img" aria-labelledby="spTitle spDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="spTitle">Speculative decoding speedup versus batch size</title>
+    <desc id="spDesc">Three curves of speedup against batch size from 0 to 400. Each is flat below
+    batch 74, falls hyperbolically between 74 and 295, and is flat again past 295. The curve for
+    acceptance 0.85 starts at 2.13 and crosses 1.0 at batch 199; acceptance 0.70 starts at 1.70 and
+    crosses at 150; acceptance 0.50 starts at 1.25 and crosses at 102. All three asymptote below 1.</desc>
+
+    <rect x="90" y="60" width="140.1" height="320" fill="var(--teal)" fill-opacity="0.07"/>
+    <g stroke="currentColor" stroke-opacity="0.12" stroke-width="1">
+      <line x1="90" y1="380" x2="880" y2="380"/>
+      <line x1="90" y1="313.3" x2="880" y2="313.3"/>
+      <line x1="90" y1="180" x2="880" y2="180"/>
+      <line x1="90" y1="113.3" x2="880" y2="113.3"/>
+    </g>
+    <line x1="90" y1="246.7" x2="880" y2="246.7" stroke="currentColor" stroke-opacity="0.45" stroke-width="1.4" stroke-dasharray="6 4"/>
+    <line x1="650.5" y1="60" x2="650.5" y2="380" stroke="var(--teal)" stroke-opacity="0.6" stroke-width="1.3" stroke-dasharray="5 5"/>
+    <line x1="90" y1="60" x2="90" y2="380" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.3"/>
+    <line x1="90" y1="380" x2="880" y2="380" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.3"/>
+
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="end">
+      <text x="82" y="384">0</text>
+      <text x="82" y="317.3">0.5</text>
+      <text x="82" y="250.7">1.0</text>
+      <text x="82" y="184">1.5</text>
+      <text x="82" y="117.3">2.0</text>
+    </g>
+    <g fill="currentColor" fill-opacity="0.6" font-size="11.5" text-anchor="middle">
+      <text x="90" y="400">0</text>
+      <text x="230" y="400">74</text>
+      <text x="375" y="400">150</text>
+      <text x="470" y="400">200</text>
+      <text x="650.5" y="400">295</text>
+      <text x="850" y="400">400</text>
+    </g>
+    <text x="485" y="422" fill="currentColor" fill-opacity="0.8" font-size="12.5" text-anchor="middle">batch size B — concurrent decoding sequences</text>
+    <text x="24" y="220" fill="currentColor" fill-opacity="0.8" font-size="12.5" text-anchor="middle" transform="rotate(-90 24 220)">speedup S(B)</text>
+
+    <path d="M 90 95.7 L 230.1 95.7 L 280 150.4 L 327.5 186.0 L 375 212.0 L 470 247.5 L 565 270.6 L 650.5 285.5 L 850 285.5" fill="none" stroke="var(--teal)" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M 90 154.0 L 230.1 154.0 L 280 197.5 L 327.5 225.8 L 375 246.5 L 422.5 262.2 L 470 274.7 L 565 293.1 L 650.5 304.9 L 850 304.9" fill="none" stroke="var(--copper)" stroke-width="2.4" stroke-linejoin="round"/>
+    <path d="M 90 212.8 L 230.1 212.8 L 280 244.9 L 327.5 265.8 L 375 281.1 L 470 302.0 L 565 315.6 L 650.5 324.4 L 850 324.4" fill="none" stroke="var(--plum)" stroke-width="2.4" stroke-linejoin="round"/>
+
+    <g fill="none" stroke-width="2.4">
+      <circle cx="468.1" cy="246.7" r="6.5" stroke="var(--teal)"/>
+      <circle cx="375" cy="246.7" r="6.5" stroke="var(--copper)"/>
+      <circle cx="283.8" cy="246.7" r="6.5" stroke="var(--plum)"/>
+    </g>
+
+    <g fill="currentColor" font-size="12">
+      <text x="862" y="278" text-anchor="end" fill="var(--teal)">α = 0.85 — break-even B ≈ 199</text>
+      <text x="862" y="322" text-anchor="end" fill="var(--copper)">α = 0.70 — break-even B ≈ 150</text>
+      <text x="862" y="342" text-anchor="end" fill="var(--plum)">α = 0.50 — break-even B ≈ 102</text>
+    </g>
+    <text x="96" y="52" fill="var(--teal)" font-size="11.5">free zone: B(κ+1) ≤ 295</text>
+    <text x="660" y="52" fill="var(--teal)" font-size="11.5">ridge T* = 295 positions</text>
+    <text x="96" y="242" fill="currentColor" fill-opacity="0.6" font-size="11.5">S = 1</text>
+  </svg>
+</div>
+
+<p>Two honest caveats. The curve is short-context: KV read traffic is proportional to $B \cdot s$
+and <em>independent of $\kappa$</em>, so at 8k context the step stays bandwidth-bound far longer
+and the crossing moves right — at $B=32$, $s=8192$ the step already moves 49.4 GB (§0.4) and the
+drafted positions are still essentially free. And the draft model has its own roofline; treating
+its cost as $c \times$ the target's is a modelling choice, defensible because both are
+memory-bound below the same ridge. The qualitative conclusion survives both: <strong>speculation
+is a latency optimisation that borrows from throughput, and the loan comes due at high
+batch</strong>. Both engines expose the knob to repay it — vLLM's
+<code>num_speculative_tokens_per_batch_size</code> is an explicit batch-size schedule
+(<code>vllm/config/speculative.py:L180-L186</code>) resolved into a lookup table each step at
+<code>vllm/v1/core/sched/scheduler.py:L1265-L1271</code>.</p></div></section>
+<section class="sec" id="production" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM: two Triton kernels and a ragged prefix sum</h3>
+
+<div class="callout callout--note">
+  <span class="callout__k">Which sampler</span>
+  <p>Everything quoted below is <code>vllm/v1/sample/rejection_sampler.py</code>, the V1 model
+  runner's. It is the live path for <code>--speculative-config</code> methods the V2 runner does not
+  implement — <code>ngram</code> and <code>ngram_gpu</code> are excluded by name at
+  <code>vllm/config/vllm.py:L2465-L2467</code>, which is why the hands-on below runs
+  <code>--method ngram</code> and hits exactly this code. For <code>eagle</code>/<code>eagle3</code>/
+  <code>mtp</code> on a dense target the V2 runner is selected instead (see
+  <a href="06-01-sampling-on-gpu.html">§6.1</a>) and verification runs through
+  <code>vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py</code>, which fuses the same
+  algebra — one-hot-draft closed form, $\max(0, p-q)$ residual, block verification — into kernels
+  that consume logits rather than probabilities. The rule is identical; the file is not.</p>
+</div>
+
+<p>vLLM flattens the whole batch's draft tokens into one 1-D tensor and carries a prefix sum to
+find each request's slice. That is <code>SpecDecodeMetadata</code> in full:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/spec_decode/metadata.py:L9-L27</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@dataclass
+class SpecDecodeMetadata:
+    # [num_tokens]
+    draft_token_ids: torch.Tensor
+    # [batch_size]
+    num_draft_tokens: list[int]
+    # [batch_size]
+    cu_num_draft_tokens: torch.Tensor
+    # [batch_size]
+    cu_num_sampled_tokens: torch.Tensor
+    # [num_tokens]
+    target_logits_indices: torch.Tensor
+    # [batch_size]
+    bonus_logits_indices: torch.Tensor
+    # [num_tokens + batch_size]
+    logits_indices: torch.Tensor
+
+    def __post_init__(self):
+        self.max_spec_len = max(self.num_draft_tokens)</code></pre>
+</div>
+
+<p>Requests in the same batch may carry different draft lengths — including zero, for a request
+that just finished prefill. The split of <code>logits_indices</code> into
+<code>target_logits_indices</code> (positions that get the accept test) and
+<code>bonus_logits_indices</code> (the last position of each request) is what lets one forward
+pass serve a mixed batch. The accept test itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/rejection_sampler.py:L806-L838</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if not rejected:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+            uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
+            if draft_token_id &lt; 0:
+                # -1 is used for padded draft token ids that should be rejected.
+                accepted = False
+            # ...
+            else:
+                if NO_DRAFT_PROBS:
+                    draft_prob = 1
+                else:
+                    draft_prob = tl.load(
+                        draft_probs_ptr
+                        + (start_idx + pos) * vocab_size
+                        + draft_token_id
+                    )
+                target_prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
+                )
+                # NOTE(woosuk): While the draft probability should never be 0,
+                # we check it to avoid NaNs. If it happens to be 0, we reject.
+                accepted = draft_prob &gt; 0 and target_prob / draft_prob &gt;= uniform_prob
+            if accepted:
+                token_id = draft_token_id
+            else:
+                rejected = True
+                token_id = tl.load(recovered_token_ids_ptr + start_idx + pos)</code></pre>
+</div>
+
+<p><code>target_prob / draft_prob &gt;= uniform_prob</code> with $u \sim \mathrm{U}[0,1)$ is
+precisely $u &lt; \min(1, p/q)$: when $p \ge q$ the ratio exceeds 1 and every coin passes.
+<code>NO_DRAFT_PROBS</code> sets $q = 1$, the correct value when the draft is deterministic —
+which is vLLM's default, <code>draft_sample_method = "greedy"</code>
+(<code>vllm/config/speculative.py:L289-L296</code>) — and the only option for an n-gram proposer
+that has no distribution at all. A one-hot $q$ makes $\min(1, p/q) = p(x)$: accept the draft with
+its own target probability. The proof holds unchanged.</p>
+
+<p>The residual sampler avoids a normalisation pass entirely by racing exponentials — the
+Gumbel-max trick in its $\mathrm{Exp}(1)$ form. It draws one $[\,\text{batch},\,\text{vocab}\,]$
+tensor of exponentials per <em>request</em>, not per position, and takes an argmax of
+$\text{prob} \times 1/q$:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/rejection_sampler.py:L919-L932</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            draft_prob = tl.load(
+                draft_probs_ptr + token_idx * vocab_size + vocab_offset,
+                mask=vocab_mask,
+                other=0.0,
+            )
+            target_prob = tl.load(
+                target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                mask=vocab_mask,
+                other=0.0,
+            )
+            prob = tl.maximum(target_prob - draft_prob, 0.0)
+            # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
+            # `tl.argmax` will select the maximum value.</code></pre>
+</div>
+
+<p>That is $\max(0, p - q)$ from the proof, verbatim, and the comment is the observation that
+argmax is scale-invariant so $Z$ never needs computing. Sharing one exponential row across all
+$\kappa$ positions of a request is safe because at most one of them is ever consumed — the first
+rejection ends the loop. In the <code>NO_DRAFT_PROBS</code> branch the kernel instead masks the
+drafted token out of the target row (<code>vocab_offset != draft_token_id</code>, L913-L918),
+which is exactly the normalised residual against a one-hot $q$.</p>
+
+<h3>SGLang: a Triton chain sampler behind a flag, and a CUDA tree sampler by default</h3>
+
+<p>Read the dispatch before the kernel. In its non-greedy branch — an all-greedy batch takes
+<code>verify_tree_greedy</code> instead — <code>eagle_sample</code> picks between exactly two
+implementations, and the choice is one boolean:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/speculative/eagle_utils.py:L770-L776</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        use_rejection_sampling = get_spec().speculative_use_rejection_sampling
+
+        sampling_fn = (
+            chain_speculative_sampling_triton
+            if use_rejection_sampling
+            else tree_speculative_sampling_target_only
+        )</code></pre>
+</div>
+
+<p><code>speculative_use_rejection_sampling</code> defaults to <code>False</code>
+(<code>python/sglang/srt/server_args.py:L2192-L2196</code>), so the Triton chain sampler quoted next
+is <em>not</em> what a default SGLang server runs — it is opt-in via
+<code>--speculative-use-rejection-sampling</code>, and only for topk 1. Read it anyway: it is the
+clearest in-tree statement of this chapter's algorithm, and its default-path counterpart is the
+CUDA kernel dissected after it. The verification loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/speculative/reject_sampling.py:L52-L87</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    while (step &lt; NUM_SLOTS) and (continue_verifying == 1):
+        draft_token = tl.load(cand_ptr_base + step * stride_cand_s)
+        # ...
+        p = tl.load(TargetProbs + offset_prob)
+        q = tl.load(DraftProbs + offset_draft)
+
+        coin = tl.load(uni_ptr_base + (step - 1) * stride_uni_s)
+
+        if coin * q &lt; p:
+            num_accept += 1
+            cur_prob_row = step
+            tl.store(Predicts + last_accepted_global_idx, draft_token)
+            # ...
+            step += 1
+        else:
+            continue_verifying = 0
+
+    tl.store(AcceptTokenNum + pid, num_accept)</code></pre>
+</div>
+
+<p><code>coin * q &lt; p</code> is the same test with the division moved to the other side —
+cheaper, and it removes the divide-by-zero that forces vLLM's <code>draft_prob &gt; 0</code>
+guard. Note also that <code>cur_prob_row</code> tracks the position whose distribution the
+residual will be built from: it advances on acceptance and freezes at the first rejection.
+That variable <em>is</em> the "discard the tail" rule.</p>
+
+<p>The residual sampler is an explicit two-pass inverse CDF rather than a Gumbel race:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/speculative/reject_sampling.py:L90-L119</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    all_drafts_accepted = continue_verifying
+    coin_final = tl.load(UniformSamplesFinal + pid)
+    norm_sum = 0.0
+    # ...
+    # Pass 1: Sum
+    for v_start in range(0, VOCAB_SIZE, BLOCK_V):
+        # ...
+        if all_drafts_accepted:
+            val = p_val
+        else:
+            q_ptr = dp_base_ptr_safe + v_offsets * stride_dp_v
+            q_val = tl.load(q_ptr, mask=mask, other=0.0)
+            # Treat NaN q (degenerate draft rows) as 0: residual falls back to p.
+            q_val = tl.where(q_val == q_val, q_val, 0.0)
+            diff = p_val - q_val
+            val = tl.where(diff &gt; 0.0, diff, 0.0)
+
+        norm_sum += tl.sum(val)</code></pre>
+</div>
+
+<p>The <code>all_drafts_accepted</code> branch is the bonus token: sample plain $p$ from the
+$(\kappa{+}1)$-th row. The other branch is $\max(0, p-q)$ with $Z$ accumulated explicitly, then a
+second pass walks the CDF to <code>coin_final * norm_sum</code>. The engineering difference is
+real: vLLM materialises a $[\,B,\,|V|\,]$ fp32 exponential tensor — 32.8 MB at $B=64$ with a
+128,256 vocabulary — and reads the vocab once; SGLang allocates one scalar per request and reads
+the vocab twice. At 3.35 TB/s both land around 20 µs. Pick your poison.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: five requests, one step</h2></div><div class="sec__body"><p>vLLM's own worked example, left in the source as a comment block, is the clearest description
+of the ragged layout in either codebase. Five requests with 3, 0, 2, 0 and 1 draft tokens:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_model_runner.py:L2928-L2936</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Inputs:
+        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
+        # num_draft_tokens:         [  3,   0,   2,   0,   1]
+        # Outputs:
+        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+        #                            206, 207, 208]
+        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+        # bonus_logits_indices:     [  3,   4,   7,   8,  10]</code></pre>
+</div>
+
+<p>Request 0 contributed 4 positions (1 real + 3 drafts) to a flat 209-token batch; request 1 is
+mid-prefill with 100 scheduled tokens and no drafts, so it gets one logit index, 103, and it lands
+in <code>bonus_logits_indices</code> only. Eleven logit rows total: six get the accept test, five
+are bonus positions. The draft token ids are recovered by shifting the same index vector by one,
+<code>draft_token_ids[target_logits_indices + 1]</code> (L2985-L2986) — the token at position
+$i+1$ is what the model was asked to predict at position $i$.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — the vLLM V1 call path for one speculative step.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["Scheduler.schedule()<br/>reserves draft_slots per request<br/>scheduler.py L505-L506"] --> B["scheduled_spec_decode_tokens<br/>req_id to list of kappa ids"]
+    B --> C["_calc_spec_decode_metadata()<br/>ragged prefix sums<br/>gpu_model_runner.py L2923"]
+    C --> D["target forward, 209 positions<br/>one weight stream, 15.01 GB"]
+    D --> E["RejectionSampler.forward()<br/>split bonus vs target logits"]
+    E --> F["apply_sampling_constraints<br/>temperature, top-k, top-p on p"]
+    F --> G["rejection_sample()<br/>greedy kernel then random kernel"]
+    G --> H["output_token_ids<br/>batch by max_spec_len+1, -1 padded"]
+    H --> I["Scheduler.update_from_output()<br/>num_computed_tokens -= num_rejected<br/>scheduler.py L1850-L1859"]
+  </script>
+</div>
+
+<p>The step ends where it began, in the scheduler, undoing its own optimism. Every scheduled
+token was already counted as computed at <code>_update_after_schedule</code> (L1398-L1404,
+"If some tokens (e.g. spec tokens) are rejected later, the number of computed tokens will be
+adjusted in update_from_output"), so rejection is a subtraction.</p></div></section>
+<section class="sec" id="kv-rollback" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">The KV-cache complication nobody warns you about</h2></div><div class="sec__body"><p>Here is the part that is absent from both papers. The target's verify pass runs attention over
+all $\kappa+1$ positions, which means it <em>writes KV entries for all of them</em>, including
+the ones that are about to be rejected. Those entries are wrong: they encode a continuation that
+did not happen. Leave them in place and the next step's attention reads them.</p>
+
+<p>vLLM does not free anything. It rolls back the logical length and lets the next step overwrite
+the physical slots:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L1847-L1859</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                num_draft_tokens = len(scheduled_spec_token_ids)
+                num_sampled = self.num_sampled_tokens_per_step
+                num_accepted = max(len(generated_token_ids) - num_sampled, 0)
+                num_rejected = num_draft_tokens - num_accepted
+                # Rejections roll back num_computed_tokens (and, under async
+                # scheduling, num_output_placeholders, which covers the spec
+                # tokens). A stale rejection count predates the preemption
+                # rollback and must not apply.
+                if not output_is_stale:
+                    if request.num_computed_tokens &gt; 0:
+                        request.num_computed_tokens -= num_rejected
+                    if request.num_output_placeholders &gt; 0:
+                        request.num_output_placeholders -= num_rejected</code></pre>
+</div>
+
+<p>Cheap — a scalar subtraction — but it leaks into three other places. The prefix cache must
+never commit a block containing a draft token, because a rejected token that has been hashed into
+the cache will be served to a future request:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_manager.py:L556-L565</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
+        # + num_external_computed_tokens + num_new_tokens, but must exclude
+        # "non-committable" tokens (e.g., draft tokens that could be rejected).
+        # Therefore, we cap the number at `request.num_tokens`, ensuring only
+        # "finalized" tokens are cached.
+        num_tokens_to_cache = min(
+            total_computed_tokens + num_new_tokens,
+            request.num_tokens,
+        )</code></pre>
+</div>
+
+<p>Sliding-window block eviction has the mirror-image problem — free a block based on the
+optimistic length and a rollback will want it back — so the free boundary is computed from
+processed rather than scheduled tokens, "because ... rejected spec tokens can roll it back"
+(<code>vllm/v1/core/kv_cache_manager.py:L504-L510</code>). And the scheduler must reserve slots
+for drafting on <em>every</em> decode request every step, whether or not that request ends up
+speculating: <code>draft_slots = spec.max_num_new_slots_for_drafting</code> is subtracted from
+the input budget at <code>vllm/v1/core/sched/scheduler.py:L505-L506</code> and again at L709.</p>
+
+<p>SGLang pays the allocation cost more visibly. Every decode step reserves, per request:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/allocation_sizing.py:L27-L54</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Spec decoding allocates max(topk * num_steps, num_draft_tokens) per decode step.
+    spec_steps = spec.speculative_num_steps or 1
+    spec_topk = spec.speculative_eagle_topk or 1
+    spec_tokens = max_speculative_num_draft_tokens()
+    page_size = get_alloc_page_size()
+    # ...
+    if page_size == 1 or spec_topk == 1 or not spec_algo.has_draft_kv():
+        return max(spec_steps * spec_topk, spec_tokens)
+    # ...
+
+def get_alloc_reserve_per_decode() -&gt; int:
+    """KV length reserved per request at each decode step.
+
+    The 2x is a double-buffer that absorbs the kv_committed_len lag in overlap
+    mode; see eagle_utils.eagle_prepare_for_decode.
+    """
+    return 2 * get_alloc_len_per_decode()</code></pre>
+</div>
+
+<p>At $\kappa = 3$, topk 1, that is $2 \times 4 = 8$ KV slots reserved per request per step where
+plain decode needs 1. For Llama-3-8B at 128 KiB of KV per token, a batch of 64 reserves 64 MB per
+step instead of 8 MB. It is returned when the step commits, but the pool must be sized for the
+peak, so speculation shrinks your maximum concurrency before it ever changes your latency.
+<em>Derived from the cited per-token KV size in §0.4.</em></p>
+
+<p>Then there is the case chain decoding does not have. With chain drafting the accepted tokens
+are a prefix of the allocated run, so committing is just advancing <code>seq_lens</code>. With a
+<em>tree</em> draft (topk &gt; 1, covered in <a href="06-04-eagle-medusa-mtp.html">§6.4</a>) the
+accepted path is scattered across tree-node slots, and SGLang physically compacts it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/speculative/spec_utils.py:L694-L708</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def move_accept_tokens_to_target_kvcache(
+    batch: ScheduleBatch,
+    accept_index: torch.Tensor,
+    num_correct_drafts: torch.Tensor,
+    token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
+):
+    """
+    Move accepted tokens (drafts + bonus) to the target KV cache.
+
+    Args:
+        batch: The batch to run.
+        accept_index: The index of the accepted tokens (incl. bonus).
+        num_correct_drafts: Per-req count of correct drafts (excludes bonus);
+            seq_lens is advanced by ``num_correct_drafts + 1`` to cover the bonus slot.
+    """</code></pre>
+</div>
+
+<p>That ends in <code>move_kv_cache(tgt_loc, src_loc)</code>
+(<code>python/sglang/srt/mem_cache/memory_pool.py:L2801-L2819</code>), a per-layer gather-scatter
+over the K and V buffers. Each moved token costs 128 KiB read plus 128 KiB written for
+Llama-3-8B; at batch 64 with 2.5 accepted tokens that is 40 MB of traffic, about 12 µs — small
+against a 4.5 ms step, but a whole extra kernel launch, and the reason
+<code>_finalize_accept_tree_path</code> exists as a separate code path from the chain case
+(<code>python/sglang/srt/speculative/eagle_worker_common.py:L406-L434</code>).</p></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h3>The coin endpoints</h3>
+
+<p>Both engines have a bug-shaped hole at a different end of $[0,1]$, and both have patched it in
+the source with an explanatory comment. vLLM's accept test is <code>&gt;=</code>, so a coin of
+exactly 0.0 accepts unconditionally — including a token the target assigns probability zero:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/rejection_sampler.py:L639-L648</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # NOTE(woosuk): We deliberately use float64 instead of float32 here
+    # because when using float32, there's a non-negligible chance that
+    # uniform_prob is sampled to be exact 0.0 as reported in
+    # https://github.com/pytorch/pytorch/issues/16706. Using float64
+    # mitigates the issue.
+    uniform_probs = torch.rand(
+        (num_tokens,),
+        dtype=torch.float64,
+        device=device,
+    )</code></pre>
+</div>
+
+<p>SGLang's seeded path has the opposite failure, at 1.0:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/speculative/eagle_utils.py:L610-L618</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # The float32 cast rounds the top 129 uint32 hashes to exactly 1.0, but
+    # the sampling kernels expect half-open [0, 1) coins: a 1.0 coin walks
+    # past the last CDF bucket and can return a zero-probability token.
+    # Clamp to the largest float32 below one; every other coin value is
+    # untouched, so previously verified bitwise baselines stay intact.
+    max_coin = 1.0 - 2**-24
+    coins = (
+        uniforms[:, :draft_token_num].to(torch.float32).clamp_(max=max_coin)
+    ).contiguous()</code></pre>
+</div>
+
+<p>Same class of bug, opposite endpoint, same symptom: a token with zero probability emitted at a
+rate of roughly one in ten million. Rare enough to survive a test suite, frequent enough to
+produce a bug report at scale.</p>
+
+<h3>Knobs that quietly void the proof</h3>
+
+<p>The guarantee holds only for the exact rule. SGLang exposes two multipliers that break it,
+both defaulting to the identity:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L2182-L2196</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    speculative_accept_threshold_single: A[
+        float,
+        "Accept a draft token if its probability in the target model is greater than this threshold.",
+        NS("spec"),
+    ] = 1.0
+    speculative_accept_threshold_acc: A[
+        float,
+        "The accept probability of a draft token is raised from its target probability p to min(1, p / threshold_acc).",
+        NS("spec"),
+    ] = 1.0
+    speculative_use_rejection_sampling: A[
+        bool,
+        "Use rejection sampling for speculative decoding (requires topk=1).",
+        NS("spec"),
+    ] = False</code></pre>
+</div>
+
+<p>Lowering <code>threshold_acc</code> below 1.0 multiplies every acceptance probability by
+$1/\text{threshold}$, raising $\alpha$ and biasing the output toward the draft. It buys
+throughput by spending the thing this chapter proved you did not have to spend. Use it knowing
+that, or not at all.</p>
+
+<p>Note also that <code>speculative_use_rejection_sampling</code> is <em>off</em> by default and
+requires topk 1. With it off, <code>eagle_sample</code> passes
+<code>draft_probs = torch.zeros_like(target_probs)</code> into
+<code>tree_speculative_sampling_target_only</code>
+(<code>python/sglang/srt/speculative/eagle_utils.py:L810-L816</code>) — a target-only rule
+equivalent to treating $q$ as deterministic, the same simplification as vLLM's
+<code>NO_DRAFT_PROBS</code>.</p>
+
+<p>That default kernel <em>is</em> readable at this SHA, despite shipping through the compiled
+<code>sgl_kernel</code> wheel: the CUDA lives at
+<code>python/sglang/kernels/aot/csrc/speculative/speculative_sampling.cuh</code>. Its accept test is
+a sibling walk, and it is worth seeing why that is still the same theorem:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/aot/csrc/speculative/speculative_sampling.cuh:L77-L94</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>      DType target_prob_single = target_probs[cur_prob_offset + draft_token_id];
+      prob_acc += target_prob_single;
+
+      if (coin &lt;= prob_acc / threshold_acc || target_prob_single &gt;= threshold_single) {
+        // accept token
+        prob_acc = 0.;
+        cur_prob_offset = (bx * num_draft_tokens + cur_index) * d;
+        coin = uniform_samples[bx * num_draft_tokens + cur_index];
+        predicts[last_accepted_retrive_idx] = draft_token_id;
+        ++num_accepted_tokens;
+        accept_index[bx * num_speculative_tokens + num_accepted_tokens] = draft_index;
+        last_accepted_retrive_idx = draft_index;
+        break;
+      } else {
+        // FIXME: leverage draft probs
+        draft_probs[cur_prob_offset + draft_token_id] = target_probs[cur_prob_offset + draft_token_id];
+        cur_index = retrive_next_sibling[bx * num_draft_tokens + cur_index];
+      }</code></pre>
+</div>
+
+<p>With both thresholds at their default 1.0 the test is <code>coin &lt;= prob_acc</code>, where
+<code>prob_acc</code> is the target mass of the siblings tried so far at this node. For a chain —
+one sibling — that is accept-with-probability $p(x)$, which is exactly $\min(1, p/q)$ for the
+one-hot $q = \delta_x$ the caller passed in. For a tree it is recursive rejection sampling: each
+rejected sibling has its target mass copied into <code>draft_probs</code>, so the residual
+<code>max(target − draft, 0)</code> computed afterwards excludes precisely the branches already
+refused. The final resample is that residual, and it appears in the kernel under confusingly
+swapped names — <code>q_vec</code> is loaded from <code>target_probs</code> and <code>p_vec</code>
+from <code>draft_probs</code>, so <code>relu_q_minus_p</code> at L119 is $\max(0, p - q)$ in this
+chapter's notation. The default tree path implements the exact rule.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Read carefully</span>
+  <p>"It ships in the compiled <code>sgl_kernel</code> wheel" does not mean "you cannot read it".
+  SGLang checks in the CUDA for both kernel families at <code>7d89325</code>:
+  <code>python/sglang/kernels/aot/csrc/</code> holds the sources the wheel is built from — this
+  sampler among them — and <code>python/sglang/kernels/jit/csrc/</code> holds the ones compiled on
+  demand at runtime. Grep both before raising an Unverified flag on an <code>sgl_kernel</code>
+  op.</p>
+</div>
+
+<h3>Stale documentation, and a real cost</h3>
+
+<p><code>RejectionSampler</code>'s class docstring states that "spec decode does not support"
+top-$p$/top-$k$ (<code>vllm/v1/sample/rejection_sampler.py:L38-L59</code>), while
+<code>apply_sampling_constraints</code> applies both to the target logits at draft positions
+(<code>vllm/v1/sample/rejection_sampler.py:L510-L564</code>). As of <code>a556f3f</code> the code
+is ahead of the comment. Read the code. And note what the code costs:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/sample/rejection_sampler.py:L563-L565</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
+    # which is slow for large vocab sizes. This may cause performance issues.
+    return apply_top_k_top_p(logits, top_k, top_p)</code></pre>
+</div>
+
+<p>Speculation multiplies the number of rows that sort by $\kappa+1$. A 128,256-entry sort per
+row, at batch 64 and $\kappa=3$, is 256 sorted rows instead of 64. If your speculative speedup is
+disappointing and the model time looks right, profile the sampler
+(<a href="06-01-sampling-on-gpu.html">§6.1</a>).</p>
+
+<h3>Ragged batches</h3>
+
+<p>Both engines launch one program per request and let it loop serially over its own draft
+tokens. vLLM launches both kernels over the full batch and each early-exits on the wrong rows —
+<code>if not is_greedy: return</code> in the greedy kernel (L731-L733) and
+<code>if is_greedy: return</code> in the random one (L791-L794) — so a mixed
+greedy/random batch pays two full launches with half the blocks idle in each. Grammar-invalidated
+drafts are padded to <code>-1</code> rather than shortening the row
+(<code>vllm/v1/core/sched/scheduler.py:L2313-L2317</code>), which is why the kernel's first branch
+is <code>if draft_token_id &lt; 0: accepted = False</code>. The uniform-random generator skips
+requests with zero drafts entirely, "important for reproducibility"
+(<code>vllm/v1/sample/rejection_sampler.py:L650-L653</code>) — a seeded run must not consume RNG
+for a request that did not speculate.</p></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>The single number to instrument is mean acceptance length, which vLLM logs directly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/spec_decode/metrics.py:L113-L118</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Conventionally, mean acceptance length includes the bonus token
+        mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
+
+        pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
+        acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
+        rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)</code></pre>
+</div>
+
+<p>That <code>mean_acceptance_length</code> is exactly the $E$ of this chapter, and
+<code>acceptance_rates</code> is the vector of unconditional per-position rates $r_i$ whose
+i.i.d. idealisation is $\alpha^i$. Run the shipped example and read them:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">from the vLLM checkout at a556f3f</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python examples/features/speculative_decoding/spec_decode_offline.py \
+    --method ngram --num-spec-tokens 3 --temp 0 --output-len 256 --print-output</code></pre>
+</div>
+
+<p>Then do the experiment this chapter argues for: hold everything fixed and sweep concurrency
+until the speedup crosses 1. Plot $r_i$ against $\alpha^i$ for the fitted $\alpha$ and see how
+badly the i.i.d. assumption holds. That is
+<a href="../LABS.html">Lab 08, spec-decode acceptance</a>. Nothing in this chapter was measured;
+the lab is where the numbers become real.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Read <code>vllm/v1/sample/rejection_sampler.py:L873-L953</code>
+  (<code>sample_recovered_tokens_kernel</code>). In the <code>NO_DRAFT_PROBS</code> branch the
+  kernel loads target probabilities with <code>mask=(vocab_mask &amp; (vocab_offset !=
+  draft_token_id))</code>. Show that this is the exact normalised residual for a deterministic
+  draft, and say why no explicit renormalisation is needed.</li>
+
+  <li>Derive the optimal $\kappa$ for $\alpha = 0.75$, $c = 0.10$ by treating $\kappa$ as
+  continuous and setting $\mathrm{d}S/\mathrm{d}\kappa = 0$. Check it against a table of integer
+  $\kappa$. Then explain in one sentence why the answer moves right as $\alpha \to 1$.</li>
+
+  <li>Predict, then verify: a request is scheduled with $\kappa = 3$ drafts and the target rejects
+  the second one. Walk through <code>Scheduler.update_from_output</code> and state the value of
+  <code>num_rejected</code>, and what happens to the KV slots the target already wrote for draft
+  tokens 2 and 3. Confirm from <code>vllm/v1/core/sched/scheduler.py:L1841-L1859</code>.</li>
+
+  <li>Using the $S(B)$ model in §6, find the batch at which speculation breaks even for
+  $\kappa=1$, $c=0.165$, $\alpha=0.70$, and compare it to the $\kappa=3$ answer of 150. What does
+  that tell you about how to degrade speculation gracefully as load rises?</li>
+
+  <li>Construct $p$ and $q$ on a three-token vocabulary with $D_{\mathrm{TV}}(p,q) = 0.5$ where
+  the draft's most likely token has target probability zero. What is $\alpha$? What is the
+  residual distribution? Verify by hand that the emitted distribution is still $p$.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><strong>1.</strong> With a deterministic draft $q = \delta_d$, the residual is
+    $\max(0, p(x) - \delta_d(x))$, which equals $p(x)$ for $x \ne d$ and
+    $\max(0, p(d)-1) = 0$ at $x = d$. Masking out index $d$ produces precisely that vector. No
+    renormalisation is needed because the kernel picks the argmax of
+    $\text{prob} \times 1/q_{\text{exp}}$ where $q_{\text{exp}}$ are $\mathrm{Exp}(1)$ variates;
+    scaling every entry by the same $1/Z$ does not change which entry is largest, which is what
+    the <code>NOTE(woosuk)</code> at L931-L932 says.</p>
+
+    <p><strong>2.</strong> $S(\kappa) = (1-\alpha^{\kappa+1})/\big((1-\alpha)(1+\kappa c)\big)$.
+    Differentiating and clearing positives gives
+    $-\alpha^{\kappa+1}\ln\alpha\,(1+\kappa c) = c\,(1-\alpha^{\kappa+1})$. For $\alpha=0.75$,
+    $c=0.10$ the root is near $\kappa \approx 4.8$; the integer table gives $S(4) = 2.18$,
+    $S(5) = 2.19$, $S(6) = 2.17$, so $\kappa = 5$. As $\alpha \to 1$, $\ln\alpha \to 0$ and the
+    marginal token stops decaying, so the optimum runs away — with a perfect draft you would
+    speculate until you hit the roofline ridge, not until acceptance decays.</p>
+
+    <p><strong>3.</strong> One draft accepted plus one sampled token means
+    <code>len(generated_token_ids) = 2</code>, <code>num_sampled = 1</code>, so
+    <code>num_accepted = 1</code> and <code>num_rejected = 3 - 1 = 2</code>.
+    <code>request.num_computed_tokens</code> is decremented by 2. Nothing frees the KV slots: they
+    stay physically allocated and are overwritten on the next step because the logical length now
+    points back at them. The one thing that must <em>not</em> happen is those slots being hashed
+    into the prefix cache, which <code>kv_cache_manager.py:L556-L565</code> prevents by capping
+    the commit at <code>request.num_tokens</code>.</p>
+
+    <p><strong>4.</strong> $E(\kappa{=}1) = 1+\alpha = 1.70$, $\kappa c = 0.165$, so
+    $B = 295(1.70-0.165)/2 \approx 226$ — half again as much headroom as $\kappa=3$'s 150. The
+    graceful degradation is to shorten $\kappa$ as batch grows rather than switching speculation
+    off, which is exactly what vLLM's
+    <code>num_speculative_tokens_per_batch_size</code> schedule expresses.</p>
+
+    <p><strong>5.</strong> Take $p = (0.5, 0.5, 0)$ and $q = (0, 0.5, 0.5)$ on $\{A,B,C\}$.
+    $D_{\mathrm{TV}} = \tfrac{1}{2}(0.5+0+0.5) = 0.5$, so $\alpha = \sum\min(p,q) = 0.5$. The
+    draft's token $C$ has $p(C)=0$ and is always rejected. Residual:
+    $\max(0,p-q) = (0.5, 0, 0)$, normalised to $\delta_A$, and $Z = 0.5 = 1-\alpha$ as the proof
+    requires. Emission: $A$ with probability $0 + 0.5\cdot 1 = 0.5$; $B$ with probability
+    $\min(0.5,0.5) + 0.5 \cdot 0 = 0.5$; $C$ with probability $0 + 0 = 0$. Exactly $p$, even
+    though the draft proposes an impossible token half the time.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>In bf16 the arithmetic intensity of a decode step equals the number of token positions in
+  it, so the H100's ridge of 295 FLOP/byte is literally a ridge at 295 positions. Positions 2
+  through 295 cost nothing. Speculation exists to fill them.</li>
+
+  <li>The correctness proof turns on one identity: $\sum_x \max(0, p(x)-q(x)) = 1 - \sum_x
+  \min(p(x),q(x))$. The residual mass equals the rejection probability because both $p$ and $q$
+  sum to one. Nothing is tuned, and the result holds for <em>any</em> draft distribution.</li>
+
+  <li>Per-token acceptance is $\alpha = 1 - D_{\mathrm{TV}}(p,q)$. That is the objective every
+  draft architecture is really optimising, and it is why a draft trained on the target's own
+  hidden states beats a separately-trained small model.</li>
+
+  <li>$S_\infty = E/(\kappa+1+\kappa c) < 1$ is unconditional, because $E \le \kappa+1$.
+  Speculation cannot help a compute-bound step; for Llama-3-8B on an H100 with $\kappa=3$,
+  $c=0.165$, $\alpha=0.70$ it turns negative at roughly 150 concurrent sequences. Batch-1 paper
+  numbers do not survive contact with a loaded server.</li>
+
+  <li>The verify pass writes KV for tokens that get rejected. vLLM rolls back
+  <code>num_computed_tokens</code> and lets the slots be overwritten, but must also refuse to
+  commit draft tokens to the prefix cache; SGLang reserves $2\max(\text{topk}\cdot\text{steps},
+  \kappa{+}1)$ slots per request per step and physically compacts the accepted path for tree
+  drafts. Speculation costs KV capacity before it costs anything else.</li>
+
+  <li>Tensor parallelism plus speculation is a deadlock waiting to happen: ranks that disagree by
+  one accepted token disagree about sequence length forever. The two engines dodge it differently.
+  SGLang samples on every rank and then broadcasts <code>predict</code>,
+  <code>accept_index</code> and <code>num_correct_drafts</code> from rank 0. vLLM never lets the
+  disagreement exist: <code>LogitsProcessor._gather_logits</code> calls
+  <code>tensor_model_parallel_gather(logits)</code> with <code>dst=0</code>
+  (<code>vllm/model_executor/layers/logits_processor.py:L118-L130</code>), which returns
+  <code>None</code> on every other rank, so verification runs only on TP rank 0.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Leviathan, Kalman &amp; Matias, <a href="https://arxiv.org/abs/2211.17192"><em>Fast Inference
+  from Transformers via Speculative Decoding</em></a> (arXiv:2211.17192). The original acceptance
+  rule and the $\mathbb{E}[\text{tokens}]$ derivation. vLLM's <code>RejectionSampler</code>
+  docstring names this paper as the specification it follows.</li>
+
+  <li>Chen et al., <a href="https://arxiv.org/abs/2302.01318"><em>Accelerating Large Language Model
+  Decoding with Speculative Sampling</em></a> (arXiv:2302.01318). Same rule, independently derived,
+  with the modified-rejection-sampling proof written out at length and results on Chinchilla 70B.</li>
+
+  <li>Sun et al., <em>block verification</em> — vLLM ships this as
+  <code>rejection_sample_method="block"</code> (<code>vllm/config/speculative.py:L219-L226</code>),
+  which verifies the draft jointly rather than one token at a time and accepts strictly more
+  often at the same exactness guarantee.</li>
+
+  <li><code>vllm/v1/spec_decode/</code> at <code>a556f3f</code> lists ten proposer implementations
+  behind the one sampler in this chapter. Where they come from is
+  <a href="06-03-draft-sources.html">§6.3</a>; how EAGLE and MTP draft from the target's own hidden
+  states, and how tree verification generalises the chain rule proved here, is
+  <a href="06-04-eagle-medusa-mtp.html">§6.4</a>; the rest of SGLang's zoo is
+  <a href="06-06-speculative-decoding-zoo.html">§6.6</a>.</li>
+
+  <li>The two formulas this chapter owns live in
+  <a href="../FORMULAS.html#spec-formulas">FORMULAS</a>; the roofline they are argued against is
+  <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>; the numerical
+  reason "exactly equivalent" needs an asterisk is
+  <a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>.</li>
+</ul></div></section>
+<div class="pager"><a href="06-01-sampling-on-gpu.html"><div class="pager__k">← Previous</div><div class="pager__t">Sampling on the GPU</div></a><a class="pager__next" href="06-03-draft-sources.html"><div class="pager__k">Next →</div><div class="pager__t">Draft sources: draft models, n-gram, suffix decoding</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#the-algorithm">The algorithm, stated precisely</a>
+<a href="#the-proof">The proof: the emitted distribution is exactly p</a>
+<a href="#greedy">Greedy as a degenerate case</a>
+<a href="#economics">The economics, derived</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: five requests, one step</a>
+<a href="#kv-rollback">The KV-cache complication nobody warns you about</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

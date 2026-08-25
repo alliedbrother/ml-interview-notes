@@ -1,0 +1,2057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observability, failure modes, recovery — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i is-current" href="09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 9 · The serving system around the engine · 09-05</div>
+<h1>Observability, failure modes, recovery</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/metrics/</code></li><li><code>vllm/v1/fault_tolerance/</code></li><li><code>python/sglang/srt/observability/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Your Grafana board says p99 inter-token latency is 9.9&nbsp;ms and has said 9.9&nbsp;ms every minute
+for three weeks. Users are complaining that generation stutters. Both facts are true, and the dashboard
+is not lying to you &mdash; it is telling you the only thing its buckets can express. This chapter is
+about which numbers an inference server actually exports, which of them are load-bearing when you are
+on call, and what happens when the thing dies.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Three things are different about operating an inference server, and all three break habits carried
+over from stateless HTTP services.</p>
+
+<p><b>The unit of work is not a request, it is a step.</b> A request occupies GPU memory for its whole
+lifetime and is re-batched every iteration (<a href="../01-the-core-loop/01-03-continuous-batching.html">&sect;1.3</a>).
+So a metric like "requests per second" tells you almost nothing; the quantities that predict failure are
+occupancy quantities &mdash; how many sequences are resident, how much KV the pool holds, how deep the
+waiting queue is.</p>
+
+<p><b>The healthy latency scale is smaller than the instrumentation's resolution.</b> The book's decode
+floor for Llama-3-8B on an H100 SXM is 4.48&nbsp;ms per token at batch 1 (15.0&nbsp;GB of bf16 weights over
+3.35&nbsp;TB/s of HBM &mdash; the full checkpoint is 16&nbsp;GB, but
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> excludes the
+gathered embedding table, which a decode step does not stream; <b>derived</b>, see
+<a href="../01-the-core-loop/01-01-prefill-vs-decode.html">&sect;1.1</a>).
+vLLM's inter-token-latency histogram has its lowest bucket edge at 10&nbsp;ms. Every healthy sample lands
+in bucket one.</p>
+
+<p><b>There is no such thing as losing one worker.</b> A tensor-parallel rank that dies leaves its peers
+blocked forever inside an NCCL collective. There is no quorum, no re-shard, no degraded mode. The engine
+dies, and restart is the recovery mechanism &mdash; a fact <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a>
+established from the barrier structure and which we verify here from the code that claims otherwise.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of the serving system as three concentric shells, each with its own failure signal and its own
+recovery story. The outer shell is the HTTP process: it can be up while everything inside it is dead.
+The middle shell is the engine core &mdash; the scheduler, the KV cache manager, the block table. The
+inner shell is the set of GPU worker processes bound in a collective. A fault in the inner shell
+propagates outward and kills everything; a fault in the outer shell kills only itself.</p>
+
+<p>Which is to say: the blast radius of a failure is determined by where it happens in the process
+topology, not by how bad it looks in the log.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the failure taxonomy laid over the process topology
+  of <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a>.</b> Dashed edges are
+  detection paths, not data paths. Note that only the leftmost column is recoverable in place.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    F1["Client disconnects mid-stream<br/>slow reader, backpressure"] --> P1
+    F2["Bad request, grammar failure<br/>context length exceeded"] --> P1
+    P1["API server process<br/>AsyncLLM / TokenizerManager<br/>SURVIVES - per-request abort"]
+    F3["KV pool exhausted<br/>preemption / retraction"] --> P2
+    F4["Waiting queue unbounded"] --> P2
+    P2["EngineCore process<br/>Scheduler, KVCacheManager<br/>SURVIVES - degrades latency"]
+    F5["Worker OOM at step N"] --> P3
+    F6["NCCL hang - rank divergence"] --> P3
+    F7["CUDA graph replay fault"] --> P3
+    P3["GPU worker ranks 0..tp-1<br/>bound in a collective<br/>ONE DIES - ALL DIE"]
+    P3 -.->|"proc.sentinel wakes<br/>is_failed = True"| P2
+    P2 -.->|"failure_callback<br/>EngineDeadError"| P1
+    P1 -.->|"HTTP 503 on /health"| K["Orchestrator<br/>kills pod, restarts"]
+    F8["Insufficient KV at init<br/>model load failure"] --> B["Never reaches serving<br/>process exits at startup"]
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: what a histogram can and cannot tell you</h2></div><div class="sec__body"><p>A Prometheus classic histogram is a set of cumulative counters, one per bucket upper bound $b_i$,
+plus a <code>_sum</code> and a <code>_count</code>. An observation $x$ increments every bucket with
+$b_i \ge x$. All information about <i>where inside a bucket</i> the observations fell is discarded at
+observation time and cannot be recovered downstream.</p>
+
+<p><code>histogram_quantile(q, ...)</code> finds the bucket containing the $q$-th observation and then
+interpolates <i>linearly</i> between that bucket's lower and upper bound. For the lowest bucket the
+lower bound is taken to be 0. So if a fraction $f = 1$ of the mass lands in the first bucket with upper
+bound $b_0$, the reported quantile is exactly</p>
+
+<div class="math-display">$$ \widehat{q} = q \cdot b_0 $$</div>
+
+<p>&mdash; a function of $q$ alone. It contains zero bits about the data.</p>
+
+<p>Now the numbers. vLLM's ITL buckets, read at <code>a556f3f</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/loggers.py:L829-L854</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        histogram_inter_token_latency = self._histogram_cls(
+            name="vllm:inter_token_latency_seconds",
+            documentation="Histogram of inter-token latency in seconds.",
+            buckets=[
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+# ... 0.15 through 40.0 elided
+                80.0,
+            ],
+            labelnames=labelnames,
+        )</code></pre>
+</div>
+
+<p>$b_0 = 10$&nbsp;ms. A healthy Llama-3-8B on one H100 decodes at 4.48&nbsp;ms/token at batch 1
+(<b>derived</b>), and batching raises throughput without raising per-token latency much until the batch
+becomes compute-bound at the ridge point $I^* = 295$ &mdash; call it 5&nbsp;ms of realised ITL with
+sampling and Python overhead. Then $f = 1$ and the dashboard reports:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">What <code>histogram_quantile</code> returns when all mass is in vLLM's first ITL bucket &mdash; <b>derived</b> from the bucket edges above and Prometheus's documented linear interpolation. These are not measurements; they are what the formula must produce.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Quantile</th><th>Reported</th><th>True ITL could be</th></tr></thead>
+      <tbody>
+        <tr><td>p50</td><td class="num">5.0 ms</td><td>anything in (0, 10] ms</td></tr>
+        <tr><td>p90</td><td class="num">9.0 ms</td><td>anything in (0, 10] ms</td></tr>
+        <tr><td>p99</td><td class="num">9.9 ms</td><td>anything in (0, 10] ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The p99 line is flat at 9.9&nbsp;ms whether your true ITL is 1&nbsp;ms or 9&nbsp;ms. It moves only
+when real ITL crosses 10&nbsp;ms &mdash; at which point it does not drift, it <i>jumps</i>, because the
+mass is now split across two buckets whose edges are 10 and 25&nbsp;ms. You get a metric that is
+simultaneously blind in the healthy regime and coarse in the degraded one.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the blindness, drawn.</b> A healthy Llama-3-8B ITL
+  distribution (peak ~5&nbsp;ms, <b>derived</b> from the 4.48&nbsp;ms decode floor) against vLLM's ITL
+  bucket edges (top) and SGLang's defaults (bottom). vLLM resolves the whole distribution into one
+  counter; SGLang splits it across four.</p>
+  <svg viewBox="0 0 960 340" width="100%" role="img" aria-label="A latency density curve peaking near five milliseconds, shown against vLLM bucket edges at ten and twenty-five milliseconds where all mass falls in the first bucket, and against SGLang bucket edges at two, four, six, eight and ten milliseconds which split the same distribution across four buckets">
+    <g font-family="IBM Plex Mono, SF Mono, Consolas, monospace" font-size="12">
+      <rect x="80" y="80" width="280" height="130" fill="var(--teal-dim)"/>
+      <polygon points="164,210 178,200 192,171 206,113 220,80 234,100 248,139 262,171 276,191 304,204 332,207 360,210"
+               fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="80" y1="210" x2="930" y2="210" stroke="var(--border-bright)" stroke-width="1"/>
+
+      <line x1="360" y1="60" x2="360" y2="216" stroke="var(--teal)" stroke-width="2" stroke-dasharray="5 3"/>
+      <line x1="780" y1="60" x2="780" y2="216" stroke="var(--teal)" stroke-width="2" stroke-dasharray="5 3"/>
+      <text x="366" y="54" fill="var(--teal)">le=0.01</text>
+      <text x="786" y="54" fill="var(--teal)">le=0.025</text>
+      <text x="88" y="100" fill="var(--teal)">vLLM bucket 1 &mdash; 100% of samples land here</text>
+      <text x="88" y="118" fill="var(--text-dim)">p50 = 5.0 ms, p90 = 9.0 ms, p99 = 9.9 ms, always</text>
+
+      <text x="220" y="74" fill="var(--copper)" text-anchor="middle">true ITL</text>
+
+      <text x="76" y="230" fill="var(--text-dim)" text-anchor="middle">0</text>
+      <text x="220" y="230" fill="var(--text-dim)" text-anchor="middle">5</text>
+      <text x="360" y="230" fill="var(--text-dim)" text-anchor="middle">10</text>
+      <text x="500" y="230" fill="var(--text-dim)" text-anchor="middle">15</text>
+      <text x="640" y="230" fill="var(--text-dim)" text-anchor="middle">20</text>
+      <text x="780" y="230" fill="var(--text-dim)" text-anchor="middle">25</text>
+      <text x="920" y="230" fill="var(--text-dim)" text-anchor="middle">30</text>
+      <text x="850" y="248" fill="var(--text-dim)">milliseconds</text>
+
+      <line x1="80" y1="285" x2="930" y2="285" stroke="var(--border-bright)" stroke-width="1"/>
+      <line x1="136" y1="265" x2="136" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="192" y1="265" x2="192" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="248" y1="265" x2="248" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="304" y1="265" x2="304" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="360" y1="265" x2="360" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="500" y1="265" x2="500" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="640" y1="265" x2="640" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <line x1="780" y1="265" x2="780" y2="291" stroke="var(--copper)" stroke-width="2"/>
+      <text x="88" y="262" fill="var(--copper)">SGLang default ITL edges: 2, 4, 6, 8, 10, 15, 20, 25 ms &hellip;</text>
+      <text x="88" y="312" fill="var(--text-dim)">the same distribution is resolved to plus or minus 2 ms</text>
+    </g>
+  </svg>
+</div>
+
+<p>SGLang's defaults start an order of magnitude lower:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/observability/metrics_collector.py:L1671-L1680</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if bucket_inter_token_latency is None:
+            bucket_inter_token_latency = [
+                0.002,
+                0.004,
+                0.006,
+                0.008,
+                0.010,
+                0.015,
+                0.020,
+                0.025,</code></pre>
+</div>
+
+<p>Neither engine is simply right. The mirror image holds for TTFT: vLLM's lowest TTFT edge is
+0.001&nbsp;s (<code>loggers.py:L796-L804</code>), while SGLang's is 0.1&nbsp;s
+(<code>metrics_collector.py:L1623-L1644</code>). An 8B model prefilling a 300-token prompt returns its
+first token in a few tens of milliseconds &mdash; so on SGLang <i>every healthy TTFT lands in bucket
+one</i>, and the exact same blindness argument applies with the engines swapped.
+<a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a> catalogues the bucket
+edges for both engines; the operational consequence is this section's.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">What to do</span>
+  <p>Three things, in order of effort. (1) Stop alerting on <code>histogram_quantile</code> of ITL and
+  alert on the ratio of rates instead: <code>rate(..._sum[5m]) / rate(..._count[5m])</code> is the true
+  mean and is not bucketed. It hides tail behaviour but it is <i>honest</i>. (2) On SGLang, pass
+  <code>--bucket-inter-token-latency</code> and <code>--bucket-time-to-first-token</code> with edges
+  chosen around your model's derived decode floor &mdash; the plumbing exists
+  (<code>python/sglang/srt/server_args.py:L1604-L1618</code>). (3) On vLLM there is no such flag; the
+  edges are literals. The supported escape hatch is a stat-logger plugin
+  (<code>vllm/v1/metrics/loggers.py:L74-L88</code>) that subclasses <code>StatLoggerBase</code> and
+  exports your own histogram from the same <code>IterationStats</code>.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">No max</span>
+  <p><a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a> established, and I
+  re-checked, that neither engine exports a max-ITL series. The worst stall any single request
+  experienced is not recoverable from <code>/metrics</code> in either engine at these SHAs. If you need
+  it, it comes from tracing (&sect;below) or from the request-level logs, not from Prometheus.</p>
+</div></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it: the metrics that exist</h2></div><div class="sec__body"><p>Both engines register their Prometheus series in one place, so the honest way to learn what exists is
+to read that file rather than a docs page. In vLLM it is <code>vllm/v1/metrics/loggers.py</code>
+(1402 lines at this SHA); in SGLang it is
+<code>python/sglang/srt/observability/metrics_collector.py</code> (2430 lines).</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The load-bearing series, read from source. Full names as registered; both engines also emit <code>_sum</code>/<code>_count</code>/<code>_bucket</code> for histograms.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>What you need to know</th><th>vLLM</th><th>SGLang</th></tr></thead>
+      <tbody>
+        <tr><td>Requests in the batch</td><td><code>vllm:num_requests_running</code></td><td><code>sglang:num_running_reqs</code></td></tr>
+        <tr><td>Requests waiting</td><td><code>vllm:num_requests_waiting</code>, plus <code>vllm:num_requests_waiting_by_reason</code> with <code>reason={capacity,deferred}</code></td><td><code>sglang:num_queue_reqs</code>, <code>sglang:num_grammar_queue_reqs</code></td></tr>
+        <tr><td>KV pressure</td><td><code>vllm:kv_cache_usage_perc</code> (0&ndash;1)</td><td><code>sglang:token_usage</code>, plus absolute <code>sglang:kv_used_tokens</code> / <code>kv_available_tokens</code> / <code>kv_evictable_tokens</code></td></tr>
+        <tr><td>Capacity overflow</td><td><code>vllm:num_preemptions</code> (counter)</td><td><code>sglang:num_retracted_requests_total</code> and <code>num_retracted_{input,output}_tokens_total</code></td></tr>
+        <tr><td>Prefix cache</td><td><code>vllm:prefix_cache_queries</code> / <code>vllm:prefix_cache_hits</code> (token counts)</td><td><code>sglang:cache_hit_rate</code> (gauge), <code>sglang:cached_tokens_total</code> by <code>cache_source</code></td></tr>
+        <tr><td>TTFT / ITL / e2e</td><td><code>vllm:time_to_first_token_seconds</code>, <code>vllm:inter_token_latency_seconds</code>, <code>vllm:e2e_request_latency_seconds</code></td><td>same three names under <code>sglang:</code>, different edges</td></tr>
+        <tr><td>Phase breakdown</td><td><code>vllm:request_queue_time_seconds</code>, <code>request_prefill_time_seconds</code>, <code>request_decode_time_seconds</code>, <code>request_inference_time_seconds</code></td><td><code>sglang:per_stage_req_latency_seconds{stage=...}</code>, <code>sglang:queue_time_seconds</code></td></tr>
+        <tr><td>Startup / capacity constants</td><td>logged, not exported</td><td><code>sglang:max_total_num_tokens</code>, <code>kv_cache_memory_usage_gb</code>, <code>weight_memory_usage_gb</code>, <code>startup_time_seconds{phase=...}</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Two differences are worth the paragraph. First, SGLang exports <i>absolute</i> token counts for the
+KV pool alongside the ratio, and separates <code>kv_used_tokens</code> from
+<code>kv_evictable_tokens</code> &mdash; the latter being radix-cached prefixes that are reclaimable
+under pressure. vLLM exports only <code>kv_cache_usage_perc</code>, so "90% used" does not tell you how
+much of that 90% is live versus cached. Second, SGLang exports its startup capacity constants as gauges,
+which means a dashboard can compute headroom in tokens without you hard-coding the pool size. vLLM logs
+the equivalent (<code>"Available KV cache memory: %s GiB"</code>,
+<code>vllm/v1/worker/gpu_worker.py:L577-L580</code>) and you have to scrape it out of the log.</p>
+
+<p>The periodic INFO log is the other primary surface, and on vLLM it is deliberately terse:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/loggers.py:L256-L298</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def log(self):
+        self._update_stats()
+        self.aggregate_scheduler_stats()
+        # Avoid log noise on an idle production system
+        log_fn = logger.debug if self.engine_is_idle else logger.info
+        # Format and print output.
+        log_parts = [
+            "Avg prompt throughput: %.1f tokens/s",
+            "Avg generation throughput: %.1f tokens/s",
+            "Running: %d reqs",
+            "Waiting: %d reqs",
+        ]
+# ...
+        if self.num_preemptions &gt; 0:
+            log_parts.append("Preemptions: %d")
+            log_args.append(self.num_preemptions)
+
+        log_parts.extend(
+            [
+                "GPU KV cache usage: %.1f%%",
+                "Prefix cache hit rate: %.1f%%",
+            ]
+        )</code></pre>
+</div>
+
+<p>Read the conditional at L283: <b>the word "Preemptions" only appears in the log at all when the
+counter is non-zero.</b> Its absence is the healthy state. Its appearance is the single most useful
+free signal either engine gives you, and it is why grepping for it is the first thing to do on a latency
+page. The interval is <code>VLLM_LOG_STATS_INTERVAL</code>, default 10.0&nbsp;s
+(<code>vllm/envs.py:L47</code>). SGLang's equivalent line is built in
+<code>python/sglang/srt/managers/scheduler_components/metrics_reporter.py:L811</code> and reads
+<code>Decode batch, #running-req: N, ... gen throughput (token/s): X, #queue-req: Y</code>.</p></div></section>
+<section class="sec" id="saturation" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Busy versus overloaded</h2></div><div class="sec__body"><p>A GPU at 100% utilisation is doing its job. The distinction you need is between <i>busy</i> (the batch
+is full, latency is at its designed value, the queue drains as fast as it fills) and <i>overloaded</i>
+(arrival rate exceeds service rate, so the queue grows without bound and every additional request makes
+every existing request slower). The metrics separate them cleanly if you look at the right three.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">HEALTHY</span><h4>Queue bounded, no preemptions</h4><p><code>num_requests_waiting</code> oscillates around a fixed mean. <code>num_preemptions</code> flat. KV utilisation below the point where an admission can fail.</p></div>
+  <div class="ve-card"><span class="ve-card__k">BUSY</span><h4>Queue bounded, KV pinned high</h4><p>Waiting queue non-zero but its 10-minute derivative is ~0. KV utilisation parked near the watermark. Preemptions occasional. This is the design point &mdash; do not page on it.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">OVERLOADED</span><h4>Queue derivative positive, preemption rate rising</h4><p><code>deriv(num_requests_waiting[10m]) &gt; 0</code> sustained, <i>and</i> <code>rate(num_preemptions[5m]) &gt; 0</code>. Queue time is now the dominant term in e2e latency.</p></div>
+</div>
+
+<p>Why preemption is the signal rather than an error: when the scheduler cannot allocate blocks for the
+running set it evicts a victim back to the waiting queue. vLLM records it as an event, and the frontend
+counts it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/stats.py:L516-L526</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        for event in events:
+            if event.type == EngineCoreEventType.QUEUED:
+                req_stats.queued_ts = event.timestamp
+                lora_states.request_waiting(req_id, lora_name)
+            elif event.type == EngineCoreEventType.SCHEDULED:
+                if req_stats.scheduled_ts == 0.0:  # ignore preemptions
+                    req_stats.scheduled_ts = event.timestamp
+                lora_states.request_running(req_id, lora_name)
+            elif event.type == EngineCoreEventType.PREEMPTED:
+                self.num_preempted_reqs += 1
+                lora_states.request_waiting(req_id, lora_name)</code></pre>
+</div>
+
+<p>SGLang calls the same thing retraction and, unlike vLLM, logs it loudly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L3619-L3631</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            msg_prefix = (
+                "KV cache pool is full. Retract requests. "
+                if kv_full_retract_flag
+                else "Testing retraction. "
+            )
+            msg_details = f"#retracted_reqs: {len(retracted_reqs)}, #new_tokens_gained: {new_token_gained}"
+# ...
+            logger.warning(msg_prefix + msg_details)</code></pre>
+</div>
+
+<p>Neither is an error. Both mean the same thing: <b>you admitted more concurrent sequences than the KV
+pool can hold, and the engine is paying for it by throwing away computed KV</b>. On vLLM the victim's
+prefix is recomputed from scratch on re-admission (<a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a>),
+so one preemption of a request with 4k tokens of context costs a full 4k-token prefill. That is a
+capacity signal with a price tag, which is exactly what you want to alert on.</p>
+
+<p><b>Deriving a starting threshold rather than inventing one.</b> Llama-3-8B stores 128&nbsp;KiB of KV
+per token. Take the book's reference budget, which
+<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> owns and which is careful to
+stay in one unit throughout &mdash; an "80&nbsp;GB" H100 is <b>79.65&nbsp;GiB</b>, neither 80&nbsp;GiB
+nor $80\times10^{9}$ bytes:</p>
+
+<div class="math-display">$$79.65\,\text{GiB} \times 0.92 \;-\; 14.96\,\text{GiB (weights)} \;-\; 6.0\,\text{GiB (activations, graphs, non-torch)} \;=\; 52.32\,\text{GiB}$$</div>
+
+<p>At 128&nbsp;KiB per token that pool is <b>428,569</b> token slots (<b>derived</b>; the exact figure
+depends on your profiling run, and <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a>
+owns the subtraction). One request at <code>max_model_len = 8192</code> occupies 1&nbsp;GiB, i.e.
+<b>1.9%</b> of the pool. So a KV-utilisation alarm at 90% leaves headroom for about five more
+max-length admissions before the scheduler must start preempting. That is a defensible <i>starting
+point</i> to tune &mdash; not a measured SLO, and it moves the moment your prompt-length distribution
+moves. Re-derive it for your model and your <code>max_model_len</code>; do not copy the number.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">On-call diagnostic table. "Change" column entries are directions, not tuned values.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Symptom</th><th>Likely cause</th><th>Check</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td>e2e p99 up, ITL mean flat</td><td>Queue time, not compute</td><td><code>vllm:request_queue_time_seconds</code> vs <code>request_inference_time_seconds</code></td><td>Add replicas; the engine is not the problem</td></tr>
+        <tr><td>ITL mean up, queue flat</td><td>Batch grew, decode is now compute-bound</td><td><code>num_requests_running</code>, <code>vllm:iteration_tokens_total</code></td><td>Lower <code>--max-num-seqs</code>, or accept it</td></tr>
+        <tr><td>Preemption rate &gt; 0 and rising</td><td>KV oversubscribed</td><td><code>kv_cache_usage_perc</code> at the same timestamps</td><td>Lower <code>--max-num-seqs</code> or <code>--max-model-len</code>; raise <code>--gpu-memory-utilization</code> only with <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> in hand</td></tr>
+        <tr><td>Prefix hit rate collapses</td><td>Router lost affinity, or cache thrash</td><td><code>prefix_cache_hits/queries</code> ratio; correlate with a deploy or a router change</td><td>Restore KV-aware routing (<a href="09-04-routers-and-load-balancing.html">&sect;9.4</a>)</td></tr>
+        <tr><td>TTFT up, ITL and queue flat</td><td>Prefill starving decode, or chunk size too large</td><td><code>request_prefill_time_seconds</code>; <code>iteration_tokens_total</code> distribution</td><td>Tune chunked prefill budget (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>)</td></tr>
+        <tr><td>Throughput drops, GPU busy, no metric moves</td><td>One slow rank dragging the collective</td><td>SGLang <code>SGLANG_DETECT_SLOW_RANK=1</code>; per-rank <code>nvidia-smi</code> clocks</td><td>Drain the node; suspect thermals or a bad link</td></tr>
+        <tr><td>Everything stops, no error, no exit</td><td>NCCL hang / rank divergence</td><td>py-spy dump every rank; <code>NCCL_DEBUG=TRACE</code></td><td>Restart; then reproduce with the consensus checker on</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the on-call decision tree.</b> Entry is a latency or
+  availability page. Every leaf is either a config change or a restart; none of them is "wait and see".
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["PAGE: latency or availability"] --> B{"Does /health return 200?"}
+    B -->|"no, 503"| C{"Is the engine process alive?"}
+    C -->|"process gone"| C1["Read the last 200 log lines<br/>look for OOM or NCCL or SIGQUIT<br/>FIX: restart, then fix the cause"]
+    C -->|"alive but stuck"| C2["py-spy dump every worker pid<br/>all ranks inside ncclAllReduce?<br/>FIX: restart. Suspect rank divergence"]
+    B -->|"yes, 200"| D{"num_requests_waiting<br/>growing over 10 min?"}
+    D -->|"yes"| E{"rate of num_preemptions<br/>above zero?"}
+    E -->|"yes"| E1["KV oversubscribed<br/>CHECK kv_cache_usage_perc<br/>FIX: lower max-num-seqs<br/>or add a replica"]
+    E -->|"no"| E2["Arrival rate exceeds capacity<br/>CHECK queue_time vs inference_time<br/>FIX: add replicas, shed load"]
+    D -->|"no"| F{"Mean ITL from sum over count<br/>above the derived decode floor?"}
+    F -->|"yes"| G{"Did prefix cache hit rate drop?"}
+    G -->|"yes"| G1["Routing affinity lost<br/>FIX: check the router"]
+    G -->|"no"| G2["Batch is compute bound<br/>or a slow rank<br/>CHECK per rank clocks<br/>FIX: cap batch, or drain the node"]
+    F -->|"no"| H["Latency is in the client<br/>or the network<br/>CHECK e2e minus inference time"]
+  </script>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: one overload, minute by minute</h2></div><div class="sec__body"><p>Walk an overload through the actual counters, on our Llama-3-8B H100 with 428,569 KV token slots
+(<b>derived</b> above). Traffic doubles at $t_0$.</p>
+
+<ol>
+<li><b>$t_0$.</b> Arrivals rise. <code>Scheduler.schedule()</code> admits from the waiting queue until
+the token budget or the block budget binds. <code>num_requests_running</code> climbs;
+<code>kv_cache_usage_perc</code> climbs with it. Nothing is wrong.</li>
+
+<li><b>$t_0 + 30$&nbsp;s.</b> The batch stops growing &mdash; admission now fails on blocks.
+<code>num_requests_waiting</code> starts a monotone climb, and
+<code>vllm:num_requests_waiting_by_reason{reason="capacity"}</code> is the label carrying it (that split
+exists precisely so you can distinguish "no room" from "deferred by a LoRA or KV-transfer constraint";
+<code>loggers.py:L513-L523</code>). <b>This is the first honest alert.</b></li>
+
+<li><b>$t_0 + 90$&nbsp;s.</b> A running request needs one more block and the pool has none. The
+scheduler preempts a victim; <code>IterationStats.update_from_events</code> increments
+<code>num_preempted_reqs</code>; the periodic log line grows a <code>Preemptions: N</code> field for the
+first time. The victim's KV is discarded and it re-enters the waiting queue.</li>
+
+<li><b>$t_0 + 120$&nbsp;s.</b> The victim is re-admitted and its 4k-token prefix is recomputed &mdash;
+which consumes prefill budget that would otherwise have gone to new arrivals. Prefill work per unit of
+useful output has risen. <code>vllm:prompt_tokens</code> rises faster than
+<code>vllm:generation_tokens</code>. This is the feedback loop: preemption creates work that causes more
+preemption.</li>
+
+<li><b>$t_0 + 300$&nbsp;s.</b> <code>request_queue_time_seconds</code> now dominates
+<code>e2e_request_latency_seconds</code>. Meanwhile <code>inter_token_latency_seconds</code> has barely
+moved, because the decode steps themselves are still fine &mdash; and even if they had moved from 5 to
+9&nbsp;ms, the first bucket would have swallowed it. <b>The ITL panel is green through the entire
+incident.</b></li>
+</ol>
+
+<p>The lesson: on this workload, queue depth leads preemption by about a minute and preemption leads
+user-visible e2e latency by a few more. Alert on the leading indicator, not the lagging one, and
+certainly not on the one whose buckets cannot see.</p></div></section>
+<section class="sec" id="failure-taxonomy" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">The failure taxonomy</h2></div><div class="sec__body"><h3>OOM at startup versus OOM ten minutes in</h3>
+
+<p>These are different bugs with the same word. A startup OOM is a sizing error and it is loud:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/kv_cache_utils.py:L778-L809</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if available_memory &lt;= 0:
+        raise ValueError(
+            "No available memory for the cache blocks. "
+            "Try increasing `gpu_memory_utilization` when initializing the engine "
+            "(this flag also controls CPU memory reservation on the CPU "
+            "backend, despite its name). "
+            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            "for more details."
+        )
+# ...
+        raise ValueError(
+            f"To serve at least one request with the model's max seq len "
+            f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
+            f"cache is needed, which is larger than the available KV cache "
+            f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
+            f"Try increasing `gpu_memory_utilization` (which also controls "
+            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
+            f"when initializing the engine. "</code></pre>
+</div>
+
+<p>An OOM ten minutes into serving is the <code>gpu_memory_utilization</code> trap:
+the profiler measured peak activation memory during a one-shot profile run and reserved the rest for KV,
+so the moment a real batch exceeds the profiled peak there is nothing left to take.
+<a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> owns that
+derivation and the reason 0.98 is a trap; do not raise the utilisation flag on a page without reading
+it. The tell-tale is a CUDA OOM raised from inside <code>execute_model</code> with a healthy uptime and
+a normal-looking KV utilisation.</p>
+
+<p>vLLM has a third, subtler startup failure worth knowing because the message names the cause exactly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/worker/gpu_worker.py:L550-L558</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        assert self.init_snapshot.free_memory &gt;= free_gpu_memory, (
+            "Error in memory profiling. "
+            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
+            f"current free memory {format_gib(free_gpu_memory)} GiB. "
+            "This happens when other processes sharing the same container "
+            "release GPU memory while vLLM is profiling during initialization. "
+            "To fix this, ensure consistent GPU memory allocation or "
+            "isolate vLLM in its own container."
+        )</code></pre>
+</div>
+
+<h3>NCCL hang</h3>
+
+<p>The signature is an <i>absence</i>: the step counter stops advancing, no exception is raised, the
+process stays resident, GPU utilisation reads high (the ranks are spinning in the collective) while SM
+occupancy is effectively idle, and <code>/health</code> still returns 200 on vLLM, because
+<code>AsyncLLM.check_health</code> only tests an <code>errored</code> flag
+(<code>vllm/v1/engine/async_llm.py:L940-L943</code>) and a hang sets no flag.</p>
+
+<p>It is usually <i>not</i> a network fault. A collective hangs when the ranks disagree about what
+collective to call &mdash; different shapes, different order, or one rank taking a branch the others did
+not. The network is fine; the ranks diverged. That is why SGLang ships an explicit divergence detector:
+every rank hashes the sequence of decisions it made and all-reduces min and max of the hash; if they
+differ, the rank kills its own process rather than hanging.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/rank_consensus_checker.py:L405-L430</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _check_for_consensus(events: list[str]) -&gt; None:
+    # Compute sha1 of concatenation of all msgs.
+    hasher = hashlib.sha1()
+    for msg in events:
+        hasher.update(msg.encode("utf-8"))
+# ...
+    if not torch.equal(min_value, max_value):
+        # When divergence, all rank should output the following log.
+        logger.critical(
+            f"Found rank divergence for {len(events)} events(s)! local hash: {value_bytes.hex()}, events = {events}"
+        )
+        for handler in logger.handlers:
+            handler.flush()
+
+        # os._exit instead of sys.exit: this runs in a background thread, where
+        # SystemExit would only kill the thread, not the process. os._exit tears
+        # down the whole scheduler process so a TP/PP mismatch can never
+        # silently keep serving.
+        os._exit(1)</code></pre>
+</div>
+
+<p>It is off by default (<code>SGLANG_ENABLE_RANK_CONSENSUS_CHECKER</code>, and <code>configure()</code>
+logs <i>"the server will suicide if rank divergence detected"</i>), it costs a gloo all-reduce per batch
+of decisions, and at this SHA the only annotated call sites are three methods in
+<code>python/sglang/srt/mem_cache/unified_radix_cache.py</code> (L495, L1753, L1971) &mdash; i.e. it
+catches cache-eviction divergence, which is exactly the class of bug where one rank frees a block the
+others keep. It is a debugging tool to turn on when reproducing a hang, not a production default.</p>
+
+<p>The first-party diagnostic set is small and worth memorising, from
+<code>docs/usage/troubleshooting.md:L33-L41</code>: <code>VLLM_LOGGING_LEVEL=DEBUG</code>,
+<code>VLLM_LOG_STATS_INTERVAL=1.</code>, <code>CUDA_LAUNCH_BLOCKING=1</code>,
+<code>NCCL_DEBUG=TRACE</code>, and <code>VLLM_TRACE_FUNCTION=1</code> &mdash; the last of which the doc
+itself warns slows generation by "over 100x". The same file (L83-L175) ships a standalone two-node NCCL
+test script; if that hangs, the problem is below vLLM and you should stop debugging vLLM.
+<code>VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS</code> defaults to 300 (<code>vllm/envs.py:L243</code>) and
+bounds how long a step may take before the RPC gives up.</p>
+
+<h3>A dead worker &mdash; and why the engine dies with it</h3>
+
+<p>vLLM has a directory named <code>vllm/v1/fault_tolerance/</code>. It is 222 lines across three files.
+<a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a> flagged that it does not do
+what the name suggests, and reading it confirms that exactly. Here is the fault handler:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/fault_tolerance/engine_core_sentinel.py:L80-L106</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def on_fault(self, exc: Exception):
+        """Called by the wrapper when the busy loop raises an exception."""
+        self.resumed.clear()
+        logger.warning(
+            "[FT] Busy loop raised %s. Waiting for recovery.", type(exc).__name__
+        )
+
+        engine = self.engine
+        aborted = engine.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+        engine._send_abort_outputs(aborted)
+        if engine.batch_queue is not None:
+            engine.batch_queue.clear()
+        if (
+            hasattr(engine.model_executor, "is_failed")
+            and engine.model_executor.is_failed
+        ):
+            self.status_type = EngineStatusType.DEAD
+        else:
+            self.status_type = EngineStatusType.UNHEALTHY</code></pre>
+</div>
+
+<p>And here is the entire recovery action:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/fault_tolerance/engine_core_sentinel.py:L122-L134</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def retry(self, ft_request: FaultToleranceRequest) -&gt; FaultToleranceResult:
+        engine = self.engine
+        executor = engine.model_executor
+
+        with set_current_vllm_config(engine.vllm_config):
+            ft_request.params.update(self._reinit_dp_group())
+        if hasattr(engine, "step_counter"):
+            engine.step_counter = 0
+
+        executor.collective_rpc("handle_ft_command", args=(ft_request,))
+
+        self.status_type = EngineStatusType.HEALTHY
+        logger.info("[FT] Engine %d status -&gt; HEALTHY", self.engine_index)</code></pre>
+</div>
+
+<p><code>_reinit_dp_group()</code> tears down and rebuilds the <i>stateless data-parallel</i> gloo group
+on fresh ports. That is the whole mechanism. It restores a DP/EP replica set after one replica dropped
+out; it does nothing whatsoever for a dead tensor-parallel rank. And the branch at L92-L96 is explicit
+about it: if the executor reports <code>is_failed</code>, the status is <code>DEAD</code>, not
+<code>UNHEALTHY</code>, and <code>retry</code> refuses to run (<code>handle_command</code> rejects any
+instruction whose status is not <code>UNHEALTHY</code>, L54-L67).</p>
+
+<p><code>is_failed</code> is set in exactly one place &mdash; the worker liveness monitor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/executor/multiproc_executor.py:L305-L324</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        def monitor_workers():
+            sentinels = [h.proc.sentinel for h in workers]
+            died = multiprocessing.connection.wait(sentinels)
+            _self = self_ref()
+            if not _self or getattr(_self, "shutting_down", False):
+                logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
+                return
+            _self.is_failed = True
+            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
+            logger.error(
+                "Worker proc %s died unexpectedly (exit code: %s), "
+                "shutting down executor.",
+                proc.name,
+                proc.exitcode,
+            )
+            _self.shutdown()</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Say it plainly</span>
+  <p>vLLM does not have worker-level fault tolerance. One TP rank dying causes
+  <code>is_failed = True</code>, an executor shutdown, a <code>failure_callback</code> to the engine, and
+  <code>EngineDeadError</code> &mdash; whose own docstring reads <i>"Raised when the EngineCore dies.
+  Unrecoverable."</i> (<code>vllm/v1/engine/exceptions.py:L12-L13</code>). Do not build a runbook step
+  that assumes a degraded-but-serving mode exists. It does not. Restart is the recovery.</p>
+</div>
+
+<p>SGLang's answer to the same problem is more direct: since a stuck collective produces no Python
+exception, it watches the forward counter from a daemon thread and shoots the process group.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/watchdog.py:L133-L163</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _watchdog_once(self):
+        watchdog_last_counter = 0
+        watchdog_last_time = time.perf_counter()
+
+        while True:
+            current = time.perf_counter()
+            if self.is_active():
+                current_counter = self.get_counter()
+                if watchdog_last_counter == current_counter:
+                    if current &gt; watchdog_last_time + self.watchdog_timeout:
+                        break
+                else:
+                    watchdog_last_counter = current_counter
+                    watchdog_last_time = current
+            time.sleep(self.watchdog_timeout / 2)
+
+        if self.dump_info is not None and (info_msg := self.dump_info()):
+            logger.error(f"{self.debug_name} debug info:\n{info_msg}")
+
+        pyspy_dump_schedulers()
+        logger.error(
+            f"{self.debug_name} watchdog timeout "
+            f"({self.watchdog_timeout=}, {self.soft=})"
+        )
+# ...
+        if not self.soft:
+            # Wait for some time so that the parent process can print the error.
+            time.sleep(5)
+            self.parent_process.send_signal(signal.SIGQUIT)</code></pre>
+</div>
+
+<p>The counter is <code>scheduler.forward_ct</code>, the timeout defaults to 300&nbsp;s
+(<code>--watchdog-timeout</code>, <code>python/sglang/srt/server_args.py:L1261-L1264</code>, whose help
+text is candid: <i>"the server will crash to prevent hanging"</i>), and before it fires it calls
+<code>pyspy_dump_schedulers()</code> so the stack of every stuck rank lands in the log. There is also a
+<code>--soft-watchdog-timeout</code> that dumps without killing &mdash; the right thing to set below the
+hard timeout in production so you get a stack trace of the near-miss. And separately,
+<code>SubprocessWatchdog</code> handles the case where a child dies without Python noticing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/watchdog.py:L166-L175</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class SubprocessWatchdog:
+    """Monitors subprocess liveness and triggers SIGQUIT when a crash is detected.
+
+    When a subprocess crashes (e.g., NCCL timeout causing C++ std::terminate()),
+    Python exception handlers never run, leaving the main process as a zombie
+    service. This watchdog polls subprocess liveness in a daemon thread and
+    sends SIGQUIT to trigger proper cleanup.
+
+    See: https://github.com/sgl-project/sglang/issues/18421
+    """</code></pre>
+</div>
+
+<p>"Leaving the main process as a zombie service" is the failure mode you should fear most: an HTTP
+server that accepts requests and never answers. Both engines have converged on the same answer &mdash;
+detect the stall, kill the whole tree, let the orchestrator restart it.</p>
+
+<h3>Model load failure, and "loads but outputs nonsense"</h3>
+
+<p>A load failure is easy: the process exits during startup with a shape or key mismatch. The dangerous
+sibling is a model that loads cleanly and emits garbage &mdash; a silently mismatched weight
+permutation, a quantisation scale applied to the wrong axis, a rotary base read from the wrong config
+key. Nothing in <code>/metrics</code> will tell you. <a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a>
+owns the loader and the mapping bugs that cause this; the operational point is that <b>output quality is
+not observable from the serving system</b> and needs an independent canary &mdash; a fixed prompt with a
+known-good completion, checked on every deploy. vLLM offers one narrow numerical tripwire:
+<code>VLLM_COMPUTE_NANS_IN_LOGITS=1</code> (default off, <code>vllm/envs.py:L247</code>) enables
+<code>vllm:corrupted_requests</code>, a counter of requests that saw NaNs in logits
+(<code>loggers.py:L572-L583</code>). It catches numerical collapse, not wrong weights.</p>
+
+<h3>Slow or disconnected clients</h3>
+
+<p>A client that opens a stream and reads slowly holds a sequence resident in KV for the whole time it
+dawdles, because the engine cannot free the blocks until the request finishes or is aborted. A hundred
+such clients are a hundred sequences of KV pressure producing almost no throughput. This is the
+backpressure path that <a href="09-03-request-lifecycle.html">&sect;9.3</a> traces end to end; from an
+observability standpoint the signature is <code>num_requests_running</code> high,
+<code>gen_throughput</code> low, and <code>e2e_request_latency</code> far exceeding
+<code>request_inference_time</code>. SGLang gives you two blunt instruments for it &mdash;
+<code>SGLANG_REQ_WAITING_TIMEOUT</code> and <code>SGLANG_REQ_RUNNING_TIMEOUT</code>, which abort with
+<code>"Request waiting timeout reached."</code> / <code>"Request running timeout reached."</code> and
+HTTP 503 (<code>python/sglang/srt/managers/scheduler.py:L1655-L1669</code> and L2878-L2903). Both
+default to disabled.</p></div></section>
+<section class="sec" id="tracing" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Tracing: what spans actually exist</h2></div><div class="sec__body"><p>vLLM's OpenTelemetry integration is real but thin. Set <code>--otlp-traces-endpoint</code> and the
+output processor emits <b>one span per request</b>, named <code>llm_request</code>, at finish time:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/output_processor.py:L805-L811</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        instrument_manual(
+            span_name="llm_request",
+            start_time=arrival_time_ns,
+            attributes=attributes,
+            context=trace_context,
+            kind=SpanKind.SERVER,
+        )</code></pre>
+</div>
+
+<p>The span carries the phase breakdown as attributes rather than as child spans:
+<code>gen_ai.latency.time_to_first_token</code>, <code>.e2e</code>, <code>.time_in_queue</code>,
+<code>.time_in_model_prefill</code>, <code>.time_in_model_decode</code>,
+<code>.time_in_model_inference</code>, plus token counts and sampling params
+(<code>vllm/tracing/utils.py:L24-L45</code>). W3C <code>traceparent</code>/<code>tracestate</code>
+headers on the incoming HTTP request are propagated, so the span nests under your caller's trace
+(<code>vllm/tracing/utils.py:L11-L12</code>). What you do <i>not</i> get is a span per scheduler step or
+per forward pass; <code>--collect-detailed-traces</code> exists in the config
+(<code>vllm/config/observability.py</code>) and is documented as "possibly costly and or blocking".</p>
+
+<p>SGLang goes the other way: a hierarchy of named stages, each of which can become a span and each of
+which is also a Prometheus histogram label.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/observability/req_time_stats.py:L105-L131</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class RequestStage:
+    # Tokenizer/gRPC Server
+    TOKENIZE = RequestStageConfig(
+        "tokenize",
+        level=1,
+    )
+    API_SERVER_DISPATCH = RequestStageConfig(
+        "api_server_dispatch",
+        level=2,
+    )
+# ...
+    REQUEST_PROCESS = RequestStageConfig(
+        "request_process",
+        level=2,
+        metrics_is_observed=True,
+    )
+    PREFILL_WAITING = RequestStageConfig(
+        "prefill_waiting",
+        level=1,</code></pre>
+</div>
+
+<p>The stage set continues through <code>prefill_forward</code>, <code>chunked_prefill</code>,
+<code>decode_loop</code>, <code>decode_forward</code> and the PD-disaggregation stages
+(<code>prefill_bootstrap</code>, <code>prefill_transfer_kv_cache</code>, <code>decode_prepare</code>).
+Stages flagged <code>metrics_is_observed</code> land in
+<code>sglang:per_stage_req_latency_seconds{stage=...}</code>, whose buckets are
+<code>exponential_buckets(start=0.001, width=1.62, length=30)</code>
+(<code>metrics_collector.py:L733-L739</code>) &mdash; note that this histogram, unlike the ITL one on
+either engine, has resolution starting at 1&nbsp;ms. Tracing is gated by
+<code>SGLANG_TRACE_LEVEL</code> (default 3) and a <code>--trace-modules</code> filter
+(<code>python/sglang/srt/observability/trace.py:L36-L37</code> and L77-L83), with an async exporter
+process behind <code>SGLANG_TRACE_ASYNC=1</code> so span construction stays off the scheduler thread
+(<code>python/sglang/srt/observability/trace.py:L133-L142</code>).</p>
+
+<p>The tradeoff is the usual one. vLLM's single span is nearly free and answers "where did this request
+spend its time" at the phase level. SGLang's stage tree answers "which of eleven pipeline stages
+regressed" but costs a span per stage per request and needs a filter to stay affordable. If you run PD
+disaggregation, the stage tree is worth it &mdash; the KV-transfer stages are where the failures live.</p></div></section>
+<section class="sec" id="what-to-log" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">What to log, and what not to</h2></div><div class="sec__body"><p>Prompts are user data. Logging them is a privacy and compliance decision that belongs to whoever owns
+your data policy, not a debugging default you flip on during an incident and forget. Say it out loud in
+your runbook, because the flags make it a one-liner.</p>
+
+<p>Both engines default to <i>not</i> logging request content. vLLM's <code>enable_log_requests</code>
+defaults to <code>False</code> (<code>vllm/engine/arg_utils.py:L2879</code>). SGLang's
+<code>--log-requests</code> defaults to <code>False</code> too &mdash; but note what happens when you
+turn it on:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L1518-L1530</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    log_requests: A[
+        bool,
+        "Log metadata, inputs, outputs of all requests. The verbosity is decided by --log-requests-level",
+        NS("observability"),
+    ] = False
+    log_requests_level: A[
+        int,
+        Arg(
+            help="0: Log metadata (no sampling parameters). 1: Log metadata and sampling parameters. 2: Log metadata, sampling parameters and partial input/output. 3: Log every input/output.",
+            choices=[0, 1, 2, 3],
+        ),
+        NS("observability"),
+    ] = 2</code></pre>
+</div>
+
+<p>The default <i>level</i> is 2 &mdash; partial input and output. So <code>--log-requests</code> with no
+further argument writes user prompts to your log pipeline. If you need request-level logs for debugging
+without the content, that is <code>--log-requests --log-requests-level 1</code>, and it is the setting
+almost everyone actually wants. HTTP headers are allow-listed rather than dumped
+(<code>python/sglang/srt/utils/request_logger.py:L30-L41</code>).</p>
+
+<p>The second trap is crash dumps. <code>--crash-dump-folder</code> is unset by default, and when set it
+writes the last five minutes of requests &mdash; full request objects, prompts included &mdash; to disk
+on SIGTERM or SIGQUIT (<code>python/sglang/srt/managers/tokenizer_manager.py:L2956-L2995</code>). It is
+an excellent debugging tool and a data-retention obligation the moment you enable it. Give the folder a
+retention policy before you give it a path.</p>
+
+<p>What you should log unconditionally: request IDs, token counts, finish reasons, timings, the
+scheduler's periodic line, and every WARNING and above from the engine. That set is enough to
+reconstruct an incident and contains no user text.</p></div></section>
+<section class="sec" id="recovery" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Readiness, draining, and why restart is the answer</h2></div><div class="sec__body"><p><b>Liveness is not readiness.</b> A replica that has started its process, mapped its weights, and is
+40 seconds into CUDA-graph capture is alive and must not receive traffic. Both engines make the
+distinction available, in different shapes.</p>
+
+<p>vLLM's <code>/health</code> is a pure liveness probe on the engine:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/serve/instrumentator/health.py:L22-L33</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@router.get("/health", response_class=Response)
+async def health(raw_request: Request) -&gt; Response:
+    """Health check."""
+    client = engine_client(raw_request)
+    if client is None:
+        # Render-only servers have no engine; they are always healthy.
+        return Response(status_code=200)
+    try:
+        await client.check_health()
+        return Response(status_code=200)
+    except EngineDeadError:
+        return Response(status_code=503)</code></pre>
+</div>
+
+<p>It answers exactly one question: has the engine died? It does not answer "is this replica warmed
+up", because the HTTP server does not start serving until startup completes. For load-balancer weighting
+there is a separate <code>/load</code> endpoint returning the in-flight request count
+(<code>vllm/entrypoints/serve/instrumentator/basic.py:L30-L49</code>), which is what
+<a href="09-04-routers-and-load-balancing.html">&sect;9.4</a>'s balancers consume.</p>
+
+<p>SGLang folds readiness into the same route, and goes further &mdash; the health check is a real
+one-token generation, so it proves the whole path works rather than just that a Python object exists:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/http_server.py:L654-L675</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@app.get("/health")
+@app.get("/health_generate")
+async def health_generate(request: Request) -&gt; Response:
+    """
+    Check the health of the inference server by sending a special request to generate one token.
+
+    If the server is running something, this request will be ignored, so it creates zero overhead.
+    If the server is not running anything, this request will be run, so we know whether the server is healthy.
+    """
+
+    if _global_state.tokenizer_manager.gracefully_exit:
+        logger.info("Health check request received during shutdown. Returning 503.")
+        return Response(status_code=503)
+
+    if _global_state.tokenizer_manager.server_status == ServerStatus.Starting:
+        return Response(status_code=503)</code></pre>
+</div>
+
+<p>Two behaviours to note. <code>ServerStatus.Starting</code> returns 503 &mdash; that is your readiness
+gate, for free. And <code>gracefully_exit</code> returns 503 <i>before</i> the process stops accepting
+work, which is exactly the drain semantic you want: SIGTERM flips the flag, the health check goes red,
+the load balancer stops sending new requests, in-flight requests finish, then the process exits.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L3567-L3583</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def sigterm_handler(self, signum=None, frame=None):
+        logger.warning(
+            f"SIGTERM received. {signum=} {frame=}. Draining requests and shutting down..."
+        )
+        self.tokenizer_manager.gracefully_exit = True
+
+    def running_phase_sigquit_handler(self, signum=None, frame=None):
+        logger.error(
+            f"SIGQUIT received. {signum=}, {frame=}. It usually means one child failed."
+        )
+        # Stop subprocess watchdog before killing processes to prevent false-positive
+        # crash detection during normal shutdown
+        if self.tokenizer_manager._subprocess_watchdog is not None:
+            self.tokenizer_manager._subprocess_watchdog.stop()
+        self.tokenizer_manager.dump_requests_before_crash()
+        kill_process_tree(os.getpid())</code></pre>
+</div>
+
+<p>SIGTERM means drain; SIGQUIT means a child died, dump and kill the tree. If your orchestrator sends
+SIGKILL after a 30-second grace period and your requests routinely run for 60 seconds, you are
+truncating user responses on every deploy. Set the grace period from your own
+<code>e2e_request_latency</code> p99, not from the platform default.</p>
+
+<p><b>Why restart is the primary recovery mechanism.</b> In a stateless service you drop the bad replica
+and the request retries elsewhere. Here, three properties conspire against that. The GPU state (weights,
+CUDA graphs, KV pool) takes tens of seconds to rebuild, so failover is not free. The KV cache is
+per-replica, so a failover discards every cached prefix and the surviving replicas take a cold-cache
+throughput hit. And the collective has no quorum: there is no configuration in which three of four
+ranks keep serving. Given all that, the honest design is what both engines chose &mdash; detect the
+stall fast, die loudly, and let the orchestrator bring back a clean process. Your job on call is to make
+the detection fast (set <code>--watchdog-timeout</code> and its soft twin sensibly), make the restart
+clean (drain on SIGTERM, correct grace period), and make the <i>next</i> one preventable by capturing a
+py-spy dump before the process goes away.</p></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Everything below runs against a single small model; none of it needs a big GPU, and the first two
+need no GPU at all.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">read the bucket edges yourself, no GPU required</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>V=~/Documents/other_git_repos/vllm
+S=~/Documents/other_git_repos/sglang
+
+# every Prometheus series vLLM registers, in registration order
+grep -n 'name="vllm:' $V/vllm/v1/metrics/loggers.py
+
+# ... and SGLang's, which is roughly 3x longer
+grep -c 'name="sglang:' $S/python/sglang/srt/observability/metrics_collector.py
+
+# the whole of vLLM's "fault tolerance"
+wc -l $V/vllm/v1/fault_tolerance/*.py</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">observe the blindness on a live server</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 8192
+
+# drive some load, then:
+curl -s localhost:8000/metrics | grep '^vllm:inter_token_latency_seconds_bucket'
+# expect: the le="0.01" bucket count equals the le="+Inf" count.
+# Every sample is in bucket one. Now compute the honest mean instead:
+curl -s localhost:8000/metrics | grep -E '^vllm:inter_token_latency_seconds_(sum|count)'</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">force a preemption and watch the counter move</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Shrink the KV pool until the running set cannot fit, then send concurrent
+# long-context requests. --kv-cache-memory-bytes takes bytes.
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  --max-model-len 8192 --max-num-seqs 64 --kv-cache-memory-bytes 2147483648
+
+# In another shell, watch for the field that only appears when non-zero:
+#   "Preemptions: N"
+# and confirm it in Prometheus:
+watch -n1 "curl -s localhost:8000/metrics | grep '^vllm:num_preemptions_total'"</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">SGLang: fix the buckets, and prove the watchdog fires</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Buckets tuned around a derived 4.48 ms decode floor:
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --enable-metrics \
+  --bucket-inter-token-latency 0.003 0.004 0.005 0.006 0.008 0.012 0.02 0.05 0.2 \
+  --bucket-time-to-first-token 0.01 0.02 0.05 0.1 0.25 0.5 1.0 2.5 10.0
+
+# There is no fault injector at this SHA; the way to exercise the watchdog is
+# to shrink its timeouts until an ordinary long batch trips them. The soft
+# timeout dumps every rank's stack and keeps serving; the hard one dumps and
+# then SIGQUITs the tree. Do NOT run this against anything you care about.
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --soft-watchdog-timeout 5 --watchdog-timeout 20</code></pre>
+</div>
+
+<p><a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> covers generating load
+that resembles your workload rather than load that flatters your numbers; use its harness, not a
+<code>for</code> loop of curl.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read and answer.</b> Open <code>vllm/v1/metrics/loggers.py</code> and find every histogram whose
+lowest bucket edge is at or above 10&nbsp;ms. For each, name a model and hardware combination from this
+book where a healthy value would fall below that edge.</li>
+
+<li><b>Derive a threshold.</b> Llama-3-70B (L=80, h_kv=8, d_h=128) in bf16 stores 320&nbsp;KiB of KV per
+token, and its 70.6&nbsp;B parameters are 131.5&nbsp;GiB &mdash; 32.87&nbsp;GiB per GPU at TP=4. Redo
+&sect;5's budget on 4&times;H100 at <code>--gpu-memory-utilization 0.90</code>, keeping every term in GiB
+against a <b>79.65&nbsp;GiB</b> card. Estimate the KV token capacity per GPU, then compute what
+fraction of the pool one request at <code>max_model_len = 32768</code> consumes. What KV-utilisation
+alarm threshold does that argue for, and how does your answer change at
+<code>max_model_len = 8192</code>?</li>
+
+<li><b>Predict, then verify.</b> vLLM's <code>request_time_per_output_token_seconds</code> uses the same
+bucket list as <code>inter_token_latency_seconds</code>. Predict what
+<code>histogram_quantile(0.95, ...)</code> of it reports for a healthy 8B server. Then read
+<code>loggers.py:L859-L882</code> and confirm the bucket list is identical.</li>
+
+<li><b>Trace a failure.</b> Starting from <code>multiproc_executor.py:L305</code>, follow
+<code>failure_callback</code> to where <code>EngineDeadError</code> is first raised on the frontend, and
+name every function in the chain. How many process boundaries does the signal cross?</li>
+
+<li><b>Design.</b> You must alert on max ITL, which neither engine exports. Given what you now know
+about vLLM's stat-logger plugin hook and SGLang's per-stage histogram, write down two designs &mdash;
+one per engine &mdash; and state what each costs on the hot path.</li>
+</ol>
+
+<details class="fold">
+<summary>Answers</summary>
+<div class="fold__body">
+<p><b>1.</b> <code>vllm:inter_token_latency_seconds</code> and
+<code>vllm:request_time_per_output_token_seconds</code> both start at 0.01; the
+<code>request_latency_buckets</code> family starts at 0.3&nbsp;s. Llama-3-8B on H100 has a 4.48&nbsp;ms
+decode floor, so both ITL histograms are blind; a short-prompt e2e latency of ~0.2&nbsp;s falls under
+the 0.3&nbsp;s floor of the third family. TTFT (floor 0.001) is fine on vLLM and blind on SGLang, whose
+floor is 0.1.</p>
+<p><b>2.</b> $79.65 \times 0.90 = 71.69$&nbsp;GiB requested, minus 32.87&nbsp;GiB of weights, minus
+the same ~6.0&nbsp;GiB of activations, graphs and non-torch allocations, leaves <b>32.82&nbsp;GiB</b> per
+GPU, i.e. $32.82 \times 1024^2 / 320 \approx 107{,}500$ tokens. One 32k request is
+$32768/107{,}500 = $ <b>30.5%</b> of the pool &mdash; only three such requests fit, so a 90% threshold is
+useless; you would need to alarm nearer 70% and, better, cap <code>max_model_len</code>. At 8192 the
+same request is 7.6%, and a 90% threshold leaves room for one more admission. Note that doing this in
+decimal GB &mdash; "80 GB times 0.9 minus 33 GB" &mdash; and then reporting the answer in GiB inflates
+the pool by about 7%; mixing the two units inside one expression is the single most common way this
+derivation goes wrong. The lesson is that a percentage threshold is only meaningful relative to the
+largest single allocation.</p>
+<p><b>3.</b> It reports 0.95 &times; 10&nbsp;ms = 9.5&nbsp;ms, for the same reason and with the same
+information content: none.</p>
+<p><b>4.</b> <code>monitor_workers</code> sets <code>is_failed</code> and calls
+<code>failure_callback</code> inside the EngineCore process; the engine core surfaces the death to the
+frontend over ZMQ; <code>core_client.py</code> marks <code>resources.engine_dead</code> and raises
+<code>EngineDeadError</code> (L493, L701, L706, L1091); <code>async_llm.py:L305</code> raises it to the
+caller. Two process boundaries: worker&rarr;engine core (an OS process sentinel) and engine
+core&rarr;API server (ZMQ). Neither is a network hop in the single-node case, which is why detection is
+fast.</p>
+<p><b>5.</b> On vLLM: a <code>StatLoggerBase</code> subclass registered through
+<code>STAT_LOGGER_PLUGINS_GROUP</code>, taking <code>IterationStats.inter_token_latencies_iter</code>
+(<code>stats.py:L437</code>) and exporting a Gauge of the per-interval max plus a histogram with your own
+edges. Cost: one pass over a list that already exists, on the frontend process, not the GPU path. On
+SGLang: either override the ITL buckets so the existing histogram resolves your range, or add a stage to
+<code>RequestStage</code> and let <code>per_stage_req_latency_seconds</code> carry it &mdash; its
+exponential buckets already start at 1&nbsp;ms. Cost of the stage approach: one observation per stage
+per request on the scheduler thread.</p>
+</div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>A histogram cannot report anything below its lowest bucket edge. vLLM's ITL floor of 10&nbsp;ms sits
+above a healthy Llama-3-8B ITL of ~5&nbsp;ms, so <code>histogram_quantile</code> on it returns
+$q \times 10$&nbsp;ms and nothing else. Alert on <code>rate(_sum)/rate(_count)</code>; fix the buckets
+with <code>--bucket-inter-token-latency</code> on SGLang or a stat-logger plugin on vLLM.</li>
+
+<li>Preemption (vLLM) and retraction (SGLang) are capacity signals, not errors &mdash; but they are
+expensive ones, because the victim's KV is discarded and its prefix recomputed. Alert on the rate, and
+read it together with KV utilisation. In vLLM's periodic log the word "Preemptions" appears only when
+the count is non-zero.</li>
+
+<li>Queue depth and its derivative lead preemption, which leads user-visible e2e latency. The whole
+incident can pass with the ITL panel green. Build the dashboard around occupancy, not around latency
+percentiles.</li>
+
+<li><code>vllm/v1/fault_tolerance/</code> is 222 lines that rebuild a stateless DP process group. It is
+DP/EP replica recovery. A dead TP rank sets <code>is_failed</code>, shuts down the executor, and
+produces <code>EngineDeadError</code> &mdash; "Unrecoverable", per its own docstring. There is no
+degraded-but-serving mode; restart is the recovery, and the operational work is making detection fast
+and the restart clean.</li>
+
+<li>A stuck collective raises no Python exception, so both engines rely on a liveness counter and a
+timeout: SGLang's <code>--watchdog-timeout</code> (default 300&nbsp;s) py-spy-dumps every rank and sends
+SIGQUIT; its <code>SubprocessWatchdog</code> catches the C++-side crashes Python never sees. Set the
+soft watchdog below the hard one so you get a stack before the kill.</li>
+
+<li>Prompts are user data. <code>--log-requests</code> on SGLang defaults to level 2, which includes
+partial input and output; <code>--crash-dump-folder</code> writes five minutes of full requests to disk.
+Both are the right tools during an investigation and a retention obligation the rest of the time.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="https://github.com/vllm-project/vllm/blob/main/docs/usage/troubleshooting.md">vLLM,
+<code>docs/usage/troubleshooting.md</code></a> &mdash; the first-party failure catalogue. The two-node
+NCCL sanity script (L83&ndash;L175) is the fastest way to decide whether a hang is vLLM's problem or the
+fabric's.</li>
+<li><a href="https://docs.vllm.ai/en/latest/design/metrics/">vLLM metrics design document</a> &mdash;
+the rationale for the V1 <code>StatLoggerBase</code> split between <code>SchedulerStats</code> (engine
+core) and <code>IterationStats</code> (frontend), which is why some metrics are per-engine and others
+are aggregated.</li>
+<li><a href="https://github.com/sgl-project/sglang/issues/18421">sgl-project/sglang#18421</a> &mdash; the
+zombie-service issue that produced <code>SubprocessWatchdog</code>; a good short read on why a crashed
+child does not necessarily kill the parent.</li>
+<li><a href="https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile">Prometheus,
+<code>histogram_quantile</code></a> &mdash; read the interpolation rules, especially the treatment of the
+lowest bucket, before you trust a percentile panel again. Native histograms remove this whole class of
+problem; neither engine emits them at these SHAs.</li>
+<li><a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OpenTelemetry GenAI semantic
+conventions</a> &mdash; vLLM copies the attribute names into
+<code>vllm/tracing/utils.py</code> rather than importing them, to avoid version conflicts; worth knowing
+if your collector enforces the spec.</li>
+<li><a href="../10-benchmarking/10-05-profiling-and-capacity.html">&sect;10.5</a> for turning these
+metrics into a capacity model, and <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a>
+for the VRAM subtraction behind every KV threshold in this chapter.</li>
+</ul></div></section>
+<div class="pager"><a href="09-04-routers-and-load-balancing.html"><div class="pager__k">← Previous</div><div class="pager__t">Routers, KV-aware balancing, session affinity</div></a><a class="pager__next" href="../10-benchmarking/10-01-workload-characterization.html"><div class="pager__k">Next →</div><div class="pager__t">Workload characterization</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: what a histogram can and cannot tell you</a>
+<a href="#production">How production systems do it: the metrics that exist</a>
+<a href="#saturation">Busy versus overloaded</a>
+<a href="#worked-trace">Worked trace: one overload, minute by minute</a>
+<a href="#failure-taxonomy">The failure taxonomy</a>
+<a href="#tracing">Tracing: what spans actually exist</a>
+<a href="#what-to-log">What to log, and what not to</a>
+<a href="#recovery">Readiness, draining, and why restart is the answer</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,2028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Data parallelism, attention-DP, expert parallelism — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i is-current" href="05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 5 · Parallelism and distributed inference · 05-03</div>
+<h1>Data parallelism, attention-DP, expert parallelism</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/coordinator.py</code></li><li><code>python/sglang/srt/layers/dp_attention.py</code></li><li><code>python/sglang/srt/eplb/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Tensor parallelism buys you nothing on an MLA model's KV cache and it buys you a narrower
+GEMM on a 256-expert MoE layer. The two parallelism axes that actually make frontier MoE models
+servable — data-parallel attention and expert parallelism — are the ones that replace collective
+reductions with routing.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You launch DeepSeek-V3 across eight GPUs the obvious way, <code>--tp 8</code>. The server
+comes up, then falls over at about 150 simultaneous 4k-token requests. Eight H100s holding fewer
+resident tokens than one GPU running Llama-3-70B at TP=1.</p>
+
+<p><a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a> established why and
+verified it in both engines: MLA's KV cache is <em>replicated</em> across tensor-parallel ranks,
+not sharded. vLLM's <code>get_num_kv_heads</code> returns 1 at the <code>use_mla</code> branch
+before the TP division; SGLang's MLA branch of <code>_compute_cell_size</code> takes no parallel
+argument at all. The per-token cell is
+$L \cdot (r_{kv} + d_{\text{rope}}) \cdot b = 61 \times 576 \times 2 = 70{,}272$ bytes on
+<em>every</em> rank, so a 40&nbsp;GiB pool holds $42{,}949{,}672{,}960 / 70{,}272 = 611{,}192$
+tokens per rank — and all eight ranks hold the <em>same</em> 611,192. Adding GPUs adds zero KV
+capacity.</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="kpi__n">611,192</div><div class="kpi__l">cluster tokens, MLA at TP=8 (derived)</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">4,889,536</div><div class="kpi__l">cluster tokens, MLA at DP=8 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">8&times;</div><div class="kpi__l">from changing one flag</div></div>
+</div>
+
+<p>The second symptom is on the FLOP side. DeepSeek-V3's MoE layer has 256 routed experts of
+2,048 intermediate width; shard each eight ways with TP and every rank runs a
+$K = 7168 \to N = 512$ GEMM per expert — a shape that leaves most of a tensor core idle, repeated
+256 times, on <em>every</em> rank, for <em>every</em> token. Both symptoms have the same fix, and it
+is not a kernel: stop splitting the tensor, start splitting the <em>data</em> and the
+<em>experts</em>. <a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a> owns TP,
+<a href="../05-parallelism/05-02-pipeline-parallelism.html">§5.2</a> PP,
+<a href="../05-parallelism/05-04-collectives-and-topology.html">§5.4</a> the collectives, and
+<a href="../07-architectures/07-01-mixture-of-experts.html">§7.1</a> MoE routing and grouped GEMM as
+a modelling topic. What follows is the parallelism of it.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Every parallelism axis answers one question: what do I split, and what must I therefore
+communicate? TP splits the <em>weight matrices</em> and pays an all-reduce over activations. PP
+splits the <em>layers</em> and pays a point-to-point send. DP splits the <em>batch</em> and pays
+nothing — until the ranks must share a weight matrix, when it pays a gather. EP splits the
+<em>experts</em> and pays an all-to-all, because which rank a token needs is decided at run time by
+the router.</p>
+
+<p>The interesting deployments are hybrids. DP attention runs attention data-parallel — each rank
+owns whole sequences, so each KV entry lives on exactly one rank — while the MoE stays tensor- or
+expert-parallel. That needs a shape change at the attention&harr;FFN boundary of every layer, and
+everything hard about DP attention lives in that shape change.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — four ways to spend eight GPUs on one transformer layer.</b>
+    What is split, and what the split costs in communication.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    Q["One decode step<br/>1024 tokens, d=7168"]
+
+    Q --> TP["TENSOR PARALLEL<br/>split every weight 8 ways<br/>KV: replicated for MLA<br/>comm: all-reduce 25.7 MB per layer"]
+    Q --> DP["PLAIN DATA PARALLEL<br/>8 independent replicas<br/>KV: 8 private pools<br/>comm: none, weights 8x duplicated"]
+    Q --> DPA["DP ATTENTION + TP FFN<br/>attention DP-8, FFN TP-8<br/>KV: 8 private pools<br/>comm: all-gather + reduce-scatter"]
+    Q --> EP["DP ATTENTION + EP FFN<br/>attention DP-8, 32 experts per rank<br/>KV: 8 private pools<br/>comm: all-to-all dispatch + combine"]
+
+    TP --> R1["MLA capacity flat in TP<br/>MoE GEMM narrow"]
+    DP --> R2["8x weights per node<br/>prefix caches do not share"]
+    DPA --> R3["8x KV capacity<br/>attention weights replicated"]
+    EP --> R4["8x KV capacity<br/>wide grouped GEMM<br/>load imbalance appears"]
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles</h2></div><div class="sec__body"><h3>Plain data parallelism</h3>
+
+<p>The baseline: $N$ replicas, each a complete engine with a complete copy of the weights and its
+own KV pool, behind a router. Throughput scales linearly in $N$ with no inter-replica
+communication. SGLang's data-parallel controller is exactly that router:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/data_parallel_controller.py:L79-L93</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class LoadBalanceMethod(Enum):
+    """Load balance method."""
+
+    ROUND_ROBIN = auto()
+    FOLLOW_BOOTSTRAP_ROOM = auto()
+    TOTAL_REQUESTS = auto()
+    TOTAL_TOKENS = auto()</code></pre>
+</div>
+
+<p>Dispatch is a greedy pick over shared-memory load snapshots — least outstanding requests, or
+least resident tokens with requests as tie-break
+(<code>python/sglang/srt/managers/data_parallel_controller.py:L114-L130</code>). Two consequences.
+$N$ replicas hold $N$ copies of the weights, so plain DP is only affordable for small models. And
+<b>prefix caches do not share across replicas</b>: a conversation routed to replica 3 on turn one
+and replica 6 on turn two re-prefills from scratch. None of these four methods knows anything about
+prefixes, which is why cache-aware routing exists —
+<a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a>.</p>
+
+<h3>DP attention: turning a replicated cache into a sharded one</h3>
+
+<p>Attention is embarrassingly parallel over sequences: nothing in the computation for sequence $a$
+touches sequence $b$. So if rank 0 owns $\{a, b\}$ and rank 1 owns $\{c, d\}$, each rank holds only
+its own KV — and the eight copies of the MLA latent that TP forced on you become eight
+<em>different</em> caches instead of eight identical ones. The FFN is not: every token needs every
+weight. The layer therefore has two halves with incompatible data layouts. SGLang names them:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/communicator.py:L197-L210</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class ScatterMode(Enum):
+    """
+    Suppose we have TP=4, DP=2, enable-dp-attention, and the system handles seq a,b,c,d
+    Model input/output: [ab, ab, cd, cd] for four ranks respectively
+    SCATTERED: [a, b, c, d]
+    TP_ATTN_FULL: [ab, ab, cd, cd], i.e. all ranks inside a TP attn group have full data of the group
+    FULL: [abcd, abcd, abcd, abcd]
+    MOE_FULL: full within the MoE group (cp_per_moe CP chunks), used when moe_dp_size &lt; attn_cp_size
+    """
+
+    SCATTERED = auto()
+    TP_ATTN_FULL = auto()
+    FULL = auto()
+    MOE_FULL = auto()</code></pre>
+</div>
+
+<p>Attention runs in <code>TP_ATTN_FULL</code>, a TP-sharded FFN in <code>FULL</code>; getting
+between them is an all-gather in and a reduce-scatter out, once per layer. The rank arithmetic that
+carves the world into an attention-DP grid is four lines:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/dp_attention.py:L326-L340</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def compute_dp_attention_world_info(
+    enable_dp_attention, tp_rank, tp_size, dp_size, attn_cp_size: int = 1
+):
+    attn_dp_size = dp_size if enable_dp_attention else 1
+    attn_tp_size = tp_size // attn_dp_size // attn_cp_size
+    attn_tp_rank = tp_rank % attn_tp_size
+
+    if not enable_dp_attention:
+        attn_dp_rank = 0
+    else:
+        # Rank layout is (dp, cp, tp) where tp is the fastest-changing dim:
+        # tp_rank = (attn_dp_rank * attn_cp_size + attn_cp_rank) * attn_tp_size + attn_tp_rank
+        attn_dp_rank = tp_rank // (attn_tp_size * attn_cp_size)
+
+    return attn_tp_rank, attn_tp_size, attn_dp_rank, attn_dp_size</code></pre>
+</div>
+
+<p>The canonical DeepSeek configuration is <code>tp_size = dp_size = 8</code>, giving
+<code>attn_tp_size = 1</code>: attention is pure DP, each rank alone with its own sequences and KV
+pool. The flag's help text says exactly this — <em>"Enabling data parallelism for attention and
+tensor parallelism for FFN. The dp size should be equal to the tp size."</em>
+(<code>python/sglang/srt/server_args.py:L1163-L1170</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — where the all-gather and reduce-scatter sit.</b>
+    One DeepSeek-V3 layer, <code>tp=8 dp=8 attn_tp=1</code>, decode step with 128 tokens per rank.
+    Shapes are bf16 unless marked. The right branch is what you get with an all-to-all MoE backend:
+    the gather disappears entirely.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["rank r: local tokens<br/>hidden [128, 7168] bf16 = 1.84 MB<br/>ScatterMode TP_ATTN_FULL"]
+    A --> B["MLA attention on rank r only<br/>reads only rank r KV pool<br/>611,192 token capacity, private"]
+    B --> C{"mlp_mode<br/>_compute_mlp_mode()"}
+
+    C -->|"a2a backend = none<br/>ScatterMode.FULL"| D["dp_gather_partial<br/>all-gather over tp_group<br/>[128,7168] -> [1024,7168]<br/>12.85 MB in per rank"]
+    D --> E["TP-sharded MoE<br/>every rank sees all 1024 tokens<br/>holds 1/8 of every expert"]
+    E --> F["dp_reduce_scatter_tensor<br/>[1024,7168] -> [128,7168]<br/>12.85 MB out per rank"]
+
+    C -->|"a2a backend = deepep<br/>ScatterMode.SCATTERED"| G["no gather<br/>topk_ids [128, 8]"]
+    G --> H["DeepEP dispatch<br/>~672 rows fp8 = 4.97 MB<br/>to the ranks owning the experts"]
+    H --> I["grouped GEMM<br/>32 local experts per rank<br/>1.41 GB fp8 weights streamed"]
+    I --> J["DeepEP combine<br/>~672 rows bf16 = 9.63 MB<br/>weighted sum back to owner rank"]
+
+    F --> K["residual add, next layer<br/>[128, 7168] on rank r"]
+    J --> K
+  </script>
+</div>
+
+<h3>The capacity arithmetic, done twice</h3>
+
+<p>The clean version first, holding the KV pool fixed at 40&nbsp;GiB per GPU exactly as
+<a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a> did. Under TP=8 all eight
+ranks hold identical latents, so cluster <em>distinct</em> resident tokens is 611,192; under DP=8
+each pool holds different sequences, so the cluster holds
+$8 \times 611{,}192 = 4{,}889{,}536$. Eight times, from one flag.</p>
+
+<p>That flatters DP attention, because it hides the cost: with <code>attn_tp_size = 1</code> every
+rank keeps a <em>full</em> copy of the attention weights instead of an eighth. Do it again with
+weights accounted, from the published shapes ($d = 7168$, $n_h = 128$, $r_q = 1536$,
+$r_{kv} = 512$, $d_{\text{rope}} = 64$, $d_{\text{nope}} = d_v = 128$):</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — MLA parameters per DeepSeek-V3 layer. Arithmetic from the published shapes; $d=7168$ is confirmed in-tree by SGLang's grouped-GEMM benchmark shapes (<code>python/sglang/kernels/aot/benchmark/bench_fp8_blockwise_group_gemm.py:L320-L325</code>).</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Projection</th><th>Shape</th><th>Params</th></tr></thead>
+      <tbody>
+        <tr><td><code>q_a_proj</code></td><td>7168 &times; 1536</td><td class="num">11.01 M</td></tr>
+        <tr><td><code>q_b_proj</code></td><td>1536 &times; 24576</td><td class="num">37.75 M</td></tr>
+        <tr><td><code>kv_a_proj_with_mqa</code></td><td>7168 &times; 576</td><td class="num">4.13 M</td></tr>
+        <tr><td><code>kv_b_proj</code></td><td>512 &times; 32768</td><td class="num">16.78 M</td></tr>
+        <tr><td><code>o_proj</code></td><td>16384 &times; 7168</td><td class="num">117.44 M</td></tr>
+        <tr><td><b>total per layer</b></td><td>&mdash;</td><td class="num"><b>187.11 M</b></td></tr>
+        <tr><td><b>&times; 61 layers</b></td><td>&mdash;</td><td class="num"><b>11.41 B</b></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>DeepSeek-V3 in fp8 is 671&nbsp;GB, of which 11.41&nbsp;GB is attention. That does not fit on
+eight 80&nbsp;GB H100s at all, so compare at 16 GPUs, budgeting 72&nbsp;GB per GPU for weights plus
+KV (8&nbsp;GB reserved for activations and workspaces — an assumption, not a measurement):</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — DeepSeek-V3 fp8 on 16&times;H100 80GB, 72 GB per GPU for weights + KV, MLA cell 70,272 B/token. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Config</th><th>Non-attn weights /rank</th><th>Attn weights /rank</th><th>KV pool /rank</th><th>Tokens /rank</th><th>Cluster distinct tokens</th></tr></thead>
+      <tbody>
+        <tr><td>TP=16, no DP attn</td><td class="num">41.22 GB</td><td class="num">0.71 GB</td><td class="num">30.06 GB</td><td class="num">427,800</td><td class="num">427,800</td></tr>
+        <tr><td>DP=16 attn, EP=16</td><td class="num">41.22 GB</td><td class="num">11.41 GB</td><td class="num">19.37 GB</td><td class="num">275,600</td><td class="num">4,409,500</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Replicating attention costs 10.7&nbsp;GB per rank and cuts the per-rank pool by 36%. It still
+wins by <b>10.3&times;</b> cluster-wide, because the factor of 16 from sharding dominates. That is
+the whole argument, and it is specific to models where attention weights are small relative to the
+experts: on a dense Llama-3-70B you would replicate attention to gain nothing, since GQA at
+$\text{TP} \le h_{kv} = 8$ already shards the cache.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — MLA cluster KV capacity, TP versus DP attention.</b>
+    <em>Derived.</em> Left pair holds the KV pool fixed at 40&nbsp;GiB per GPU on 8 GPUs; right pair
+    accounts for weights on 16 GPUs. TP adds ranks without adding capacity.</p>
+  <svg viewBox="0 0 900 300" width="100%" role="img" aria-labelledby="capTitle capDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="capTitle">Cluster KV capacity under TP versus DP attention for an MLA model</title>
+    <desc id="capDesc">Four bars. At fixed 40 GiB pool on 8 GPUs, TP=8 holds 611 thousand distinct
+    tokens and DP=8 holds 4.89 million. With weights accounted on 16 GPUs, TP=16 holds 428 thousand
+    and DP=16 holds 4.41 million, a 10.3 times difference.</desc>
+
+    <line x1="120" y1="230" x2="850" y2="230" stroke="currentColor" stroke-opacity="0.2" stroke-width="1"/>
+    <line x1="120" y1="40" x2="850" y2="40" stroke="currentColor" stroke-opacity="0.1" stroke-width="1" stroke-dasharray="2 4"/>
+    <text x="112" y="44" font-size="10" fill="currentColor" fill-opacity="0.55" text-anchor="end">4.89M</text>
+    <text x="112" y="234" font-size="10" fill="currentColor" fill-opacity="0.55" text-anchor="end">0</text>
+    <text x="46" y="140" font-size="11" fill="currentColor" fill-opacity="0.7" transform="rotate(-90 46 140)" text-anchor="middle">cluster distinct resident tokens</text>
+
+    <rect x="180" y="206" width="70" height="24" fill="var(--teal)" fill-opacity="0.55"/>
+    <rect x="290" y="40" width="70" height="190" fill="var(--copper)" fill-opacity="0.8"/>
+    <rect x="560" y="213" width="70" height="17" fill="var(--teal)" fill-opacity="0.55"/>
+    <rect x="670" y="59" width="70" height="171" fill="var(--copper)" fill-opacity="0.8"/>
+
+    <g font-size="11" fill="currentColor" fill-opacity="0.85" text-anchor="middle">
+      <text x="215" y="200">611,192</text>
+      <text x="325" y="34">4,889,536</text>
+      <text x="595" y="207">427,800</text>
+      <text x="705" y="53">4,409,500</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.7" text-anchor="middle">
+      <text x="215" y="248">TP = 8</text>
+      <text x="325" y="248">DP = 8</text>
+      <text x="595" y="248">TP = 16</text>
+      <text x="705" y="248">DP = 16</text>
+      <text x="270" y="274">fixed 40 GiB pool per GPU</text>
+      <text x="650" y="274">weights accounted, 72 GB budget</text>
+    </g>
+    <g font-size="11" fill="var(--copper)" text-anchor="middle">
+      <text x="270" y="292">8.0&times;</text>
+      <text x="650" y="292">10.3&times;</text>
+    </g>
+    <line x1="450" y1="30" x2="450" y2="280" stroke="currentColor" stroke-opacity="0.12" stroke-width="1"/>
+  </svg>
+</div>
+
+<h3>What the boundary costs</h3>
+
+<p>Per layer, per rank, the DP-attention boundary with a TP-sharded FFN moves</p>
+
+<div class="math-display">$$V_{\text{dp}} = 2\,\frac{N-1}{N}\, T_g \, d \, b \quad\text{bytes}$$</div>
+
+<p>with $N$ the full TP world size, $T_g$ the global token count this step, $d$ hidden size, $b$
+bytes per element — an all-gather in, a reduce-scatter out. For DeepSeek-V3 at $N = 8$,
+$T_g = 1024$, $d = 7168$, bf16: $2 \times \tfrac{7}{8} \times 1024 \times 7168 \times 2 =
+25.7$&nbsp;MB per layer per rank, or 1.49&nbsp;GB per rank per decode step over 58 MoE layers. At
+NVLink&nbsp;4's 900&nbsp;GB/s aggregate per H100 (450&nbsp;GB/s one direction, from the
+<a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 product page</a>) that is
+3.3&nbsp;ms of pure collective per generated token — which is why DP attention is almost always
+paired with an all-to-all MoE that eliminates the gather entirely.</p></div></section>
+<section class="sec" id="expert-parallelism" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Expert parallelism and the all-to-all</h2></div><div class="sec__body"><p>Under EP, expert $e$ lives on exactly one rank (a few, once EPLB starts replicating); rank $r$
+holds $E/N$ of the $E$ experts and nothing else. The router picks $k$ experts per token at run time,
+so before the grouped GEMM every token must be <em>sent</em> to the ranks holding its experts, and
+afterwards sent back and weighted-summed. That pair — dispatch and combine — is an all-to-all: every
+rank sends a different amount to every other rank, and the amounts are unknown until the router has
+run.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — one MoE layer under EP=8, DeepSeek-V3 decode.</b>
+    128 tokens per rank, top-8 of 256 experts, 32 experts resident per rank. Row counts are
+    <em>derived</em> expectations, not measurements.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    R0["rank 0 hidden [128, 7168]<br/>topk_ids [128, 8] into 0..255"]
+    R1["rank 1 hidden [128, 7168]"]
+    R7["rank 7 hidden [128, 7168]"]
+
+    R0 --> Q["fp8 per-token-group quant<br/>group=128, 1.031 bytes per element"]
+    R1 --> Q
+    R7 --> Q
+
+    Q --> A2A["ALL-TO-ALL DISPATCH<br/>each token to the E[distinct ranks] = 5.25 ranks it needs<br/>~672 rows out per rank = 4.97 MB<br/>irregular per-peer sizes, known only after routing"]
+
+    A2A --> G0["rank 0: experts 0..31<br/>recv ~1024 token-expert rows<br/>grouped GEMM, 32 groups"]
+    A2A --> G1["rank 1: experts 32..63<br/>recv ~1024 rows"]
+    A2A --> G7["rank 7: experts 224..255<br/>recv ~1024 rows"]
+
+    G0 --> C2A["ALL-TO-ALL COMBINE<br/>~672 rows back per rank, bf16 = 9.63 MB<br/>weighted sum by topk_weights at the owner"]
+    G1 --> C2A
+    G7 --> C2A
+
+    C2A --> OUT["rank r output [128, 7168]<br/>total 14.6 MB moved per rank per layer"]
+  </script>
+</div>
+
+<h3>Communication volume</h3>
+
+<p>Naively, dispatch sends each token $k$ times. Real libraries deduplicate by <em>destination
+rank</em>: two chosen experts on the same rank cost one crossing, not two. So per-rank dispatch
+volume is</p>
+
+<div class="math-display">$$V_{\text{dispatch}} = T_\ell \cdot \rho \cdot d \cdot b_{\text{disp}}, \qquad \rho \;=\; N\left(1 - \left(1 - \tfrac{1}{N}\right)^{k}\right)$$</div>
+
+<p>with $T_\ell$ the rank's local token count and $\rho$ the expected number of distinct
+destination ranks per token, assuming uniform routing — an optimistic assumption the next section
+demolishes. Combine is symmetric in rows but not bytes: dispatch is narrowed to fp8 while combine
+returns model dtype. In normal mode SGLang narrows it itself with
+<code>sglang_per_token_group_quant_fp8(hidden_states, 128, ...)</code>
+(<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L527-L534</code>); in low-latency
+mode it passes <code>use_fp8=True</code> into the kernel. SGLang's Ascend buffer-sizing formula
+budgets <code>TOTAL_SEQ_LEN * (hidden_size + hidden_size) * topk</code> — two passes of $T k d$
+(<a href="https://docs.sglang.ai/advanced_features/expert_parallelism">Expert Parallelism
+guide</a>).</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — $\rho$, the expected distinct destination ranks per token, for top-8 routing. As EP widens, deduplication stops helping and dispatch volume approaches the naive $k\,T\,d\,b$.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>EP size $N$</th><th>experts/rank</th><th>$\rho$</th><th>vs. naive $k=8$</th></tr></thead>
+      <tbody>
+        <tr><td class="num">8</td><td class="num">32</td><td class="num">5.25</td><td class="num">0.66&times;</td></tr>
+        <tr><td class="num">16</td><td class="num">16</td><td class="num">6.45</td><td class="num">0.81&times;</td></tr>
+        <tr><td class="num">32</td><td class="num">8</td><td class="num">7.18</td><td class="num">0.90&times;</td></tr>
+        <tr><td class="num">64</td><td class="num">4</td><td class="num">7.58</td><td class="num">0.95&times;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Contrast with TP. At $N=8$, $T_\ell = 128$, $d = 7168$: EP moves
+$128 \times 5.25 \times 7168 \times 1.031 = 4.97$&nbsp;MB out and 9.63&nbsp;MB back,
+<b>14.6&nbsp;MB per layer per rank</b>, against <b>25.7&nbsp;MB</b> for DP-gather-plus-TP-FFN. EP is
+1.8&times; cheaper in bytes. The all-to-all is <em>not</em> the expensive primitive by volume; it is
+expensive because it is irregular (per-peer sizes are data-dependent, so the kernel cannot be
+shape-specialised), latency-sensitive (two round trips &times; 58 layers = 116 serialised
+collectives per decode step), and because at scale it crosses node boundaries where bandwidth drops
+an order of magnitude.</p>
+
+<h3>Why EP is really about weight bandwidth</h3>
+
+<p>What actually decides EP size at decode is not communication but HBM reads. Each DeepSeek-V3
+expert is $3 \times 2048 \times 7168 = 44.04$&nbsp;MB in fp8; all 256 are 11.27&nbsp;GB <em>per
+layer</em>. At decode, every resident expert's weights are streamed once per step regardless of how
+many tokens hit it:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — floor on DeepSeek-V3 decode step time from streaming routed-expert weights alone, at H100's 3.35 TB/s HBM, 58 MoE layers. Ignores attention, dense layers, and all communication. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>EP size</th><th>experts/rank</th><th>fp8 bytes/layer/rank</th><th>stream time/layer</th><th>&times; 58 layers</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1 (one GPU)</td><td class="num">256</td><td class="num">11.27 GB</td><td class="num">3.37 ms</td><td class="num">195 ms</td></tr>
+        <tr><td class="num">8</td><td class="num">32</td><td class="num">1.41 GB</td><td class="num">421 &micro;s</td><td class="num">24.4 ms</td></tr>
+        <tr><td class="num">16</td><td class="num">16</td><td class="num">705 MB</td><td class="num">210 &micro;s</td><td class="num">12.2 ms</td></tr>
+        <tr><td class="num">64</td><td class="num">4</td><td class="num">176 MB</td><td class="num">52.6 &micro;s</td><td class="num">3.05 ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>TP=8 reads the same 1.41&nbsp;GB per rank — it holds a slice of every expert rather than all of
+a few — so its bandwidth floor matches EP=8. What differs is arithmetic intensity: 256 skinny
+$K{=}7168 \to N{=}512$ GEMMs against every token in the global batch, versus 32 fat ones against
+only the tokens routed here. And only EP reduces the per-rank expert footprint, which is
+simultaneously the HBM budget and the decode latency floor. That is why "wide EP" — 64, 128, 320
+ranks — is the shape of every serious frontier MoE deployment.</p></div></section>
+<section class="sec" id="production" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>SGLang: one process world, modes per layer</h3>
+
+<p>SGLang runs one TP world and re-partitions it per layer. Whether a layer needs the DP gather
+at all is decided once, at model construction:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/communicator.py:L385-L400</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    @classmethod
+    def _compute_mlp_mode(cls, context: _LayerModeComputationContext):
+        if context.is_layer_sparse:
+            if (
+                # Token dispatch/combine will be handled outside of LayerCommunicator for these modes.
+                not get_moe_a2a_backend().is_none()
+                or should_use_flashinfer_cutlass_moe_fp4_allgather()
+                or enable_dwdp()
+            ):
+                return ScatterMode.SCATTERED
+            # DSA CP and MLA CP both don't support MOE_FULL yet; fall back to FULL.
+            if is_enable_moe_cp_allgather() and not (
+                is_dsa_enable_prefill_cp() or is_mla_prefill_cp_enabled()
+            ):
+                return ScatterMode.MOE_FULL
+            return ScatterMode.FULL</code></pre>
+</div>
+
+<p>With <code>--moe-a2a-backend deepep</code> sparse layers are <code>SCATTERED</code> — no
+gather, no scatter, the dispatcher owns all movement. Without it they are <code>FULL</code> and you
+pay the 25.7&nbsp;MB per layer computed above. One flag, two different communication graphs.</p>
+
+<p>When the gather <em>is</em> needed, SGLang picks between two implementations based on how uneven
+the ranks are:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/dp_attention.py:L120-L127</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # we choose the mode that minimizes the communication cost
+        # prefer MAX_LEN when communication cost is equal to enable symmetric memory
+        max_len = max(global_num_tokens)
+        sum_len = sum(global_num_tokens)
+        if sum_len * 2 &gt;= max_len * dp_size:
+            return cls.MAX_LEN
+        else:
+            return cls.SUM_LEN</code></pre>
+</div>
+
+<p><code>MAX_LEN</code> pads every rank to the longest and uses <code>all_gather_into_tensor</code>,
+moving $N \cdot \max_i T_i$ rows; <code>SUM_LEN</code> zero-fills a $\sum_i T_i$-row buffer and
+all-reduces. The test picks whichever is cheaper, and the gap between them is exactly the cost of
+DP-attention imbalance — Exercise 1 works a case where it is 8&times;.</p>
+
+<p>The other half of DP attention lives in the scheduler and is the operationally important half.
+Because the FFN is a collective, <b>every DP rank must enter every forward pass</b>, work or no
+work:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/dp_attn.py:L359-L369</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Decide whether to emit idle batch
+    if skip_all_gather:
+        # Skip idle batch when attn-dp=1 (and always under DWDP: ranks run independently)
+        need_idle_batch = not dwdp and dp_size &gt; 1
+    else:
+        need_idle_batch = max(mlp_sync_info.global_num_tokens) &gt; 0
+
+    batch_to_gather = local_batch
+    if need_idle_batch:
+        if local_batch is None:
+            batch_to_gather = local_batch = get_idle_batch()</code></pre>
+</div>
+
+<p>Every scheduler iteration all-gathers each rank's token count
+(<code>python/sglang/srt/managers/scheduler_components/dp_attn.py:L131-L193</code>); if any rank has
+tokens, ranks with none fabricate an empty <code>ScheduleBatch</code> to reach the collectives. DP
+attention is <em>not</em> $N$ independent engines — it is one engine in lockstep whose attention
+happens to be partitioned, and that lockstep is the source of most DP-attention production
+pain.</p>
+
+<h3>vLLM: N engine processes, one flattened MoE world</h3>
+
+<p>vLLM arrives from the opposite direction. Its DP ranks are separate <code>EngineCore</code>
+processes with separate schedulers and separate KV caches — plain DP by construction — and the MoE
+layer is what reaches <em>across</em> them:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/parallel.py:L129-L131</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    data_parallel_size: int = Field(default=1, ge=1)
+    """Number of data parallel groups. MoE layers will be sharded according to
+    the product of the tensor, prefill-context, and data parallel sizes."""</code></pre>
+</div>
+
+<p>The flattening is literal: DP and PCP are folded into the MoE's TP rank space, and with
+<code>enable_expert_parallel</code> that flattened size becomes the EP size.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/fused_moe/config.py:L1202-L1210</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            When TP = 2, DP(PCP) = 2 and EP = True, the configuration on different
+                devices:
+
+            - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
+            - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
+            - device 2: TP = {1, 0} DP = {2, 1} EP = {4, 2}
+            - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
+            - Comment: There are 2 engine instances and the experts are split
+                between the 4 devices.</code></pre>
+</div>
+
+<p>Note <code>TP = {1, 0}</code> in every EP row: turning on EP sets the MoE's tensor-parallel size
+to 1 outright (<code>vllm/model_executor/layers/fused_moe/config.py:L1243-L1253</code>). EP and TP
+are alternatives inside the MoE layer, not composable there. And vLLM's simplest all-to-all backend
+is SGLang's gather/scatter under a different name:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/all2all.py:L44-L48</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class AgRsAll2AllManager(All2AllManagerBase):
+    """
+    An implementation of all2all communication based on
+    all-gather (dispatch) and reduce-scatter (combine).
+    """</code></pre>
+</div>
+
+<p>Because vLLM's DP ranks are separate processes, its lockstep problem is worse than SGLang's and
+it needs a dedicated process to solve it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/coordinator.py:L33-L41</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    * Keeps track of the current DP "request wave" number and running state
+      of the engines. This is received from the DP rank 0 engine and published
+      to the front-end processes along with the current load stats.
+
+      The engines alternate between a global running/paused state. The global
+      "request wave" number is a count of the number of times that the workers
+      collectively move from a running state to a paused state. This transition
+      is synchronized via the all-reduce operation performed in the
+      DPEngineCoreProc._has_global_unfinished_reqs method.</code></pre>
+</div>
+
+<p>An idle vLLM DP rank runs <code>execute_dummy_batch()</code>
+(<code>vllm/v1/engine/core.py:L2202-L2206</code>) — the same fabricated forward pass SGLang calls an
+idle batch. The world only stops when a synchronising all-reduce agrees, amortised to once every 32
+steps:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L2253-L2257</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _has_global_unfinished_reqs(self, local_unfinished: bool) -&gt; bool:
+        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        self.step_counter += 1
+        if self.step_counter % 32 != 0:
+            return True</code></pre>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">Why they differ</span>
+  <p>SGLang partitions one TP world per layer, so DP attention is a tensor-layout concern
+  (<code>ScatterMode</code>) and the synchronisation is an in-process all-gather. vLLM keeps engines
+  as independent processes, so DP attention is free — each engine trivially owns its own KV — and
+  the cost moves to inter-process coordination: a coordinator, request waves, dummy batches.
+  SGLang's design gives finer control over the boundary collectives; vLLM's gives process isolation
+  and a natural "one pod per DP rank" Kubernetes story (<code>data_parallel_external_lb</code>,
+  <code>vllm/config/parallel.py:L149-L155</code>). Two places to put the same synchronisation.</p>
+</div></div></section>
+<section class="sec" id="eplb" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Load imbalance and EPLB</h2></div><div class="sec__body"><p>Every EP number above assumed uniform routing. Routing is a learned, data-dependent function,
+and on real traffic some experts receive several times the mean while others receive almost none.
+Because dispatch, grouped GEMM and combine are all collective, <b>the slowest rank sets the step
+time for the whole cluster</b>: one rank holding two hot experts stalls seven idle peers. Both
+engines measure this with the same statistic. SGLang:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/eplb/expert_distribution.py:L1088-L1103</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def compute_utilization_rate(
+    gpu_physical_count_of_batch: torch.Tensor,  # (..., num_layer, num_gpu)
+):
+    """output: utilization_rate (..., num_layer)"""
+    gpu_physical_count_of_batch = gpu_physical_count_of_batch.float()
+    max_gpu_physical_count = einops.reduce(
+        gpu_physical_count_of_batch,
+        "... num_layer num_gpu -&gt; ... num_layer",
+        "max",
+    )
+    avg_gpu_physical_count = einops.reduce(
+        gpu_physical_count_of_batch,
+        "... num_layer num_gpu -&gt; ... num_layer",
+        "mean",
+    )
+    return (avg_gpu_physical_count + 1e-5) / (max_gpu_physical_count + 1e-5)</code></pre>
+</div>
+
+<p>vLLM computes the identical ratio and calls it <em>balancedness</em>, logging
+<code>"EPLB step: %d for model %s: avg_tokens=%.2f, max_tokens=%d, balancedness=%.4f"</code>
+(<code>vllm/distributed/eplb/eplb_state.py:L600-L612</code>). It is the fraction of your purchased
+MoE FLOPs you are actually using: 0.55 means 45% of expert compute is stall.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 5 — token load across eight EP ranks, one MoE layer.</b>
+    <em>Illustrative</em>, constructed to a balancedness of 0.55 to show the shape of the problem —
+    not measured. Rank 7's 15,000 token-expert rows set the step time for all eight.</p>
+  <svg viewBox="0 0 900 300" width="100%" role="img" aria-labelledby="lbTitle lbDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="lbTitle">Token-expert assignments per EP rank showing one straggler</title>
+    <desc id="lbDesc">Eight bars for ranks 0 through 7 with loads rising from 5,900 to 8,336, then
+    rank 7 at 15,000. A dashed line marks the mean of 8,192. Balancedness is 0.55.</desc>
+
+    <line x1="110" y1="210" x2="850" y2="210" stroke="currentColor" stroke-opacity="0.2" stroke-width="1"/>
+    <line x1="110" y1="117" x2="850" y2="117" stroke="var(--teal)" stroke-opacity="0.6" stroke-width="1" stroke-dasharray="5 4"/>
+    <text x="102" y="121" font-size="10" fill="var(--teal)" text-anchor="end">mean 8,192</text>
+    <text x="102" y="214" font-size="10" fill="currentColor" fill-opacity="0.55" text-anchor="end">0</text>
+    <text x="40" y="125" font-size="11" fill="currentColor" fill-opacity="0.7" transform="rotate(-90 40 125)" text-anchor="middle">token-expert rows received</text>
+
+    <rect x="140" y="143" width="60" height="67" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="230" y="138" width="60" height="72" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="320" y="132" width="60" height="78" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="410" y="127" width="60" height="83" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="500" y="124" width="60" height="86" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="590" y="118" width="60" height="92" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="680" y="116" width="60" height="94" fill="var(--teal)" fill-opacity="0.4"/>
+    <rect x="770" y="40" width="60" height="170" fill="var(--plum)" fill-opacity="0.85"/>
+
+    <g font-size="10" fill="currentColor" fill-opacity="0.75" text-anchor="middle">
+      <text x="170" y="137">5,900</text>
+      <text x="260" y="132">6,400</text>
+      <text x="350" y="126">6,900</text>
+      <text x="440" y="121">7,300</text>
+      <text x="530" y="118">7,600</text>
+      <text x="620" y="112">8,100</text>
+      <text x="710" y="110">8,336</text>
+    </g>
+    <text x="800" y="34" font-size="11" fill="var(--plum)" text-anchor="middle">15,000</text>
+    <text x="800" y="22" font-size="10" fill="var(--plum)" text-anchor="middle">straggler sets step time</text>
+
+    <g font-size="11" fill="currentColor" fill-opacity="0.7" text-anchor="middle">
+      <text x="170" y="228">rank 0</text>
+      <text x="260" y="228">1</text>
+      <text x="350" y="228">2</text>
+      <text x="440" y="228">3</text>
+      <text x="530" y="228">4</text>
+      <text x="620" y="228">5</text>
+      <text x="710" y="228">6</text>
+      <text x="800" y="228">7</text>
+      <text x="480" y="252">balancedness = 8,192 / 15,000 = 0.55 &mdash; the other seven ranks idle 45% of the MoE layer</text>
+    </g>
+  </svg>
+</div>
+
+<h3>The rebalancing idea</h3>
+
+<p>EPLB — DeepSeek's Expert-Parallel Load Balancer, vendored verbatim into SGLang — has two
+moves. <b>Replication</b>: allocate more physical expert slots than logical experts, and hand each
+spare slot to whichever expert currently has the highest load per replica. A greedy loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/eplb/eplb_algorithms/deepseek.py:L70-L82</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    n, num_log = weight.shape
+    num_redundant = num_phy - num_log
+    assert num_redundant &gt;= 0
+    device = weight.device
+    phy2log = torch.arange(num_phy, dtype=torch.int64, device=device).repeat(n, 1)
+    rank = torch.zeros(n, num_phy, dtype=torch.int64, device=device)
+    logcnt = torch.ones(n, num_log, dtype=torch.int64, device=device)
+    arangen = torch.arange(n, dtype=torch.int64, device=device)
+    for i in range(num_log, num_phy):
+        redundant_indices = (weight / logcnt).max(dim=-1).indices
+        phy2log[:, i] = redundant_indices
+        rank[:, i] = logcnt[arangen, redundant_indices]
+        logcnt[arangen, redundant_indices] += 1</code></pre>
+</div>
+
+<p><b>Permutation</b>: pack the physical slots onto GPUs so per-GPU load sums are as equal as
+possible. The full algorithm is hierarchical and topology-aware — groups onto nodes, then
+replication within a node, then slots onto GPUs within a node, so traffic prefers NVLink:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/eplb/eplb_algorithms/deepseek.py:L126-L151</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Step 1: pack groups to nodes
+    tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
+    group_pack_index, group_rank_in_pack = balanced_packing(tokens_per_group, num_nodes)
+# ...
+    # Step 2: construct redundant experts within nodes
+    # [num_layers * num_nodes, num_logical_experts // num_nodes]
+    tokens_per_mlog = weight.gather(-1, mlog2log).view(
+        -1, num_logical_experts // num_nodes
+    )
+    phy2mlog, phyrank, mlogcnt = replicate_experts(
+        tokens_per_mlog, num_physical_experts // num_nodes
+    )
+
+    # Step 3: pack physical_experts to GPUs
+    # [num_layers * num_nodes, num_physical_experts // num_nodes]
+    tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
+    pack_index, rank_in_pack = balanced_packing(tokens_per_phy, num_gpus // num_nodes)</code></pre>
+</div>
+
+<p>Replication is what makes this work. Permutation alone cannot fix a single expert taking
+2&times; the mean — no packing puts it anywhere but on some GPU. Replication splits it in two,
+halving per-replica load, for one extra 44&nbsp;MB slot. The trade is <b>HBM for balancedness</b>,
+budgeted as <code>ep_num_redundant_experts</code> added to the logical count
+(<code>python/sglang/srt/eplb/expert_location.py:L237-L241</code>) or vLLM's
+<code>eplb_config.num_redundant_experts</code> (<code>vllm/config/parallel.py:L72-L73</code>).</p>
+
+<h3>What rebalancing costs</h3>
+
+<p>The manager is a generator that yields once per forward pass and falls into a rebalance every
+<code>eplb_rebalance_num_iterations</code> steps (default 1000):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/eplb/eplb_manager.py:L91-L97</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # can be more complex if needed
+    def _entrypoint(self):
+        while True:
+            for _ in range(self._rebalance_num_iterations):
+                yield
+
+            yield from self.rebalance()</code></pre>
+</div>
+
+<p>Moving expert $e$ from rank 3 to rank 5 means copying 44&nbsp;MB of fp8 weights over the
+fabric, and a full permutation can move a large fraction of every layer. SGLang does it with
+batched point-to-point sends, chunked to keep NCCL from choking:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/eplb/expert_location_updater.py:L489-L505</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # Submit P2P ops in batches to prevent NCCL/RCCL GPU-side accumulation
+        # hangs on large rebalances. All ranks use the same expert_id ranges
+        # (based on num_physical_experts) so matching send/recv pairs land in
+        # the same batch. Set batch_chunk_size &gt;= num_physical_experts to disable.
+        batch_chunk_size = envs.SGLANG_EPLB_P2P_BATCH_CHUNK_SIZE.get()
+        ops_by_expert = {eid: ops for eid, ops in sorted_infos}
+        for start in range(0, num_physical_experts, batch_chunk_size):
+            batch_ops = []
+            for eid in range(
+                start, min(start + batch_chunk_size, num_physical_experts)
+            ):
+                if eid in ops_by_expert:
+                    batch_ops.extend(ops_by_expert[eid])
+            if batch_ops:
+                reqs = torch.distributed.batch_isend_irecv(batch_ops)
+                for req in reqs:
+                    req.wait()</code></pre>
+</div>
+
+<p><code>eplb_rebalance_layers_per_chunk</code> spreads the move across several forward passes so
+no single step spikes, and <code>eplb_min_rebalancing_utilization_threshold</code> (default 1.0)
+suppresses the rebalance entirely when measured utilisation already exceeds it
+(<code>python/sglang/srt/server_args.py:L2435-L2450</code>). vLLM uses a 1000-step sliding window
+with a 3000-step rearrangement interval and an async path
+(<code>vllm/config/parallel.py:L62-L87</code>). Same design points, different defaults, and no
+published measurement behind either set that I could find in these trees.</p></div></section>
+<section class="sec" id="elastic-ep" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Elastic expert parallelism</h2></div><div class="sec__body"><p>Wide EP is brittle: with 64 ranks in the all-to-all, one dead GPU takes down the deployment.
+SGLang's <code>python/sglang/srt/elastic_ep/</code> is the machinery for surviving that and for
+growing the EP world without a restart. What it concretely does, from source:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">active-rank mask</span><h4>Liveness as a tensor</h4><p><code>ElasticEPState</code> carries an <code>active_ranks</code> int32 tensor sized to <code>max_ep_size</code>, plus a CPU mirror and a prior snapshot for change detection (<code>python/sglang/srt/elastic_ep/elastic_ep.py:L43-L72</code>). The a2a backend reads this mask to know which peers to expect.</p></div>
+  <div class="ve-card"><span class="ve-card__k">pre-reservation</span><h4>Slots before ranks</h4><p><code>--max-ep-size</code> pre-allocates active-rank state and backend buffers for a larger-than-launch world; slots beyond <code>world_size</code> start zeroed (<code>python/sglang/srt/elastic_ep/elastic_ep.py:L90-L104</code>). The DP controller likewise binds ZMQ sockets for <code>max_dp_size</code> slots up front (<code>python/sglang/srt/managers/data_parallel_controller.py:L566-L578</code>).</p></div>
+  <div class="ve-card"><span class="ve-card__k">join modes</span><h4>recover vs. scale</h4><p><code>--elastic-ep-join-mode</code> takes <code>recover</code> (rejoin an existing slot after a fault) or <code>scale</code> (join as a new rank past the original group size, requiring <code>--elastic-ep-join-rank-offset</code>) — <code>python/sglang/srt/server_args.py:L2499-L2518</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">phases</span><h4>A scale state machine</h4><p><code>scale_phase</code> moves through <code>idle</code>, <code>waiting_for_cohort</code>, <code>pending</code>, <code>joining</code>, <code>configuring_data_plane</code>, <code>syncing_new_world</code>, <code>serving_expanded</code>, <code>failed</code>, <code>recovery_unsupported</code> (<code>python/sglang/srt/elastic_ep/elastic_ep.py:L166-L242</code>), gated by <code>--elastic-ep-scale-timeout</code>, default 600 seconds (<code>python/sglang/srt/server_args.py:L2529-L2534</code>).</p></div>
+  <div class="ve-card"><span class="ve-card__k">expert backup</span><h4>Weights off the critical path</h4><p><code>ExpertBackupManager</code> is a separate process holding expert weights in DRAM over ZMQ plus a transfer engine, sharded by node rank over <code>n_routed_experts</code> (<code>python/sglang/srt/elastic_ep/expert_backup_manager.py:L39-L52</code>). A joining rank pulls from there, not from disk.</p></div>
+  <div class="ve-card"><span class="ve-card__k">post-scale EPLB</span><h4>Rebalance follows growth</h4><p>After a scale, <code>EPLBManager.rebalance</code> recomputes the layout with <code>use_flat_topology=True</code> and broadcasts it from rank 0, so process-local launch topology cannot influence the mapping (<code>python/sglang/srt/eplb/eplb_manager.py:L190-L225</code>).</p></div>
+</div>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>The actual data-plane reconfiguration — how a Mooncake or NIXL all-to-all communicator is
+  rebuilt to include a new peer mid-flight, and what pause in serving that causes — lives in the
+  external <code>mooncake</code> and <code>nixl</code> packages, not in either tree at these SHAs.
+  In-tree I found only the state machine that drives it
+  (<code>python/sglang/srt/elastic_ep/elastic_ep.py</code>) and the scale hook
+  (<code>_on_scale_nixl</code>, same file), so I have no source basis for any claim about elastic-EP
+  scale latency or its effect on in-flight requests. vLLM has a parallel mechanism
+  (<code>vllm/distributed/elastic_ep/</code>, reached from
+  <code>EngineCore.reinitialize_distributed</code>,
+  <code>vllm/v1/engine/core.py:L2272-L2290</code>) which I did not trace. Check before relying on
+  either.</p>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one token through DP-attn + EP</h2></div><div class="sec__body"><p>DeepSeek-V3 on SGLang, <code>--tp 8 --dp-size 8 --ep 8 --enable-dp-attention --moe-a2a-backend
+deepep</code>. Follow one decode token that landed on DP rank 3, through one sparse layer.</p>
+
+<ol>
+  <li><code>DataParallelController.total_tokens_scheduler</code> routed the request at admission
+  to the rank with the fewest resident tokens
+  (<code>python/sglang/srt/managers/data_parallel_controller.py:L114-L130</code>). Rank 3 owns this
+  sequence for life; its KV blocks never leave.</li>
+
+  <li><code>prepare_mlp_sync_batch_raw</code> all-gathers every rank's token count into
+  <code>global_num_tokens</code>; ranks with nothing to do build an idle batch
+  (<code>python/sglang/srt/managers/scheduler_components/dp_attn.py:L359-L369</code>). All eight now
+  agree on the global shape. <code>initialize_dp_attention</code> resolved the grid at startup:
+  <code>attn_tp_size = 8 // 8 // 1 = 1</code>, so <code>attn_dp_rank = tp_rank = 3</code>
+  (<code>python/sglang/srt/layers/dp_attention.py:L326-L340</code>).</li>
+
+  <li>MLA runs on rank 3 alone against rank 3's KV pool, emitting <code>[1, 7168]</code> inside a
+  <code>[T_3, 7168]</code> local tensor. <code>LayerScatterModes._compute_mlp_mode</code> sees a
+  sparse layer and a non-<code>none</code> a2a backend, so it returns
+  <code>ScatterMode.SCATTERED</code>
+  (<code>python/sglang/srt/layers/communicator.py:L385-L400</code>): <b>no <code>dp_gather</code>
+  happens</b> and Figure 2's 12.85&nbsp;MB all-gather is skipped.</li>
+
+  <li>The router produces <code>topk_ids [T_3, 8]</code> over 0..255, and
+  <code>ExpertLocationDispatcher</code> maps each logical expert to one of its physical replicas
+  (<code>python/sglang/srt/eplb/expert_location_dispatch.py</code>) — with EPLB running a hot expert
+  has several, and the choice spreads load.</li>
+
+  <li><code>_DeepEPDispatcherImplLowLatency.dispatch_a</code> reaches
+  <code>_dispatch_core</code>, which calls <code>buffer.low_latency_dispatch(hidden_states,
+  topk_ids, self.num_max_dispatch_tokens_per_rank, self.num_experts, use_fp8=self.use_fp8, ...)</code>
+  (<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L766-L776</code>) — the fp8
+  narrowing happens inside the DeepEP kernel here, while the normal-mode path does it explicitly
+  with <code>sglang_per_token_group_quant_fp8</code>. Our token's
+  hidden vector is copied to each of the ~5.25 distinct ranks holding its eight experts. Every rank
+  contributes to the same collective — which is why step 2's idle batches were mandatory.</li>
+
+  <li>On each destination rank, the received rows land in per-expert buckets
+  (<code>packed_recv_count</code>) and a grouped GEMM runs 32 groups, streaming 1.41&nbsp;GB of fp8
+  expert weights. The straggler rank — the one whose 32 experts happened to attract the most rows —
+  finishes last, and everyone waits.</li>
+
+  <li><code>combine_a</code> / <code>combine_b</code> send the eight partial outputs back and
+  apply the <code>topk_weights</code> sum, producing <code>[1, 7168]</code> on rank 3 again. Along
+  the way <code>on_deepep_dispatch_low_latency</code> incremented this layer's per-expert counters
+  (<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L726-L730</code>); after 1000 such
+  steps <code>EPLBManager._entrypoint</code> falls out of its yield loop and starts moving
+  44&nbsp;MB expert tensors over <code>batch_isend_irecv</code>.</li>
+</ol></div></section>
+<section class="sec" id="combining" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">The combination rule and a worked configuration</h2></div><div class="sec__body"><p>Real deployments mix all four axes. The decision procedure, in order, because each step
+constrains the next:</p>
+
+<ol>
+  <li><b>PP only if you must.</b> It exists to cross a fabric too slow for TP. Inside an NVLink
+  domain, skip it — bubbles are pure loss
+  (<a href="../05-parallelism/05-02-pipeline-parallelism.html">§5.2</a>).</li>
+  <li><b>EP as wide as the experts allow</b>, subject to $E \bmod \text{EP} = 0$. This sets
+  per-rank expert HBM and therefore the decode latency floor.</li>
+  <li><b>Attention: DP if MLA, TP if GQA.</b> With MLA, TP adds zero KV capacity, so DP wins if
+  you can afford replicated attention weights. With GQA at $\text{TP} \le h_{kv}$, TP already
+  shards the cache and DP only wastes memory.</li>
+  <li><b>TP fills what is left.</b> SGLang requires <code>tp_size % dp_size == 0</code>
+  (<code>python/sglang/srt/server_args.py:L6742-L6744</code>) and the DeepEP, Mooncake, NIXL and
+  pplx backends additionally require <code>ep_size == tp_size</code>. vLLM instead derives
+  EP $= \text{TP} \times \text{PCP} \times \text{DP}$ automatically
+  (<code>vllm/model_executor/layers/fused_moe/config.py:L1202-L1210</code>).</li>
+  <li><b>Then EPLB.</b> It optimises placement within a fixed EP world, so settle the topology
+  first, then measure balancedness.</li>
+</ol>
+
+<h3>Worked: Qwen3-235B-A22B fp8 on one 8&times;H100 node</h3>
+
+<p>235&nbsp;B parameters in fp8 is 235&nbsp;GB — 29.4&nbsp;GB per GPU across eight, comfortable.
+The shapes are confirmed in-tree by SGLang's grouped-GEMM benchmark: $d = 4096$ (the <code>k</code>
+of the gate-up GEMM), 128 experts, $2 \times 768 \times 4/2 = 1536$ intermediate width at TP=4:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/aot/benchmark/bench_fp8_blockwise_group_gemm.py:L326-L333</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            # Prefill, Qwen3-235B-A22B-FP8, gateup, chunk_size = 16384, TP = 4
+            ShapeArg(expected_m_per_group=1024, n=768, k=4096, num_groups=128),
+            # Prefill, Qwen3-235B-A22B-FP8, down, chunk_size = 16384, TP = 4
+            ShapeArg(expected_m_per_group=1024, n=4096, k=384, num_groups=128),
+            # Decode, Qwen3-235B-A22B-FP8, gateup, bs = 256, TP = 4
+            ShapeArg(expected_m_per_group=16, n=768, k=4096, num_groups=128),
+            # Decode, Qwen3-235B-A22B-FP8, down, bs = 256, TP = 4
+            ShapeArg(expected_m_per_group=16, n=4096, k=384, num_groups=128),</code></pre>
+</div>
+
+<p>(The prefill row also pins top-$k$: $16384 \times k / 128 = 1024 \Rightarrow k = 8$.)
+Applying the procedure: no PP; EP=8, giving 16 experts per rank at
+$3 \times 1536 \times 4096 = 18.9$&nbsp;MB each, so 302&nbsp;MB of expert weights per layer per
+rank. Qwen3 uses GQA with $h_{kv} = 4$, so step 3 says <em>attention TP, not DP</em> — but the a2a
+backends demand <code>ep_size == tp_size == 8</code>, which forces <code>dp_size = 8</code> and
+hence <code>attn_tp_size = 1</code>. So: either accept replicated attention weights (small here) to
+get the DeepEP path, or set <code>--moe-a2a-backend none</code> and keep <code>attn_tp = 8</code>
+with an all-gather/reduce-scatter MoE. A genuine fork with no universal answer — measure both.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">One slow rank is every slow rank</span>
+  <p>Under DP attention every rank enters every forward pass, so a rank stuck on a 32k-token
+  prefill holds the other seven at the collective. SGLang mitigates by dividing the chunked-prefill
+  budget: <code>self.chunked_prefill_size = self.chunked_prefill_size // self.dp_size</code>
+  (<code>python/sglang/srt/server_args.py:L6746</code>) and by scaling
+  <code>schedule_conservativeness</code> by 0.3. If you see per-rank utilisation swinging wildly,
+  check whether your chunk size was silently divided by 8.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The 1024-token dispatch ceiling</span>
+  <p>DeepEP's inter-node low-latency path uses <code>FINISHED_SUM_TAG=1024</code> as a sentinel, so
+  no rank may send more than 1024 tokens to any single peer:
+  <code>assert self.num_max_dispatch_tokens_per_rank <= 1024</code>
+  (<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L389-L397</code>). Raising
+  <code>SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK</code> past that trips the assert; raising it
+  below the cap silently inflates the pre-allocated RDMA buffer — "A large value will lead to large
+  memory occupation", says the comment right above.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">EPLB without EP is a config error, not a no-op</span>
+  <p>vLLM refuses outright rather than degrading: <em>"enable_expert_parallel must be True to use
+  EPLB"</em>, and <em>"EPLB requires tensor, prefill-context, or data parallelism, but got TP=...,
+  PCP=..., DP=..."</em> (<code>vllm/config/parallel.py:L507-L528</code>). Setting
+  <code>num_redundant_experts</code> without <code>enable_eplb</code> is a hard error too — those
+  slots would be allocated and never used.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">dp_size defaults to 1 and silently disables DP attention</span>
+  <p><code>--enable-dp-attention</code> alone does nothing: at <code>dp_size == 1</code>,
+  <code>compute_dp_attention_world_info</code> returns <code>attn_dp_size = 1</code> and you get
+  plain TP with a misleading flag set. Pass both. If your MLA model still OOMs at low concurrency
+  after "enabling DP attention", check this first.</p>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Rebalance hangs on large moves</span>
+  <p>The chunking in <code>_execute_p2p_ops</code> exists because unbatched
+  <code>batch_isend_irecv</code> over hundreds of expert tensors caused "NCCL/RCCL GPU-side
+  accumulation hangs on large rebalances" (comment at
+  <code>python/sglang/srt/eplb/expert_location_updater.py:L489-L492</code>). If a rebalance hangs,
+  <code>SGLANG_EPLB_P2P_BATCH_CHUNK_SIZE</code> is the knob.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>The DeepSeek recipe from SGLang's own guide. Every flag is load-bearing; dropping any one
+changes the communication graph:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">DP attention + EP, DeepSeek-V3</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python -m sglang.launch_server \
+    --model-path deepseek-ai/DeepSeek-V3 \
+    --tp 8 --dp-size 8 --ep 8 \
+    --enable-dp-attention \
+    --moe-a2a-backend deepep \
+    --moe-runner-backend deep_gemm \
+    --enable-eplb \
+    --ep-num-redundant-experts 32 \
+    --expert-distribution-recorder-mode stat</code></pre>
+</div>
+
+<p>Three things to measure, none of which need a benchmark harness:</p>
+
+<ol>
+  <li><b>The capacity claim.</b> Start with and without <code>--enable-dp-attention</code>, read
+  the KV pool line the scheduler logs, and multiply by <code>dp_size</code> in the DP case. You
+  should recover the 8&times; from Figure 3.</li>
+  <li><b>Balancedness.</b> <code>--expert-distribution-recorder-mode stat</code> accumulates the
+  per-expert counts that <code>compute_utilization_rate</code> turns into Figure 5's ratio; on vLLM,
+  <code>--eplb-config.log_balancedness=true</code> prints it. Watch it either side of the rebalance
+  at step 1000.</li>
+  <li><b>The gather that disappears.</b> Profile one decode step with
+  <code>--moe-a2a-backend deepep</code> and again with <code>none</code>, counting NCCL kernels per
+  layer. The <code>deepep</code> run has no <code>AllGather</code> in the sparse layers at all —
+  that is <code>_compute_mlp_mode</code> returning <code>SCATTERED</code>.</li>
+</ol>
+
+<p>On vLLM the equivalent single-node start is
+<code>vllm serve &lt;model&gt; --data-parallel-size 8 --enable-expert-parallel</code>; the offline
+form is in <code>examples/features/data_parallel/data_parallel_offline.py:L4-L9</code>.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Read <code>python/sglang/srt/layers/dp_attention.py:L95-L127</code>. A step has
+  <code>global_num_tokens = [4096, 1, 1, 1, 1, 1, 1, 1]</code> and <code>dp_size = 8</code>. Which
+  <code>DpPaddingMode</code> is chosen, and how many rows does the resulting collective move
+  compared with the other choice?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p><code>sum_len = 4103</code>, <code>max_len = 4096</code>. The test is
+  <code>sum_len * 2 &gt;= max_len * dp_size</code>: $8206 \ge 32768$ is false, so
+  <code>SUM_LEN</code>. The all-reduce buffer is 4,103 rows; <code>MAX_LEN</code> would have
+  all-gathered $8 \times 4096 = 32{,}768$ rows — 8&times; the traffic to carry the same data.
+  (There is an override above: if the pplx backend is active it forces <code>MAX_LEN</code>
+  regardless, because pplx's a2a is a symmetric collective that deadlocks on unequal token
+  counts.)</p></div></details></li>
+
+  <li>Using $\rho = N(1 - (1-1/N)^k)$, compute the per-rank dispatch and combine bytes for
+  DeepSeek-V3 at EP=32, 64 tokens per rank, fp8 dispatch (1.031 B/element) and bf16 combine. Then
+  say why running EP=32 across four nodes is much worse than the number suggests.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>$\rho = 32(1-(31/32)^8) = 7.18$; rows $= 64 \times 7.18 = 459$. Dispatch 3.39&nbsp;MB,
+  combine 6.58&nbsp;MB, total 9.97&nbsp;MB per layer per rank — 22&nbsp;&micro;s at NVLink 4's
+  450&nbsp;GB/s. But across four nodes most of those 7.18 destinations are remote, and
+  400&nbsp;Gb/s NDR InfiniBand is 50&nbsp;GB/s: 9&times; slower, ~200&nbsp;&micro;s per layer,
+  ~11&nbsp;ms per decode step. The bytes did not change; the bandwidth did. This is why DeepEP
+  forwards inter-node traffic over NVLink inside the destination node rather than sending a token
+  to each remote rank separately.</p></div></details></li>
+
+  <li>Predict: you enable <code>--enable-dp-attention --dp-size 8 --tp 8</code> on Llama-3-70B
+  (dense, GQA-8) instead of DeepSeek-V3. What happens to per-GPU weight memory and cluster KV
+  capacity? Then verify by reasoning about <code>compute_dp_attention_world_info</code> and
+  <a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a>'s GQA cell size.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p><code>attn_tp_size = 1</code>, so every rank keeps the full attention weights instead of an
+  eighth. Cluster KV capacity is <em>unchanged</em>: GQA at TP=8 already shards the cache eight ways
+  ($h_{kv}=8$), so the per-rank cell is already 40&nbsp;KiB. You paid weight memory for zero
+  capacity, plus a per-layer gather/scatter you did not have before. DP attention is an MLA fix, not
+  a general one.</p></div></details></li>
+
+  <li>Read <code>python/sglang/srt/eplb/eplb_algorithms/deepseek.py:L70-L82</code>. A layer has
+  logical loads <code>[100, 50, 25, 25]</code> and 6 physical slots. Which experts get replicated,
+  and what is the resulting maximum per-replica load?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>Slot 4: <code>weight/logcnt = [100, 50, 25, 25]</code>, argmax is expert 0, so
+  <code>logcnt = [2,1,1,1]</code>. Slot 5: <code>[50, 50, 25, 25]</code>; <code>.max()</code>
+  returns the first index at the maximum, so expert 0 again — <code>logcnt = [3,1,1,1]</code>,
+  per-replica loads <code>[33.3, 50, 25, 25]</code>, maximum 50. The greedy loop drove the max from
+  100 to 50 by spending two extra 44&nbsp;MB slots: 2&times; balancedness for 88&nbsp;MB per
+  layer.</p></div></details></li>
+
+  <li>Predict, then verify against
+  <code>vllm/model_executor/layers/fused_moe/config.py:L1202-L1210</code>: you launch vLLM with
+  <code>--tensor-parallel-size 4 --data-parallel-size 4 --enable-expert-parallel</code> on 16 GPUs.
+  What EP size and TP size do the MoE layers see?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>EP = 16, TP = 1. DP is flattened into the MoE's TP rank space
+  (<code>flatten_tp_size = dp_size * pcp_size * tp_size = 4 &times; 1 &times; 4</code>) and enabling
+  EP then sets MoE <code>tp_size=1</code>, <code>ep_size=16</code>. Attention still runs at TP=4
+  inside each of the 4 engine processes. One flag gives TP-4 attention, DP-4 KV pools, EP-16
+  experts — the same shape as SGLang's <code>--tp 16 --dp-size 4 --ep 16</code>.</p></div></details></li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>DP attention exists because MLA's cache is replicated under TP. Sharding by
+  <em>sequence</em> instead of by <em>head</em> turns eight identical caches into eight different
+  ones — 10.3&times; more cluster-resident tokens for DeepSeek-V3 at 16 GPUs, even after paying
+  10.7&nbsp;GB/rank for replicated attention weights (derived).</li>
+  <li>The all-to-all is cheaper in bytes than the alternative, not dearer: 14.6&nbsp;MB per layer per
+  rank versus 25.7&nbsp;MB for gather-plus-TP-FFN at EP=8 (derived). What makes it hard is
+  data-dependent per-peer sizes, two serialised round trips per layer, and an order-of-magnitude
+  bandwidth cliff outside the NVLink domain.</li>
+  <li>Wide EP is about HBM, not FLOPs. Per-rank routed-expert weights fall as
+  $11.27\,\text{GB}/N$ per layer and must be streamed every decode step regardless of batch — a
+  24.4&nbsp;ms floor at EP=8 against 3.05&nbsp;ms at EP=64 (derived).</li>
+  <li>Under DP attention nothing is independent: both engines fabricate empty forward passes for
+  idle ranks (<code>get_idle_batch()</code>, <code>execute_dummy_batch()</code>) because the FFN is a
+  collective. Capacity planning that treats DP ranks as independent replicas will be wrong.</li>
+  <li>EPLB trades HBM for balancedness by replicating hot experts, then permutes placement
+  hierarchically so traffic prefers NVLink. Both engines define balancedness identically as
+  mean-over-max rank load, and both charge 44&nbsp;MB of point-to-point movement per relocated
+  expert.</li>
+  <li>Plain DP replicas do not share prefix caches. For multi-turn traffic the routing policy in
+  front of the replicas matters more than the parallelism inside them —
+  <a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a>.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://lmsys.org/blog/2025-05-05-large-scale-ep/">LMSYS, "Deploying DeepSeek with
+  PD Disaggregation and Large-scale Expert Parallelism"</a> — the primary write-up behind SGLang's
+  EP stack, including its EPLB and two-batch-overlap sections. Cited by SGLang's own expert
+  parallelism guide.</li>
+  <li><a href="https://github.com/deepseek-ai/EPLB">deepseek-ai/EPLB</a> — the upstream of
+  <code>python/sglang/srt/eplb/eplb_algorithms/deepseek.py</code>, vendored because it is not a
+  PyPI package (see the file's first line).</li>
+  <li><a href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a> — the all-to-all
+  library, including the normal/low-latency split and the NVLink-forwarding design for inter-node
+  dispatch. SGLang's dispatcher wraps its <code>low_latency_dispatch</code> /
+  <code>low_latency_combine</code> directly.</li>
+  <li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a> — the source for
+  the 671&nbsp;B total / 37&nbsp;B active parameter counts and the group-limited routing that caps
+  how many nodes a token can reach.</li>
+  <li><a href="https://github.com/sgl-project/sglang/pull/6121">SGLang PR #6121</a> — DP attention
+  extended beyond MLA to standard-attention Qwen models, cited from SGLang's DP/DPA guide.</li>
+  <li><a href="https://github.com/sgl-project/sglang/pull/9269">SGLang PR #9269</a> — the MoE
+  refactor behind the <code>BaseDispatcher</code> / <code>MoeRunnerCore</code> split in
+  <code>python/sglang/srt/layers/moe/token_dispatcher/base.py</code>;
+  <a href="https://github.com/sgl-project/sglang/pull/13327">PR #13327</a> for the dispatcher hooks
+  behind single-batch overlap.</li>
+  <li>Next: <a href="../05-parallelism/05-04-collectives-and-topology.html">§5.4</a> on the
+  collectives themselves and what topology does to them, and
+  <a href="../07-architectures/07-01-mixture-of-experts.html">§7.1</a> on the routing function that
+  produces the imbalance this chapter spends so much effort correcting.</li>
+</ul></div></section>
+<div class="pager"><a href="05-02-pipeline-parallelism.html"><div class="pager__k">← Previous</div><div class="pager__t">Pipeline parallelism and bubbles</div></a><a class="pager__next" href="05-04-collectives-and-topology.html"><div class="pager__k">Next →</div><div class="pager__t">Collectives, topology, custom all-reduce</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles</a>
+<a href="#expert-parallelism">Expert parallelism and the all-to-all</a>
+<a href="#production">How production systems do it</a>
+<a href="#eplb">Load imbalance and EPLB</a>
+<a href="#elastic-ep">Elastic expert parallelism</a>
+<a href="#worked-trace">Worked trace: one token through DP-attn + EP</a>
+<a href="#combining">The combination rule and a worked configuration</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

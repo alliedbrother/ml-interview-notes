@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weight loading, sharded loaders, adding a model — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i is-current" href="08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 8 · Compilation and runtime · 08-04</div>
+<h1>Weight loading, sharded loaders, adding a model</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/model_loader/</code></li><li><code>vllm/models/</code></li><li><code>python/sglang/srt/model_loader/</code></li><li><code>python/sglang/srt/models/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A scale-up event fires. Kubernetes schedules a new 8×H100 pod. Ninety seconds later it is still not serving traffic, because 131 GiB of Llama-3-70B weights are still crawling off network storage. Nothing in this chapter makes a token faster — it makes the server <em>exist</em> faster, and it is the difference between an autoscaler that helps and one that makes your p99 worse.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Cold start is the one part of an inference engine where the GPU is idle by construction. The model runner is built, the KV cache is sized, the CUDA graphs are ready to capture — and none of it matters until bytes from a checkpoint are sitting in the right memory of the right device. Llama-3-8B is 16.06 GB of bf16 weights; Llama-3-70B is 131 GiB (141.1 GB). Those bytes must cross whatever medium the checkpoint lives on, and storage is the slowest link in the serving stack — three orders of magnitude below the 3.35 TB/s of HBM those weights sit in once they arrive. Note that this chapter's figure is the <em>resident</em> checkpoint, every parameter of it, because every parameter has to be read off disk and placed. It is not the figure that sets the decode floor: a decode step <em>streams</em> only 7.50 B of Llama-3-8B's 8.03 B parameters, because the embedding table is gathered rather than multiplied, which is why <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a> divides 15.01 GB rather than 16.06 GB by the bandwidth and gets 4.48 ms. Do not carry one number into the other's derivation.</p>
+
+<p>Work the floor from link rates, which are pure arithmetic. A PCIe Gen4 x4 NVMe drive signals at 16 GT/s per lane over 4 lanes with 128b/130b encoding: $16 \times 4 \times \frac{128}{130} / 8 = 7.88$ GB/s of link ceiling, and good drives land near 7 GB/s sequential. A 25 GbE link is $25/8 = 3.125$ GB/s at line rate; 10 GbE is 1.25 GB/s. Divide the checkpoint by each:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — checkpoint bytes divided by link-rate ceilings. These are <em>optimistic floors</em>: real filesystems, request overhead, and contention only make them worse. Not measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Medium</th><th>Ceiling</th><th>Llama-3-8B (16.06 GB)</th><th>Llama-3-70B (141.1 GB)</th></tr></thead>
+      <tbody>
+        <tr><td>NVMe, PCIe Gen4 x4</td><td class="num">7.0 GB/s</td><td class="num">2.3 s</td><td class="num">20.2 s</td></tr>
+        <tr><td>Network FS over 25 GbE</td><td class="num">3.125 GB/s</td><td class="num">5.1 s</td><td class="num">45.2 s</td></tr>
+        <tr><td>Network FS over 10 GbE</td><td class="num">1.25 GB/s</td><td class="num">12.8 s</td><td class="num">112.9 s</td></tr>
+        <tr><td>Object store / Hub pull at 200 MB/s</td><td class="num">0.2 GB/s</td><td class="num">80.3 s</td><td class="num">705.5 s</td></tr>
+        <tr><td>Host&rarr;device copy, PCIe Gen5 x16 (per rank, TP=8)</td><td class="num">63 GB/s</td><td class="num">0.03 s</td><td class="num">0.28 s</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The last row is the punchline. Getting each rank's 17.64 GB shard of the 70B model from host memory onto its H100 takes about a quarter of a second. Getting the checkpoint off the media takes 20 seconds on the best local disk you can buy and nearly twelve minutes if you are pulling it from a registry over a WAN. <strong>Weight loading is a storage problem wearing a GPU costume.</strong></p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Capacity planning</span>
+  <p>If a replica takes 60 s to become ready, an autoscaler that reacts to a traffic spike delivers capacity a minute after the spike started — by which time the queue has already blown the SLO. Cold start is an input to your scaling policy, not an implementation detail. Routing and autoscaling are covered in <a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a>; this chapter is where the number in that policy comes from.</p>
+</div>
+
+<p>There is a second multiplier that surprises people. Under tensor parallelism every rank runs the <em>same</em> weight-loading loop over the <em>same</em> checkpoint files and throws away the 7/8 of each tensor that does not belong to it. At TP=8 the logical read volume is $8 \times 141.1 = 1{,}129$ GB. Whether that becomes 1,129 GB of physical I/O or 141 GB depends entirely on whether the host page cache can hold the checkpoint. On a node with 2 TB of RAM it can; on a memory-constrained container it cannot, and your 20-second load becomes a 161-second load.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>The pipeline is short and every stage is a place to lose time. A checkpoint is a set of <code>*.safetensors</code> files plus an index JSON mapping tensor name to file. The loader opens each file, reads its header, and yields <code>(name, tensor)</code> pairs. The model's <code>load_weights</code> method translates each checkpoint name into an engine parameter name — possibly folding several checkpoint tensors into one fused parameter — and hands the tensor to that parameter's <code>weight_loader</code> callback. The callback narrows the tensor to this rank's slice and copies it into the already-allocated device parameter.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — the load pipeline for one tensor, Llama-3-70B at TP=8, rank 3.</b> Sizes are derived from the model shapes: d=8192, h=64, h_kv=8, d_h=128, bf16.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["model.safetensors.index.json<br/>weight_map from tensor name to file<br/>723 entries, 141.1 GB total"] --> B["one safetensors shard file<br/>8-byte little-endian header length<br/>JSON header, then raw tensor bytes"]
+    B --> C["Header lookup<br/>model.layers.40.self_attn.k_proj.weight<br/>dtype BF16, shape 1024 x 8192, offsets"]
+    C --> D["safe_open + get_tensor<br/>CPU tensor 1024 x 8192 bf16<br/>16.78 MB"]
+    D --> E["WeightsMapper<br/>.k_proj becomes .qkv_proj<br/>shard_id = k"]
+    E --> F["QKVParallelLinear.weight_loader<br/>tp_rank=3, num_kv_head_replicas=1<br/>shard_offset=1024, shard_size=128"]
+    F --> G["loaded_weight.narrow dim0<br/>start_idx = 3 x 128 = 384<br/>view of 128 x 8192 = 2.10 MB"]
+    G --> H["param_data.narrow dim0 1024 128<br/>copy into qkv_proj.weight<br/>rank slice 1280 x 8192 = 20.97 MB"]
+    H --> I["Device parameter on GPU 3<br/>per-layer rank total 213.9 MB<br/>whole-model rank total 17.64 GB"]
+  </script>
+</div>
+
+<p>Two things in that diagram do the real work. The <em>header lookup</em> is why safetensors won; the <em>name mapping</em> is why adding a model is hard.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: format and names</h2></div><div class="sec__body"><h3>Why safetensors</h3>
+
+<p>A PyTorch <code>.bin</code> checkpoint is a zip of pickled objects. Unpickling executes arbitrary bytecode, which means loading a checkpoint from the internet is remote code execution by design, and it means you cannot know a tensor's offset without walking the pickle stream. Safetensors replaces this with the dullest possible container: an 8-byte little-endian header length, a UTF-8 JSON header mapping each tensor name to <code>{dtype, shape, data_offsets}</code>, then a contiguous blob of raw tensor bytes. No code runs. Any tensor's bytes can be located with one seek. And because the payload is raw and aligned, the file can be <code>mmap</code>ed and tensors constructed as views into the mapping rather than copies.</p>
+
+<p>vLLM's default path is exactly that — <code>safe_open</code> plus <code>get_tensor</code>, one tensor at a time, never holding more than one file's worth of state:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/weight_utils.py:L957-L963</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        else:
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():  # noqa: SIM118
+                    if should_skip_weight(name, local_expert_ids):
+                        continue
+                    param = f.get_tensor(name)
+                    yield name, param</code></pre>
+</div>
+
+<p>SGLang's iterator is the same shape, with an explicit escape hatch for filesystems where <code>mmap</code>'s random-access pattern is pathological:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_loader/weight_utils.py:L1107-L1117</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if disable_mmap:
+            with open(st_file, "rb") as f:
+                result = safetensors.torch.load(f.read())
+                for name in sorted(result.keys()):
+                    yield name, result[name]
+        else:
+            with safetensors.safe_open(st_file, framework="pt", device="cpu") as f:
+                for name in f.keys():
+                    yield name, f.get_tensor(name)
+        if drop_cache_after_load:
+            _drop_file_cache_after_load(st_file)</code></pre>
+</div>
+
+<p>That <code>disable_mmap</code> branch is not cosmetic. Memory-mapping a file on NFS or Lustre turns a sequential 141 GB read into a storm of page faults, each of which is a network round trip. vLLM encodes the same knowledge as a filesystem sniff and an auto-prefetch decision:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/weight_utils.py:L849-L856</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    fs_type = _get_fs_type(sorted_files)
+    is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
+    total_bytes = _get_checkpoints_size_bytes(sorted_files)
+    avail_bytes = _get_available_ram_bytes()
+    ram_threshold_pct = 90
+    fits_in_ram = total_bytes &lt;= (ram_threshold_pct / 100.0) * avail_bytes
+    fs_name = fs_type.upper() if fs_type else "unknown"</code></pre>
+</div>
+
+<p>If the checkpoint is on a network FS and fits in 90% of available RAM, vLLM spawns background threads that read every file end-to-end to warm the page cache before the loader touches it — trading a sequential streaming read for the random-access pattern that would otherwise dominate. The user-facing knob is <code>--safetensors-load-strategy</code>, documented in <code>vllm/config/load.py:L62-L83</code> with four values: <code>lazy</code> (mmap), <code>eager</code> (slurp the whole file into RAM first), <code>prefetch</code>, and <code>torchao</code>.</p>
+
+<h3>The name-mapping problem</h3>
+
+<p>A checkpoint's parameter names come from the framework that trained the model — usually HuggingFace Transformers. The engine's module tree has its own names, chosen for a different purpose: fusing GEMMs that share an input, and splitting tensors across ranks. The mapping is not one-to-one in either direction.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — the three name-mapping cases, with real Llama-3-70B shapes at TP=8.</b> Case 2 is the one that breaks naive ports.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph C1["Case 1 — one to one, replicated"]
+      A1["input_layernorm.weight<br/>8192 bf16 = 16 KB"] --> A2["input_layernorm.weight<br/>identical on all 8 ranks"]
+    end
+    subgraph C2["Case 2 — many to one, fused then sharded"]
+      B1["q_proj.weight<br/>8192 x 8192 = 134.2 MB"] --> B4["qkv_proj.weight<br/>full 10240 x 8192 = 167.8 MB<br/>rank slice 1280 x 8192 = 20.97 MB"]
+      B2["k_proj.weight<br/>1024 x 8192 = 16.78 MB"] --> B4
+      B3["v_proj.weight<br/>1024 x 8192 = 16.78 MB"] --> B4
+      B5["gate_proj.weight<br/>28672 x 8192 = 469.8 MB"] --> B7["gate_up_proj.weight<br/>full 57344 x 8192 = 939.5 MB<br/>rank slice 7168 x 8192 = 117.4 MB"]
+      B6["up_proj.weight<br/>28672 x 8192 = 469.8 MB"] --> B7
+    end
+    subgraph C3["Case 3 — one to many, sharded only"]
+      D1["down_proj.weight<br/>8192 x 28672 = 469.8 MB"] --> D2["down_proj.weight row parallel<br/>narrow dim 1 at rank x 3584<br/>8192 x 3584 = 58.7 MB per rank"]
+      D3["embed_tokens.weight<br/>128256 x 8192 = 2.10 GB"] --> D4["VocabParallelEmbedding<br/>16032 x 8192 = 262.7 MB per rank"]
+    end
+  </script>
+</div>
+
+<p>Case 2 is the whole difficulty. <code>qkv_proj</code> does not exist in the checkpoint; it is an engine invention that lets one GEMM produce Q, K and V at once. So three checkpoint tensors write into three disjoint row ranges of one engine parameter, <em>and</em> each of them is independently sliced by TP rank, <em>and</em> the K/V slicing uses a different rank arithmetic than Q because with $h_{kv}=8$ and TP=8 there is exactly one KV head per rank while there are eight query heads. Miss any of that and the model loads without error and emits fluent nonsense.</p>
+
+<p><a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a> owns <em>why</em> a tensor is sharded on a given axis and why the column/row split is what it is. This chapter owns the plumbing that makes rank 3 end up with rows 384–511 of <code>k_proj</code> and nothing else.</p></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM: a declarative mapper plus a tree walk</h3>
+
+<p>At <code>a556f3f</code>, vLLM's Llama implementation has almost no hand-written loading loop left. The mapping is a class attribute:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L344-L354</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class LlamaModel(nn.Module, EagleModelMixin):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )</code></pre>
+</div>
+
+<p>and <code>load_weights</code> is three lines:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L441-L443</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -&gt; set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)</code></pre>
+</div>
+
+<p>The mapper rewrites the name and smuggles the shard identity onto the tensor object itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/utils.py:L115-L147, L137-L147</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        shard_id: ShardId | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
+            if substr in key:
+                key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
+# ...
+    def apply(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -&gt; Iterable[tuple[str, torch.Tensor]]:
+        for name, data in weights:
+            result = self._map_name_with_shard(name)
+            if result is None:
+                continue
+            out_name, shard_id = result
+            if shard_id is not None:
+                data.shard_id = shard_id
+            yield out_name, data</code></pre>
+</div>
+
+<p><code>AutoWeightsLoader.load_weights</code> then groups the renamed stream by prefix and recurses down the module tree, so a weight named <code>model.layers.40.self_attn.qkv_proj.weight</code> is routed to <code>model</code> &rarr; <code>layers</code> &rarr; <code>40</code> &rarr; <code>self_attn</code> &rarr; <code>qkv_proj</code> without any string matching in the model file. When it reaches a module that defines its own <code>load_weights</code>, it delegates; <code>QKVParallelLinear</code> does, and that is where the shard id is read back off the tensor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L945-L960</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -&gt; Iterable[str]:
+        for name, loaded_weight in weights:
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
+            # Load into self if name is not an attr of self or its submodules
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)</code></pre>
+</div>
+
+<h3>SGLang: the explicit loop, and a v2 behind an env var</h3>
+
+<p>SGLang's <code>LlamaForCausalLM.load_weights</code> still ships the classic table-driven loop as the default, with the tree-walking loader gated:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/llama.py:L663-L678</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.environ import envs
+
+        if envs.SGLANG_ENABLE_WEIGHT_LOADER_V2.get():
+            return self._load_weights_v2(weights)
+        return self._legacy_load_weights(weights)
+
+    def _legacy_load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]</code></pre>
+</div>
+
+<p>Same five-row table, different delivery. The loop that consumes it is the pattern you will find replicated across the 212 model files in <code>python/sglang/srt/models/</code> (216 <code>.py</code> at the top level, less <code>registry.py</code>, <code>utils.py</code> and two per-family helper modules):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/llama.py:L714-L742</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # ...
+                if name in params_dict.keys():
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                else:
+                    logger.warning(f"Parameter {name} not found in params_dict")</code></pre>
+</div>
+
+<p><strong>The divergence that matters is the last line.</strong> An unmapped checkpoint tensor in SGLang's legacy path produces a <code>logger.warning</code> and the run continues with that parameter holding whatever it was initialised to. vLLM raises:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/default_loader.py:L465-L470</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {weights_not_loaded}"
+                )</code></pre>
+</div>
+
+<p>Neither choice is obviously right. vLLM's strictness turns silent-garbage bugs into a startup crash, but it also means one unexpected tensor refuses the whole load — which is why the check is gated on <code>model_config.quantization is None and loaded_weights is not None</code>. SGLang's leniency lets a partially-supported checkpoint boot: useful during a port, dangerous in production. If you run SGLang, read the startup warnings; they are load-bearing.</p>
+
+<h3>The per-rank slice</h3>
+
+<p>Every path converges on a <code>weight_loader</code> callback attached to the parameter. The simplest one is the row-parallel case — one checkpoint tensor, sliced on dim 0:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/weight_utils.py:L1243-L1255</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def row_parallel_weight_loader(
+    param: torch.Tensor, loaded_weight: torch.Tensor
+) -&gt; None:
+    """Load weights that are row-parallelized."""
+    tp_rank = get_tensor_model_parallel_rank()
+    shard_dim = 0 if param.dim() != 1 else None
+
+    if shard_dim is not None:
+        shard_size = param.data.shape[shard_dim]
+        start_idx = tp_rank * shard_size
+        loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
+
+    return default_weight_loader(param, loaded_weight)</code></pre>
+</div>
+
+<p>The fused-and-sharded case is the interesting one. Note that the destination parameter is narrowed too — the shard lands at a specific offset inside <code>qkv_proj.weight</code> — and that K and V use a divided rank when the model has fewer KV heads than ranks:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L1238-L1280</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        assert loaded_shard_id in ["q", "k", "v"]
+
+        # If output dim is defined, use the default loading process.
+        if output_dim is not None:
+            if loaded_shard_id == "q":
+                shard_offset = 0
+                shard_size = self.num_heads * self.head_size
+            elif loaded_shard_id == "k":
+                shard_offset = self.num_heads * self.head_size
+                shard_size = self.num_kv_heads * self.head_size
+            elif loaded_shard_id == "v":
+                shard_offset = (self.num_heads + self.num_kv_heads) * self.head_size
+                shard_size = self.num_kv_heads * self.v_head_size
+# ...
+            is_sharded_weight = getattr(param, "is_sharded_weight", False)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            if loaded_shard_id == "q":
+                shard_rank = self.tp_rank
+            else:
+                shard_rank = self.tp_rank // self.num_kv_head_replicas
+            start_idx = shard_rank * shard_size
+
+            if not is_sharded_weight:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)</code></pre>
+</div>
+
+<p>Both <code>narrow</code> calls produce views, not copies. The only allocation-sized operation is the final <code>param_data.copy_(loaded_weight)</code>, which moves exactly this rank's bytes to the device. The CPU never holds more than one checkpoint tensor at a time, and the GPU never holds a byte it does not own.</p>
+
+<h3>The loader zoo</h3>
+
+<p>vLLM's registry is a flat dict from format string to loader class (<code>vllm/model_executor/model_loader/__init__.py:L32-L63</code>). SGLang's is a chain of <code>if</code>s in <code>get_model_loader</code> (<code>python/sglang/srt/model_loader/loader.py:L4338-L4350</code>) over a 21-member enum. What exists at these SHAs:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Load formats present at vLLM <code>a556f3f</code> and SGLang <code>7d89325</code>. vLLM list from <code>vllm/model_executor/model_loader/__init__.py:L32-L63</code>; SGLang from <code>python/sglang/srt/configs/load_config.py:L17-L38</code> and the CLI choice list at <code>python/sglang/srt/server_args.py:L117-L135</code>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Format</th><th>vLLM</th><th>SGLang</th><th>What it is for</th></tr></thead>
+      <tbody>
+        <tr><td><code>auto</code> / <code>safetensors</code> / <code>pt</code> / <code>hf</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>The default disk path. <code>auto</code> sniffs for Mistral-native layout first.</td></tr>
+        <tr><td><code>dummy</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>Random weights. Profiling and startup benchmarking without touching disk.</td></tr>
+        <tr><td><code>npcache</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>Numpy side-cache for <code>.bin</code> checkpoints. Legacy.</td></tr>
+        <tr><td><code>sharded_state</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>Pre-sharded per-rank files: each rank reads only its own bytes.</td></tr>
+        <tr><td><code>presharded</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>SGLang-only. First run dumps a per-rank, per-quant checkpoint; later runs skip re-quantization entirely.</td></tr>
+        <tr><td><code>runai_streamer</code> (+ <code>_sharded</code>)</td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>Run:ai Model Streamer — concurrent object-store reads from S3/GCS/Azure.</td></tr>
+        <tr><td><code>fastsafetensors</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--verified">yes</span></td><td>GPUDirect Storage: NVMe straight into device memory, bypassing the host bounce buffer.</td></tr>
+        <tr><td><code>tensorizer</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--blocked">no</span></td><td>CoreWeave Tensorizer serialization.</td></tr>
+        <tr><td><code>instanttensor</code>, <code>modelexpress</code></td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--blocked">no</span></td><td>Distributed/pipelined direct-I/O loaders.</td></tr>
+        <tr><td><code>remote</code>, <code>remote_instance</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>Pull weights from an object store, or from a already-running peer instance over NCCL / a transfer engine.</td></tr>
+        <tr><td><code>bitsandbytes</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>NF4 on-the-fly quantized load. Absent from vLLM at this SHA — see <a href="../04-quantization/04-01-the-design-space.html">§4.1</a>.</td></tr>
+        <tr><td><code>gguf</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>llama.cpp's container format, with its own name maps in <code>gguf_name_maps.py</code>. Absent from vLLM at this SHA.</td></tr>
+        <tr><td><code>layered</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>Load and quantize one layer at a time to shrink the peak host-memory envelope.</td></tr>
+        <tr><td><code>flash_rl</code>, <code>ipc_cache</code></td><td><span class="pill pill--blocked">no</span></td><td><span class="pill pill--verified">yes</span></td><td>RL weight refresh, and the CUDA-IPC weight cache (see §8.4.7).</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The shape of the difference: vLLM's zoo is about <em>transport</em> (how do bytes get here fastest), SGLang's is about <em>transport plus lifecycle</em> (how do bytes get here fastest, and how do I replace them at runtime).</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one tensor onto rank 3</h2></div><div class="sec__body"><p>Follow <code>model.layers.40.self_attn.k_proj.weight</code> from a Llama-3-70B checkpoint into GPU 3 at TP=8, naming every function in order.</p>
+
+<ol>
+<li><code>get_model_loader(load_config)</code> maps <code>load_format="auto"</code> to <code>DefaultModelLoader</code> (<code>vllm/model_executor/model_loader/__init__.py:L48-L63</code>).</li>
+<li><code>BaseModelLoader.load_model</code> enters <code>set_default_torch_dtype(bf16)</code>, then <code>with target_device:</code>, then calls <code>initialize_model</code> — the entire module tree is constructed <em>on the GPU</em> with uninitialised storage, so every parameter already has its final shape and device before any byte is read (<code>vllm/model_executor/model_loader/base_loader.py:L53-L64</code>). Rank 3's <code>qkv_proj.weight</code> is allocated at <code>[1280, 8192]</code>, not <code>[10240, 8192]</code>.</li>
+<li><code>DefaultModelLoader.load_weights</code> calls <code>model.load_weights(self.get_all_weights(...))</code> (<code>vllm/model_executor/model_loader/default_loader.py:L414-L427</code>).</li>
+<li><code>get_all_weights</code> &rarr; <code>_get_weights_iterator</code> &rarr; <code>_prepare_weights</code> resolves the file list, filtering against <code>model.safetensors.index.json</code> so a consolidated file and its shards are never both loaded.</li>
+<li><code>safetensors_weights_iterator</code> sniffs the filesystem, decides whether to prefetch, then <code>safe_open</code>s each shard and yields <code>("model.layers.40.self_attn.k_proj.weight", &lt;CPU tensor 1024&times;8192 bf16, 16.78 MB&gt;)</code>.</li>
+<li><code>AutoWeightsLoader.load_weights</code> merges in the quant-config cache-scale mapper and the rotary-embedding drop list, then calls <code>mapper.apply(weights)</code>.</li>
+<li><code>WeightsMapper._map_name_with_shard</code> matches <code>".k_proj"</code>, rewrites the name to <code>model.layers.40.self_attn.qkv_proj.weight</code>, and sets <code>data.shard_id = "k"</code>.</li>
+<li><code>_load_module</code> groups by prefix and recurses: <code>model</code> &rarr; <code>layers</code> &rarr; <code>40</code> &rarr; <code>self_attn</code> &rarr; <code>qkv_proj</code>. At <code>qkv_proj</code> the module defines <code>load_weights</code>, so the walk delegates.</li>
+<li><code>QKVParallelLinear.load_weights</code> reads <code>shard_id</code> back off the tensor and calls <code>param.weight_loader(param, loaded_weight, "k")</code>.</li>
+<li><code>QKVParallelLinear.weight_loader</code> computes, for rank 3 with <code>num_heads=8</code>, <code>num_kv_heads=1</code>, <code>head_size=128</code>: <code>shard_offset = 8*128 = 1024</code>, <code>shard_size = 1*128 = 128</code>. Since <code>num_kv_head_replicas == 1</code>, <code>shard_rank = 3</code> and <code>start_idx = 3*128 = 384</code>.</li>
+<li>Two narrows: <code>param_data.narrow(0, 1024, 128)</code> selects rows 1024–1151 of the fused parameter; <code>loaded_weight.narrow(0, 384, 128)</code> selects rows 384–511 of the checkpoint tensor.</li>
+<li><code>param_data.copy_(loaded_weight)</code> — 128 &times; 8192 &times; 2 = 2.10 MB crosses PCIe. The other 14.68 MB of that checkpoint tensor is never touched by rank 3, though it <em>was</em> read from disk.</li>
+<li>Back in <code>BaseModelLoader.load_model</code>: <code>process_weights_after_loading</code> runs per-module post-processing (weight repacking for Marlin, FP8 scale folding — see <a href="../04-quantization/04-03-formats-and-kernels.html">§4.3</a>), then <code>model.eval()</code>.</li>
+<li><code>track_weights_loading</code> diffs <code>named_parameters()</code> against the returned set and raises if anything is missing.</li>
+</ol>
+
+<p>Step 12 is where the TP read amplification lives. Rank 3 read 16.78 MB off disk to keep 2.10 MB. Multiply across the checkpoint and you get the 8&times; factor from §8.4.1 — and the reason <code>sharded_state</code> and <code>presharded</code> exist, since they let each rank read only what it will keep.</p></div></section>
+<section class="sec" id="adding-a-model" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Adding a model, end to end</h2></div><div class="sec__body"><p>Everything above was preparation for this. Adding a model is six concrete artifacts. Read <code>vllm/model_executor/models/llama.py</code> — all 549 lines — before you write any of them; it is the reference implementation the other 285 model files under <code>vllm/model_executor/models/</code> imitate.</p>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">Step 1</span><h4>The config</h4><p>Reuse the HF config class if <code>transformers</code> has one. If not, add a dataclass under <code>vllm/transformers_utils/configs/</code> and register it. Everything downstream reads <code>vllm_config.model_config.hf_config</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Step 2</span><h4>The module tree</h4><p>Build with the parallel primitives, not <code>nn.Linear</code>. Every module takes a <code>prefix</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Step 3</span><h4>load_weights</h4><p>The mapper table, plus whatever renames your checkpoint needs.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Step 4</span><h4>Registry entry</h4><p>One line in vLLM. Zero lines in SGLang.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Step 5</span><h4>Interfaces</h4><p><code>SupportsPP</code>, <code>SupportsLoRA</code>, <code>SupportsMultiModal</code>, <code>SupportsQuant</code> — opt in explicitly.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Step 6</span><h4>Tests</h4><p>One registry entry gets you CI. Correctness tests are optional but expected.</p></div>
+</div>
+
+<h3>Step 2 — the module tree, in the primitives</h3>
+
+<p>The single most common porting mistake is copying HF's <code>modeling_*.py</code> and leaving <code>nn.Linear</code> in place. Every projection must be one of <code>ColumnParallelLinear</code>, <code>MergedColumnParallelLinear</code>, <code>QKVParallelLinear</code>, <code>RowParallelLinear</code>, <code>ReplicatedLinear</code>, <code>VocabParallelEmbedding</code>, or <code>ParallelLMHead</code>. Choosing correctly <em>is</em> choosing the sharding, because each class ships the <code>weight_loader</code> that implements it. Llama's attention block:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L162-L170</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        self.qkv_proj = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )</code></pre>
+</div>
+
+<p>Note that it is constructed with <em>total</em> head counts. The layer divides by <code>tp_size</code> internally, which is what makes the same model file work at TP=1 and TP=8 with no branching. The <code>prefix</code> is not decoration: attention layers register themselves in a global compilation and KV-cache map under their prefix, and quantization configs match per-layer ignore lists against it.</p>
+
+<h3>Step 3 — the mapping table</h3>
+
+<p>Write the <code>WeightsMapper</code> (vLLM) or <code>stacked_params_mapping</code> (SGLang) by diffing two lists. Get the checkpoint side with <code>safetensors</code>; get the engine side from <code>model.named_parameters()</code>. Anything in the first list with no home in the second is a mapping you owe. For Llama that is exactly five rows. For a model that renames <code>mlp.w1</code>/<code>mlp.w3</code>, or splits attention output into two tensors, or stores experts as a stacked 3-D tensor (<a href="../07-architectures/07-01-mixture-of-experts.html">§7.1</a>), it is more.</p>
+
+<h3>Step 4 — registration</h3>
+
+<p>The two projects made opposite choices. vLLM keeps an explicit dict from HF <code>architectures[0]</code> to a lazily-imported module and class:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/registry.py:L153, L1484-L1492</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+# ...
+ModelRegistry = _ModelRegistry(
+    {
+        model_arch: _LazyRegisteredModel(
+            module_name=_resolve_module_name(mod_relname),
+            class_name=cls_name,
+        )
+        for model_arch, (mod_relname, cls_name) in _VLLM_MODELS.items()
+    }
+)</code></pre>
+</div>
+
+<p>Laziness matters: importing 292 model modules eagerly would initialise CUDA in the parent process and break forked workers. SGLang instead scans its own package at import time and picks up any module that exports <code>EntryClass</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/registry.py:L97-L112</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    package = importlib.import_module(package_name)
+    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + "."):
+        if not ispkg:
+            if name.split(".")[-1] in envs.SGLANG_DISABLED_MODEL_ARCHS.get():
+                logger.debug(f"Skip loading {name} due to SGLANG_DISABLED_MODEL_ARCHS")
+                continue
+
+            try:
+                module = importlib.import_module(name)
+            except Exception as e:
+                if strict:
+                    raise
+                logger.warning(f"Ignore import error when loading {name}: {e}")
+                continue
+            if hasattr(module, "EntryClass"):
+                entry = module.EntryClass</code></pre>
+</div>
+
+<p>So an SGLang contributor writes <code>EntryClass = [MyModelForCausalLM]</code> at the bottom of the file and is done — the trade being that a syntax error or a missing optional dependency in <em>any</em> model file turns into a swallowed warning and an architecture that mysteriously does not exist. vLLM's cost is a merge conflict magnet of a dict; its benefit is that a missing architecture produces a list of everything that <em>is</em> supported (<code>vllm/model_executor/models/registry.py:L1167-L1169</code>).</p>
+
+<h3>Step 5 — interfaces</h3>
+
+<p>vLLM's optional capabilities are <code>Protocol</code> classes with a <code>ClassVar</code> flag, checked at runtime with <code>isinstance</code>. Declaring one is a promise about your <code>forward</code> signature:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/interfaces.py:L730-L744</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@runtime_checkable
+class SupportsPP(Protocol):
+    """The interface required for all models that support pipeline parallel."""
+
+    supports_pp: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports pipeline parallel.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
+    """Called when PP rank &gt; 0 for profiling purposes."""</code></pre>
+</div>
+
+<p>Llama declares five of them in its class header &mdash; <code>SupportsLoRA</code>, <code>SupportsPP</code>, <code>SupportsEagle</code>, <code>SupportsEagle3</code>, <code>SupportsQuant</code>, alongside <code>LocalArgmaxMixin</code> and <code>nn.Module</code> (<code>vllm/model_executor/models/llama.py:L444-L452</code>) &mdash; and <code>SupportsLoRA</code> is why <code>packed_modules_mapping</code> exists alongside the weights mapper — LoRA adapters name <code>q_proj</code>, so the LoRA manager needs the fused-module decomposition in reverse. Multimodal models add <code>SupportsMultiModal</code>, whose processing contract belongs to <a href="../07-architectures/07-04-multimodal-serving.html">§7.4</a>.</p>
+
+<h3>Step 6 — the tests you owe</h3>
+
+<p>vLLM's contributing guide is explicit that exactly one test is mandatory:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/contributing/model/tests.md:L10-L13</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>### Model loading
+
+Include an example HuggingFace repository for your model in [tests/models/registry.py](../../../tests/models/registry.py).
+This enables a unit test that loads dummy weights to ensure that the model can be initialized in vLLM.</code></pre>
+</div>
+
+<p>The entry is a <code>_HfExamplesInfo</code>, and the <code>extras</code> dict is how quantized and variant checkpoints get coverage for free:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">tests/models/registry.py:L382-L391</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    "LlamaForCausalLM": _HfExamplesInfo(
+        "meta-llama/Llama-3.2-1B-Instruct",
+        extras={
+            "guard": "meta-llama/Llama-Guard-3-1B",
+            "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
+            "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
+            "tiny": "hmellor/tiny-random-LlamaForCausalLM",
+        },
+    ),</code></pre>
+</div>
+
+<p>The optional-but-expected tests live under <code>tests/models/language/</code>: <code>check_outputs_equal</code> for exact text agreement with HF Transformers, or <code>check_logprobs_close</code> when sampling makes exact agreement unrealistic. Write the logprobs one. It is the only thing that catches a transposed fused offset.</p></div></section>
+<section class="sec" id="fast-load" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Making cold start smaller</h2></div><div class="sec__body"><div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — cold-start timeline for Llama-3-70B, TP=8, one node.</b> Weight-load segments are derived from the link-rate table in §8.4.1. Compile and capture segments are owned by <a href="../08-compilation-and-runtime/08-02-torch-compile.html">§8.2</a> and <a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a> and are not derived here.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    P0["Process spawn, torch import<br/>NCCL init for 8 ranks<br/>see 5.5 startup sequence"] --> P1
+    P1["initialize_model on device<br/>allocate 17.64 GB of empty params per rank<br/>no bytes read yet"] --> P2
+    P2["WEIGHT LOAD — the dominant term<br/>one of these four cases applies"] --> A
+    P2 --> B
+    P2 --> C
+    P2 --> D
+    A["Local NVMe cold, 7 GB/s<br/>141.1 GB read once, page cache absorbs ranks 1-7<br/>DERIVED 20.2 s"] --> Z
+    B["Network FS, 10 GbE, 1.25 GB/s<br/>DERIVED 112.9 s"] --> Z
+    C["No page cache headroom, 8x amplification on NVMe<br/>1129 GB read<br/>DERIVED 161 s"] --> Z
+    D["Hub pull over WAN at 200 MB/s, first ever start<br/>DERIVED 705 s"] --> Z
+    Z["process_weights_after_loading<br/>quant repack, scale folding"] --> Y
+    Y["KV cache sizing and allocation<br/>see 2.2"] --> X
+    X["torch.compile plus CUDA graph capture<br/>see 8.1 and 8.2"] --> W
+    W["Server ready"]
+  </script>
+</div>
+
+<p>Three families of fix exist, and they attack different parts of the diagram.</p>
+
+<h3>Read fewer bytes</h3>
+
+<p><code>sharded_state</code> is the direct attack on the 8&times; amplification. You pay one normal load, dump per-rank files, and every subsequent start reads only what it keeps:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/sharded_state_loader.py:L29-L38</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class ShardedStateLoader(BaseModelLoader):
+    """
+    Model loader that directly loads each worker's model state dict, which
+    enables a fast load path for large tensor-parallel models where each worker
+    only needs to read its own shard rather than the entire checkpoint. See
+    `examples/features/sharded_state/save_sharded_state_offline.py` for creating
+    a sharded checkpoint.
+    """
+
+    DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"</code></pre>
+</div>
+
+<p>For the 70B at TP=8 this turns 1,129 GB of logical reads into 141 GB — 8&times; less at worst, and it removes the dependence on having 131 GiB of spare page cache. SGLang's <code>presharded</code> goes further and caches the <em>post-quantization</em> tensors, so a run that would have spent CPU time re-deriving FP8 scales skips that too. The cost is the same in both: the dumped checkpoint is bound to one exact (TP size, PP size, quantization) tuple. Change any of them and it is garbage.</p>
+
+<h3>Read the bytes faster</h3>
+
+<p><code>fastsafetensors</code> uses GPUDirect Storage to move NVMe blocks into device memory without a host bounce buffer. <code>runai_streamer</code> issues many concurrent range requests against object storage, which is the right shape for S3 where a single stream is latency-bound rather than bandwidth-bound. vLLM's auto-prefetch (§8.4.3) is the cheap version of the same idea for network filesystems.</p>
+
+<h3>Do not read the bytes at all</h3>
+
+<p>This is where SGLang has something vLLM does not. The <strong>weight cache daemon</strong> is a separate process that holds the fully-loaded, TP-sharded, post-quantization weights in GPU memory and hands them to engine processes as CUDA IPC handles:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/weight_cache/daemon.py:L2-L9</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>"""Weight Cache Daemon — a persistent process that holds post-quantized,
+TP-sharded model weights in GPU memory and serves them via CUDA IPC handles.
+
+Each GPU runs one daemon process for its TP rank. The daemon:
+1. Loads model weights from disk (full pipeline: disk → TP shard → quantize)
+2. Exports every parameter/buffer as a CUDA IPC handle
+3. Serves handles over a Unix socket to requesting engine processes
+4. Validates CacheConfig compatibility before serving
+# ...</code></pre>
+</div>
+
+<p>An engine started with <code>--weight-cache-mode client</code> maps the daemon's tensors instead of reading a byte from disk — the whole weight-load segment of Figure 3 collapses to passing a few hundred IPC handles over a Unix socket. The loader documents a precise fallback-vs-raise contract, because a silent fallback to disk would turn a fast restart into a slow one that <em>looks</em> healthy:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/weight_cache/ipc_loader.py:L51-L61</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    In client mode, disk fallback is allowed ONLY when the daemon is genuinely
+    absent (its Unix socket file does not exist). Every other failure is a hard
+    error rather than a silent fallback, so a broken IPC path never masquerades
+    as a healthy (but slow, disk-loaded) server:
+
+    - socket file missing            -&gt; fall back to disk load
+    - connection refused             -&gt; raise (daemon crashed after binding)
+    - CacheConfig mismatch           -&gt; raise (do NOT disk-load on a shared GPU
+                                        holding a different config's weights;
+                                        also surfaces fingerprint drift bugs)
+    - any protocol / transfer error  -&gt; raise</code></pre>
+</div>
+
+<p>Read the flag help before reaching for it, because the obvious usage is the wrong one:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L3577-L3583</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            help="Weight cache mode. 'off': normal disk loading. "
+            "'daemon': launch weight cache daemon (holds weights in GPU memory). "
+            "Engine-spawned daemons are co-terminal with the engine and do NOT "
+            "persist across restarts, so this alone does not speed up restart "
+            "(the first start is slower). For fast recovery, run the standalone "
+            "daemon (python -m sglang.srt.weight_cache.daemon) and connect with "
+            "'client'. 'client': connect to existing daemon and load via IPC.",</code></pre>
+</div>
+
+<h3>Live weight update</h3>
+
+<p>The same machinery serves reinforcement-learning loops, where a trainer produces new weights every few minutes and the engine must adopt them without restarting. SGLang exposes three routes — <code>update_weights_from_disk</code>, <code>update_weights_from_distributed</code>, <code>update_weights_from_tensor</code> — running from the HTTP server down through the tokenizer manager, scheduler, and TP worker into the model runner. The disk route re-runs the loader against a live model, with a rollback path:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/model_executor/model_runner_components/weight_updater.py:L184-L200</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        with set_default_torch_dtype(self.model_config.dtype):
+            try:
+                iter = get_weight_iter(self.model_config)
+            except Exception as e:
+                message = f"Failed to get weights iterator: {e}."
+                return False, message
+            try:
+                model = model_load_weights(self.get_model(), iter)
+            except Exception as e:
+                message = (
+                    f"Failed to update weights: {e}.\nRolling back to original weights."
+                )
+                del iter
+                gc.collect()
+                iter = get_weight_iter(self.model_config)
+                model_load_weights(self.get_model(), iter)
+                return False, message</code></pre>
+</div>
+
+<p>The tensor route is the one RL frameworks use. A trainer holding FSDP or Megatron shards calls into <code>weight_sync/utils.py</code>, which gathers DTensors to full tensors, serialises them as CUDA IPC handles, transposes the per-rank gather so each logical tensor carries all its shards, and posts one <code>UpdateWeightsFromTensorReqInput</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/weight_sync/utils.py:L106-L121</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
+    """
+    Preprocess the tensor for update weights.
+    Example Use Case:
+        - FSDP: we gather tensor by calling full_tensor in _preprocess_tensor_for_update_weights
+        - Megatron: we do nothing here, assuming it is gathered when feed into this func
+
+    Args:
+        tensor: The tensor to be preprocessed.
+
+    Returns:
+        The full tensor if it is a DTensor, otherwise the original tensor.
+    """
+    if isinstance(tensor, DTensor):
+        return tensor.full_tensor()
+    return tensor
+</code></pre>
+</div>
+
+<p>On the engine side, <code>update_weights_from_tensor</code> unwraps the IPC tensors and calls <code>self.get_model().load_weights(named_tensors)</code> — the same <code>load_weights</code> you wrote when you added the model, fed from GPU memory instead of a file. That is the payoff for keeping it a pure function of an iterator: cold start, hot reload, and RL weight sync all reuse it unmodified. A <code>flattened_bucket</code> format concatenates many small tensors into one buffer to amortise per-tensor overhead (<code>python/sglang/srt/weight_sync/tensor_bucket.py:L19-L26</code>), and a <code>checkpoint_engine</code> integration for the external Moonshot parameter server (<code>python/sglang/srt/checkpoint_engine/update.py:L1-L11</code>).</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">vLLM equivalent</span>
+  <p>vLLM has in-place weight loading in the base loader API — <code>load_weights</code> is documented as "This standalone API allows inplace weights loading for an already-initialized model" (<code>vllm/model_executor/model_loader/base_loader.py:L36-L40</code>) — and a <code>reload</code> subpackage under the model loader. I did not trace a first-party RL weight-sync path equivalent to SGLang's three <code>update_weights_from_*</code> endpoints at this SHA; RL integrations typically drive vLLM through the collective-RPC worker extension instead. Treat this as the sharper capability gap between the two engines.</p>
+</div></div></section>
+<section class="sec" id="pitfalls" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h3>The missing name: loud or silent</h3>
+
+<p>Three distinct failures, three different symptoms.</p>
+
+<p><strong>Unexpected checkpoint tensor.</strong> vLLM's tree walk hits a name with no module or parameter to route to:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/utils.py:L411-L417</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                msg = (
+                    f"There is no module or parameter named {prefix!r} "
+                    f"in {self.module._get_name()}. "
+                    f"The available parameters belonging to {base_prefix} "
+                    f"({module._get_name()}) are: {desc_param_keys}"
+                )
+                raise ValueError(msg)</code></pre>
+</div>
+
+<p>The error prints the available names, which is usually enough to spot the missing mapper row.</p>
+
+<p><strong>Unfilled engine parameter.</strong> Caught after the fact by <code>track_weights_loading</code>: <code>"Following weights were not initialized from checkpoint: {...}"</code>. This is the one that would otherwise be silent, since an uninitialised CUDA allocation contains plausible-looking garbage.</p>
+
+<p><strong>Wrong shape.</strong> <code>default_weight_loader</code>'s assertion fires: <code>"Attempted to load weight (torch.Size([1024, 8192])) into parameter (torch.Size([128, 8192]))"</code>. In practice this means you narrowed with the wrong <code>shard_size</code>, or forgot that a GQA model's K and V are <code>h_kv * d_h</code> rows, not <code>d</code>.</p>
+
+<h3>Loads fine, outputs nonsense</h3>
+
+<p>The worst class, because nothing raises. Every shape checks out and the model emits confident garbage. It is almost always a <em>correct-shape, wrong-content</em> bug in a fused parameter. Bisect it like this:</p>
+
+<ol>
+<li><strong>Run at TP=1 first.</strong> Correct at TP=1 and wrong at TP=8 means shard arithmetic. Wrong at both means the mapping or the forward pass.</li>
+<li><strong>Diff against HF.</strong> Run <code>transformers</code> on the same checkpoint and prompt with greedy decoding and compare hidden states layer by layer. The first divergent layer names the module.</li>
+<li><strong>Check the fused offsets by hand.</strong> Assert that <code>qkv_proj.weight[0:num_heads*head_size]</code> equals the checkpoint's <code>q_proj</code> rank slice. A <code>k</code>/<code>v</code> transposition, or a <code>gate</code>/<code>up</code> swap in <code>gate_up_proj</code>, is invisible to every shape check because both halves have identical shape.</li>
+<li><strong>Check GQA replication.</strong> When <code>total_num_kv_heads &lt; tp_size</code>, K and V are replicated and <code>shard_rank = tp_rank // num_kv_head_replicas</code>. Getting it wrong hands each rank the wrong KV head: grammatical output, unrelated to the prompt.</li>
+<li><strong>Turn on the loader's own logging.</strong> <code>VLLM_LOGGING_LEVEL=DEBUG</code> makes <code>AutoWeightsLoader</code> log every tensor it loads and <code>QKVParallelLinear.load_weights</code> log every shard. Grep for the layer you suspect.</li>
+</ol>
+
+<h3>dtype and quantization mismatches</h3>
+
+<p>The loader runs inside <code>set_default_torch_dtype(model_config.dtype)</code>, so parameters are created in the engine's dtype and <code>copy_</code> silently casts. An fp32 checkpoint loaded as bf16 loses mantissa bits and nobody complains — usually fine, occasionally not for models trained with unusual scaling.</p>
+
+<p>Quantized checkpoints sharpen this. A quantized parameter is not one tensor but a family — packed weights, group scales, zero points, sometimes activation scales — and if the engine's quant method does not recognise the checkpoint's naming convention, some members go unmapped. vLLM's FP8 KV-scale remapper is a whole function of accumulated conventions (<code>vllm/model_executor/model_loader/weight_utils.py:L1365-L1404</code>), and it fails quietly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/model_loader/weight_utils.py:L1396-L1403</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        remapped_name = name.replace(".kv_scale", ".attn.k_scale")
+        if remapped_name not in params_dict:
+            logger.warning_once(
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                name,
+                remapped_name,
+            )
+            return None</code></pre>
+</div>
+
+<p>A dropped KV scale means FP8 KV cache runs with a default scale, which degrades quality without erroring. This is also why <code>track_weights_loading</code>'s strict check is disabled when <code>model_config.quantization</code> is set — the strictness that protects bf16 loads is exactly the strictness that a quantized checkpoint would trip on legitimately. Under quantization, you are on your own; read the warnings.</p>
+
+<h3>Pre-sharded checkpoints and stale configs</h3>
+
+<p><code>sharded_state</code> and <code>presharded</code> dumps encode a parallelism and quantization configuration. Loading one under a different TP size gives <code>"Could not find checkpoint files '...', only pre-sharded checkpoints are currently supported!"</code> if the rank pattern misses, or <code>"Missing keys {...} in loaded state!"</code> if the file set is incomplete. Both are from <code>vllm/model_executor/model_loader/sharded_state_loader.py:L130-L133, L161-L162</code>. Treat a pre-sharded dump as a build artifact keyed by config, not as a checkpoint.</p></div></section>
+<section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>All of these run on a single GPU with a small model; substitute a larger one if you have the hardware.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Measure the load-time floor without a GPU</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Total checkpoint bytes and the per-tensor header, straight from safetensors.
+python - &lt;&lt;'PY'
+import json, glob, os, struct
+files = sorted(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/*/*.safetensors")))
+total = sum(os.path.getsize(f) for f in files)
+with open(files[0], "rb") as fh:
+    n = struct.unpack("&lt;Q", fh.read(8))[0]
+    hdr = json.loads(fh.read(n))
+print(f"{len(files)} files, {total/1e9:.2f} GB, header {n} bytes, {len(hdr)-1} tensors")
+for k in list(hdr)[:4]:
+    if k != "__metadata__":
+        print(" ", k, hdr[k])
+print(f"floor at 7 GB/s: {total/7e9:.2f} s   at 1.25 GB/s: {total/1.25e9:.2f} s")
+PY</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Isolate the weight-load segment of startup</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM logs "Loading weights took %.2f seconds" from DefaultModelLoader.load_weights.
+vllm serve meta-llama/Llama-3.2-1B-Instruct 2&gt;&amp;1 | grep -E "Loading weights took|Filesystem type"
+
+# Subtract weights entirely: --load-format dummy skips all disk I/O.
+# The difference between these two runs IS your weight-load cost.
+vllm serve meta-llama/Llama-3.2-1B-Instruct --load-format dummy 2&gt;&amp;1 | grep "Loading weights took"
+
+# Force the network-FS strategy on local disk and watch it get slower.
+vllm serve meta-llama/Llama-3.2-1B-Instruct --safetensors-load-strategy eager</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Watch the name mapping happen</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Every mapped tensor, with its final engine name and shape.
+VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B-Instruct 2&gt;&amp;1 \
+  | grep -E "Loaded (weight|shard)" | head -40
+
+# The same on the SGLang side, comparing the two loader paths.
+python -m sglang.launch_server --model-path meta-llama/Llama-3.2-1B-Instruct
+SGLANG_ENABLE_WEIGHT_LOADER_V2=1 python -m sglang.launch_server --model-path meta-llama/Llama-3.2-1B-Instruct</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Break the mapping on purpose</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># In a scratch checkout of vLLM, delete the ".k_proj" row from
+# LlamaModel.hf_to_vllm_mapper (vllm/model_executor/models/llama.py:L349)
+# and start the server. Predict the error before you read it.
+#
+# Then delete only the ".up_proj" row's shard id (change 1 to 0) and start again.
+# Note that this one does NOT raise. That is the whole point of §8.4.8.</code></pre>
+</div></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><p><strong>Read and answer.</strong> Open <code>vllm/model_executor/models/utils.py</code> and read <code>AutoWeightsLoader._load_module</code> (L345–L416). A weight arrives named <code>model.layers.7.mlp.gate_up_proj.weight</code> and <code>model.layers.7.mlp</code> is a <code>LlamaMLP</code>, which does <em>not</em> define <code>load_weights</code>. Which branch handles it, and where does the shard id survive to?</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>_load_module</code> checks <code>module_load_weights = getattr(module, "load_weights", None)</code> and finds nothing on <code>LlamaMLP</code>, so it falls through to <code>_groupby_prefix</code>. The prefix <code>gate_up_proj</code> is in <code>child_modules</code>, so it recurses into <code>MergedColumnParallelLinear</code> — which <em>does</em> define <code>load_weights</code> (inherited via <code>ColumnParallelLinear</code>, L945). There, <code>getattr(loaded_weight, "shard_id", None)</code> retrieves the <code>0</code> or <code>1</code> that <code>WeightsMapper.apply</code> stapled to the tensor object at L146. The shard id rides on the tensor, not the name, precisely so the tree walk can stay name-agnostic.</p></div></details></li>
+
+<li><p><strong>Arithmetic.</strong> DeepSeek-V3-style MoE models store expert weights as one stacked tensor per layer. vLLM's default loader can skip non-local experts before reading them (<code>DefaultModelLoader._init_ep_weight_filter</code>, L351–L412). For a 256-expert model at EP=8, what fraction of expert bytes does each rank read with the filter on versus off, and why does the code disable the filter when <code>enable_eplb</code> is set?</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>With the filter on, each rank reads $256/8 = 32$ experts — 1/8 of the expert bytes. With it off, each rank reads all 256 and discards 7/8, exactly the amplification from §8.4.1. The code short-circuits when <code>enable_eplb</code> is true because expert-parallel load balancing creates redundant physical expert slots that may map to logical experts belonging to other ranks in the default partition; the weight loader needs to see <em>all</em> logical expert weights to populate them. The comment at L370–L375 says so directly.</p></div></details></li>
+
+<li><p><strong>Predict, then verify.</strong> You port a model whose checkpoint stores attention output projection as <code>attn.out_proj.weight</code> with shape <code>[d, d]</code>, and you wire it to a <code>ColumnParallelLinear</code> instead of a <code>RowParallelLinear</code>. Shapes are square, so nothing asserts. Predict the symptom at TP=1 and at TP=4, then check your reasoning against <code>row_parallel_weight_loader</code> and <code>ColumnParallelLinear.weight_loader</code>.</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>At TP=1 nothing is sliced and no all-reduce is needed, so the model is <em>correct</em> — which is what makes the bug expensive. At TP=4 the column-parallel loader slices dim 0 (output rows) while the correct split is dim 1 (input columns, matching the sharded heads feeding it). Each rank multiplies its local head outputs by the wrong quarter of the matrix, and <code>ColumnParallelLinear</code> never all-reduces, so the four partials are not summed either. Fluent nonsense — exactly the "TP=1 correct, TP&gt;1 wrong" signature from step 1 of the bisection.</p></div></details></li>
+
+<li><p><strong>Read and compare.</strong> SGLang's <code>LlamaAttention</code> defines its own <code>load_weights</code> (L266–L281) that calls <code>STANDARD_QKV_MAPPING.try_load</code>, and <code>LlamaForCausalLM._legacy_load_weights</code> has the flat table. Both are live at this SHA. Under what condition does each run, and what would you check before enabling the v2 path in production?</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>LlamaForCausalLM.load_weights</code> (L663) branches on <code>envs.SGLANG_ENABLE_WEIGHT_LOADER_V2</code>. Unset, the flat legacy loop runs and the per-module <code>load_weights</code> methods are dead code. Set, <code>_load_weights_v2</code> builds an <code>AutoWeightsLoader</code> that walks the tree and delegates to them. Before flipping it: v2 returns a <code>set[str]</code> of loaded names and handles tied embeddings explicitly (L769–L777), while the legacy path returns nothing and only warns on unmapped names. Diff the two loaded-name sets for your exact checkpoint — especially a quantized one. The legacy path's silence is why you must do that diff by hand.</p></div></details></li>
+
+<li><p><strong>Design.</strong> Your fleet autoscales 70B replicas from a shared NFS mount over 25 GbE. Cold start is 45 s of weight load (derived, §8.4.1) plus everything else. You have 2 TB of host RAM per node and can run one extra process per GPU. Rank the available fixes by expected gain per unit of operational complexity.</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>(1) <code>--safetensors-load-strategy prefetch</code> or <code>eager</code> — one flag, turns NFS page faults into sequential streaming, and 131 GiB fits in 2 TB; the free win. (2) <code>sharded_state</code>/<code>presharded</code> — kills the read amplification and, in SGLang, the re-quantization; costs a build step and a config-keyed artifact per (TP, PP, quant) tuple. (3) A local NVMe cache tier populated out of band, lifting the ceiling from 3.125 to 7 GB/s. (4) SGLang's standalone weight-cache daemon in <code>client</code> mode — near-zero restart cost, but it permanently holds 17.6 GB of each GPU, straight out of your KV cache budget. Fix 4 is the biggest gain and the biggest cost: worth it only if you restart often (crash recovery, rolling deploys) rather than scale often.</p></div></details></li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>The host-to-device copy is never the bottleneck. For Llama-3-70B at TP=8, PCIe Gen5 moves each rank's 17.64 GB shard in a derived 0.28 s while getting 141.1 GB off NVMe takes a derived 20.2 s — a 72&times; gap. Optimise storage, not the copy.</li>
+<li>Under TP every rank reads the whole checkpoint and keeps $1/N$ of it. Whether that costs you 1&times; or 8&times; the disk traffic is decided entirely by page-cache headroom, which is why <code>sharded_state</code> and <code>presharded</code> exist and why they are keyed to an exact parallelism and quantization tuple.</li>
+<li>Safetensors won on three properties in this order: no code execution, a JSON header that gives every tensor an O(1) offset lookup, and a raw payload that can be mapped rather than copied. Everything the loaders do — prefetch heuristics, GPUDirect, streaming — is built on the third.</li>
+<li>The fused parameter is where ports break. A <code>gate</code>/<code>up</code> swap or a transposed <code>k</code>/<code>v</code> offset has identical shapes on both sides, passes every assertion, and produces fluent nonsense. Only a layer-by-layer diff against HF catches it, and only at TP&gt;1 does the KV-head replication arithmetic get exercised.</li>
+<li>vLLM raises on an unfilled parameter; SGLang's legacy path logs a warning and continues. The strictness that protects a bf16 load is also what a quantized checkpoint would legitimately trip, which is why vLLM disables the check under quantization — so under quantization both engines are equally silent.</li>
+<li>Keeping <code>load_weights</code> a pure function of a <code>(name, tensor)</code> iterator is what makes SGLang's live weight update possible at all: the same method serves cold start from disk, CUDA-IPC hot reload from a weight-cache daemon, and RL weight sync from a trainer's GPU memory, with no change to the model file.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="https://github.com/huggingface/safetensors">huggingface/safetensors</a> — the format specification, including the exact header layout and the security rationale versus pickle.</li>
+<li><a href="https://github.com/vllm-project/vllm/blob/main/docs/contributing/model/basic.md">vLLM: Basic Model</a>, <a href="https://github.com/vllm-project/vllm/blob/main/docs/contributing/model/registration.md">Registration</a>, and <a href="https://github.com/vllm-project/vllm/blob/main/docs/contributing/model/tests.md">Unit Testing</a> — the three-page contributor path this chapter grounds in source.</li>
+<li><a href="https://github.com/run-ai/runai-model-streamer">Run:ai Model Streamer</a> — the concurrent object-store reader behind <code>--load-format runai_streamer</code>, with the design rationale for why S3 loading is latency- rather than bandwidth-bound.</li>
+<li><a href="https://github.com/foundation-model-stack/fastsafetensors">fastsafetensors</a> — GPUDirect Storage for safetensors, used by both engines under <code>--load-format fastsafetensors</code>.</li>
+<li><a href="https://github.com/MoonshotAI/checkpoint-engine">MoonshotAI/checkpoint-engine</a> — the external parameter server SGLang integrates with in <code>python/sglang/srt/checkpoint_engine/</code>, aimed squarely at RL weight refresh.</li>
+<li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/weight_cache">SGLang weight_cache</a> — the daemon, the IPC loader, and the protocol; read <code>protocol.py</code>'s <code>CacheConfig</code> fingerprint for how it decides two configurations are compatible.</li>
+<li><a href="https://github.com/vllm-project/vllm/blob/main/examples/features/sharded_state/save_sharded_state_offline.py">save_sharded_state_offline.py</a> — the script that produces a <code>sharded_state</code> checkpoint, referenced directly from <code>ShardedStateLoader</code>'s docstring.</li>
+<li><a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a> for why each tensor is sharded the way it is, <a href="../05-parallelism/05-05-worker-orchestration.html">§5.5</a> for where weight load sits in the startup sequence, and <a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> for what cold start does to an autoscaling policy.</li>
+</ul></div></section>
+<div class="pager"><a href="08-03-triton-and-cutlass.html"><div class="pager__k">← Previous</div><div class="pager__t">Writing a Triton kernel; CUTLASS at a glance</div></a><a class="pager__next" href="../09-serving-system/09-01-openai-api-surface.html"><div class="pager__k">Next →</div><div class="pager__t">The OpenAI-compatible API surface</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: format and names</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: one tensor onto rank 3</a>
+<a href="#adding-a-model">Adding a model, end to end</a>
+<a href="#fast-load">Making cold start smaller</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

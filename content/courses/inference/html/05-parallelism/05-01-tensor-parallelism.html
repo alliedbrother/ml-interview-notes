@@ -1,0 +1,2035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tensor parallelism — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i is-current" href="05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 5 · Parallelism and distributed inference · 05-01</div>
+<h1>Tensor parallelism</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/distributed/</code></li><li><code>vllm/model_executor/layers/linear.py</code></li><li><code>python/sglang/srt/layers/linear.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Llama-3-70B in bf16 is 131 GiB of weights. An H100 SXM has 80 GB. There is no
+flag, no allocator trick, and no offload policy that makes that fit at serving latency, so
+tensor parallelism is not an optimisation for this model — it is the load path. This chapter
+derives the specific way the two engines cut a transformer block apart, why that cut costs
+exactly two all-reduces per layer and not four, and where on the TP axis you stop getting
+anything back for the extra GPUs.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You launch Llama-3-70B with <code>--tensor-parallel-size 4</code> on an 8&times;H100 node and
+the engine reports a KV pool that holds roughly 567k tokens. You bump to
+<code>--tensor-parallel-size 8</code> and it reports about 1.56M — a 2.76&times; jump from a
+2&times; change in GPU count, which feels like a bargain. So you wire up a second node, set
+<code>--tensor-parallel-size 16</code>, and the number lands at about 1.78M. You doubled the
+hardware and bought 14% more cache. Every one of those figures is derived in
+<a href="#heads">&sect;4</a> from published shapes, but the shape of the curve is the point:
+tensor parallelism buys three different things — weight room, FLOP/s, and KV capacity — and they
+stop arriving at three different times.</p>
+
+<p>The first one to stop is KV capacity, and it stops at a number written in the checkpoint:
+$h_{kv}$, the number of key/value heads. Llama-3-70B has eight. Past TP=8 the engines replicate
+KV heads instead of splitting them, because there is nothing left to split. Meanwhile the
+per-step communication bill keeps growing with every rank you add, so beyond that point you are
+paying more collectives for a cache that no longer grows.</p>
+
+<p>The second problem is that a naive sharding of a transformer block wants a collective after
+every matmul — four per block, 320 for an 80-layer model, on a decode step whose entire
+bandwidth-bound floor is about 5.2&nbsp;ms at TP=8. Getting that to two per block is the single
+structural decision in this chapter, and it comes out of two lines of linear algebra.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Hold one object in your head: the <em>residual stream</em>. It is a
+<code>[num_tokens, d]</code> tensor that every rank must agree on, byte for byte, at the
+boundary between blocks. Everything <em>between</em> two consecutive points on that stream —
+the QKV projection, attention itself, the out-projection, the MLP — can be cut into $p$
+independent pieces that never talk to each other. The all-reduce is the price of putting the
+stream back together.</p>
+
+<p>So the design question is not "how do I shard a matmul". It is "how few times per block must
+the ranks agree?" The answer for a standard pre-norm transformer block is <b>two</b>: once at
+the end of attention, once at the end of the MLP. And the reason is that each of those two
+sub-blocks is a matmul, a nonlinearity, and another matmul — and there is exactly one way to
+split that sandwich so the nonlinearity in the middle does not force a collective.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one Llama-3-70B transformer block at TP=8, with real per-rank shapes and the only two collectives in it.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    R["residual stream<br/>identical on all 8 ranks<br/>[n, 8192] bf16 = 16 KiB per token"] --> N1["input_layernorm RMSNorm<br/>weight [8192] replicated<br/>no communication"]
+    N1 --> QKV["qkv_proj  COLUMN parallel<br/>full [8192, 10240] to per-rank [8192, 1280]<br/>rank r owns 8 q heads plus 1 kv head"]
+    QKV --> ATT["attention<br/>8 q heads, 1 kv head per rank<br/>block-diagonal in the head axis"]
+    ATT --> O["o_proj  ROW parallel<br/>full [8192, 8192] to per-rank [1024, 8192]<br/>output is a PARTIAL sum"]
+    O --> AR1["ALL-REDUCE 1<br/>[n, 8192] bf16<br/>28 KiB moved per rank per token at TP=8"]
+    AR1 --> N2["post_attention_layernorm<br/>replicated, no communication"]
+    N2 --> GU["gate_up_proj  COLUMN parallel<br/>full [8192, 57344] to per-rank [8192, 7168]"]
+    GU --> ACT["SiluAndMul<br/>elementwise, so it commutes with a column split"]
+    ACT --> DN["down_proj  ROW parallel<br/>full [28672, 8192] to per-rank [3584, 8192]<br/>output is a PARTIAL sum"]
+    DN --> AR2["ALL-REDUCE 2<br/>[n, 8192] bf16<br/>28 KiB moved per rank per token at TP=8"]
+    AR2 --> OUT["residual stream, agreed again<br/>next block starts here"]
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: why column then row</h2></div><div class="sec__body"><p>Take the MLP, because its shapes make the argument loudest. Write it as
+$Y = \sigma(XA)B$ with $X \in \mathbb{R}^{n \times d}$ the token batch, $A \in \mathbb{R}^{d
+\times f}$ the up-projection, $B \in \mathbb{R}^{f \times d}$ the down-projection, $\sigma$ an
+elementwise nonlinearity, $n$ the number of tokens in the pass, $d$ the model width, $f$ the FFN
+width, and $p$ the tensor-parallel size. For Llama-3-70B, $d = 8192$ and $f = 28672$, so
+<b>the intermediate is 3.5&times; wider than the residual stream</b>. Remember that ratio; it
+decides everything below.</p>
+
+<p><b>Split $A$ by columns.</b> $A = [A_1 \,|\, \cdots \,|\, A_p]$ with each
+$A_i \in \mathbb{R}^{d \times f/p}$. Rank $i$ holds a replicated $X$ and computes
+$Z_i = XA_i \in \mathbb{R}^{n \times f/p}$. No communication: $X$ is already everywhere.</p>
+
+<p><b>The nonlinearity survives it.</b> $\sigma$ is elementwise, so
+$\sigma(Z)$ restricted to columns $[i\cdot f/p, (i{+}1)\cdot f/p)$ is exactly $\sigma(Z_i)$.
+Rank $i$ can apply the activation to its own slice and be correct. This is the whole trick, and
+it is why the ordering is not arbitrary.</p>
+
+<p><b>Split $B$ by rows.</b> $B = [B_1; \cdots; B_p]$ with each
+$B_i \in \mathbb{R}^{f/p \times d}$. The matching rows of $B$ are exactly the ones that multiply
+rank $i$'s columns of $\sigma(Z)$, so</p>
+
+<div class="math-display">$$\sigma(Z)B \;=\; \sum_{i=1}^{p} \sigma(Z_i)\,B_i$$</div>
+
+<p>Each rank produces a full-width $[n, d]$ tensor that is a <em>partial sum</em>. Adding them
+elementwise across ranks gives the answer. That addition is one all-reduce, and it is the only
+one in the module.</p>
+
+<h3>Why every other pairing is worse</h3>
+
+<p>There are four ways to pair the two splits, and the cost differences are not subtle. Two
+independent facts drive them: (1) $\sigma$ commutes with a column split but not with a row
+split, because $\sigma(\sum_i Z_i) \neq \sum_i \sigma(Z_i)$ — so a row-parallel first matmul
+forces a collective <em>before</em> the activation; (2) that forced collective lands on the
+$[n, f]$ intermediate, which is 3.5&times; the bytes of the $[n, d]$ residual.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Communication per rank per token for one Llama-3-70B MLP at TP=8, bf16. <em>Derived</em> from the ring-collective volumes in &sect;6 with $d=8192$ (16 KiB/token) and $f=28672$ (56 KiB/token). Nothing measured.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>Pairing</th><th>What must be communicated</th><th class="num">Bytes / rank / token</th><th class="num">vs. best</th></tr></thead>
+    <tbody>
+      <tr><td><b>column &rarr; row</b></td><td>one all-reduce of $[n,d]$ at the end</td><td class="num">28 KiB</td><td class="num">1.00&times;</td></tr>
+      <tr><td>column &rarr; column</td><td>all-gather $[n,f]$ before matmul&nbsp;2, then all-gather $[n,d]$</td><td class="num">63 KiB</td><td class="num">2.25&times;</td></tr>
+      <tr><td>row &rarr; column</td><td>all-reduce $[n,f]$ before $\sigma$, then all-gather $[n,d]$</td><td class="num">112 KiB</td><td class="num">4.00&times;</td></tr>
+      <tr><td>row &rarr; row</td><td>all-reduce $[n,f]$ before $\sigma$, then all-reduce $[n,d]$</td><td class="num">126 KiB</td><td class="num">4.50&times;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>Column&rarr;row is the only pairing whose collective never touches the wide intermediate. That
+is the design, and it is why <code class="c-vllm">ColumnParallelLinear</code> and
+<code class="c-vllm">RowParallelLinear</code> come in pairs in every model file in both engines.
+Attention has the same sandwich shape — a projection, a per-head operation, a projection — so it
+gets the same treatment, which is why the count is two all-reduces per block and $2L = 160$ per
+forward pass for Llama-3-70B.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Bias</span>
+  <p>A row-parallel bias cannot be added on every rank or it would be counted $p$ times by the
+  all-reduce. vLLM fuses it into the GEMM on rank 0 only:
+  <code>bias_ = None if (self.tp_rank &gt; 0 or self.skip_bias_add) else self.bias</code>
+  (<code>vllm/model_executor/layers/linear.py:L1656</code>). SGLang has the identical line at
+  <code>python/sglang/srt/layers/linear.py:L1615</code>. Llama has no linear biases, so this
+  never fires there — but it is the first thing to check when a biased model comes out wrong at
+  TP&gt;1 and right at TP=1.</p>
+</div></div></section>
+<section class="sec" id="heads" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Attention: heads are the split axis, until they run out</h2></div><div class="sec__body"><p>Attention is column&rarr;row too, but the column index has a physical meaning. The QKV
+projection's output is $(h + 2h_{kv})d_h$ wide, and $\mathrm{softmax}(QK^\top/\sqrt{d_h})V$ is
+block-diagonal in the head axis: head $j$'s output depends on head $j$'s $Q$, $K$, $V$ and
+nothing else. So the head axis <em>is</em> the column axis, attention is the "nonlinearity" in
+the middle of the sandwich, and the out-projection — whose input is the concatenation of head
+outputs — is row-parallel along exactly the same boundary.</p>
+
+<p>Both engines write the head division the same way, in the model file, before the layer is
+even constructed:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/llama.py:L140-L153</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads &gt;= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/llama.py:L158-L171</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        tp_size = get_parallel().tp_size
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads &gt;= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)</code></pre>
+</div>
+
+<p>Character-for-character the same arithmetic, comments included — SGLang's linear and model
+layers began as a fork of vLLM's and the head-division logic has not diverged at these SHAs.
+The load-bearing token is <code>max(1, ...)</code>. Query heads divide exactly, forever, until
+$p = h$. KV heads divide only until $p = h_{kv}$, and then <b>every additional rank gets a
+duplicate</b>. vLLM's QKV layer names the duplication factor explicitly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L1022-L1030</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Divide the weight matrix along the last dimension.
+        tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
+        self.num_heads = divide(self.total_num_heads, tp_size)
+        if tp_size &gt;= self.total_num_kv_heads:
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
+        else:
+            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_head_replicas = 1</code></pre>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; head assignment for Llama-3-70B (h=64, h_kv=8) at TP=8 and TP=16.</b>
+    Query heads always divide. KV heads stop dividing at TP=8; past that the same head is stored on
+    two ranks and the cluster spends 640 KiB per token to hold 320 KiB of information. <em>Derived</em>
+    from <code>max(1, h_kv // tp_size)</code>.</p>
+  <svg viewBox="0 0 900 420" width="100%" role="img" aria-labelledby="headTitle headDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="headTitle">Attention head assignment across tensor-parallel ranks</title>
+    <desc id="headDesc">Top row: eight ranks at TP equals 8, each holding eight query heads and one
+    distinct key-value head numbered zero through seven. Bottom row: sixteen ranks at TP equals 16,
+    each holding four query heads, but the key-value heads repeat in pairs so head zero lives on ranks
+    zero and one, head one on ranks two and three, and so on.</desc>
+
+    <text x="20" y="26" font-size="13" fill="currentColor" font-weight="600">TP = 8 &mdash; 64 q heads / 8, 8 kv heads / 8</text>
+
+    <g>
+      <rect x="20" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="125" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="230" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="335" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="440" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="545" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="650" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+      <rect x="755" y="42" width="100" height="52" fill="var(--teal-dim)" stroke="var(--teal)" stroke-width="1"/>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.8" text-anchor="middle">
+      <text x="70" y="58">rank 0</text><text x="175" y="58">rank 1</text><text x="280" y="58">rank 2</text><text x="385" y="58">rank 3</text>
+      <text x="490" y="58">rank 4</text><text x="595" y="58">rank 5</text><text x="700" y="58">rank 6</text><text x="805" y="58">rank 7</text>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.62" text-anchor="middle">
+      <text x="70" y="73">q0&ndash;q7</text><text x="175" y="73">q8&ndash;q15</text><text x="280" y="73">q16&ndash;q23</text><text x="385" y="73">q24&ndash;q31</text>
+      <text x="490" y="73">q32&ndash;q39</text><text x="595" y="73">q40&ndash;q47</text><text x="700" y="73">q48&ndash;q55</text><text x="805" y="73">q56&ndash;q63</text>
+    </g>
+    <g font-size="11" fill="var(--teal)" text-anchor="middle" font-weight="600">
+      <text x="70" y="89">kv 0</text><text x="175" y="89">kv 1</text><text x="280" y="89">kv 2</text><text x="385" y="89">kv 3</text>
+      <text x="490" y="89">kv 4</text><text x="595" y="89">kv 5</text><text x="700" y="89">kv 6</text><text x="805" y="89">kv 7</text>
+    </g>
+    <text x="20" y="118" font-size="11" fill="currentColor" fill-opacity="0.7">8 distinct KV heads on 8 ranks &mdash; 40 KiB per token per rank, 320 KiB per token cluster-wide, zero duplication.</text>
+
+    <line x1="20" y1="140" x2="880" y2="140" stroke="currentColor" stroke-opacity="0.14"/>
+
+    <text x="20" y="172" font-size="13" fill="currentColor" font-weight="600">TP = 16 &mdash; 64 q heads / 16, but max(1, 8 // 16) = 1 kv head each</text>
+
+    <g>
+      <rect x="20" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="70" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="123" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="173" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="226" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="276" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="329" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="379" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="432" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="482" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="535" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="585" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="638" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="688" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="741" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+      <rect x="791" y="188" width="47" height="52" fill="var(--copper-dim)" stroke="var(--copper)" stroke-width="1"/>
+    </g>
+    <g font-size="9" fill="currentColor" fill-opacity="0.75" text-anchor="middle">
+      <text x="43" y="204">r0</text><text x="93" y="204">r1</text><text x="146" y="204">r2</text><text x="196" y="204">r3</text>
+      <text x="249" y="204">r4</text><text x="299" y="204">r5</text><text x="352" y="204">r6</text><text x="402" y="204">r7</text>
+      <text x="455" y="204">r8</text><text x="505" y="204">r9</text><text x="558" y="204">r10</text><text x="608" y="204">r11</text>
+      <text x="661" y="204">r12</text><text x="711" y="204">r13</text><text x="764" y="204">r14</text><text x="814" y="204">r15</text>
+    </g>
+    <g font-size="8" fill="currentColor" fill-opacity="0.55" text-anchor="middle">
+      <text x="43" y="218">4q</text><text x="93" y="218">4q</text><text x="146" y="218">4q</text><text x="196" y="218">4q</text>
+      <text x="249" y="218">4q</text><text x="299" y="218">4q</text><text x="352" y="218">4q</text><text x="402" y="218">4q</text>
+      <text x="455" y="218">4q</text><text x="505" y="218">4q</text><text x="558" y="218">4q</text><text x="608" y="218">4q</text>
+      <text x="661" y="218">4q</text><text x="711" y="218">4q</text><text x="764" y="218">4q</text><text x="814" y="218">4q</text>
+    </g>
+    <g font-size="10" fill="var(--copper)" text-anchor="middle" font-weight="600">
+      <text x="43" y="234">kv0</text><text x="93" y="234">kv0</text><text x="146" y="234">kv1</text><text x="196" y="234">kv1</text>
+      <text x="249" y="234">kv2</text><text x="299" y="234">kv2</text><text x="352" y="234">kv3</text><text x="402" y="234">kv3</text>
+      <text x="455" y="234">kv4</text><text x="505" y="234">kv4</text><text x="558" y="234">kv5</text><text x="608" y="234">kv5</text>
+      <text x="661" y="234">kv6</text><text x="711" y="234">kv6</text><text x="764" y="234">kv7</text><text x="814" y="234">kv7</text>
+    </g>
+    <g stroke="var(--plum)" stroke-width="1.4" fill="none">
+      <path d="M20 250 L20 258 L117 258 L117 250"/>
+      <path d="M123 250 L123 258 L220 258 L220 250"/>
+      <path d="M226 250 L226 258 L323 258 L323 250"/>
+      <path d="M329 250 L329 258 L426 258 L426 250"/>
+      <path d="M432 250 L432 258 L529 258 L529 250"/>
+      <path d="M535 250 L535 258 L632 258 L632 250"/>
+      <path d="M638 250 L638 258 L735 258 L735 250"/>
+      <path d="M741 250 L741 258 L838 258 L838 250"/>
+    </g>
+    <text x="20" y="278" font-size="11" fill="var(--plum)">each bracket = one KV head stored twice</text>
+    <text x="20" y="298" font-size="11" fill="currentColor" fill-opacity="0.7">Still 40 KiB per token per rank &mdash; the cell size stops shrinking. Cluster now spends 640 KiB per token on 320 KiB of unique KV.</text>
+
+    <line x1="20" y1="320" x2="880" y2="320" stroke="currentColor" stroke-opacity="0.14"/>
+    <text x="20" y="346" font-size="12" fill="currentColor" font-weight="600">Consequence: weight memory keeps shrinking as 1/TP; KV capacity does not.</text>
+    <text x="20" y="368" font-size="11" fill="currentColor" fill-opacity="0.72">Weights per rank: 131 / TP GiB &mdash; 16.4 GiB at TP=8, 8.2 at TP=16, 4.1 at TP=32.</text>
+    <text x="20" y="388" font-size="11" fill="currentColor" fill-opacity="0.72">KV cell per rank: 320 / min(TP, 8) KiB &mdash; 40 KiB at TP=8 and at every TP above it.</text>
+    <text x="20" y="408" font-size="11" fill="currentColor" fill-opacity="0.72">Cluster resident tokens therefore grow 2.76x from TP=4 to TP=8, then only 1.14x from TP=8 to TP=16.</text>
+  </svg>
+</div>
+
+<p>Put the two effects in one table. Assume an 80&nbsp;GiB H100, 4&nbsp;GiB reserved for
+activations, workspace and CUDA graphs, and the rest given to the KV pool. Llama-3-70B is
+131&nbsp;GiB of bf16 weights and 320&nbsp;KiB of KV per token at $h_{kv}=8$
+(<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>), so the per-rank
+cell is $320/\min(\mathrm{TP}, 8)$ KiB.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Llama-3-70B bf16 on H100 SXM 80 GiB. All <em>derived</em> arithmetic from published shapes plus a 4 GiB non-KV reservation; nothing measured. Cluster resident tokens = KV pool / cell size, because every rank holds a slice of the <em>same</em> tokens.</div>
+  <div class="table-scroll">
+  <table class="dt">
+    <thead><tr><th>TP</th><th class="num">weights / rank</th><th class="num">KV pool / rank</th><th class="num">q heads</th><th class="num">kv heads</th><th class="num">KV cell</th><th class="num">cluster tokens</th><th class="num">gain vs. prev</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td class="num">131 GiB</td><td class="num">&mdash;</td><td class="num">64</td><td class="num">8</td><td class="num">320 KiB</td><td class="num">OOM</td><td class="num">&mdash;</td></tr>
+      <tr><td class="num">2</td><td class="num">65.5 GiB</td><td class="num">10.5 GiB</td><td class="num">32</td><td class="num">4</td><td class="num">160 KiB</td><td class="num">68,812</td><td class="num">&mdash;</td></tr>
+      <tr><td class="num">4</td><td class="num">32.8 GiB</td><td class="num">43.3 GiB</td><td class="num">16</td><td class="num">2</td><td class="num">80 KiB</td><td class="num">566,885</td><td class="num">8.24&times;</td></tr>
+      <tr><td class="num">8</td><td class="num">16.4 GiB</td><td class="num">59.6 GiB</td><td class="num">8</td><td class="num">1</td><td class="num">40 KiB</td><td class="num">1,563,033</td><td class="num">2.76&times;</td></tr>
+      <tr><td class="num">16</td><td class="num">8.2 GiB</td><td class="num">67.8 GiB</td><td class="num">4</td><td class="num">1 <span class="pill pill--blocked">&times;2 copies</span></td><td class="num">40 KiB</td><td class="num">1,777,663</td><td class="num">1.14&times;</td></tr>
+      <tr><td class="num">32</td><td class="num">4.1 GiB</td><td class="num">71.9 GiB</td><td class="num">2</td><td class="num">1 <span class="pill pill--blocked">&times;4 copies</span></td><td class="num">40 KiB</td><td class="num">1,884,969</td><td class="num">1.06&times;</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<p>This is the cluster capacity law that
+<a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html#tp-asymmetry">&sect;3.5</a> derives:
+$N_{\text{GQA}} = P \cdot \min(\mathrm{TP}, h_{kv}) / c$. The table is that formula with the
+weight term folded into $P$, which is why the TP=2&rarr;4 gain is a wild 8.24&times; (the pool
+itself quadruples as the weights vacate) and the TP=8&rarr;16 gain is 1.14&times; (only the
+weight term is still moving). &sect;3.5 also establishes the counterpart you must not confuse
+with this: <b>MLA caches are replicated on every rank at all TP</b>, verified in both engines,
+so an MLA model gets none of this curve and its cache advantage over GQA-8 is spent by
+TP&nbsp;&asymp;&nbsp;4.7.</p></div></section>
+<section class="sec" id="not-split" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">What does not split, and why</h2></div><div class="sec__body"><p>Four things stay whole, and each for a different reason.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card">
+    <span class="ve-card__k">RMSNorm</span>
+    <h4>Replicated</h4>
+    <p>Both engines construct it at full width — <code>RMSNorm(config.hidden_size, ...)</code>
+    (<code>vllm/model_executor/models/llama.py:L305-L308</code>). Sharding it would be pointless:
+    the weight is $d$ elements against a block's ~107M per-rank parameters, and the
+    root-mean-square is a reduction <em>over</em> $d$, so a sharded norm would need its own
+    all-reduce of the partial sums of squares. Replication buys the answer for free.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Embedding</span>
+    <h4>Vocab-parallel, not replicated</h4>
+    <p>Split along the vocabulary, not the hidden dimension: rank $i$ owns rows
+    $[iV/p, (i{+}1)V/p)$ and returns zeros for ids outside its range, so a sum over ranks
+    reconstructs the lookup. That sum is an all-reduce. Details below.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">LM head</span>
+    <h4>Vocab-parallel, output all-gathered</h4>
+    <p>The same shard boundary, run forwards: rank $i$ produces logits for its own vocab slice
+    and the ranks all-gather to reconstruct $[n, V]$. It is the only place in the model where a
+    tensor wider than $d$ crosses the wire.</p>
+  </div>
+  <div class="ve-card">
+    <span class="ve-card__k">Sampler</span>
+    <h4>Replicated, redundantly</h4>
+    <p>After the all-gather every rank holds identical logits, so every rank runs the identical
+    sampler and reaches the identical token. That redundancy is deliberate: it removes a
+    broadcast from the critical path, at the cost of requiring bitwise-identical RNG state
+    across ranks.</p>
+  </div>
+</div>
+
+<h3>The vocab-parallel passage, and why 128k matters</h3>
+
+<p>Llama-3's vocabulary is 128,256 tokens. At $d = 8192$ the LM head is
+$128256 \times 8192 = 1.05$&nbsp;G parameters — 2.10&nbsp;GB in bf16, and the untied input
+embedding is another 2.10&nbsp;GB. Replicating those on eight ranks would cost 33.6&nbsp;GB of
+aggregate HBM instead of 4.2, but the sharper cost is bandwidth: a decode step reads every
+weight it touches, so a replicated head would add
+$2.10 - 0.26 = 1.84$&nbsp;GB of extra reads per rank per step, which at 3.35&nbsp;TB/s is
+549&nbsp;&micro;s — a <b>10.5% tax on a 5.25&nbsp;ms step floor</b> (derived; the floor comes from
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html#first-principles">&sect;0.4</a>).
+So it is sharded.</p>
+
+<p>The input side is elegant. Each rank masks out ids it does not own, embeds the rest, zeroes
+the masked rows, and all-reduces:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/vocab_parallel_embedding.py:L487-L507</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def forward(self, input_):
+        if self.tp_size &gt; 1:
+            # Build the mask.
+            masked_input, input_mask = get_masked_input_and_mask(
+                input_,
+                self.shard_indices.org_vocab_start_index,
+                self.shard_indices.org_vocab_end_index,
+                self.shard_indices.num_org_vocab_padding,
+                self.shard_indices.added_vocab_start_index,
+                self.shard_indices.added_vocab_end_index,
+            )
+        else:
+            masked_input = input_
+        # Get the embeddings.
+        output_parallel = self.quant_method.embedding(self, masked_input.long())
+        # Mask the output embedding.
+        if self.tp_size &gt; 1:
+            output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+            # Reduce across all the model parallel GPUs.
+            return tensor_model_parallel_all_reduce(output_parallel)
+        return output_parallel</code></pre>
+</div>
+
+<p>SGLang's is the same shape, with the extra branch that sends the reduce to the attention-TP
+subgroup when DP-attention is on — a mechanism owned by
+<a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/vocab_parallel_embedding.py:L566-L579</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def forward(self, input_):
+        # Surface a bad token id (&gt;= vocab_size, or a negative / unmasked sentinel) as a
+        # located async assert instead of a silent OOB embedding gather (tp=1 does not mask).
+        maybe_detect_oob(
+            input_, 0, self.num_embeddings, "VocabParallelEmbedding input id"
+        )
+        output_parallel = self._embed_local_shard(input_)
+        if self.tp_size &gt; 1 and not get_attn_tp_context().input_scattered:
+            if self.use_attn_tp_group:
+                output_parallel = attn_tp_all_reduce(output_parallel)
+            else:
+                # Reduce across all the model parallel GPUs.
+                output_parallel = tensor_model_parallel_all_reduce(output_parallel)
+        return output_parallel</code></pre>
+</div>
+
+<p>That all-reduce is on a $[n, d]$ tensor — 16&nbsp;KiB per token, same as every other one, and
+it happens once per forward pass rather than 160 times. The <em>output</em> side is where the
+vocabulary hurts. vLLM's logits path:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/logits_processor.py:L171-L187</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _get_logits(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        embedding_bias: torch.Tensor | None,
+    ) -&gt; torch.Tensor | None:
+        # Get the logits for the next tokens.
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+
+        # Gather logits for TP
+        if lm_head.tp_size &gt; 1:
+            logits = self._gather_logits(logits)
+
+        # Remove paddings in vocab (if any).
+        if logits is not None:
+            logits = logits[..., : self.org_vocab_size]
+        return logits</code></pre>
+</div>
+
+<p>Price it. Full logits for one token in bf16 are $128256 \times 2 = 250.5$&nbsp;KiB. A ring
+all-gather moves $(p-1)/p$ of the gathered size per rank, so at TP=8 that is 219&nbsp;KiB per
+token — versus 28&nbsp;KiB for one of the block all-reduces. <b>The single logits all-gather
+costs 7.8&times; what an entire transformer block's attention all-reduce costs</b>, and it is
+4.9% of the model's whole per-token TP traffic for one layer out of eighty.</p>
+
+<p>vLLM has an escape hatch for the common case where you only need the argmax. Each rank takes
+its local max, and only <code>(value, index)</code> pairs cross the wire:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/logits_processor.py:L194-L200</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    ) -&gt; torch.Tensor:
+        """Vocab-parallel argmax without all-gathering full logits.
+
+        Each TP rank computes local argmax, then only the (value, index) pairs
+        are gathered and reduced. Communication: O(batch * 2 * tp_size) vs
+        O(batch * vocab_size).
+        """</code></pre>
+</div>
+
+<p>The gathered tensor is $2p$ fp32 values = 64 bytes, of which 56 cross the wire per rank.
+That is <b>a 4,000&times; reduction</b> in logits communication (derived: 224,448 / 56). It is
+exposed through <code>LocalArgmaxMixin</code>, which <code>LlamaForCausalLM</code> inherits
+(<code>vllm/model_executor/models/llama.py:L446-L455</code>) and which is used for draft heads
+in speculative decoding, where greedy argmax is the whole job.</p>
+
+<p>Both engines pad the vocabulary before sharding —
+<code>DEFAULT_VOCAB_PADDING_SIZE = 64</code> in both
+(<code>vllm/model_executor/layers/vocab_parallel_embedding.py:L32</code>,
+<code>python/sglang/srt/layers/vocab_parallel_embedding.py:L48</code>) — so that the shard
+boundary lands on a tensor-core-friendly multiple and every rank gets the same shape. 128,256
+is already $64 \times 2004$, so Llama-3 needs no padding; a model with an awkward vocab gets
+rows of garbage that <code>logits[..., : self.org_vocab_size]</code> then slices off.</p></div></section>
+<section class="sec" id="cost" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The price: communication volume and where TP stops paying</h2></div><div class="sec__body"><p>A ring all-reduce over $p$ ranks does a reduce-scatter followed by an all-gather, each moving
+$(p-1)/p$ of the tensor per rank. So for a tensor of $S$ bytes, each rank moves</p>
+
+<div class="math-display">$$V_{\text{AR}}(S, p) \;=\; 2\,\frac{p-1}{p}\,S \quad\text{bytes, both directions combined.}$$</div>
+
+<p>For a transformer forward pass with $L$ layers, two all-reduces each, $n$ tokens, width $d$,
+$b$ bytes per element, the per-rank bill is</p>
+
+<div class="math-display">$$V_{\text{step}} \;=\; 2L \cdot 2\,\frac{p-1}{p}\, n\,d\,b$$</div>
+
+<p>Llama-3-70B, $L = 80$, $d = 8192$, $b = 2$: one token's residual slice is 16&nbsp;KiB, and at
+TP=8 that is $160 \times 1.75 \times 16\,\text{KiB} = 4.375$&nbsp;MiB per rank per token.
+NVIDIA rates fourth-generation NVLink on H100 SXM at 900&nbsp;GB/s per GPU, bidirectional, with
+an NVSwitch fabric giving every GPU in an 8-way HGX node that rate to any other
+(<a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVIDIA NVLink</a>). Against that,
+4.375&nbsp;MiB takes 5.10&nbsp;&micro;s.</p>
+
+<p>Compare it to the decode step's floor. From
+<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>, a decode
+step cannot beat weight bytes over HBM bandwidth: $131\,\text{GiB} / 8 / 3.35\,\text{TB/s} =
+5.25$&nbsp;ms. (That charges all 131&nbsp;GiB. <a href="05-02-pipeline-parallelism.html">&sect;5.2</a>
+quotes 5.17&nbsp;ms for the same step because it drops the 2.1&nbsp;GiB input embedding, which is
+gathered a row at a time rather than streamed; the 1.5% moves nothing below.) So the bandwidth term of TP communication is <b>0.097% of the floor at batch 1</b>
+— nothing. Rearranged, the comm fraction has a pleasingly simple form:</p>
+
+<div class="math-display">$$\frac{t_{\text{comm}}}{t_{\text{floor}}} \;=\; \frac{4L\,n\,d\,\beta}{P\,B_{\text{net}}}\,(p-1) \;=\; 1.39\times10^{-4}\cdot n \cdot (p-1) \quad \text{for Llama-3-70B on H100+NVLink}$$</div>
+
+<p>where $P$ is the parameter count, $\beta$ the HBM bandwidth and $B_{\text{net}}$ the
+interconnect bandwidth. Note what is <em>not</em> in it: the bytes-per-element $b$ cancels, because
+it multiplies the wire volume and the weight stream equally, and so does the $1/p$ that both terms
+carry. What is left is linear in batch size and linear in $p-1$. That single expression is the
+whole scaling story.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; TP all-reduce time as a percentage of the decode step's bandwidth floor, Llama-3-70B on H100 SXM over NVLink.</b>
+    <em>Derived</em> from the formula above. Log y-axis. Batch 1 is free; batch 256 at TP=32 spends
+    more time on collectives than the arithmetic floor allows for the entire step. Bandwidth term only
+    &mdash; collective <em>latency</em>, which dominates at batch 1, is added in the text.</p>
+  <svg viewBox="0 0 900 400" width="100%" role="img" aria-labelledby="commTitle commDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="commTitle">Communication time as a fraction of decode step floor versus TP size</title>
+    <desc id="commDesc">Log-scale plot with tensor-parallel size 2, 4, 8, 16, 32 on the x-axis and
+    communication as a percentage of the decode step floor on the y-axis. Three lines for batch 1,
+    batch 64 and batch 256. Batch 1 stays below one tenth of one percent everywhere. Batch 64 reaches
+    27 percent at TP 32. Batch 256 crosses 100 percent between TP 16 and TP 32.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.10" stroke-width="1">
+      <line x1="120" y1="60" x2="120" y2="345"/>
+      <line x1="120" y1="345" x2="800" y2="345"/>
+      <line x1="120" y1="340" x2="800" y2="340" stroke-dasharray="2 4"/>
+      <line x1="120" y1="275" x2="800" y2="275" stroke-dasharray="2 4"/>
+      <line x1="120" y1="210" x2="800" y2="210" stroke-dasharray="2 4"/>
+      <line x1="120" y1="145" x2="800" y2="145" stroke-dasharray="2 4"/>
+    </g>
+    <line x1="120" y1="80" x2="800" y2="80" stroke="var(--plum)" stroke-width="1.2" stroke-dasharray="5 4"/>
+    <text x="804" y="84" font-size="10" fill="var(--plum)">100% of floor</text>
+
+    <g font-size="10" fill="currentColor" fill-opacity="0.6" text-anchor="end">
+      <text x="112" y="344">0.01%</text>
+      <text x="112" y="279">0.1%</text>
+      <text x="112" y="214">1%</text>
+      <text x="112" y="149">10%</text>
+      <text x="112" y="84">100%</text>
+    </g>
+    <g font-size="11" fill="currentColor" fill-opacity="0.7" text-anchor="middle">
+      <text x="160" y="365">TP = 2</text>
+      <text x="300" y="365">4</text>
+      <text x="440" y="365">8</text>
+      <text x="580" y="365">16</text>
+      <text x="720" y="365">32</text>
+      <text x="450" y="388">tensor-parallel size (one NVLink domain ends at 8)</text>
+    </g>
+    <text x="34" y="205" font-size="11" fill="currentColor" fill-opacity="0.7" transform="rotate(-90 34 205)" text-anchor="middle">all-reduce time / step floor</text>
+
+    <line x1="510" y1="60" x2="510" y2="345" stroke="var(--steel)" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x="516" y="72" font-size="10" fill="var(--steel)">node boundary</text>
+
+    <polyline points="160,331 300,300 440,276 580,254 720,234" fill="none" stroke="var(--steel)" stroke-width="2.2"/>
+    <polyline points="160,213 300,182 440,158 580,137 720,117" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+    <polyline points="160,174 300,143 440,119 580,98 720,77" fill="none" stroke="var(--copper)" stroke-width="2.4"/>
+
+    <g fill="var(--steel)"><circle cx="160" cy="331" r="3.5"/><circle cx="300" cy="300" r="3.5"/><circle cx="440" cy="276" r="3.5"/><circle cx="580" cy="254" r="3.5"/><circle cx="720" cy="234" r="3.5"/></g>
+    <g fill="var(--teal)"><circle cx="160" cy="213" r="3.5"/><circle cx="300" cy="182" r="3.5"/><circle cx="440" cy="158" r="3.5"/><circle cx="580" cy="137" r="3.5"/><circle cx="720" cy="117" r="3.5"/></g>
+    <g fill="var(--copper)"><circle cx="160" cy="174" r="3.5"/><circle cx="300" cy="143" r="3.5"/><circle cx="440" cy="119" r="3.5"/><circle cx="580" cy="98" r="3.5"/><circle cx="720" cy="77" r="3.5"/></g>
+
+    <g font-size="11">
+      <text x="736" y="238" fill="var(--steel)">batch 1</text>
+      <text x="736" y="121" fill="var(--teal)">batch 64</text>
+      <text x="736" y="66" fill="var(--copper)">batch 256</text>
+    </g>
+    <g font-size="10" fill="currentColor" fill-opacity="0.65">
+      <text x="446" y="272">0.097%</text>
+      <text x="446" y="112">24.9%</text>
+      <text x="600" y="92">53.3%</text>
+      <text x="668" y="70">110%</text>
+    </g>
+  </svg>
+</div>
+
+<h3>Two reasons the scaling is sublinear</h3>
+
+<p><b>Bandwidth.</b> Per-rank compute falls as $1/p$ but per-rank communication <em>rises</em>
+toward a ceiling: $2(p-1)/p \to 2$. At $p=2$ you move $1.0S$; at $p=8$, $1.75S$; at $p=32$,
+$1.94S$. So the ratio of comm to compute grows roughly as $p$, exactly as the formula says. At
+batch 256 the comm bill is 24.9% of the floor at TP=8 and 110% at TP=32 — past which the
+collectives alone exceed the time the arithmetic was supposed to take.</p>
+
+<p><b>Latency.</b> At batch 1 each all-reduce is 16&nbsp;KiB, far too small to reach peak
+bandwidth; it is a latency event, not a transfer. The step budget is 5.25&nbsp;ms across 160
+collectives, so <b>32.8&nbsp;&micro;s per collective</b> before communication consumes the whole
+floor. If a small NVLink all-reduce costs $\lambda$, the tax is $160\lambda / 5249\,\mu\text{s}$:
+at $\lambda = 5\,\mu\text{s}$ that is 15%, at $\lambda = 10\,\mu\text{s}$ it is 30%. Neither number is
+measured here — the point is that $\lambda$ is a <em>constant</em> that TP does not amortise, so
+scaling efficiency decays even with zero bandwidth cost. Reducing $\lambda$ is precisely what
+custom all-reduce kernels exist for, and that is
+<a href="05-04-collectives-and-topology.html">&sect;5.4</a>'s subject. Measuring it is
+<a href="../LABS.html">Lab 07</a>.</p>
+
+<h3>Where TP stops paying: the node boundary</h3>
+
+<p>Define an interconnect intensity: FLOPs of compute per byte of TP traffic, per rank.
+Dividing the pass's $2P/p$ FLOPs by $4L\frac{p-1}{p}db$ bytes per token gives</p>
+
+<div class="math-display">$$I_{\text{net}} \;=\; \frac{P}{2L\,(p-1)\,d\,b}$$</div>
+
+<p>and the machine's own ratio is $\pi / B_{\text{net}}$. For Llama-3-70B at TP=8,
+$I_{\text{net}} = 3{,}815$ FLOP/byte. H100 NVLink gives $989.4\,\text{TFLOP/s} /
+900\,\text{GB/s} = 1{,}099$, so compute still dominates by 3.5&times;; the break-even is at
+$p \approx 25$, comfortably past the 8-GPU NVLink domain. Cross a node boundary onto InfiniBand
+NDR at 400&nbsp;Gb/s = 50&nbsp;GB/s
+(<a href="https://www.nvidia.com/en-us/networking/quantum2/">NVIDIA Quantum-2</a>) and the
+machine ratio becomes 19,788 — break-even at $p \approx 2.35$. <b>Tensor parallelism is a
+single-NVLink-domain technique, and the arithmetic says so by a factor of eighteen.</b> Past the
+node you use pipeline parallelism (<a href="05-02-pipeline-parallelism.html">&sect;5.2</a>) or
+data parallelism (<a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>), which move a
+$[n,d]$ activation once per stage boundary instead of 160 times per step.</p></div></section>
+<section class="sec" id="production" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>The declaration is a constructor argument, and the collective is issued inside the layer.
+That is the entire API surface in both engines. vLLM's column layer divides its output:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L454-L473</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Divide the weight matrix along the last dimension.
+        if disable_tp:
+            self.tp_rank, self.tp_size = 0, 1
+        else:
+            self.tp_rank = (
+                tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+            )
+            self.tp_size = (
+                tp_size
+                if tp_size is not None
+                else get_tensor_model_parallel_world_size()
+            )
+        self.input_size_per_partition = input_size
+        self.output_size_per_partition = divide(output_size, self.tp_size)
+        self.output_partition_sizes = [self.output_size_per_partition]
+        # If QKV or MergedColumn, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = [
+                divide(output_size, self.tp_size) for output_size in self.output_sizes
+            ]</code></pre>
+</div>
+
+<p>and the row layer divides its input and, at the end of <code>forward</code>, issues the only
+collective in the module:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L1653-L1662</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Matrix multiply.
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP&gt;1 case)
+        bias_ = None if (self.tp_rank &gt; 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+
+        if self.reduce_results and self.tp_size &gt; 1:
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel</code></pre>
+</div>
+
+<p>which is a two-line dispatch to the TP process group
+(<code>vllm/distributed/communication_op.py:L12-L14</code>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/communication_op.py:L12-L14</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def tensor_model_parallel_all_reduce(input_: torch.Tensor) -&gt; torch.Tensor:
+    """All-reduce the input tensor across model parallel group."""
+    return get_tp_group().all_reduce(input_)</code></pre>
+</div>
+
+<p>SGLang's <code class="c-sglang">RowParallelLinear.forward</code> has the same skeleton and
+three extra branches, which is where the engines actually diverge:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/linear.py:L1638-L1660</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        # skip_all_reduce: explicit call-site override. Also honor
+        # ForwardFlags (fuse_mlp_allreduce / mlp_reduce_scatter) published by
+        # the decoder — callers should not thread those flags into modules.
+        if (
+            ((self.reduce_results and self.tp_size &gt; 1) or self.use_decode_attn_tp)
+            and not skip_all_reduce
+            and not should_skip_mlp_all_reduce()
+        ):
+            if self.use_dp_attention_reduce:
+                output = get_parallel().attn_tp_group.all_reduce(output_parallel)
+            else:
+                quantize_communications = (
+                    (
+                        not forward_batch.forward_mode.is_decode_or_idle()
+                        and get_exec().comm.enable_quant_communications
+                    )
+                    if forward_batch is not None
+                    else False
+                )
+                if quantize_communications:
+                    output = tensor_model_parallel_quant_all_reduce(output_parallel)
+                else:
+                    output = tensor_model_parallel_all_reduce(output_parallel)</code></pre>
+</div>
+
+<p>Three differences worth naming. First, <code>use_dp_attention_reduce</code> redirects the
+reduce to a <em>subgroup</em> — the attention-TP group rather than the global TP group — which is
+the hook for DP-attention (<a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>).
+Second, <code>quantize_communications</code> can send the partial sums in a narrower dtype during
+prefill, trading numerics for wire time, gated off for decode where the message is too small for
+bandwidth to matter — exactly the regime split Figure 3 predicts. Third,
+<code>should_skip_mlp_all_reduce()</code> lets the <em>decoder layer</em> suppress the module's
+collective when it intends to fuse it with the following norm.</p>
+
+<p>vLLM reaches the same fusion from the other direction, as a compiler pass rather than a
+runtime flag:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/compilation/passes/fusion/sequence_parallelism.py:L498-L515</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class SequenceParallelismPass(VllmPatternMatcherPass):
+    """
+    This pass enables sequence parallelism for models.
+    It identifies patterns where an AllReduce operation is followed by
+    an RMSNorm (or RMSNorm and then Quantization) operation.
+    These patterns are replaced with a ReduceScatter operation, followed by
+    a local RMSNorm/Quantization, and then an AllGather operation.
+
+    The general transformation is:
+    Input -&gt; AllReduce -&gt; RMSNorm -&gt; Output
+    becomes
+    Input -&gt; ReduceScatter -&gt; RMSNorm -&gt; AllGather -&gt; Output
+
+    While this pass itself does not directly yield performance improvements,
+    it lays the groundwork for subsequent fusion passes, such as
+    GEMM + ReduceScatter and AllGather + GEMM fusions. These fusions can
+    significantly reduce communication overhead and improve overall model
+    performance.
+# ...</code></pre>
+</div>
+
+<p>Note what that does to the "RMSNorm is replicated" claim above: the pass exists precisely to
+stop it being true — sharding the norm along the <em>token</em> axis so each rank normalises $n/p$
+rows, which costs nothing extra because the all-reduce was already going to be split into a
+reduce-scatter and an all-gather. It is the same total wire volume with the redundant per-rank
+normalisation deleted.</p>
+
+<p>Two things gate it, and both matter for reading the default path correctly. It is <em>on</em> by
+default: <code>enable_sp</code> resolves to <code>IS_DENSE</code> at optimization level 2
+(<code>vllm/config/vllm.py:L303-L309</code>), and <code>-O2</code> is the default
+(<code>vllm/config/vllm.py:L435</code>), so a dense model at TP&gt;1 gets the pass registered
+(<code>vllm/compilation/passes/pass_manager.py:L161-L164</code>). But <code>is_applicable</code>
+returns <code>compile_range.start &gt;= self.min_token_num</code>
+(<code>vllm/compilation/passes/fusion/sequence_parallelism.py:L604-L618</code>), where
+<code>min_token_num</code> comes from a per-GPU-megabyte heuristic
+(<code>get_sequence_parallelism_threshold</code>, <code>:L55-L104</code>). A decode step is far
+below that threshold, so <b>the collective this chapter counts &mdash; a plain all-reduce into a
+replicated norm &mdash; is what actually runs at decode</b>; the reduce-scatter rewrite is a
+prefill-shaped optimisation. It is also fullgraph-only, asserted in the same method: "SequenceParallelismPass
+requires full-graph compilation".</p>
+
+<h3>Sharding at load time</h3>
+
+<p>No engine loads the full checkpoint and then slices. Each rank narrows the tensor as it
+streams off disk, so peak host memory is the shard, not the model. The column loader narrows
+along the output dimension:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L548-L557</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        output_dim = getattr(param, "output_dim", None)
+
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+
+        param_data = param.data
+        if output_dim is not None and not is_sharded_weight:
+            shard_size = param_data.shape[output_dim]
+            start_idx = self.tp_rank * shard_size
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)</code></pre>
+</div>
+
+<p>the row loader narrows along the input dimension
+(<code>vllm/model_executor/layers/linear.py:L1614-L1622</code>, identical but with
+<code>input_dim</code>), and the QKV loader is the one place where replication becomes visible in
+the loader itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/linear.py:L1271-L1280</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            is_sharded_weight = getattr(param, "is_sharded_weight", False)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            if loaded_shard_id == "q":
+                shard_rank = self.tp_rank
+            else:
+                shard_rank = self.tp_rank // self.num_kv_head_replicas
+            start_idx = shard_rank * shard_size
+
+            if not is_sharded_weight:
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)</code></pre>
+</div>
+
+<p>At TP=8 on Llama-3-70B, <code>num_kv_head_replicas == 1</code> and
+<code>shard_rank == tp_rank</code>. At TP=16 it is 2, so ranks 0 and 1 both compute
+<code>shard_rank = 0</code> and both read the <em>same</em> slice of <code>k_proj</code> and
+<code>v_proj</code> — while reading different slices of <code>q_proj</code>. That single integer
+division is where the KV replication of Figure 2 is physically created.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: k_proj rank 9 at TP=16</h2></div><div class="sec__body"><div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; how one checkpoint tensor becomes one rank's slice.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["safetensors file<br/>model.layers.0.k_proj.weight<br/>[1024, 8192] bf16, 8 kv heads"] --> B["WeightsMapper orig_to_new_stacked<br/>llama.py L345-L354<br/>k_proj maps to qkv_proj with shard id k"]
+    B --> C["QKVParallelLinear.weight_loader<br/>linear.py L1171"]
+    C --> D["shard_offset = num_heads * head_size = 512<br/>shard_size = num_kv_heads * head_size = 128"]
+    D --> E["shard_rank = tp_rank // num_kv_head_replicas<br/>rank 9 at TP=16: 9 // 2 = 4"]
+    E --> F["start_idx = 4 * 128 = 512<br/>loaded_weight.narrow(0, 512, 128)"]
+    F --> G["param_data.copy_ into qkv_proj.weight<br/>rows 512:640 of the ranks [640, 8192] tensor"]
+    G --> H["rank 8 computes 8 // 2 = 4 as well<br/>identical 128 rows, identical KV cache pages"]
+  </script>
+</div>
+
+<p>Follow the number through, function by function, for rank 9 of a TP=16 Llama-3-70B:</p>
+
+<ol>
+  <li><code>LlamaAttention.__init__</code> (<code>vllm/model_executor/models/llama.py:L140-L153</code>) computes
+  <code>num_heads = 64 // 16 = 4</code> and <code>num_kv_heads = max(1, 8 // 16) = 1</code>. The
+  <code>tp_size % total_num_kv_heads == 0</code> branch is taken: 16 % 8 = 0, so the assert
+  passes.</li>
+  <li><code>QKVParallelLinear.__init__</code> (<code>vllm/model_executor/layers/linear.py:L1022-L1030</code>) takes the
+  <code>tp_size &gt;= total_num_kv_heads</code> branch, sets <code>num_kv_heads = 1</code> and
+  <code>num_kv_head_replicas = 16 // 8 = 2</code>.</li>
+  <li><code>ColumnParallelLinear.__init__</code> (<code>vllm/model_executor/layers/linear.py:L454-L473</code>) sets
+  <code>output_size_per_partition</code>. Output sizes are
+  $[4{\cdot}128{\cdot}16,\ 1{\cdot}128{\cdot}16,\ 1{\cdot}128{\cdot}16] = [8192, 2048, 2048]$,
+  divided by 16 to $[512, 128, 128]$ — a per-rank <code>qkv_proj.weight</code> of
+  <code>[640, 8192]</code>.</li>
+  <li>Loading: the <code>WeightsMapper</code> &mdash; the checkpoint-name-to-module rewriting table that
+  <a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a> owns &mdash; at <code>vllm/model_executor/models/llama.py:L345-L354</code> turns
+  <code>...k_proj.weight</code> into <code>(qkv_proj, "k")</code>, and
+  <code>QKVParallelLinear.weight_loader</code> computes
+  <code>shard_rank = 9 // 2 = 4</code>, <code>start_idx = 512</code>, and narrows rows 512:640
+  out of the checkpoint's <code>[1024, 8192]</code>. Rank 8 computes <code>8 // 2 = 4</code> and
+  narrows the same rows.</li>
+  <li>At runtime, <code>LlamaAttention.forward</code> (<code>vllm/model_executor/models/llama.py:L221-L231</code>) splits
+  the fused output with <code>qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)</code>
+  = <code>[512, 128, 128]</code>, applies RoPE, calls <code>self.attn(q, k, v)</code>, and hands
+  the result to <code>self.o_proj</code>.</li>
+  <li><code>RowParallelLinear.forward</code> (<code>vllm/model_executor/layers/linear.py:L1641-L1668</code>) multiplies the
+  rank's <code>[512, 8192]</code> slice of <code>o_proj</code> and calls
+  <code>tensor_model_parallel_all_reduce</code>. That is all-reduce number one of the layer.</li>
+  <li>KV-cache sizing sees the same 1: SGLang's
+  <code>ModelConfig.get_num_kv_heads</code> (<code>python/sglang/srt/configs/model_config.py:L1166-L1177</code>) returns
+  <code>max(1, 8 // 16) = 1</code>, which
+  <code>pool_configurator._compute_cell_size</code> (<code>python/sglang/srt/model_executor/pool_configurator.py:L326-L333</code>)
+  multiplies by <code>(head_dim + v_head_dim) * layers * kv_size</code> = $256 \times 80 \times 2
+  = 40{,}960$ bytes. vLLM's <code>ModelConfig.get_num_kv_heads</code>
+  (<code>vllm/config/model.py:L1517-L1537</code>) returns the same 1 by the same
+  <code>max(1, ...)</code>.</li>
+</ol>
+
+<p>Ranks 8 and 9 now hold byte-identical K and V pages for every token in the batch, forever.
+That is the 1.14&times; in the table.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><b>TP that does not divide the head count.</b> The friendliest of the failures, because it is
+checked in config validation with a real message:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L1411-L1418</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        total_num_attention_heads = self.model_arch_config.total_num_attention_heads
+        tensor_parallel_size = parallel_config.tensor_parallel_size
+        if total_num_attention_heads % tensor_parallel_size != 0:
+            raise ValueError(
+                f"Total number of attention heads ({total_num_attention_heads})"
+                " must be divisible by tensor parallel size "
+                f"({tensor_parallel_size})."
+            )</code></pre>
+</div>
+
+<p><b>TP that does not divide the FFN width.</b> Less friendly. Llama-3-70B's intermediate is
+28,672, which divides by 1, 2, 4, 8, 16 and 32 but not by 6 or 12. The check is a bare assert
+inside the layer — <code>assert all(output_size % self.tp_size == 0 for output_size in
+output_sizes)</code> (<code>vllm/model_executor/layers/linear.py:L689</code>) — and the
+underlying <code>divide()</code> helper raises
+<code>"{} is not divisible by {}"</code> (<code>vllm/distributed/utils.py:L53-L57</code>), which
+tells you the two numbers and nothing about which layer produced them. Search the shape.</p>
+
+<p><b>The TP=8&rarr;16 capacity cliff.</b> The war story of this chapter. A team moves a
+70B deployment from one node to two, expecting max-concurrency to double, and gets 14%. The
+number to watch is what the engine logs at startup —
+<code>"GPU KV cache size: %s tokens, Maximum concurrency for %s tokens per request: %.2fx"</code>
+(<code>vllm/v1/core/kv_cache_utils.py:L1925-L1931</code>). If it barely moved when you doubled
+TP, you crossed $h_{kv}$. Read <code>num_key_value_heads</code> out of the checkpoint's
+<code>config.json</code> before you buy the second node.</p>
+
+<p><b>Silently divergent ranks.</b> Because every rank runs the sampler on identical logits, any
+per-rank divergence — a different seed, a non-deterministic kernel, an fp32 reduction order —
+produces ranks that pick different tokens and then compute different KV, with no error and
+steadily worsening output. The symptom is a model that is coherent at TP=1 and subtly wrong at
+TP=8. The tell is that it starts fine and degrades over the generation.</p>
+
+<p><b>The bias double-count.</b> Covered in &sect;3; if a biased model is wrong at TP&gt;1 only,
+check whether a custom layer replicated the bias into every rank's GEMM.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I did not find, at either SHA, an engine-side assertion that the sampler's RNG state is
+  identical across TP ranks — the redundant-sampling correctness argument rests on all ranks
+  receiving bitwise-identical logits from the all-gather, which is itself a property of the
+  reduction order in the collective. The likely places to look are
+  <code>vllm/v1/sample/sampler.py</code> and
+  <code>vllm/v1/worker/gpu_input_batch.py</code> (generator construction). Readers relying on
+  exact reproducibility at TP&gt;1 should verify before assuming.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Read the sharding out of the engine rather than trusting this chapter. Both
+<code>ColumnParallelLinear</code> and <code>RowParallelLinear</code> implement
+<code>extra_repr</code> that prints the partitioned sizes
+(<code>vllm/model_executor/layers/linear.py:L595-L601</code> and <code>L1669-L1675</code>), so
+printing the model prints the shard map:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Print the per-rank shapes without a GPU</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>python -c "
+from transformers import AutoConfig
+c = AutoConfig.from_pretrained('meta-llama/Meta-Llama-3-70B')
+for tp in (1,2,4,8,16,32):
+    q  = c.num_attention_heads // tp
+    kv = max(1, c.num_key_value_heads // tp)
+    rep = max(1, tp // c.num_key_value_heads)
+    cell = kv * 2 * (c.hidden_size // c.num_attention_heads) * c.num_hidden_layers * 2
+    print(f'TP={tp:3d}  q/rank={q:3d}  kv/rank={kv}  replicas={rep}  KV cell={cell/1024:.0f} KiB/token')
+"</code></pre>
+</div>
+
+<p>Then confirm it against a live engine and watch the KV-pool line move (and stop moving):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Sweep TP and read the reported cache size</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM
+for TP in 2 4 8; do
+  vllm serve meta-llama/Meta-Llama-3-70B --tensor-parallel-size $TP \
+      --max-model-len 8192 2&gt;&amp;1 | grep -E "GPU KV cache size|Maximum concurrency"
+done
+
+# SGLang, same knob, aliased
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-70B \
+    --tp-size 8 --context-length 8192</code></pre>
+</div>
+
+<p>SGLang's flag lives at <code>python/sglang/srt/server_args.py:L1025-L1032</code>, declared as
+<code>tp_size</code> with the alias <code>--tensor-parallel-size</code>; vLLM's is
+<code>tensor_parallel_size</code> at <code>vllm/config/parallel.py:L124-L125</code>. The full
+speedup-versus-TP measurement, with a profile attributing the gap to collectives, is
+<a href="../LABS.html">Lab 07 — tensor-parallel scaling</a>.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the file.</b> Open <code>vllm/model_executor/layers/linear.py</code> and find every
+  call site of <code>tensor_model_parallel_all_reduce</code> and
+  <code>tensor_model_parallel_all_gather</code> in the module. How many of each are there, and
+  which class does each belong to?</li>
+
+  <li><b>Predict, then verify.</b> Qwen2-72B has $h = 64$, $h_{kv} = 8$, $d = 8192$, $L = 80$.
+  Predict the per-rank KV cell size at TP=4 and TP=32, and the ratio of cluster KV capacity
+  between them assuming both fit their weights comfortably. Then check your prediction against
+  <code>ModelConfig.get_num_kv_heads</code> in either engine.</li>
+
+  <li><b>Derive.</b> Llama-3-8B has $d = 4096$, $L = 32$, 8.03&nbsp;G parameters. Compute the
+  per-rank TP traffic per token at TP=4, and express it as a fraction of the decode step's
+  bandwidth floor at batch 1 and at batch 128.</li>
+
+  <li><b>Argue the counterfactual.</b> Suppose someone proposes making the MLP row-parallel
+  first and column-parallel second, arguing it saves an all-reduce because the final output is
+  already sharded and could stay sharded into the next block's norm. What breaks, and what
+  would you have to add to the norm to make it work? (This is not hypothetical — it is what
+  <code>SequenceParallelismPass</code> does.)</li>
+
+  <li><b>Find the boundary.</b> At what TP does Llama-3-70B's per-rank weight footprint drop
+  below its per-rank KV pool, on an 80&nbsp;GiB card with 4&nbsp;GiB reserved? What changes
+  about the deployment's failure mode on either side of that point?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+    <p><b>1.</b> One all-reduce, in <code>RowParallelLinear.forward</code> (L1660), and one
+    all-gather, in <code>ColumnParallelLinear.forward</code> (L586) behind
+    <code>gather_output</code>, which Llama never sets. The asymmetry is the chapter: the
+    column layer's collective is optional and unused in practice; the row layer's is the
+    mandatory one.</p>
+
+    <p><b>2.</b> Identical to Llama-3-70B: cell = $\max(1, 8/\mathrm{TP}) \times 256 \times 80
+    \times 2$ bytes, so 80&nbsp;KiB at TP=4 and 40&nbsp;KiB at TP=32. Cluster capacity ratio at
+    equal pool size is $\min(32,8)/\min(4,8) = 2$, not 8 — the extra 24 ranks contribute
+    nothing to capacity.</p>
+
+    <p><b>3.</b> One residual slice is $4096 \times 2 = 8$&nbsp;KiB. Traffic
+    $= 2 \times 32 \times 2 \times \frac{3}{4} \times 8\,\text{KiB} = 768$&nbsp;KiB per rank per
+    token. Floor $= 15.01\text{e}9 / 4 / 3.35\text{e}12 = 1.12$&nbsp;ms &mdash; note the 15.01, not
+    16.06: <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>
+    streams 7.50&nbsp;B of the 8.03&nbsp;B parameters, because the embedding table is gathered rather
+    than read. At 900 GB/s, 768 KiB takes 0.87&nbsp;&micro;s, so 0.078% at batch 1 and 10.0% at
+    batch 128. Same shape as the 70B curve, shifted by the smaller $L\,d$ product.</p>
+
+    <p><b>4.</b> Two things break. The activation: $\sigma(\sum_i Z_i) \neq \sum_i \sigma(Z_i)$,
+    so the first matmul's partial sums must be reduced before $\sigma$ — and that reduction is on
+    the $[n,f]$ intermediate, 3.5&times; the residual. And the norm: an output sharded along $d$
+    cannot compute a root-mean-square over $d$ without its own reduction. The fix is to shard
+    along the <em>token</em> axis instead, which is exactly the reduce-scatter &rarr; local norm
+    &rarr; all-gather rewrite in <code>SequenceParallelismPass</code>.</p>
+
+    <p><b>5.</b> Weights per rank $= 131/\mathrm{TP}$ GiB; pool $= 76 - 131/\mathrm{TP}$ GiB.
+    They cross at $\mathrm{TP} = 262/76 = 3.45$, so from TP=4 upward the card is mostly cache.
+    Below it you fail at load time with an allocator OOM; above it you fail at request time with
+    preemption and a falling cache hit rate — a scheduling problem, not a memory one.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li><b>Column-then-row is forced, not chosen.</b> An elementwise nonlinearity commutes with a
+  column split and not with a row split, and the tensor between the two matmuls is 3.5&times; the
+  residual's width. Every other pairing puts a collective on that wide tensor and costs
+  2.25&times; to 4.5&times; more wire per token.</li>
+
+  <li><b>Two all-reduces per block, 160 per Llama-3-70B forward pass.</b> They are issued at
+  exactly two places in the code — the end of <code>RowParallelLinear.forward</code> for
+  <code>o_proj</code> and for <code>down_proj</code>. Everything else in the block is local.</li>
+
+  <li><b>KV capacity stops scaling at TP = $h_{kv}$; weight memory never stops.</b>
+  <code>max(1, h_kv // tp_size)</code> replicates instead of dividing past that point. For
+  Llama-3-70B, cluster resident tokens grow 2.76&times; from TP=4 to TP=8 and 1.14&times; from
+  TP=8 to TP=16 (derived). Read <code>num_key_value_heads</code> before you size a cluster.</li>
+
+  <li><b>TP's comm fraction is linear in batch and in $p-1$.</b>
+  $t_{\text{comm}}/t_{\text{floor}} = 1.39\times10^{-4} \cdot n \cdot (p-1)$ for Llama-3-70B on
+  H100 + NVLink: negligible at batch 1, 25% at batch 256 and TP=8, over 100% at batch 256 and
+  TP=32. At small batch the binding constraint is not bandwidth but the 160 fixed collective
+  latencies, which TP does not amortise.</li>
+
+  <li><b>The node boundary is an arithmetic wall.</b> Compute-per-comm-byte at TP=8 is 3,815
+  FLOP/byte against NVLink's 1,099 — comfortable — but against InfiniBand NDR's 19,788 the
+  break-even is TP&nbsp;&asymp;&nbsp;2.4. TP belongs inside one NVLink domain; across nodes, use
+  PP or DP.</li>
+
+  <li><b>The vocabulary is the one tensor wider than $d$ that crosses the wire.</b> At 128k
+  vocab the logits all-gather moves 219&nbsp;KiB per token at TP=8 — 7.8&times; a block's
+  attention all-reduce — which is why vLLM has a vocab-parallel argmax path that gathers 56 bytes
+  instead, a 4,000&times; reduction for greedy decoding.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li>Shoeybi et al., <a href="https://arxiv.org/abs/1909.08053">Megatron-LM: Training
+  Multi-Billion Parameter Language Models Using Model Parallelism</a> (2019) — the paper that
+  introduced the column&rarr;row pairing. Both engines' <code>linear.py</code> descends from its
+  reference implementation, comments and all.</li>
+
+  <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation
+  Recomputation in Large Transformer Models</a> (2022) — where sequence parallelism (the
+  reduce-scatter/all-gather rewrite of the norm) is derived. Read it alongside
+  <code>vllm/compilation/passes/fusion/sequence_parallelism.py</code>.</li>
+
+  <li>Pope et al., <a href="https://arxiv.org/abs/2211.05102">Efficiently Scaling Transformer
+  Inference</a> (2022) — the partitioning-strategy analysis for <em>inference</em> specifically,
+  including the batch-size regimes where different layouts win. The closest thing to a
+  first-principles treatment of Figure 3.</li>
+
+  <li>NVIDIA, <a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVLink and NVSwitch</a>
+  and <a href="https://www.nvidia.com/en-us/networking/quantum2/">Quantum-2 InfiniBand</a> — the
+  bandwidth figures cited in &sect;6. All interconnect numbers in this chapter are from these
+  pages; none are measured.</li>
+
+  <li>The two <code>linear.py</code> files read side by side &mdash;
+  <code>vllm/model_executor/layers/linear.py</code> against
+  <code>python/sglang/srt/layers/linear.py</code>. The clearest way to see which parts of the
+  design are inherited from Megatron-LM and which are each engine's own; diff the two
+  <code>RowParallelLinear.forward</code> bodies first.</li>
+
+  <li>Neighbouring chapters: <a href="05-02-pipeline-parallelism.html">&sect;5.2</a> for what to
+  do past the node boundary, <a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a> for
+  DP-attention (the answer to replicated MLA caches),
+  <a href="05-04-collectives-and-topology.html">&sect;5.4</a> for the latency term $\lambda$ and
+  custom all-reduce, and
+  <a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html#tp-asymmetry">&sect;3.5</a> for the
+  GQA-versus-MLA capacity law this chapter's head arithmetic feeds.</li>
+</ul></div></section>
+<div class="pager"><a href="../04-quantization/04-04-when-quantization-pays.html"><div class="pager__k">← Previous</div><div class="pager__t">When quantization pays — and when it does not</div></a><a class="pager__next" href="05-02-pipeline-parallelism.html"><div class="pager__k">Next →</div><div class="pager__t">Pipeline parallelism and bubbles</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: why column then row</a>
+<a href="#heads">Attention: heads are the split axis, until they run out</a>
+<a href="#not-split">What does not split, and why</a>
+<a href="#cost">The price: communication volume and where TP stops paying</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: k_proj rank 9 at TP=16</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

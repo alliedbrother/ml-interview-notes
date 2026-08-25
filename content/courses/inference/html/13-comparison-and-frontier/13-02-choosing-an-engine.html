@@ -1,0 +1,1726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Choosing an engine for a workload — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body>
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i is-current" href="13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 13 · Comparison, frontier, and practice · 13-02</div>
+<h1>Choosing an engine for a workload</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">You cannot pick a serving engine from a bar chart. The number on the chart was produced by a workload, on hardware, with flags, none of which are yours &mdash; and the flag that will actually decide your deployment is one nobody in the comparison touched. This chapter is an ordered procedure: two gates that eliminate, one axis that discriminates, and one tiebreak that decides whether you can still operate the thing in six months.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>A team serving a document-QA product reads that SGLang's radix tree gives near-perfect prefix reuse on shared-prefix workloads, benchmarks it on Llama-3-8B against their chat traffic, sees the win, and ships. Six weeks later they add a reranking pass &mdash; one request scores many candidate passages against one query &mdash; and enable it with <code>--enable-mis</code>. Throughput on that path is a fraction of what the benchmark predicted, and there is no regression to find. Three subsystems turned themselves off at startup, each with a <code>logger.warning</code> nobody read.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L4808-L4830</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _handle_multi_item_scoring(self):
+        &quot;&quot;&quot;Setup and validate multi-item scoring constraints.
+
+        Auto-disables settings incompatible with MIS mechanics (CUDA graph,
+        radix cache, chunked prefill). Asserts on attention backend since
+        changing it silently could surprise users who intentionally picked
+        a non-flashinfer backend.
+        &quot;&quot;&quot;
+        if not self.enable_mis:
+            return
+
+        if self.cuda_graph_config.decode.backend != Backend.DISABLED:
+            logger.warning(&quot;CUDA graph is disabled because --enable-mis is set.&quot;)
+        self.cuda_graph_config.decode.backend = Backend.DISABLED
+        self.cuda_graph_config.prefill.backend = Backend.DISABLED
+
+        if not self.disable_radix_cache:
+            logger.warning(&quot;Radix cache is disabled because --enable-mis is set.&quot;)
+            self.disable_radix_cache = True
+
+        if self.chunked_prefill_size != -1:
+            logger.warning(&quot;Chunked prefill is disabled because --enable-mis is set.&quot;)
+            self.chunked_prefill_size = -1</code></pre>
+</div>
+
+<p>CUDA graphs, the radix cache, and chunked prefill, in that order. The docstring gives the reason as written &mdash; these settings are &quot;incompatible with MIS mechanics&quot; &mdash; and the assertion just below the quoted range requires FlashInfer &quot;for custom attention mask support&quot;. A correct decision, correctly logged, that deletes the reason the engine was chosen.</p>
+
+<p>The expensive part is the second one, and it is not simply &quot;no cache&quot;. SGLang's cache selection is a chain, and one branch of it swaps the tree for a different class rather than for nothing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/mem_cache/registry.py:L91-L102</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if ctx.effective_chunked_prefill_size is not None and ctx.disable_radix_cache:
+        if not ctx.is_hybrid_swa:
+            from sglang.srt.mem_cache.chunk_cache import ChunkCache
+
+            return ChunkCache(params)
+        if ctx.full_tokens_per_layer == 0:
+            from sglang.srt.mem_cache.chunk_cache import PureSWAChunkCache
+
+            return PureSWAChunkCache(params)
+        from sglang.srt.mem_cache.chunk_cache import SWAChunkCache
+
+        return SWAChunkCache(params)</code></pre>
+</div>
+
+<p><code class="c-sglang">ChunkCache</code> is exactly what its docstring says: &quot;used when radix cache is disabled&quot; (<code>python/sglang/srt/mem_cache/chunk_cache.py:L35-L41</code>). Its <code>match_prefix</code> returns an empty index tensor and its <code>insert</code> is a documented no-op &mdash; &quot;ChunkCache does not support prefix caching&quot; (<code>python/sglang/srt/mem_cache/chunk_cache.py:L67-L77</code>). The tree is not degraded; it is absent, replaced by a scratchpad holding one request's own blocks.</p>
+
+<p>And there is a third thing, independent of any of this: on the original chat path, the tree was probably never being <em>scheduled</em> for. SGLang's cache-aware policies are opt-in.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L843-L858</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    schedule_policy: A[
+        str,
+        Arg(
+            help=&quot;The scheduling policy of the requests.&quot;,
+            choices=[
+                &quot;lpm&quot;,
+                &quot;random&quot;,
+                &quot;fcfs&quot;,
+                &quot;dfs-weight&quot;,
+                &quot;lof&quot;,
+                &quot;priority&quot;,
+                &quot;routing-key&quot;,
+            ],
+        ),
+        NS(&quot;schedule&quot;),
+    ] = &quot;fcfs&quot;</code></pre>
+</div>
+
+<p>The default is <code>fcfs</code>. The radix cache still services hits opportunistically, but the scheduler does not order the waiting queue to create them &mdash; <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> works through why the ordering, not the data structure, is what produces the hit rate under load.</p>
+
+<p>None of this is an SGLang defect; vLLM has the mirror image of every one, and &sect;5 quotes one. The point is the shape of the failure. <b>The decision was made on an axis &mdash; prefix reuse &mdash; that a later feature flag switched off, on a path the original benchmark never covered.</b> No comparison chart can show you that, because what disabled the mechanism is a property of your flags, not of the engine.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: two gates, one axis, one tiebreak</h2></div><div class="sec__body"><p>Four things are usually offered as "how to choose": workload, model, hardware, team. They are not peers. Two <em>eliminate</em>: if your architecture is not in the registry or your accelerator has no backend, no benchmark matters. One <em>discriminates</em>: among engines that both work, workload shape decides which mechanism is load-bearing, and therefore which engine's version of it you are buying. One <em>decides whether the decision survives</em>: team capacity determines whether you can still operate the thing after the person who chose it leaves.</p>
+
+<p>Order matters because the common failure is running them backwards: pick on the axis, meet the gate in production. And note the uncomfortable consequence &mdash; for the modal case, a Llama- or Qwen-family dense model on H100s, <em>both gates pass</em>, so the comparison chart everyone reads is answering the one question that was never in doubt.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the four inputs are not peers.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    G1["GATE 1 - MODEL FAMILY<br/>Is this exact architecture served?<br/>Eliminates. No benchmark overrides it."]
+    G2["GATE 2 - HARDWARE<br/>Is there a backend for this accelerator,<br/>at this memory size, at this node count?"]
+    AX["AXIS - WORKLOAD SHAPE<br/>Among survivors: which mechanism<br/>carries your traffic? Sets the ceiling."]
+    TB["TIEBREAK - TEAM CAPACITY<br/>Config surface, extension seams,<br/>failure modes you will be paged for."]
+    G1 -->|both pass| G2
+    G1 -->|one fails| DONE1["Decided. Stop."]
+    G2 -->|both pass| AX
+    G2 -->|one fails| DONE2["Decided. Stop."]
+    AX -->|ceiling above 1.5x| DECIDE["Decide on the axis.<br/>Then verify with your own benchmark."]
+    AX -->|ceiling below 1.25x| TB
+    TB --> DECIDE2["Decide on operability.<br/>The engines are interchangeable here."]
+  </script>
+</div>
+
+<p>The rest of the chapter walks the four in that order, then folds them into an explicit question list in &sect;8.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: compute the ceiling before you compare</h2></div><div class="sec__body"><p>Almost every engine comparison is, underneath, a comparison of prefill efficiency: prefix caching, chunked prefill, cache-aware scheduling, P/D disaggregation. So the first quantity to compute is the fraction of your GPU time that prefill occupies. Call it $\phi$; everything the prefill machinery can buy you is bounded by it.</p>
+
+<p>Let $T_p$ be the GPU time one request's prefill costs and $T_d$ the GPU time its decode costs, both amortised to a per-request share of a batched step. Let $\eta \in [0,1]$ be the fraction of prefill tokens a perfect prefix cache would serve from an existing hit. Then</p>
+
+<div class="math-display">$$\phi = \frac{T_p}{T_p + T_d}, \qquad \text{speedup} \le \frac{1}{1 - \phi\,\eta}$$</div>
+
+<p>Amdahl's law with prefill as the accelerable part. It bounds the <em>mechanism</em>, not either engine, and the gap between two implementations of that mechanism is some fraction of it. If the ceiling is 1.06&times;, radix-versus-hash is an argument about a couple of percent.</p>
+
+<h3>Working $\phi$ for three real workloads</h3>
+
+<p>Llama-3-8B on one H100 SXM, with the constants <a href="../10-benchmarking/10-01-workload-characterization.html">Part 10</a> uses throughout: 7.505&times;10<sup>9</sup> non-embedding parameters (15.01 GB in bf16), 3.35 TB/s of HBM, 989.4 TFLOP/s of bf16 peak, 128 KiB of KV per token (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>). Prefill is compute-bound: $T_p = 2NP/F$. Decode is bandwidth-bound: a step costs $(W + \text{KV})/B_{\text{HBM}}$, and one request's share of $O$ output tokens is $O \, t_{\text{step}} / B$.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived arithmetic &mdash; no measurement. Llama-3-8B bf16, one H100 SXM. KV is evaluated at mid-run context $P + O/2$, and $T_d$ charges the $O-1$ shared decode steps &mdash; the first output token comes out of prefill (<a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> uses the same convention). The agent row uses $B{=}48$ because $B{=}64$ at 8k context needs 64.50&nbsp;GiB of KV, which does not fit in the 52.32&nbsp;GiB pool <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> derives for this card (79.65&nbsp;GiB &times; 0.92, less 14.96&nbsp;GiB of resident weights and a 6.0&nbsp;GiB allowance); $B{=}48$ needs 48.38&nbsp;GiB and does. Long prompts cap your batch, which raises $\phi$ further. Note the two weight figures are different quantities: the 15.01&nbsp;GB in $t_{\text{step}}$ is what a decode step <em>streams</em>, the 14.96&nbsp;GiB here is what the model <em>occupies</em> &mdash; the embedding table costs capacity but is not read every step (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>).</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Workload</th><th>$P$ / $O$ / $B$</th><th>KV at mid-run</th><th>$t_{\text{step}}$</th><th>$T_p$</th><th>$T_d$</th><th>$\phi$</th></tr></thead>
+      <tbody>
+        <tr><td>Chat, decode-heavy</td><td class="num">512 / 1024 / 64</td><td class="num">8.59 GB</td><td class="num">7.05 ms</td><td class="num">7.8 ms</td><td class="num">112.6 ms</td><td class="num">0.065</td></tr>
+        <tr><td>RAG / summarisation</td><td class="num">2048 / 256 / 64</td><td class="num">18.25 GB</td><td class="num">9.93 ms</td><td class="num">31.1 ms</td><td class="num">39.6 ms</td><td class="num">0.440</td></tr>
+        <tr><td>Agent / tool loop</td><td class="num">8192 / 128 / 48</td><td class="num">51.9 GB</td><td class="num">19.99 ms</td><td class="num">124.3 ms</td><td class="num">52.9 ms</td><td class="num">0.702</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Now put those through the ceiling at an optimistic $\eta = 0.9$ &mdash; nine tenths of prompt tokens repeating something already cached, roughly what a stable system prompt plus a stable tool schema plus a growing conversation gives you.</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="kpi__n">1.06&times;</div><div class="kpi__l">chat ceiling at $\eta = 0.9$ (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">1.66&times;</div><div class="kpi__l">RAG ceiling at $\eta = 0.9$ (derived)</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">2.71&times;</div><div class="kpi__l">agent ceiling at $\eta = 0.9$ (derived)</div></div>
+</div>
+
+<p><b>This is the single most useful number in the chapter.</b> On a decode-heavy chat product a <em>perfect</em> prefix cache is worth 6%, so the radix-versus-hash literature is a rounding error and you should decide on hardware fit and operability. On an agent loop with 8k prompts and short replies the same mechanism is worth 2.7&times;, and nothing else is worth deciding on.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; the ceiling curve.</b> Maximum speedup available from perfect prefix reuse, as a function of the prefill fraction $\phi$, for two hit rates. Derived from $1/(1-\phi\eta)$ with the three workloads of the table marked on the $\eta = 0.9$ curve. Nothing here is measured.</p>
+  <svg viewBox="0 0 800 400" width="100%" role="img" aria-label="Plot of maximum speedup from prefix caching against the prefill fraction phi, for hit rates 0.5 and 0.9, with three workloads marked">
+    <line x1="90" y1="330" x2="750" y2="330" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>
+    <line x1="90" y1="330" x2="90" y2="45" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>
+    <line x1="250" y1="330" x2="250" y2="336" stroke="currentColor" stroke-width="1"/>
+    <line x1="410" y1="330" x2="410" y2="336" stroke="currentColor" stroke-width="1"/>
+    <line x1="570" y1="330" x2="570" y2="336" stroke="currentColor" stroke-width="1"/>
+    <line x1="730" y1="330" x2="730" y2="336" stroke="currentColor" stroke-width="1"/>
+    <text x="90" y="350" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0</text>
+    <text x="250" y="350" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.2</text>
+    <text x="410" y="350" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.4</text>
+    <text x="570" y="350" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.6</text>
+    <text x="730" y="350" font-family="monospace" font-size="10" fill="currentColor" text-anchor="middle">0.8</text>
+    <text x="410" y="372" font-family="monospace" font-size="11" fill="currentColor" text-anchor="middle">phi = prefill share of GPU time</text>
+    <line x1="84" y1="330" x2="90" y2="330" stroke="currentColor" stroke-width="1"/>
+    <line x1="84" y1="262" x2="90" y2="262" stroke="currentColor" stroke-width="1"/>
+    <line x1="84" y1="195" x2="90" y2="195" stroke="currentColor" stroke-width="1"/>
+    <line x1="84" y1="128" x2="90" y2="128" stroke="currentColor" stroke-width="1"/>
+    <line x1="84" y1="60" x2="90" y2="60" stroke="currentColor" stroke-width="1"/>
+    <text x="78" y="334" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">1.0x</text>
+    <text x="78" y="266" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">1.5x</text>
+    <text x="78" y="199" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">2.0x</text>
+    <text x="78" y="132" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">2.5x</text>
+    <text x="78" y="64" font-family="monospace" font-size="10" fill="currentColor" text-anchor="end">3.0x</text>
+    <rect x="90" y="290" width="660" height="40" fill="#46586b" fill-opacity="0.10"/>
+    <text x="600" y="308" font-family="monospace" font-size="10.5" fill="currentColor" text-anchor="end">below 1.3x: the mechanism cannot decide the engine</text>
+    <path d="M90 330 L170 317 L250 300 L330 280 L410 254 L490 219 L570 172 L650 100 L666 82" fill="none" stroke="#b8567a" stroke-width="2.4"/>
+    <text x="500" y="150" font-family="monospace" font-size="11" fill="#b8567a">hit rate eta = 0.9</text>
+    <path d="M90 330 L250 315 L410 296 L570 272 L730 240" fill="none" stroke="#2f9a94" stroke-width="2.4"/>
+    <text x="612" y="232" font-family="monospace" font-size="11" fill="#2f9a94">eta = 0.5</text>
+    <circle cx="142" cy="322" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    <text x="152" y="326" font-family="monospace" font-size="10.5" fill="currentColor">CHAT 512/1024: 1.06x</text>
+    <circle cx="442" cy="242" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    <text x="452" y="246" font-family="monospace" font-size="10.5" fill="currentColor">RAG 2048/256: 1.66x</text>
+    <circle cx="650" cy="99" r="5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+    <text x="640" y="94" font-family="monospace" font-size="10.5" fill="currentColor" text-anchor="end">AGENT 8192/128: 2.71x</text>
+  </svg>
+</div>
+
+<p>Two caveats. $\eta$ is not an engine property but a property of your prompt structure, and <a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a> shows how to measure it rather than assume it. And the ceiling is reachable only if the pool holds those prefixes long enough; at high concurrency the working set can exceed it, eviction policy starts mattering, and you are back to comparing implementations. The ceiling tells you whether that argument is worth having.</p></div></section>
+<section class="sec" id="workload-shape" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The axis: workload shape, mechanism by mechanism</h2></div><div class="sec__body"><p>Four sub-axes, each tied to a mechanism that one engine exposes differently from the other. None of them is "which engine is faster".</p>
+
+<h3>Shared prefix: the discriminator is the scheduler, not the tree</h3>
+
+<p>Both engines cache prefixes; <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> and <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> own the structures. What differs at the decision level is how much of the queue-ordering problem each one lets you express. SGLang's policy enum has six members, split by exactly one question &mdash; does the policy consult the cache:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/schedule_policy.py:L200-L213</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>class CacheAwarePolicy(Enum):
+    &quot;&quot;&quot;Scheduling policies that are aware of the tree cache.&quot;&quot;&quot;
+
+    LPM = &quot;lpm&quot;  # longest prefix match
+    DFS_WEIGHT = &quot;dfs-weight&quot;  # depth-first search weighting
+
+
+class CacheAgnosticPolicy(Enum):
+    &quot;&quot;&quot;Scheduling policies that are not aware of the tree cache.&quot;&quot;&quot;
+
+    FCFS = &quot;fcfs&quot;  # first come first serve
+    LOF = &quot;lof&quot;  # longest output first
+    RANDOM = &quot;random&quot;
+    ROUTING_KEY = &quot;routing-key&quot;  # prioritize by routing key frequency in running batch</code></pre>
+</div>
+
+<p>vLLM has two, neither of which consults the cache:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/request_queue.py:L13-L17</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class SchedulingPolicy(Enum):
+    &quot;&quot;&quot;Enum for scheduling policies.&quot;&quot;&quot;
+
+    FCFS = &quot;fcfs&quot;
+    PRIORITY = &quot;priority&quot;</code></pre>
+</div>
+
+<p>That is the real shared-prefix decision, and it cuts both ways. If your prefixes <em>branch</em> &mdash; one document, many questions; one agent scaffold, many trajectories &mdash; reordering the queue so siblings run together is worth more than the data structure, and <code>--schedule-policy lpm</code> is a lever vLLM does not have. If they are <em>flat</em>, LPM has nothing to reorder and vLLM's hash chain hits the same prefix with less machinery. Two warnings before reaching for LPM: it is not the default, and it silently downgrades to FCFS past 128 queued requests (<a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>).</p>
+
+<h3>Long prefill versus long decode: whose TTFT do you protect</h3>
+
+<p>Chunked prefill (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>) is on by default in both. The interesting difference is the knob each exposes for the <em>conflict</em> between a long prefill and the decodes it delays. vLLM lets you declare a prompt "long" and cap how much of the token budget it may take:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/scheduler.py:L70-L72</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    long_prefill_token_threshold: int = Field(default=0, ge=0)
+    &quot;&quot;&quot;For chunked prefill, a request is considered long if the prompt is
+    longer than this number of tokens. 0 disables the cap (default).&quot;&quot;&quot;</code></pre>
+</div>
+
+<p>SGLang instead lets you guarantee decode progress between prefill batches:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L816-L820</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    prefill_decode_interval: A[
+        int,
+        &quot;The number of decode rounds to run after a prefill batch before scheduling the next prefill. In data-parallel attention mode, the interval is synchronized across all DP ranks. Set to 0 to disable.&quot;,
+        NS(&quot;schedule&quot;),
+    ] = 0</code></pre>
+</div>
+
+<p>These are duals, and both default to 0, meaning off. vLLM's threshold bounds the damage one outlier prompt does; SGLang's interval bounds the rate at which prefill is admitted at all &mdash; the stronger guarantee for inter-token latency, the more expensive one for TTFT. If your SLO is written on ITL jitter under a mixed short/long workload, SGLang's knob maps onto it directly; if your problem is one pathological 200k-token prompt among 2k-token neighbours, vLLM's does.</p>
+
+<h3>Strict TTFT versus throughput-maximising batch</h3>
+
+<p>This axis chooses a configuration, not an engine &mdash; but it changes what a comparison means. A TTFT-bound deployment runs at low utilisation by construction, so per-step overhead and CUDA-graph coverage dominate; a saturated offline batch is decided by scheduler packing and memory efficiency. Engines routinely swap places between those regimes (<a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>). Decide which regime you are in <em>before</em> reading anyone's numbers, and discard every number taken in the other.</p>
+
+<h3>Bursty versus steady arrivals</h3>
+
+<p>Burstiness makes admission and preemption first-order, and preemption cost is where the two engines genuinely diverge &mdash; <a href="13-01-head-to-head.html">&sect;13.1</a> has the row and the derived numbers, <a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a> the mechanism. If your traffic is bursty enough that preemption is routine, that row outweighs any prefix-cache comparison, because the cost lands exactly when your SLO is already in trouble. If arrivals are steady and you run below the knee, preemption is a tail event and the row is trivia.</p></div></section>
+<section class="sec" id="the-gates" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The two gates: model family and hardware</h2></div><div class="sec__body"><h3>Gate 1: is your architecture actually served</h3>
+
+<p>The two registries have opposite failure modes, which is more decision-relevant than the raw counts. vLLM's is an explicit table of architecture string to module:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/models/registry.py:L72-L77</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>_TEXT_GENERATION_MODELS = {
+    # [Decoder-only]
+    &quot;AfmoeForCausalLM&quot;: (&quot;afmoe&quot;, &quot;AfmoeForCausalLM&quot;),
+    &quot;ApertusForCausalLM&quot;: (&quot;apertus&quot;, &quot;ApertusForCausalLM&quot;),
+    &quot;ArceeForCausalLM&quot;: (&quot;arcee&quot;, &quot;ArceeForCausalLM&quot;),
+    &quot;ArcticForCausalLM&quot;: (&quot;arctic&quot;, &quot;ArcticForCausalLM&quot;),</code></pre>
+</div>
+
+<p>SGLang discovers models by importing every module in the package and looking for an <code>EntryClass</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/models/registry.py:L95-L110</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def import_model_classes(package_name: str, strict: bool = False):
+    model_arch_name_to_cls = {}
+    package = importlib.import_module(package_name)
+    for _, name, ispkg in pkgutil.iter_modules(package.__path__, package_name + &quot;.&quot;):
+        if not ispkg:
+            if name.split(&quot;.&quot;)[-1] in envs.SGLANG_DISABLED_MODEL_ARCHS.get():
+                logger.debug(f&quot;Skip loading {name} due to SGLANG_DISABLED_MODEL_ARCHS&quot;)
+                continue
+
+            try:
+                module = importlib.import_module(name)
+            except Exception as e:
+                if strict:
+                    raise
+                logger.warning(f&quot;Ignore import error when loading {name}: {e}&quot;)
+                continue</code></pre>
+</div>
+
+<p>Read the <code>except Exception</code>. A module that fails to import &mdash; a missing dependency, a kernel package that did not build &mdash; warns and vanishes from the registry, and the symptom is "architecture not supported" for a model that is in the tree. vLLM's static table cannot fail that way, at the cost that adding a model means editing a central file.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Counted from the pinned trees at <code>a556f3f</code> and <code>7d89325</code>. Entry counts include aliases and so overstate distinct architectures; module counts understate them. Orders of magnitude, not a scoreboard.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Family</th><th>vLLM</th><th>SGLang</th><th>What it means for the decision</th></tr></thead>
+      <tbody>
+        <tr><td>Text generation</td><td class="num">133 registry entries</td><td class="num">216 model modules total</td><td>Both cover the mainstream. Check <em>your exact</em> architecture string</td></tr>
+        <tr><td>Multimodal</td><td class="num">120 registry entries</td><td class="num">51 processors</td><td>vLLM has the broader surface and a dedicated <code>vllm/multimodal/</code> stack</td></tr>
+        <tr><td>Pooling: embedding, rerank, classify</td><td class="num">65 entries across 5 dicts</td><td class="num">13 dedicated modules</td><td>Not close. vLLM's 65 span <code>_EMBEDDING_MODELS</code> (35), <code>_LATE_INTERACTION_MODELS</code> (11), <code>_SEQUENCE_CLASSIFICATION_MODELS</code> (10), <code>_TOKEN_CLASSIFICATION_MODELS</code> (6) and <code>_REWARD_MODELS</code> (3); SGLang's 13 are 5 embedding, 5 reward and 3 classification files. If you serve embeddings or rerankers, this gate is decisive</td></tr>
+        <tr><td>Pure SSM (Mamba, Mamba2, Jamba, Zamba2)</td><td class="num">present</td><td class="num">absent</td><td>SGLang ships hybrids (Falcon-H1, Nemotron-H, Qwen3-Next) but no pure-SSM modules</td></tr>
+        <tr><td>MLA / DeepSeek</td><td class="num">22 entries under <code>v1/attention/backends/mla/</code></td><td class="num">7 MLA backend files + dedicated <code>dsa/</code>, <code>dsv4/</code>, <code>nsa/</code> trees</td><td>Both serious. SGLang carries DeepSeek kernel trees into <code>python/sglang/kernels/</code></td></tr>
+        <tr><td>Tuned MoE kernel configs</td><td class="num">330 JSON files</td><td class="num">363, sharded by Triton version</td><td>Comparable; SGLang keys configs by Triton version, vLLM does not</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The model family also silently reconfigures the engine. vLLM derives whether prefix caching is even legal from the model's attention type and pooling config:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/config/model.py:L2086-L2096</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def is_prefix_caching_supported(self) -&gt; bool:
+        attn_type = self.attn_type
+
+        if pooler_config := self.pooler_config:
+            # for pooling models
+            if attn_type == &quot;encoder_only&quot;:
+                logger.debug(
+                    &quot;Pooling models with bidirectional attn &quot;
+                    &quot;do not support prefix caching.&quot;
+                )
+                return False</code></pre>
+</div>
+
+<p>An encoder-only pooling model gets no prefix caching and no chunked prefill by construction: bidirectional attention makes a prefix's activations depend on later tokens, so there is nothing to reuse. Physics, not a gap &mdash; but it means that if you serve embeddings, every prefill-side argument in this chapter evaluates to zero and you decide on the registry gate and throughput per dollar instead.</p>
+
+<p>SGLang's version of the same thing is per-architecture rather than per-attention-type, and it fires on multimodal models whose processors cannot be chunked:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L3985-L3993</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if (
+            model_config.is_multimodal
+            and not model_config.is_multimodal_chunked_prefill_supported
+        ):
+            self.chunked_prefill_size = -1
+            logger.info(
+                f&quot;Automatically turn off --chunked-prefill-size as it is not supported for &quot;
+                f&quot;{hf_config.model_type}&quot;
+            )</code></pre>
+</div>
+
+<p>Note what this one does <em>not</em> do: it disables chunked prefill but leaves the radix cache alone, so a VLM keeps its tree and loses only the prefill-admission machinery. The cascade that costs you the tree needs <code>disable_radix_cache</code> too, set automatically at this SHA for EmbeddingGemma (<code>python/sglang/srt/server_args.py:L3927-L3929</code>), HRM-Text with <code>prefix_lm</code> (<code>L3876-L3878</code>), and <code>--enable-mis</code>. Read the startup log; do not reason about it.</p>
+
+<h3>Gate 2: hardware</h3>
+
+<p>vLLM has five built-in platforms and an entry-point group for everything else, with out-of-tree plugins taking precedence over built-ins:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/platforms/__init__.py:L210-L216</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>builtin_platform_plugins = {
+    &quot;tpu&quot;: tpu_platform_plugin,
+    &quot;cuda&quot;: cuda_platform_plugin,
+    &quot;rocm&quot;: rocm_platform_plugin,
+    &quot;xpu&quot;: xpu_platform_plugin,
+    &quot;cpu&quot;: cpu_platform_plugin,
+}</code></pre>
+</div>
+
+<p>SGLang instead carries hardware backends in-tree: <code>python/sglang/srt/hardware_backend/</code> holds <code>cpu</code>, <code>gpu</code>, <code>mlx</code>, <code>musa</code>, <code>npu</code>, and <code>xpu</code> subtrees, and the attention-backend list names the accelerators directly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L181-L189, L202-L209</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>ATTENTION_BACKEND_CHOICES = [
+    # Common
+    &quot;triton&quot;,
+    &quot;torch_native&quot;,
+    &quot;flex_attention&quot;,
+    &quot;dsa&quot;,
+    &quot;nsa&quot;,  # Deprecated alias for &quot;dsa&quot;
+    &quot;dsv4&quot;,
+    &quot;compressed&quot;,  # Deprecated alias for &quot;dsv4&quot;
+    # ...
+    # AMD specific
+    &quot;aiter&quot;,
+    &quot;wave&quot;,
+    # Other platforms
+    &quot;intel_amx&quot;,
+    &quot;ascend&quot;,
+    &quot;intel_xpu&quot;,
+]</code></pre>
+</div>
+
+<p>So: <b>TPU</b> is a vLLM built-in with no SGLang counterpart at this SHA. <b>Ascend NPU</b> is in-tree in SGLang (an <code>ascend</code> backend plus an <code>npu/</code> tree with its own allocator, memory pool, MoE and quantization) and an out-of-tree plugin on vLLM. <b>Apple Silicon</b> appears in SGLang via <code>mlx</code>, not in vLLM. <b>AMD</b> and <b>Intel XPU</b> are first-class in both. Off NVIDIA and AMD the gate is usually decisive &mdash; in different directions.</p>
+
+<h3>The single-24GB-card case</h3>
+
+<p>Both engines tier their defaults by device memory, and there you can read each project's stated target. vLLM has three tiers and a candid <code>TODO</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/engine/arg_utils.py:L2609-L2638</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if device_memory &gt;= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with &gt;= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory &gt;= 70 * GiB_bytes and &quot;a100&quot; not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 8192,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        else:
+            # TODO(woosuk): Tune the default values for other hardware.
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 8192,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 256,
+                UsageContext.OPENAI_API_SERVER: 256,
+            }</code></pre>
+</div>
+
+<p>SGLang has six, and the bottom two are named after consumer cards:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L4866-L4883</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        if gpu_mem is not None:
+            if gpu_mem &lt; 20 * 1024:
+                # T4, 4080
+                # (chunked_prefill_size 2k, max_bs 8)
+                if self.chunked_prefill_size is None:
+                    self.chunked_prefill_size = 2048
+                if decode_cuda_graph_config.max_bs is None:
+                    decode_cuda_graph_config.max_bs = 8
+            elif gpu_mem &lt; 35 * 1024:
+                # A10, 4090, 5090
+                # (chunked_prefill_size 2k, max_bs 24 if tp &lt; 4 else 80)
+                if self.chunked_prefill_size is None:
+                    self.chunked_prefill_size = 2048
+                if decode_cuda_graph_config.max_bs is None:
+                    if self.tp_size &lt; 4:
+                        decode_cuda_graph_config.max_bs = 24
+                    else:
+                        decode_cuda_graph_config.max_bs = 80</code></pre>
+</div>
+
+<p>Read them as declarations of intent. vLLM collapses everything below 70 GB into one bucket with an explicit "tune the default values for other hardware" note; SGLang names T4, 4080, A10, 4090 and 5090 and picks a CUDA-graph batch ceiling for each. On a single 24 GB card, SGLang has thought about you more recently.</p>
+
+<p>The quantization surface says it louder. SGLang's list includes the formats that matter when weights do not fit:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L143-L152, L173-L179</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>QUANTIZATION_CHOICES = [
+    &quot;awq&quot;,
+    &quot;fp8&quot;,  # MOE + linear online quantization.
+    &quot;mxfp8&quot;,  # MOE + linear online quantization.
+    &quot;gptq&quot;,
+    &quot;marlin&quot;,
+    &quot;gptq_marlin&quot;,
+    &quot;awq_marlin&quot;,
+    &quot;bitsandbytes&quot;,
+    &quot;gguf&quot;,
+    # ...
+    # Apple Silicon MLX backend — on-the-fly quantization of fp16 weights at load
+    # time via mlx.nn.quantize. Only takes effect when SGLANG_USE_MLX=1.
+    &quot;mlx_q4&quot;,  # 4 bits, group_size=64 (mlx-community default)
+    &quot;mlx_q8&quot;,  # 8 bits, group_size=64
+    &quot;unquant&quot;,
+    &quot;humming&quot;,
+]</code></pre>
+</div>
+
+<p>vLLM's list, at this SHA, does not:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/__init__.py:L12-L36</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>QuantizationMethods = Literal[
+    &quot;awq&quot;,
+    &quot;auto_awq&quot;,
+    &quot;fp8&quot;,
+    &quot;fbgemm_fp8&quot;,
+    &quot;fp_quant&quot;,
+    &quot;modelopt&quot;,
+    &quot;modelopt_fp4&quot;,
+    &quot;modelopt_mxfp8&quot;,
+    &quot;modelopt_mixed&quot;,
+    &quot;auto_gptq&quot;,
+    &quot;gptq&quot;,
+    &quot;gptq_marlin&quot;,
+    &quot;awq_marlin&quot;,
+    &quot;humming&quot;,
+    &quot;compressed-tensors&quot;,
+    &quot;experts_int8&quot;,
+    &quot;quark&quot;,
+    &quot;moe_wna16&quot;,
+    &quot;torchao&quot;,
+    &quot;inc&quot;,
+    &quot;mxfp4&quot;,
+    &quot;gpt_oss_mxfp4&quot;,
+    &quot;deepseek_v4_fp8&quot;,
+    &quot;online&quot;,</code></pre>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Version-stamped</span>
+  <p>As of <code>a556f3f</code> there is no <code>gguf</code> and no <code>bitsandbytes</code> entry in vLLM's <code>QuantizationMethods</code>, and no <code>gguf.py</code> or <code>bitsandbytes.py</code> under <code>vllm/model_executor/layers/quantization/</code> &mdash; only residual references in model code (e.g. <code>vllm/model_executor/models/siglip.py:L421</code>). SGLang has both as first-class implementations. This is a fast-moving surface: re-check at your own SHA before it decides anything, and note that <code>register_quantization_config</code> in the same vLLM file lets a third party add either back out-of-tree.</p>
+</div>
+
+<p>For a single 24 GB card the honest answer is often <em>neither</em>, and &sect;9 says why.</p>
+
+<h3>One node, and more than one</h3>
+
+<p>On one 8&times;80 GB node both engines are mature and the gate passes; decide on the axis. Beyond one node the question is what ships in the box: SGLang ships a Rust gateway (<code>sgl-model-gateway/</code>) with cache-aware routing built in, vLLM ships no router and exports KV-cache events for someone else's to consume. <a href="../09-serving-system/09-04-routers-and-load-balancing.html">&sect;9.4</a> owns that comparison. In one line: SGLang gives you a policy you did not write; vLLM gives you truth you must write a policy against.</p></div></section>
+<section class="sec" id="team-capacity" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The tiebreak: what each engine costs you to operate</h2></div><div class="sec__body"><p>Two questions: how much surface must an operator hold in their head, and where can an engineer cut in when the answer is "we need X and it is not there".</p>
+
+<p>On surface area, the two projects made opposite structural choices. SGLang derives its entire CLI from one dataclass:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L8746-L8749</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def add_cli_args(parser: argparse.ArgumentParser):
+
+        # Auto-derived from Annotated[..., Arg(...)] field metadata.
+        add_cli_args_from_dataclass(parser, ServerArgs)</code></pre>
+</div>
+
+<p><code>ServerArgs</code> carries <b>475 annotated fields</b> in a single 9,400-line class body (between <code>class ServerArgs</code> at L458 and the last field at L9858). vLLM splits the equivalent surface across <b>31 typed config modules</b> in <code>vllm/config/</code>, roughly 14,000 lines. Neither is small. SGLang's is greppable in one file with no type-level grouping; vLLM's is grouped and individually documented, and requires you to know which of 31 files owns the flag.</p>
+
+<p>On extension, the seams are genuinely different in kind. vLLM's are entry-point groups resolved at import time, one per process boundary:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/plugins/__init__.py:L16-L30</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code># Default plugins group will be loaded in all processes(process0, engine core
+# process and worker processes)
+DEFAULT_PLUGINS_GROUP = &quot;vllm.general_plugins&quot;
+# IO processor plugins group will be loaded in process0 only
+IO_PROCESSOR_PLUGINS_GROUP = &quot;vllm.io_processor_plugins&quot;
+# Platform plugins group will be loaded in all processes when
+# `vllm.platforms.current_platform` is called and the value not initialized,
+PLATFORM_PLUGINS_GROUP = &quot;vllm.platform_plugins&quot;
+# Stat logger plugins group will be loaded in process0 only when serve vLLM with
+# async mode.
+STAT_LOGGER_PLUGINS_GROUP = &quot;vllm.stat_logger_plugins&quot;
+# Endpoint plugins group is loaded in the API server front end process only.
+# Each entry point resolves to a factory returning an `EndpointPlugin`
+# (see `vllm/plugins/endpoint_plugins/interface.py`).
+ENDPOINT_PLUGINS_GROUP = &quot;vllm.endpoint_plugins&quot;</code></pre>
+</div>
+
+<p>SGLang's are in-process registration functions called at import: <code>register_radix_cache_backend</code> for the prefix cache (<a href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html">&sect;12.3</a>), <code>SpeculativeAlgorithm.register</code> for a decoding algorithm, and the <code>add_*_choices</code> helpers at <code>python/sglang/srt/server_args.py:L397-L454</code>, which let an out-of-tree package extend the CLI's own choice lists before <code>ServerArgs</code> is built. <a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html">&sect;11.5</a> and <a href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html">&sect;12.4</a> audit both.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">DEBUGGING</span><h4>Where the state lives</h4><p>vLLM concentrates the scheduling decision in one engine-core process and broadcasts it; SGLang replicates the scheduler per TP rank. At TP&gt;1 that is the difference between reading one process' state and reasoning about whether $N$ processes agreed. <a href="13-01-head-to-head.html">&sect;13.1</a> has the row.</p></div>
+  <div class="ve-card"><span class="ve-card__k">DRIFT</span><h4>Silent reconfiguration</h4><p>Both engines rewrite your flags at startup and log it at <code>INFO</code>. The first thing to build is a startup-config assertion in CI: parse the resolved config from the startup log or <code>/server_info</code>, and fail the deploy if a flag you care about was flipped.</p></div>
+</div>
+
+<p>The uncomfortable truth is that both engines are large enough that "we will extend it" is a staffing commitment, not a flag. If nobody on the team can read a scheduler, decide on the gates and the axis, configure conservatively, and treat both extension-point chapters as reference rather than plan. One factor this book cannot cite: vLLM has the larger operator population, so more of your failure modes are already someone else's answered issue. Treat that as a prior, not evidence.</p></div></section>
+<section class="sec" id="decision-procedure" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">The decision procedure</h2></div><div class="sec__body"><p>Eight questions, in order. Stop at the first that gives an answer.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The procedure. Each answer is conditional on the stated premise; none of them is unconditional.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>#</th><th>Question</th><th>How to answer it</th><th>What it decides</th></tr></thead>
+      <tbody>
+        <tr><td class="num">Q1</td><td>Is your exact <code>architectures[0]</code> string served by both?</td><td>Grep the registries. Then actually start both servers with the model &mdash; SGLang can drop a model on an import error</td><td>Eliminates. Nothing overrides it</td></tr>
+        <tr><td class="num">Q2</td><td>Is your accelerator a first-class backend?</td><td>TPU: vLLM only. Ascend NPU or Apple MLX: SGLang in-tree. NVIDIA/AMD/XPU: both</td><td>Eliminates</td></tr>
+        <tr><td class="num">Q3</td><td>Does the model silently disable the mechanism you are choosing for?</td><td>Start the server, read the startup log for the auto-off lines quoted in &sect;1 and &sect;5</td><td>Eliminates the <em>reason</em>, not the engine</td></tr>
+        <tr><td class="num">Q4</td><td>What is $\phi$ for your traffic?</td><td>Token histogram from your logs (<a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a>), then the arithmetic of &sect;3</td><td>Whether the axis can decide anything</td></tr>
+        <tr><td class="num">Q5</td><td>If $\phi\eta > 0.4$: do your prefixes branch or are they flat?</td><td>Count distinct continuations per shared prefix in your traffic</td><td>Branching favours SGLang + <code>--schedule-policy lpm</code>; flat is a tie</td></tr>
+        <tr><td class="num">Q6</td><td>Is your SLO written on TTFT, on ITL, or on throughput?</td><td>Read the SLO. If nobody wrote one, stop and write one</td><td>Which knob you need: vLLM's long-prompt cap or SGLang's prefill/decode interval</td></tr>
+        <tr><td class="num">Q7</td><td>Who is on call, and can they read a scheduler?</td><td>Honestly</td><td>Operability tiebreak when Q4 says the ceiling is low</td></tr>
+        <tr><td class="num">Q8</td><td>Did you run the benchmark from &sect;10 on your own traffic?</td><td>Two servers, one harness, matched flags, open loop, $n \ge 3$</td><td>Confirms or overturns everything above</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the procedure as a flowchart. Every leaf states its condition; none is an unconditional recommendation.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    Q1["Q1 - architecture served by both?"]
+    Q1 -->|only one| L1["Use that one.<br/>Revisit next quarter."]
+    Q1 -->|neither| L2["See section 9:<br/>llama.cpp, TensorRT-LLM, or hosted"]
+    Q1 -->|both| Q2
+    Q2["Q2 - accelerator first-class in both?"]
+    Q2 -->|TPU| L3["vLLM - tpu is a builtin platform"]
+    Q2 -->|Ascend NPU or Apple MLX| L4["SGLang - in-tree hardware backend"]
+    Q2 -->|one 24GB card, weights do not fit| L5["See section 9. GGUF and offload<br/>are not vLLM strengths at a556f3f"]
+    Q2 -->|NVIDIA or AMD datacentre| Q4
+    Q4["Q4 - compute phi from your own logs.<br/>Is phi times eta above 0.4?"]
+    Q4 -->|no, ceiling under 1.25x| Q7
+    Q4 -->|yes| Q5
+    Q5["Q5 - do prefixes branch?"]
+    Q5 -->|branching, many suffixes per prefix| L6["SGLang with schedule-policy lpm.<br/>Condition: queue depth stays under 128"]
+    Q5 -->|flat, one system prompt| Q7
+    Q7["Q7 - operability tiebreak"]
+    Q7 -->|no engine owner on the team| L7["vLLM. Condition: you accept its<br/>defaults and do not extend it"]
+    Q7 -->|someone owns the engine| L8["Either. Pick the tree that person<br/>can navigate. Then run Q8."]
+  </script>
+</div>
+
+<div class="callout callout--note">
+  <span class="callout__k">The conditions matter more than the leaves</span>
+  <p>Every leaf above is false under a different premise. "SGLang for branching prefixes" is false if your queue routinely exceeds 128 and LPM downgrades to FCFS. "vLLM if nobody owns the engine" is false if your model is only in SGLang's tree. Publishing the leaf without the condition is how comparison posts become wrong six weeks later.</p>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one workload through the procedure</h2></div><div class="sec__body"><p>Concrete case. A coding agent: 4&times;H100-80GB on one node, an MoE model in the 30B-total / 3B-active class, prompts averaging 12k tokens (a stable ~2k system prompt and tool schema, a repository context block that is stable within a session, and a growing tool-call transcript), replies averaging 400 tokens, arrivals bursty around a working day, SLO written as p95 time-to-first-token under 3 s.</p>
+
+<ol>
+<li><b>Q1 &mdash; architecture.</b> Both trees carry the Qwen3-MoE family, but do not stop at the family: check the exact <code>architectures[0]</code> from the checkpoint's <code>config.json</code> against vLLM's <code>_TEXT_GENERATION_MODELS</code> and SGLang's discovered set, and start both servers to confirm SGLang swallowed no import error. <span class="pill pill--verified">both pass</span></li>
+<li><b>Q2 &mdash; hardware.</b> NVIDIA datacentre, one node. Both first-class. Both have H100 tuned MoE configs in their fused-MoE config directories. <span class="pill pill--verified">both pass</span></li>
+<li><b>Q3 &mdash; silent disable.</b> Text-only, so the multimodal chunked-prefill auto-off does not fire; not a pooling model, so vLLM's prefix-caching gate does not fire. Read the startup log anyway. <span class="pill pill--verified">clean</span></li>
+<li><b>Q4 &mdash; the ceiling.</b> Rerun the &sect;3 arithmetic with this model's shapes, not Llama-3-8B's. The direction is already visible: 12k in, 400 out is <em>more</em> prefill-dominated than the agent row ($\phi = 0.70$), and an MoE pushes further that way because active-parameter decode is cheap while prefill still touches every expert. Expect $\phi > 0.75$, so $\eta = 0.85$ gives a ceiling above 2.7&times;. <b>The axis decides.</b></li>
+<li><b>Q5 &mdash; branching.</b> Heavily branching: one repository context, many tool-call trajectories diverging from it, many turns per session. This is the case SGLang's tree and LPM ordering were built for.</li>
+<li><b>Q6 &mdash; SLO.</b> p95 TTFT is a prefill-side SLO, the same side the axis is on. Consistent. Had it been ITL, SGLang's <code>--prefill-decode-interval</code> would be the lever; here it is not.</li>
+<li><b>Q7 &mdash; team.</b> Only relevant if Q4 had been inconclusive. It was not.</li>
+<li><b>Q8 &mdash; verify.</b> Below.</li>
+</ol>
+
+<p><b>Recommendation, with its conditions.</b> Start with SGLang and <code>--schedule-policy lpm</code> explicitly set, conditional on (a) queue depth staying below 128 so LPM does not downgrade, (b) the exact checkpoint loading, and (c) a measured run on your own traffic confirming $\phi$. If any condition fails, the ceiling collapses, the engines are interchangeable here, and Q7 decides. Note what this is <em>not</em>: not "SGLang is faster for agents", but "for this $\phi$, this prefix structure, and this queue depth, the mechanism SGLang exposes better outweighs everything else on the table".</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>The claim that MoE raises $\phi$ relative to a dense model of the same total size is arithmetic I did not complete for a specific checkpoint, and I found no per-model $\phi$ calculation in either tree to check it against (I looked in <code>vllm/benchmarks/</code>, <code>python/sglang/benchmark/</code>, and both profiling paths). The reasoning is that decode reads only active parameters while prefill is compute-bound over every expert the batch touches &mdash; but that expert-activation pattern at large prefill batch is precisely what I cannot verify without a GPU. Do the arithmetic for your checkpoint.</p>
+</div></div></section>
+<section class="sec" id="neither" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">When the answer is neither</h2></div><div class="sec__body"><div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>I did not read TensorRT-LLM or llama.cpp source at any pinned SHA. Everything in this section is sourced to public documentation I fetched while writing, quoted inline. It is a pointer to where to look, not a claim of the kind the vLLM and SGLang sections make. <a href="13-01-head-to-head.html">&sect;13.1</a> describes these projects; this section only states the <em>conditions</em> under which they beat both engines this book is about.</p>
+</div>
+
+<p><b>llama.cpp / Ollama &mdash; when the machine is yours and the weights do not fit.</b> The condition: a single consumer card, a laptop, or CPU-only, with a model too large for VRAM. Its docs describe a "Fast, lightweight, pure C/C++ HTTP server" with continuous batching on by default, <code>-np, --parallel N</code> for "number of server slots", <code>--cache-prompt</code> enabled by default, and <code>-ngl, --gpu-layers</code> for the "max. number of layers to store in VRAM" (<a href="https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md">server README</a>). Note what that has and vLLM at <code>a556f3f</code> does not: GGUF weights and a first-class partial-offload story. It is not single-user &mdash; it batches. It optimises for one machine you own rather than a fleet you rent.</p>
+
+<p><b>TensorRT-LLM &mdash; when you are NVIDIA-only and want NVIDIA's own kernels.</b> NVIDIA's overview describes a "comprehensive open-source library for accelerating and optimizing inference performance of the latest large language models (LLMs) on NVIDIA GPUs", "Architected on Pytorch", with "Seamless distributed inference with tensor, pipeline, and expert parallelism across multiple GPUs and nodes" (<a href="https://nvidia.github.io/TensorRT-LLM/overview.html">overview</a>). The ahead-of-time engine build that used to define it is gone: a migration guide states that "The TensorRT engine backend has been removed", that "PyTorch is now the sole execution backend for TensorRT LLM", and that there is "no engine-build step &mdash; HuggingFace checkpoints load directly" (<a href="https://nvidia.github.io/TensorRT-LLM/legacy/tensorrt-backend-removal.html">migration guide</a>). So the old winning condition &mdash; a shape-stable model you were willing to compile for &mdash; no longer describes it. What remains is the narrower one: NVIDIA hardware you control, and a preference for kernels and parallelism strategies maintained by the vendor of the silicon. <a href="13-01-head-to-head.html">&sect;13.1</a> has the same reconciliation in its table.</p>
+
+<p><b>A hosted API &mdash; when your utilisation is low.</b> Most teams should price this and almost none do. One 8&times;H100 node at a rented $2&ndash;3 per GPU-hour is $16&ndash;24 per hour and $12k&ndash;17k per month <em>whether or not a request arrives</em>. Divide by your actual monthly token volume for your true cost per million tokens, then compare a provider's list price. A deployment at 10% utilisation pays 10&times; its marginal cost, and no engine choice recovers that &mdash; only batching traffic into fewer, busier replicas does. Self-hosting wins on sustained high utilisation, data residency, models nobody hosts, and latency floors an API cannot promise; not on price at low volume. <a href="../10-benchmarking/10-05-profiling-and-capacity.html">&sect;10.5</a> turns a curve into exactly this number.</p>
+
+<p><b>TGI is no longer a live option.</b> Hugging Face's own documentation opens with a caution: "text-generation-inference is now in maintenance mode. Going forward, we will accept pull requests for minor bug fixes, documentation improvements and lightweight maintenance tasks", and recommends "vllm, SGLang, as well as local engines with inter-compatibility such as llama.cpp or MLX" (<a href="https://huggingface.co/docs/text-generation-inference/index">TGI index</a>, fetched while writing). It is a historical note, not a column in a decision matrix.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls: how the decision goes wrong</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">SCREENSHOT</span><h4>Deciding on someone else's curve</h4><p>&sect;10 enumerates six mechanical ways a published number misleads, each with its control. The meta-failure is subtler: a vendor benchmark is chosen to be the workload on which that vendor wins. Not dishonest, not transferable. The only benchmark that decides your deployment is the one whose workload is yours.</p></div>
+  <div class="ve-card"><span class="ve-card__k">FAMILY, NOT ARCH</span><h4>"Qwen is supported"</h4><p>Support is per <code>architectures[0]</code> string, not per family: a new MoE variant, a new vision tower, or a fine-tune that renamed its architecture all miss. On SGLang the miss can also be an import error logged as a warning &mdash; <code>Ignore import error when loading {name}: {e}</code> &mdash; then reported as an unsupported architecture.</p></div>
+  <div class="ve-card"><span class="ve-card__k">FLAG DRIFT</span><h4>The config you set is not the config that ran</h4><p>Both engines rewrite flags at startup from model and hardware. SGLang forces <code>chunked_prefill_size = -1</code> and <code>disable_radix_cache = True</code> for several model classes and for <code>--enable-mis</code>; vLLM derives both from the model config. Assert the resolved config in CI.</p></div>
+  <div class="ve-card"><span class="ve-card__k">DEFAULT LEFT ON</span><h4>Choosing for a mechanism you then do not enable</h4><p>The archetype: picking SGLang for RadixAttention and leaving <code>--schedule-policy</code> at <code>fcfs</code>, so every argument in the decision was about an ordering that is not happening. Whatever you chose on, write down the flag that enables it and assert it.</p></div>
+  <div class="ve-card"><span class="ve-card__k">ONE POINT</span><h4>A single load, reported as a verdict</h4><p>Engines swap places along a load curve: one wins at low load on per-step overhead, the other near saturation on packing. A single-point comparison picks a winner by picking a load.</p></div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on: run the benchmark that decides it</h2></div><div class="sec__body"><p>Six mechanical ways a published comparison misleads, each with its control. Every one is a knob in a harness both projects ship.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The failure, the mechanism, the control. Mechanisms and controls are read from the harnesses in <a href="../10-benchmarking/10-02-benchmark-harnesses.html">&sect;10.2</a> and <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>The failure</th><th>Why the number moves</th><th>The control</th></tr></thead>
+      <tbody>
+        <tr><td>Batch size unstated</td><td>Decode step time is a function of batch size, and the CUDA-graph bucket ladder makes sweeps plateau</td><td>Report <code>max_num_seqs</code> / <code>max-running-requests</code> and the achieved batch size</td></tr>
+        <tr><td>Input/output length distribution unstated</td><td>$\phi$ swings from 0.065 to 0.70 across the three workloads in &sect;3 &mdash; a 10&times; change in what is being measured</td><td>Report the full histogram, not the mean. <a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a> has the shape</td></tr>
+        <tr><td>TTFT quoted where TPOT decides</td><td>They move in opposite directions under chunked prefill and under any prefill-admission knob</td><td>Report TTFT, ITL and E2EL percentiles together, or goodput under a stated SLO</td></tr>
+        <tr><td>Closed loop presented as load</td><td>The client is the admission control, so the offered rate is $N/\bar{W}$ and overload is unreachable</td><td>Open loop with an explicit arrival schedule. Say so if <code>--max-concurrency</code> is set &mdash; latency then excludes client queueing</td></tr>
+        <tr><td>Warmup too short</td><td>Queue relaxation at $\rho = 0.9$ takes ~1,000 requests, not 10 (&sect;10.3). Short runs understate tail latency</td><td>Warm at the load you will measure, flush, then discard one residence time</td></tr>
+        <tr><td>Quantization mismatch</td><td>An FP8 arm against a bf16 arm is a format comparison in an engine comparison's clothes</td><td>Same checkpoint, same format, same KV dtype on both arms &mdash; or run all four cells</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>There is a seventh that is specific to this chapter's subject. The default synthetic dataset in vLLM's harness has <em>no shared prefix at all</em>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/datasets/datasets.py:L573-L577</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Default values copied from benchmark_serving.py for the random dataset.
+    DEFAULT_PREFIX_LEN = 0
+    DEFAULT_RANGE_RATIO = 0.0
+    DEFAULT_INPUT_LEN = 1024
+    DEFAULT_OUTPUT_LEN = 128</code></pre>
+</div>
+
+<p><code>DEFAULT_PREFIX_LEN = 0</code>: <code>--dataset-name random</code> with default flags measures $\eta = 0$, the exact worst case for the mechanism that per &sect;3 decides an agent workload. A comparison run that way cannot see the axis you care about, and most published comparisons are run that way. (<code>DEFAULT_RANGE_RATIO = 0.0</code> is a second problem; <a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a> owns it.)</p>
+
+<p>So measure $\phi$ and $\eta$ first, then run the two arms that differ. Both harnesses ship a shared-prefix generator: vLLM's <code>PrefixRepetitionRandomDataset</code> (<code>vllm/benchmarks/datasets/datasets.py:L4380</code>) and SGLang's <code>generated_shared_prefix</code> with Zipf-distributed prefix groups (<code>python/sglang/benchmark/datasets/generated_shared_prefix.py:L23-L41</code>).</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">step 1 - price the axis on one engine before comparing two</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Same server, same load, two datasets: eta = 0 versus eta high.
+# The delta between these two runs IS your ceiling, measured.
+vllm bench serve --model $MODEL --dataset-name random \
+  --random-input-len 8192 --random-output-len 128 \
+  --request-rate 6 --num-prompts 2000 --seed 1 \
+  --save-result --result-filename eta0.json
+
+curl -X POST localhost:8000/reset_prefix_cache      # needs VLLM_SERVER_DEV_MODE=1
+
+vllm bench serve --model $MODEL --dataset-name prefix_repetition \
+  --request-rate 6 --num-prompts 2000 --seed 1 \
+  --save-result --result-filename etahigh.json
+
+# If the two results are within a few percent, stop. The axis is not live
+# for this workload and you should decide on Q2 and Q7 instead.</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">step 2 - only if step 1 showed a real gap: one harness, two servers</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># One client, both servers, matched semantics, open loop, n &gt;= 3.
+# Cross-harness numbers are NOT comparable - see section 10.2.
+VLLM_SERVER_DEV_MODE=1 vllm serve $MODEL \
+  --max-num-seqs 256 --max-num-batched-tokens 8192 --enable-prefix-caching
+
+python -m sglang.launch_server --model-path $MODEL \
+  --max-running-requests 256 --chunked-prefill-size 8192 \
+  --schedule-policy lpm --port 30000
+
+# Then point ONE harness at each in turn, with identical arrival schedule
+# and seed, and sweep request-rate to get a curve rather than a point.</code></pre>
+</div>
+
+<p>The full protocol &mdash; warmup, flush, saturation, open-loop arrivals, run count, and what you may claim from the resulting $\sigma$ &mdash; is <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>, and the lab <code>11-end-to-end-benchmark</code> in <a href="../LABS.html">Labs</a> walks it. The point of this chapter is that you must run <em>something</em> on <em>your</em> traffic, and step 1 is usually enough to tell you whether step 2 is worth a day.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Derive.</b> Your traffic averages 4,096-token prompts and 512-token outputs on Llama-3-8B at batch 64. Using the constants of &sect;3, compute $T_p$, $t_{\text{step}}$, $T_d$, and $\phi$. At $\eta = 0.7$, what is the ceiling? Would you spend a week comparing prefix-cache implementations?</li>
+<li><b>Read the code.</b> Open <code>python/sglang/srt/mem_cache/registry.py</code> and follow <code>default_radix_cache_factory</code> from L80. List every condition under which the function returns something that is <em>not</em> a <code>UnifiedRadixCache</code>, and say which of them a user could trigger without passing a cache-related flag.</li>
+<li><b>Predict, then verify.</b> You start SGLang on a 24 GB RTX 4090 with no <code>--chunked-prefill-size</code> and no CUDA-graph flags. Predict the two values the server will choose. Then read <code>python/sglang/srt/server_args.py:L4866-L4883</code> and check. Now predict vLLM's <code>max_num_batched_tokens</code> for the same card served via <code>vllm serve</code>, and check against <code>vllm/engine/arg_utils.py:L2609-L2638</code>.</li>
+<li><b>Predict.</b> A teammate reports that a model works in vLLM but SGLang says the architecture is unsupported, and the model file is visibly present in <code>python/sglang/srt/models/</code>. Name the exact log line you would grep for and the mechanism that produced it.</li>
+<li><b>Design.</b> You must serve an embedding model and a chat model behind one API. Which of the four inputs in &sect;2 is decisive, and why does every argument in &sect;3 evaluate to zero for the embedding half? What would you deploy?</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> $T_p = 2 \times 7.505{\times}10^{9} \times 4096 / 9.894{\times}10^{14} = 62.1$ ms. Mid-run context $= 4352$, so KV $= 64 \times 4352 \times 131072 = 36.5$ GB and $t_{\text{step}} = (15.01 + 36.5)/3350 = 15.4$ ms. $T_d = 511 \times 15.4/64 = 123.0$ ms. $\phi = 62.1/185.1 = 0.336$. Ceiling at $\eta = 0.7$ is $1/(1-0.235) = 1.31\times$ &mdash; above the 1.25&times; line but not far, and the gap <em>between two engines'</em> implementations is a fraction of that 31%. Run step 1 of &sect;10 for an afternoon instead of a week.</p>
+  <p><b>2.</b> Non-<code>UnifiedRadixCache</code> returns: <code>ChunkCache</code>, <code>PureSWAChunkCache</code> or <code>SWAChunkCache</code> when chunked prefill is set and the radix cache is disabled; <code>RadixCacheCpp</code> under <code>SGLANG_EXPERIMENTAL_CPP_RADIX_TREE</code>; <code>PureSWARadixCache</code> for a pure sliding-window model; <code>LMCRadixCache</code> under LMCache; the FlexKV factory under <code>--enable-flexkv</code>. The branches a user reaches <em>without</em> a cache flag are the chunk-cache ones, because the model-family handlers set <code>disable_radix_cache</code> themselves &mdash; EmbeddingGemma, HRM-Text, or <code>--enable-mis</code>.</p>
+  <p><b>3.</b> 24 GB satisfies <code>gpu_mem &lt; 35 * 1024</code>, so SGLang picks <code>chunked_prefill_size = 2048</code> and, at <code>tp_size &lt; 4</code>, <code>decode.max_bs = 24</code>. vLLM falls through both the $\ge$160 GiB and $\ge$70 GiB branches into the <code>else</code>, so <code>vllm serve</code> (<code>UsageContext.OPENAI_API_SERVER</code>) gets <code>max_num_batched_tokens = 2048</code> and <code>max_num_seqs = 256</code>. Note the asymmetry: a decode batch ceiling of 24 from one engine, 256 concurrent sequences from the other. A naive A/B on a 4090 compares two very different configurations.</p>
+  <p><b>4.</b> Grep the SGLang startup log for <code>Ignore import error when loading</code>, from <code>import_model_classes</code> (<code>python/sglang/srt/models/registry.py:L95-L110</code>), which imports every module inside a <code>try</code> and, when <code>strict</code> is false, warns and <code>continue</code>s. The module never registers its <code>EntryClass</code>, so the architecture is absent and the user sees "unsupported". Usual root cause: a missing optional dependency or a kernel package that did not build for the installed CUDA.</p>
+  <p><b>5.</b> Gate 1 is decisive: 65 pooling-family registry entries across five vLLM dicts against SGLang's thirteen dedicated pooling modules. &sect;3 evaluates to zero for the embedding half because <code>is_prefix_caching_supported</code> returns <code>False</code> for encoder-only pooling models &mdash; bidirectional attention makes a prefix depend on later tokens, so there is nothing to reuse. Deploy them as separate replicas regardless: different memory profiles, different batching, and one has no prefill/decode split at all. Putting both behind one router is a routing problem, not an engine problem.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li>Compute $\phi$, the prefill share of GPU time, before reading anyone's comparison. Perfect prefix reuse is bounded by $1/(1-\phi\eta)$: for Llama-3-8B at 512-in/1024-out that ceiling is 1.06&times; and radix-versus-hash is noise; at 8192-in/128-out it is 2.71&times; and nothing else matters. Both derived, neither measured.</li>
+<li>Model family and hardware are gates that eliminate; workload shape is the axis that discriminates among survivors; team capacity is the tiebreak. Running them in the wrong order is the standard failure &mdash; you pick on the axis and meet the gate in production.</li>
+<li>The shared-prefix decision is about scheduling, not data structures. SGLang's policy enum has six members, two of which consult the cache; vLLM's has two, neither of which does. (The <code>--schedule-policy</code> flag advertises <em>seven</em> choices &mdash; the six enum members plus <code>priority</code>, which is not a policy of its own but a layer over <code>fcfs</code> or <code>lof</code>, asserted as such at <code>python/sglang/srt/server_args.py:L9333-L9336</code>.) But SGLang's default is <code>fcfs</code>, so the lever you chose the engine for is off until you set it &mdash; and it downgrades past 128 queued requests.</li>
+<li>Both engines rewrite your flags at startup from the model config, the device, and other flags. In SGLang a multimodal checkpoint forces <code>chunked_prefill_size = -1</code>; EmbeddingGemma, HRM-Text and <code>--enable-mis</code> additionally force <code>disable_radix_cache = True</code>, which swaps <code>UnifiedRadixCache</code> for <code>ChunkCache</code> &mdash; an object whose <code>match_prefix</code> returns empty. vLLM derives prefix caching and chunked prefill from the model's attention type. Assert the resolved config in CI, not the flags you passed.</li>
+<li>The gates are decisive in opposite directions and on non-obvious surfaces: TPU is vLLM-only; Ascend NPU and Apple MLX are in-tree in SGLang; embeddings and rerankers are 65 vLLM registry entries across five dicts against 13 dedicated SGLang modules; pure-SSM models exist only in vLLM; and at <code>a556f3f</code> GGUF and bitsandbytes are SGLang-only.</li>
+<li>The comparison that decides your deployment is one you run: two servers, one harness, matched flags, open loop, a curve rather than a point, on a dataset whose $\eta$ resembles yours. <code>--dataset-name random</code> defaults to <code>DEFAULT_PREFIX_LEN = 0</code>, which measures $\eta = 0$ &mdash; the one case where the axis cannot appear.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><a href="13-01-head-to-head.html">&sect;13.1</a> is the comparison matrix this chapter deliberately does not duplicate: one row per design decision, with the "why they chose this" column that makes the tradeoffs legible. Read it before running the procedure here, not instead of it.</li>
+<li><a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a> for measuring $\eta$ and the token histogram that feeds $\phi$; <a href="../10-benchmarking/10-02-benchmark-harnesses.html">&sect;10.2</a> for why the two harnesses' numbers cannot share a table; <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> for the protocol; <a href="../10-benchmarking/10-05-profiling-and-capacity.html">&sect;10.5</a> for turning a curve into cost per million tokens, which is the input to the hosted-API comparison in &sect;9.</li>
+<li><a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> and <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> for the two cache mechanisms, and <a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a> for the prefill-admission machinery whose knobs &sect;4 compares.</li>
+<li><a href="../11-vllm-deep-dive/11-05-vllm-extension-points.html">&sect;11.5</a> and <a href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html">&sect;12.4</a> for the extension seams behind the team-capacity section, including what each project explicitly refuses to make extensible.</li>
+<li><a href="https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md">llama.cpp server README</a>, <a href="https://nvidia.github.io/TensorRT-LLM/overview.html">TensorRT-LLM overview</a>, and the <a href="https://huggingface.co/docs/text-generation-inference/index">TGI index</a> &mdash; the three documents behind &sect;9. Fetch them yourself; all three moved in the last year and the TGI one in particular changed what it recommends.</li>
+<li>The pinned trees themselves are the reference for Q1 and Q2: <code>vllm/model_executor/models/registry.py</code>, <code>python/sglang/srt/models/registry.py</code>, <code>vllm/platforms/</code>, and <code>python/sglang/srt/hardware_backend/</code>. Every count in the table in &sect;5 is reproducible with <code>ls</code> and <code>grep</code>, and you should reproduce it at your own SHA rather than trusting mine.</li>
+</ul></div></section>
+<div class="pager"><a href="13-01-head-to-head.html"><div class="pager__k">← Previous</div><div class="pager__t">Head-to-head design comparison</div></a><a class="pager__next" href="13-03-open-problems.html"><div class="pager__k">Next →</div><div class="pager__t">Open problems</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: two gates, one axis, one tiebreak</a>
+<a href="#first-principles">First principles: compute the ceiling before you compare</a>
+<a href="#workload-shape">The axis: workload shape, mechanism by mechanism</a>
+<a href="#the-gates">The two gates: model family and hardware</a>
+<a href="#team-capacity">The tiebreak: what each engine costs you to operate</a>
+<a href="#decision-procedure">The decision procedure</a>
+<a href="#worked-trace">Worked trace: one workload through the procedure</a>
+<a href="#neither">When the answer is neither</a>
+<a href="#pitfalls">Pitfalls: how the decision goes wrong</a>
+<a href="#hands-on">Hands-on: run the benchmark that decides it</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

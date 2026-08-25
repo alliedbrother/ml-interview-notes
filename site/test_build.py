@@ -78,9 +78,43 @@ def main() -> int:
         for bad in set(re.findall(r'href="([^"]*\.md(?:#[^"]*)?)"', html_text)):
             check(False, f"{rel_page}: unrewritten markdown link -> {bad}")
 
-        # ---- shared stylesheet is linked, not inlined per page
-        check('href="/assets/style.css"' in html_text,
-              f"{rel_page}: missing shared stylesheet link")
+        # ---- generated pages link the shared stylesheet; prebuilt course pages
+        #      carry their own CSS and are re-themed by the bridge instead
+        if 'href="/assets/prebuilt-bridge.css"' not in html_text:
+            check('href="/assets/style.css"' in html_text,
+                  f"{rel_page}: missing shared stylesheet link")
+
+    # ---- prebuilt courses: every page re-themed and given the site bar, and
+    #      every relative link inside the tree resolves to a real file
+    import yaml
+    for cfg_file in (CONTENT / "courses").glob("*/course.yml"):
+        cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
+        if cfg.get("type") != "prebuilt":
+            continue
+        slug = cfg.get("slug", cfg_file.parent.name)
+        root = OUT / "courses" / slug
+        check(root.is_dir(), f"prebuilt course {slug}: not built")
+        pages_p = sorted(root.rglob("*.html"))
+        check(bool(pages_p), f"prebuilt course {slug}: no pages")
+        check((root / cfg.get("entry", "index.html")).is_file(),
+              f"prebuilt course {slug}: missing entry page")
+        rel_re = re.compile(r'(?:href|src)="(?!https?:|/|#|mailto:|data:)([^"#?]+)')
+        for page in pages_p:
+            text = page.read_text(encoding="utf-8")
+            rel_page = page.relative_to(OUT)
+            check('href="/assets/prebuilt-bridge.css"' in text,
+                  f"{rel_page}: prebuilt page not re-themed")
+            # must be in the BODY: a naive injection can bury it in a CSS
+            # comment inside <head>, where the browser discards it silently
+            head_end = text.find("</head>")
+            bar_at = text.find('class="topbar"')
+            check(bar_at != -1 and head_end != -1 and bar_at > head_end,
+                  f"{rel_page}: site bar missing or not inside <body>")
+            for target in set(rel_re.findall(text)):
+                check((page.parent / target).exists(),
+                      f"{rel_page}: dead relative link -> {target}")
+        check((OUT / "assets" / "prebuilt-bridge.css").is_file(),
+              "missing assets/prebuilt-bridge.css")
 
     # ---- assets exist
     for asset in ("style.css", "page.js", "mermaid.js", "katex-init.js", "favicon.svg"):

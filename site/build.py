@@ -301,6 +301,7 @@ class Course:
     def __init__(self, directory: Path):
         self.dir = directory
         cfg = yaml.safe_load((directory / "course.yml").read_text(encoding="utf-8"))
+        self.order = cfg.get("order", 99)
         self.slug = cfg.get("slug", directory.name)
         self.title = cfg["title"]
         self.subtitle = cfg.get("subtitle", "")
@@ -312,6 +313,18 @@ class Course:
         self.footer_html = cfg.get("footer_html", "")
         self.tracks = cfg.get("tracks", [])
         self.base = f"/courses/{self.slug}/"
+
+        # A "prebuilt" course ships as finished HTML rather than Markdown. Its
+        # pages are copied verbatim and re-themed through CSS custom properties,
+        # so no conversion can corrupt the content. See render_prebuilt().
+        self.prebuilt = cfg.get("type") == "prebuilt"
+        self.module_count = cfg.get("module_count", 0)
+        self.pages, self.modules, self.index = [], [], None
+        if self.prebuilt:
+            self.html_dir = directory / cfg.get("source", "html")
+            if not self.html_dir.is_dir():
+                raise SystemExit(f"course {self.slug}: missing prebuilt source {self.html_dir}")
+            return
 
         files = sorted(p for p in directory.glob("*.md") if re.match(r"\d\d-", p.name))
         if not files:
@@ -344,7 +357,9 @@ class Site:
         self.domain = cfg["domain"]
         self.repo = cfg["repo"]
         self.nav = cfg.get("nav", [])
-        self.courses = [Course(d) for d in sorted((CONTENT / "courses").iterdir()) if d.is_dir()]
+        self.courses = sorted(
+            (Course(d) for d in sorted((CONTENT / "courses").iterdir()) if d.is_dir()),
+            key=lambda c: (c.order, c.title))
         # Notes are two levels: a category is content/notes/<slug>.md, and its
         # topics live in content/notes/<slug>/*.md. A topic is a page inside its
         # category, never a sibling of it.
@@ -570,6 +585,12 @@ def render_note(site: Site, page: Page, md: MarkdownIt, urls: dict[Path, str]) -
                     body=body, scripts=MATH_SCRIPTS + extra), env
 
 
+def course_meta(c: "Course") -> str:
+    n = c.module_count or len(c.modules)
+    unit = "chapters" if c.prebuilt else "modules"
+    return f"{n} {unit} · {c.level}" if c.level else f"{n} {unit}"
+
+
 def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
     meta_html = f'<div class="card__meta">{html.escape(meta)}</div>' if meta else ""
     return (
@@ -579,6 +600,43 @@ def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
         f'<p class="card__b">{html.escape(blurb)}</p>'
         f"{meta_html}</a>"
     )
+
+
+def render_prebuilt(site: Site, course: Course) -> int:
+    """Copy a prebuilt HTML course into the site and graft the site chrome on.
+
+    The content is never parsed or rewritten — only two injections happen per
+    page: a stylesheet link that re-points the course's CSS custom properties at
+    the site palette, and the shared top bar. Both go in as late as possible so
+    the page's own inline <style> loses the cascade to ours.
+    """
+    dest = OUT / course.base.strip("/")
+    shutil.copytree(course.html_dir, dest,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
+
+    bar = topbar(site, "/courses/")
+    bridge_link = '<link rel="stylesheet" href="/assets/prebuilt-bridge.css">\n</head>'
+    touched = 0
+    for page in sorted(dest.rglob("*.html")):
+        text = page.read_text(encoding="utf-8")
+        if "prebuilt-bridge.css" in text:
+            continue
+        head_end = text.find("</head>")
+        if head_end == -1:
+            continue
+        # Anchor the body search AFTER </head>. These pages inline their CSS, and
+        # one of the comments in it reads "overridden by <body data-track>" — a
+        # naive search matches that comment and buries the bar inside <head>,
+        # where the browser silently discards it.
+        m = re.search(r"<body[^>]*>", text[head_end:])
+        if not m:
+            continue
+        body_end = head_end + m.end()
+        text = (text[:head_end] + bridge_link
+                + text[head_end + len("</head>"):body_end] + "\n" + bar + text[body_end:])
+        page.write_text(text, encoding="utf-8")
+        touched += 1
+    return touched
 
 
 STATUS_LABEL = {"done": "Done", "progress": "In progress", "planned": "Planned"}
@@ -672,6 +730,11 @@ def build() -> int:
 
     # ---- courses
     for course in site.courses:
+        if course.prebuilt:
+            n = render_prebuilt(site, course)
+            pages_written += n
+            print(f"  {course.base:<58} {n:>4} prebuilt pages")
+            continue
         for page in course.pages:
             doc, env = render_module(site, course, page, md, urls)
             write(page.out_path, doc)
@@ -694,7 +757,7 @@ def build() -> int:
     # ---- courses index
     course_cards = "\n".join(
         card(c.base, "Course", f"{c.title}{f' — {c.subtitle}' if c.subtitle else ''}",
-             c.blurb, f"{len(c.modules)} modules · {c.level}" if c.level else f"{len(c.modules)} modules")
+             c.blurb, course_meta(c))
         for c in site.courses
     )
     write(OUT / "courses" / "index.html", render_landing(
@@ -757,6 +820,10 @@ def build() -> int:
         dest.mkdir(parents=True, exist_ok=True)
         for f in page_assets.glob("*.js"):
             shutil.copyfile(f, dest / f.name)
+
+    bridge_src = THEME / "prebuilt" / "bridge.css"
+    if bridge_src.is_file():
+        shutil.copyfile(bridge_src, assets / "prebuilt-bridge.css")
 
     (OUT / "CNAME").write_text(site.domain + "\n", encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")

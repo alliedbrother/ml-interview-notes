@@ -1,0 +1,2152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Formats and kernels: FP8, INT8, INT4, Marlin, Machete — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="kernels">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i is-current" href="04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 4 · Quantization · 04-03</div>
+<h1>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>csrc/libtorch_stable/quantization/marlin/</code></li><li><code>csrc/libtorch_stable/quantization/machete/</code></li><li><code>vllm/model_executor/kernels/linear/</code></li><li><code>python/sglang/srt/layers/quantization/fp8_utils.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Quantise Llama-3-70B's gate projection to INT4 and the weight shrinks from 470&nbsp;MB to
+121&nbsp;MB. Then write the obvious kernel &mdash; dequantise to bf16, call cuBLAS &mdash; and the layer gets
+<em>2.3&times; slower</em> than it was in bf16. Everything in this chapter exists because of that number.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take one weight matrix from Llama-3-70B: <code>gate_proj</code>, shape $N \times K = 28672 \times 8192$,
+234.9&nbsp;M parameters. At batch $M = 1$ the GEMM is $2MNK = 0.47$&nbsp;GFLOP &mdash; 0.47&nbsp;microseconds of
+H100 tensor-core time at the 989.4&nbsp;TFLOP/s bf16 peak <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>
+fixed. The weight read is 0.47&nbsp;GB, which at 3.35&nbsp;TB/s costs 140&nbsp;&micro;s. The layer is
+300&times; memory bound; only the weight bytes matter.</p>
+
+<p>INT4 with group size 128 and fp16 scales stores $b_{\text{eff}} = 4 + 16/128 = 4.125$ bits per weight
+(<a href="../00-foundations/00-05-numerics.html">§0.5</a> owns that formula), so 121&nbsp;MB, so 36&nbsp;&micro;s.
+That is the prize: 3.9&times;. Now count what the naive implementation actually moves.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; HBM traffic for one Llama-3-70B <code>gate_proj</code> at M=1, H100 SXM, 3.35 TB/s. Arithmetic, not measurement.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Strategy</th><th>HBM bytes moved</th><th class="num">Time</th><th class="num">vs. bf16</th></tr></thead>
+      <tbody>
+        <tr><td>bf16 GEMM</td><td>read 470&nbsp;MB weights</td><td class="num">140 &micro;s</td><td class="num">1.00&times;</td></tr>
+        <tr><td>Dequantise to HBM, then GEMM</td><td>read 121 + write 470 + read 470 = 1061&nbsp;MB</td><td class="num">317 &micro;s</td><td class="num">0.44&times;</td></tr>
+        <tr><td>Fused: dequant inside the GEMM</td><td>read 121&nbsp;MB packed</td><td class="num">36 &micro;s</td><td class="num">3.87&times;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The middle row is not a strawman &mdash; it is what you get from <code>torch.matmul(x, dequant(w))</code>,
+and it is what every "we support INT4" implementation does before somebody writes a real kernel. The
+quantised weight only pays if it stays packed all the way from HBM into the registers that feed the
+tensor core. That constraint &mdash; <em>never materialise the dequantised weight in memory</em> &mdash; is
+the entire design brief for Marlin, Machete, and every kernel in this chapter.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Scope</span>
+  <p>Bit layouts, dynamic range and block scaling are <a href="../00-foundations/00-05-numerics.html">§0.5</a>.
+  How the INT4 values were chosen is <a href="04-02-gptq-awq-smoothquant.html">§4.2</a>. Whether the
+  3.87&times; survives contact with a real serving workload is <a href="04-04-when-quantization-pays.html">§4.4</a>.
+  KV-cache quantisation kernels are <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">§2.5</a>.
+  This chapter is about the instruction set and the GEMM.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A tensor core accepts a fixed menu of operand types. If your format is on the menu, the GEMM is an
+ordinary GEMM and the only interesting question is where the scale factors get applied. If your format
+is <em>not</em> on the menu &mdash; and INT4 weights against bf16 activations are not &mdash; the kernel must
+convert, and the only question that matters is <em>where</em>. Convert in HBM and you lose. Convert in
+shared memory and you have merely moved the problem. Convert in registers, one 32-bit word at a time,
+with the conversion instructions interleaved into the same instruction stream as the <code>mma</code>s
+they feed, and the conversion is free: it runs on the integer/ALU pipes while the tensor cores are busy.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the mixed-precision GEMM pipeline, W4A16.</b>
+    The packed representation survives global &rarr; shared &rarr; register. Only the last hop upconverts,
+    and it overlaps the previous tile's <code>mma</code>.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    G["HBM: B packed int4<br/>k=128 x n=128 tile = 8 KB"] -->|"cp.async.cg 16 B/thread<br/>fetch_to_shared(pipe)"| S
+    S["Shared memory, STILL PACKED<br/>4 stages x 8 KB = 32 KB"] -->|"ld.shared 32-bit word<br/>fetch_to_registers(k+1)"| R
+    R["Registers: I4 frag_b_quant, double buffered<br/>1 word = 8 nibbles = 8 weights"] -->|"2x LOP3 plus hsub2<br/>dequant()"| F
+    F["Registers: FragB frag_b0, frag_b1<br/>8 x fp16 in mma lane order"] -->|"__hmul2 group scale<br/>scale()"| Fs
+    Fs["Scaled fp16 B fragments"] --> M
+    A["HBM: A bf16 activations"] -->|"cp.async + ldmatrix"| RA["Registers: frag_a[2][m]"]
+    RA --> M
+    M["mma.m16n8k16.f32.bf16.bf16.f32<br/>accumulate in fp32 frag_c"]
+    M -->|"next k, other register buffer"| R
+    M --> O["Epilogue: reduce across k-splits,<br/>cast to bf16, store"]
+  </script>
+</div>
+
+<p>Two register buffers indexed <code>[k % 2]</code> make the overlap explicit: the kernel issues
+<code>fetch_to_registers(k+1)</code> before <code>matmul(k)</code>, so the loads and the LOP3 conversions for
+tile $k{+}1$ are in flight while the tensor cores chew on tile $k$. This is classic software pipelining;
+what is unusual is that a whole <em>numeric format conversion</em> has been hidden inside the slack.</p></div></section>
+<section class="sec" id="what-the-tensor-cores-provide" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What the tensor cores actually provide</h2></div><div class="sec__body"><p>The definitive statement of which formats exist in hardware is not a marketing slide &mdash; it is the
+list of inline-PTX strings a kernel is willing to emit. Marlin's <code>mma</code> wrapper is that list, and
+it is short:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/marlin_mma.h:L68-L93</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    } else if constexpr (std::is_same&lt;scalar_t, nv_bfloat16&gt;::value) {
+      float* c = reinterpret_cast&lt;float*&gt;(&amp;frag_c);
+      asm volatile(
+          "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+            "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+    } else if constexpr (std::is_same&lt;scalar_t, __nv_fp8_e4m3&gt;::value) {
+      float* c = reinterpret_cast&lt;float*&gt;(&amp;frag_c);
+      asm volatile(
+          "mma.sync.aligned.m16n8k16.row.col.f32.e4m3.e4m3.f32 "
+          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
+          : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+          : "r"(a[idx * 2]), "r"(a[idx * 2 + 1]), "r"(b[idx]), "f"(c[0]),
+            "f"(c[1]), "f"(c[2]), "f"(c[3]));
+    } else if constexpr (std::is_same&lt;scalar_t, int8_t&gt;::value) {
+      int32_t* c = reinterpret_cast&lt;int32_t*&gt;(&amp;frag_c);
+      asm volatile(
+          "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32.satfinite "
+          "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%7,%8,%9,%10};\n"
+          : "=r"(c[0]), "=r"(c[1]), "=r"(c[2]), "=r"(c[3])
+          : "r"(a[idx * 2]), "r"(a[idx * 2 + 1]), "r"(b[idx]), "r"(c[0]),
+            "r"(c[1]), "r"(c[2]), "r"(c[3]));
+    }
+  } else if (k_size == 32) {</code></pre>
+</div>
+
+<p>Four operand types &mdash; fp16, bf16, e4m3 FP8, s8 &mdash; and one shape family, $m16n8k$ with $k \in
+\{8, 16, 32\}$ depending on element width (<code>m16n8k8</code> on SM75, <code>m16n8k32</code> for FP8 and
+INT8 at <code>marlin_mma.h:L93-L133</code>). All accumulate in fp32 (or s32), all take A from registers and
+B from registers. <strong>There is no INT4 entry.</strong> And even if the ISA offered an s4&times;s4 op, W4A16
+could not use it: the A operand is bf16 activations, and tensor-core instructions require both operands
+to share a type.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Format &times; hardware support, read out of the kernels that emit the instructions. "Native" means a tensor-core instruction takes the stored type directly.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>W&times;A pair</th><th>Instruction</th><th>Native?</th><th>Source</th></tr></thead>
+      <tbody>
+        <tr><td>fp16 / bf16 &times; same</td><td><code>mma.m16n8k16.f32.{f16,bf16}.…f32</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L39</code>, <code>:L71</code></td></tr>
+        <tr><td>INT8 &times; INT8</td><td><code>mma.m16n8k{16,32}.s32.s8.s8.s32.satfinite</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L87</code>, <code>:L127</code></td></tr>
+        <tr><td>FP8 e4m3 &times; e4m3</td><td><code>mma.m16n8k{16,32}.f32.e4m3.e4m3.f32</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L79</code>, <code>:L97</code></td></tr>
+        <tr><td>Hopper FP8/bf16, warpgroup</td><td><code>wgmma</code> via <code>GMMA::rs_op_selector</code> (A from registers)</td><td><span class="pill pill--verified">native</span></td><td><code>machete_prepacked_layout.cuh:L100-L103</code></td></tr>
+        <tr><td>NVFP4 &times; NVFP4, SM100</td><td><code>OpClassBlockScaledTensorOp</code> on <code>nv_float4_t&lt;float_e2m1_t&gt;</code></td><td><span class="pill pill--verified">native</span></td><td><code>nvfp4_scaled_mm_kernels.cu:L77-L98</code></td></tr>
+        <tr><td>INT4 &times; bf16 (W4A16)</td><td>none &mdash; upconvert to bf16 first</td><td><span class="pill pill--blocked">emulated</span></td><td><code>dequant.h:L107-L119</code></td></tr>
+        <tr><td>INT4 &times; FP8 (W4A8)</td><td>none &mdash; upconvert to e4m3, then <code>m16n8k32</code></td><td><span class="pill pill--blocked">emulated</span></td><td><code>marlin_int4_fp8_preprocess.cu</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The table is the chapter. Everything below the double line needs a conversion inside the GEMM; everything
+above it needs only a scale in the epilogue. Blackwell's block-scaled tensor op is the one place where a
+sub-byte format is genuinely native &mdash; the scale factors are a second tensor input laid out by
+<code>Sm100BlkScaledConfig::tile_atom_to_shape_SFA</code> (<code>nvfp4_scaled_mm_kernels.cu:L155-L168</code>),
+so the hardware applies the per-16-element scale itself.</p></div></section>
+<section class="sec" id="dequant-inside-the-pipeline" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Dequantising inside the pipeline</h2></div><div class="sec__body"><p>Converting int4 to fp16 the obvious way costs a shift, a mask, an integer-to-float convert and a multiply
+per value. The trick vLLM inherits from FasterTransformer costs roughly one instruction per <em>pair</em> of
+values, by constructing the fp16 bit pattern directly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/dequant.h:L107-L119</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;&gt;
+__device__ inline void dequant&lt;half2, vllm::kU4B8.id(), true&gt;(int q,
+                                                              half2* frag_b) {
+  const int MASK = 0x000f000f;
+  const int EX = 0x64006400;
+  // Guarantee that the `(a &amp; b) | c` operations are LOP3s.
+  int lo = lop3&lt;(0xf0 &amp; 0xcc) | 0xaa&gt;(q, MASK, EX);
+  q &gt;&gt;= 4;
+  int hi = lop3&lt;(0xf0 &amp; 0xcc) | 0xaa&gt;(q, MASK, EX);
+
+  frag_b[0] = *reinterpret_cast&lt;half2*&gt;(&amp;lo);
+  frag_b[1] = *reinterpret_cast&lt;half2*&gt;(&amp;hi);
+}</code></pre>
+</div>
+
+<p><code>0x6400</code> is fp16 for 1024. Splicing a 4-bit integer into the low mantissa bits of that pattern
+yields $1024 + v$ exactly, for $v \in [0,15]$, with no rounding. One <code>LOP3.LUT</code> instruction &mdash;
+a single three-input lookup on the ALU &mdash; produces <em>two</em> such fp16 values packed in one register.
+The $-1024$ correction and the $-8$ zero point are then folded into one <code>__hsub2</code> against the
+constant <code>0x64086408</code> (<code>dequant.h:L121-L143</code>), and the group scale into one
+<code>__hmul2</code>. Cost: about 4 ALU instructions per 4 weights, issued on pipes the tensor cores are not
+using.</p>
+
+<p>Group scaling is why this must happen <em>inside</em> the k-loop. With per-tensor or per-channel scales the
+scale factors out of the sum,
+<span class="math-inline">$\sum_k (s_a a_{ik})(s_b b_{kj}) = s_a s_b \sum_k a_{ik} b_{kj}$</span>, and can be
+applied once at the end. With group size 128 the scale <em>changes every 128 values of k</em> and cannot be
+hoisted out of the reduction. Marlin therefore scales the register fragment before every <code>mma</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/marlin_template.h:L104-L116</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>// Multiply dequantized values by the corresponding quantization scale; used
+// only for grouped quantization.
+template &lt;vllm::ScalarTypeId type_id&gt;
+__device__ inline void scale(typename MarlinScalarType&lt;type_id&gt;::FragB&amp; frag_b,
+                             typename MarlinScalarType&lt;type_id&gt;::FragS&amp; frag_s,
+                             int i) {
+  using scalar_t = typename MarlinScalarType&lt;type_id&gt;::scalar_t;
+  using scalar_t2 = typename MarlinScalarType&lt;type_id&gt;::scalar_t2;
+  scalar_t2 s = MarlinScalarType&lt;type_id&gt;::num2num2(
+      reinterpret_cast&lt;scalar_t*&gt;(&amp;frag_s)[i]);
+  frag_b[0] = __hmul2(frag_b[0], s);
+  frag_b[1] = __hmul2(frag_b[1], s);
+}</code></pre>
+</div>
+
+<h3>Where the batch-size crossover is</h3>
+
+<p>A weight-only kernel wins while the weight stream dominates and loses once the tensor cores saturate.
+Equate the two: streaming $NK$ weights at $b_{\text{eff}}$ bits costs $NK b_{\text{eff}}/(8\,\text{BW})$;
+the math costs $2MNK/P$ where $P$ is the peak of the instruction the kernel <em>actually issues</em>. Setting
+them equal:</p>
+
+<div class="math-display">$$ M^{*} \;=\; \frac{b_{\text{eff}}}{8} \cdot \frac{P}{2\,\mathrm{BW}} $$</div>
+
+<p>with $b_{\text{eff}}$ the effective bits per stored weight (<a href="../00-foundations/00-05-numerics.html">§0.5</a>),
+$P$ the tensor-core peak in FLOP/s, $\mathrm{BW}$ HBM bandwidth. On H100 SXM ($P_{\text{bf16}} = 989.4$
+TFLOP/s, $P_{\text{fp8}} = 1978.9$ TFLOP/s dense, $\mathrm{BW} = 3.35$ TB/s):</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">M* &asymp; 76</div><div class="kpi__l">W4A16 (b_eff 4.125, bf16 mma)</div></div>
+  <div class="kpi"><div class="kpi__n">M* &asymp; 148</div><div class="kpi__l">W8A16 FP8 weights, bf16 mma</div></div>
+  <div class="kpi"><div class="kpi__n">M* &asymp; 295</div><div class="kpi__l">W8A8 FP8, fp8 mma</div></div>
+</div>
+
+<p>These are the same crossover <a href="04-01-the-design-space.html#decision">&sect;4.1.4</a> derives as
+$B^{*} = I^{*}b_w/2$, refined by the group metadata: &sect;4.1 charges W4A16 a flat 0.5 B per weight and gets
+74, this section charges the 4.125 effective bits and gets 76. The scale bytes you also have to stream keep
+you memory-bound a fraction longer. W8A16 (148) and W8A8 FP8 (295) are identical in both, since neither
+carries per-group metadata.</p>
+
+<p>These are derived numbers, and they are the reason every dispatcher in this chapter buckets on $M$ at
+16 / 64 / 128 / 256. Marlin's own switch between its small-batch and large-batch tile tables fires at
+$M > 16$; CUTLASS's FP8 dispatcher has boundaries at 16, 64, 128; Machete's generated heuristic has
+16, 32, 64, 128, 256. The hardware ratio puts the interesting region at a few tens of rows, and that is
+where the tuning effort goes.</p></div></section>
+<section class="sec" id="marlin" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Marlin: making the layout do the work</h2></div><div class="sec__body"><p>Marlin (Elias Frantar, IST-DASLab; the vLLM copy carries <em>"Adapted from
+https://github.com/IST-DASLab/marlin"</em> at <code>marlin_template.h:L19</code>) starts from an observation
+about the <code>mma.m16n8k16</code> B fragment. For a $16(k) \times 8(n)$ B tile, lane $t$ of the warp owns
+exactly four elements: column $n = t/4$, rows $k \in \{2r,\, 2r{+}1,\, 2r{+}8,\, 2r{+}9\}$ where $r = t \bmod 4$.
+That is a strided, interleaved scatter &mdash; nothing like row-major order.</p>
+
+<p>Every W4A16 kernel has to land its dequantised values in those lanes. Most do it with shared-memory gathers
+or warp shuffles after conversion. Marlin does it <em>once, offline</em>, in a repack pass, so that at runtime
+one contiguous 32-bit load plus two <code>LOP3</code>s produce the eight fp16 values a lane needs, in the order
+it needs them, with zero cross-lane movement. The repack kernel is where the mapping is written down:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu:L122-L134</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    auto warp_id = threadIdx.x / 32;
+    auto th_id = threadIdx.x % 32;
+
+    if (warp_id &gt;= 4) {
+      return;
+    }
+
+    int tc_col = th_id / 4;
+    int tc_row = (th_id % 4) * (is_a_8bit ? 4 : 2);
+
+    constexpr int tc_offsets[4] = {0, 1, 8, 9};
+
+    int cur_n = (warp_id / (is_a_8bit ? 2 : 1)) * 16 + tc_col;</code></pre>
+</div>
+
+<p><code>tc_col</code>, <code>tc_row</code> and <code>tc_offsets = {0,1,8,9}</code> <em>are</em> the mma fragment
+map, transcribed. The thread gathers four values for column <code>cur_n</code> into <code>vals[0..3]</code>
+and four for column <code>cur_n + 8</code> into <code>vals[4..7]</code>, then writes them in permuted nibble
+order:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu:L199-L209</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if constexpr (!is_a_8bit &amp;&amp; num_bits == 4) {
+      int pack_idx[8] = {0, 2, 4, 6, 1, 3, 5, 7};
+
+      uint32_t res = 0;
+#pragma unroll
+      for (int i = 0; i &lt; 8; i++) {
+        res |= vals[pack_idx[i]] &lt;&lt; (i * 4);
+      }
+
+      out_ptr[out_offset + th_id * 4 + warp_id] = res;</code></pre>
+</div>
+
+<p><code>{0,2,4,6,1,3,5,7}</code> looks arbitrary until you line it up against the <code>LOP3</code>. The mask
+<code>0x000f000f</code> selects nibbles 0 and 4 into <code>frag_b[0]</code>; after <code>q &gt;&gt;= 4</code> it
+selects nibbles 1 and 5 into <code>frag_b[1]</code>. So the dequant emits, in order, nibbles
+$\langle 0, 4, 1, 5 \rangle$. The permutation places $\text{vals}[0..3]$ at exactly those nibble positions,
+and $\text{vals}[4..7]$ at nibbles $\langle 2,6,3,7 \rangle$ &mdash; which is what a second dequant of
+<code>q &gt;&gt; 8</code> reads. One word in, two fragments out, no shuffles.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; Marlin's nibble permutation, for lane t = 5 of warp 0.</b>
+    Left: the four (k, n) elements lane 5 owns in the m16n8k16 B fragment. Right: how the repack packs eight
+    of them into one 32-bit word so the LOP3 dequant emits them in fragment order.</p>
+  <svg viewBox="0 0 960 380" width="100%" role="img" aria-label="Marlin repack: mapping of lane 5's B-fragment elements into nibble positions of one packed 32-bit word" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <text x="0" y="14" font-size="11" fill="var(--text-dim)">B tile, m16n8k16 fragment map &mdash; rows k, cols n</text>
+    <text x="0" y="30" font-size="11" fill="var(--copper)">lane 5: tc_col = 5/4 = 1, tc_row = (5%4)*2 = 2, offsets {0,1,8,9}</text>
+
+    <g font-size="10" fill="var(--text-dim)">
+      <text x="18" y="52">n=0</text><text x="58" y="52">1</text><text x="88" y="52">2</text><text x="118" y="52">3</text>
+      <text x="148" y="52">4</text><text x="178" y="52">5</text><text x="208" y="52">6</text><text x="238" y="52">7</text>
+    </g>
+    <g stroke="var(--border)" stroke-width="0.7" fill="none">
+      <rect x="14" y="58" width="256" height="288"/>
+    </g>
+    <g font-size="9" fill="var(--text-dim)">
+      <text x="0" y="70">k0</text><text x="0" y="88">k1</text><text x="0" y="106">k2</text><text x="0" y="124">k3</text>
+      <text x="0" y="142">k4</text><text x="0" y="160">k5</text><text x="0" y="178">k6</text><text x="0" y="196">k7</text>
+      <text x="0" y="214">k8</text><text x="0" y="232">k9</text><text x="0" y="250">k10</text><text x="0" y="268">k11</text>
+      <text x="0" y="286">k12</text><text x="0" y="304">k13</text><text x="0" y="322">k14</text><text x="0" y="340">k15</text>
+    </g>
+    <g stroke="var(--grid-line)" stroke-width="0.5">
+      <line x1="14" y1="76"  x2="270" y2="76"/><line x1="14" y1="94"  x2="270" y2="94"/>
+      <line x1="14" y1="112" x2="270" y2="112"/><line x1="14" y1="130" x2="270" y2="130"/>
+      <line x1="14" y1="148" x2="270" y2="148"/><line x1="14" y1="166" x2="270" y2="166"/>
+      <line x1="14" y1="184" x2="270" y2="184"/><line x1="14" y1="202" x2="270" y2="202"/>
+      <line x1="14" y1="220" x2="270" y2="220"/><line x1="14" y1="238" x2="270" y2="238"/>
+      <line x1="14" y1="256" x2="270" y2="256"/><line x1="14" y1="274" x2="270" y2="274"/>
+      <line x1="14" y1="292" x2="270" y2="292"/><line x1="14" y1="310" x2="270" y2="310"/>
+      <line x1="14" y1="328" x2="270" y2="328"/>
+      <line x1="46" y1="58" x2="46" y2="346"/><line x1="78" y1="58" x2="78" y2="346"/>
+      <line x1="110" y1="58" x2="110" y2="346"/><line x1="142" y1="58" x2="142" y2="346"/>
+      <line x1="174" y1="58" x2="174" y2="346"/><line x1="206" y1="58" x2="206" y2="346"/>
+      <line x1="238" y1="58" x2="238" y2="346"/>
+    </g>
+    <g fill="var(--copper)" fill-opacity="0.42" stroke="var(--copper)" stroke-width="1">
+      <rect x="46" y="94"  width="32" height="18"/>
+      <rect x="46" y="112" width="32" height="18"/>
+      <rect x="46" y="238" width="32" height="18"/>
+      <rect x="46" y="256" width="32" height="18"/>
+    </g>
+    <g font-size="9" fill="var(--text)">
+      <text x="52" y="107">v0</text><text x="52" y="125">v1</text>
+      <text x="52" y="251">v2</text><text x="52" y="269">v3</text>
+    </g>
+    <text x="14" y="366" font-size="10" fill="var(--text-dim)">v4..v7 are the same four rows at n = 1 + 8 = 9 (next 8-wide B tile)</text>
+
+    <text x="330" y="14" font-size="11" fill="var(--text-dim)">one packed uint32 written by the repack &mdash; nibble index i holds vals[pack_idx[i]]</text>
+    <g stroke="var(--border-bright)" stroke-width="0.8">
+      <rect x="330" y="26" width="72" height="34" fill="var(--copper)" fill-opacity="0.30"/>
+      <rect x="402" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+      <rect x="474" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+      <rect x="546" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+      <rect x="618" y="26" width="72" height="34" fill="var(--copper)" fill-opacity="0.30"/>
+      <rect x="690" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+      <rect x="762" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+      <rect x="834" y="26" width="72" height="34" fill="var(--teal)"   fill-opacity="0.22"/>
+    </g>
+    <g font-size="10" fill="var(--text-dim)">
+      <text x="356" y="22">nib 0</text><text x="428" y="22">nib 1</text><text x="500" y="22">nib 2</text><text x="572" y="22">nib 3</text>
+      <text x="644" y="22">nib 4</text><text x="716" y="22">nib 5</text><text x="788" y="22">nib 6</text><text x="860" y="22">nib 7</text>
+    </g>
+    <g font-size="12" fill="var(--text)">
+      <text x="358" y="48">v0</text><text x="430" y="48">v2</text><text x="502" y="48">v4</text><text x="574" y="48">v6</text>
+      <text x="646" y="48">v1</text><text x="718" y="48">v3</text><text x="790" y="48">v5</text><text x="862" y="48">v7</text>
+    </g>
+
+    <g stroke="var(--copper)" stroke-width="1.2" fill="none">
+      <path d="M366 60 L366 108"/><path d="M654 60 L654 108"/>
+      <path d="M438 60 L438 160"/><path d="M726 60 L726 160"/>
+    </g>
+    <g stroke="var(--teal)" stroke-width="1.2" fill="none" stroke-dasharray="4 3">
+      <path d="M510 60 L510 212"/><path d="M798 60 L798 212"/>
+      <path d="M582 60 L582 264"/><path d="M870 60 L870 264"/>
+    </g>
+
+    <g stroke="var(--border-bright)" stroke-width="0.8">
+      <rect x="330" y="110" width="400" height="30" fill="var(--copper)" fill-opacity="0.16"/>
+      <rect x="330" y="162" width="400" height="30" fill="var(--copper)" fill-opacity="0.16"/>
+      <rect x="474" y="214" width="400" height="30" fill="var(--teal)" fill-opacity="0.13"/>
+      <rect x="474" y="266" width="400" height="30" fill="var(--teal)" fill-opacity="0.13"/>
+    </g>
+    <g font-size="11" fill="var(--text)">
+      <text x="338" y="130">lop3(q, 0x000f000f, 0x64006400)  =&gt;  frag_b0[0] = half2(v0, v1)</text>
+      <text x="338" y="182">lop3(q&gt;&gt;4, ...)                  =&gt;  frag_b0[1] = half2(v2, v3)</text>
+      <text x="482" y="234">lop3(q&gt;&gt;8, ...)                  =&gt;  frag_b1[0] = half2(v4, v5)</text>
+      <text x="482" y="286">lop3(q&gt;&gt;12, ...)                 =&gt;  frag_b1[1] = half2(v6, v7)</text>
+    </g>
+    <text x="330" y="322" font-size="11" fill="var(--copper)">frag_b0 feeds mma for columns n..n+7; frag_b1 feeds the second mma for n+8..n+15.</text>
+    <text x="330" y="342" font-size="11" fill="var(--text-dim)">No warp shuffle, no shared-memory gather, no bank conflict: the layout already agreed with the ISA.</text>
+    <text x="330" y="366" font-size="10" fill="var(--text-dim)">Source: gptq_marlin_repack.cu:L122-L134, :L199-L209; dequant.h:L107-L119</text>
+  </svg>
+</div>
+
+<h3>The pipeline and its budget</h3>
+
+<p>The rest of Marlin is a four-stage <code>cp.async</code> pipeline sized to fit shared memory. The constants
+are deliberately small:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/marlin.cuh:L21-L31</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>static constexpr int default_threads = 256;
+
+static constexpr int pipe_stages =
+    4;  // 4 pipeline stages fit into shared memory
+
+static constexpr int min_thread_n = 64;
+static constexpr int min_thread_k = 64;
+static constexpr int max_thread_n = 256;
+
+static constexpr int tile_size = 16;
+static constexpr int max_par = 16;</code></pre>
+</div>
+
+<p>Shared-memory demand is computed exactly, not guessed, in <code>marlin.cu:L193-L226</code>:
+<code>sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4</code>. For the default 128&times;128 tile at 4 bits
+that is $4 \times (128 \times 128 / 8) \times 4 = 32{,}768$ bytes of packed B plus
+$4 \times (16 \times 128) \times 2 = 16{,}384$ bytes of bf16 A &mdash; 48&nbsp;KB against the 228&nbsp;KB/SM
+Hopper ceiling <a href="../00-foundations/00-03-gpu-architecture.html">§0.3</a> quotes. That headroom buys
+four stages instead of two. <code>is_valid_config</code> (<code>marlin.cu:L229-L260</code>) rejects any tile
+whose computed <code>cache_size</code> exceeds the device limit &mdash; which is why a too-large tile shows up
+as a kernel-selection failure rather than a launch error. The overlap itself is in the main loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/marlin_template.h:L1795-L1816</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>  #pragma unroll
+    for (int pipe = 0; pipe &lt; stages;) {
+  #pragma unroll
+      for (int k = 0; k &lt; b_sh_wr_iters; k++) {
+        fetch_to_registers(k + 1, pipe % stages);
+        fetch_scales_to_registers(k + 1, pipe);
+        fetch_zp_to_registers(k + 1, pipe);
+        if (k == b_sh_wr_iters - 2) {
+          fetch_to_shared((pipe + stages - 1) % stages, pipe,
+                          slice_iters &gt;= stages);
+          pipe++;
+          wait_for_stage();
+          init_same_group(pipe % stages);
+        }
+        # ...
+          matmul(k, pipe - (k &gt;= b_sh_wr_iters - 2 ? 1 : 0));</code></pre>
+</div>
+
+<p>Three fetch depths run concurrently: <code>cp.async</code> global&rarr;shared two stages ahead,
+shared&rarr;register one k-step ahead, and the <code>matmul</code> consuming the buffer filled last iteration.
+<code>wait_for_stage()</code> waits on <code>cp_async_wait&lt;stages - 2&gt;</code> with the comment
+<em>"We only have <code>stages - 2</code> active fetches since we are double buffering"</em>
+(<code>marlin_template.h:L924-L931</code>).</p>
+
+<h3>Tile tables, and what happens when your shape does not fit</h3>
+
+<p>The tile choice is a two-table lookup keyed on nothing more than "is M above one 16-row block":</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/marlin/marlin.cu:L139-L153</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>thread_config_t small_batch_thread_configs[] = {
+    // Ordered by priority
+
+    // thread_k, thread_n, num_threads
+    {128, 128, 256},
+    {64, 128, 128},
+    {128, 64, 128}};
+
+thread_config_t large_batch_thread_configs[] = {
+    // Ordered by priority
+
+    // thread_k, thread_n, num_threads
+    {64, 256, 256},
+    {64, 128, 128},
+    {128, 64, 128}};</code></pre>
+</div>
+
+<p>Small batch prefers deep K (128) and moderate N; large batch prefers wide N (256), so each loaded A
+fragment is reused across more output columns. <code>determine_exec_config</code>
+(<code>marlin.cu:L276-L325</code>) takes the first entry that both divides the problem and fits in shared
+memory. Divisibility is the constraint that bites. The Python guard is stricter than the CUDA one &mdash;
+<code>GPTQ_MARLIN_MIN_THREAD_K = 128</code> against the kernel's <code>min_thread_k = 64</code> &mdash; because
+a usable tile family needs $n \bmod 64 = 0$ <em>and</em> $k \bmod 128 = 0$, or the transposed pair:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/utils/marlin_utils.py:L221-L244</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def marlin_padded_nk(size_n: int, size_k: int, group_size: int = -1) -&gt; tuple[int, int]:
+    """Minimal (padded_n, padded_k) satisfying a Marlin thread-tile family.
+
+    Marlin GEMM and repack require (n % 64, k % 128) or (n % 128, k % 64);
+    shapes satisfying neither are zero-padded up to the cheaper family. K
+    stays divisible by group_size so padded scales keep an integral group
+    count. Padded weight regions contribute nothing to the GEMM output:
+    quantized value 0 decodes to 0.0 (FP4/FP8) or is cancelled by the
+    zero-padded scales/zero-points (INT).
+    """
+    group = group_size if group_size &gt; 0 else 1
+    candidates = (
+        (round_up(size_n, 64), round_up(size_k, math.lcm(128, group))),
+        (round_up(size_n, 128), round_up(size_k, math.lcm(64, group))),
+    )
+    padded_nk = min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    if padded_nk != (size_n, size_k):
+        logger.warning_once(
+            "Marlin requires thread-tile padding for some weight shapes in "
+            "this model. Activations and/or outputs of the padded layers are "
+            "padded/sliced on every forward; performance may be degraded."
+        )
+    return padded_nk</code></pre>
+</div>
+
+<p>As of <code>a556f3f</code>, an awkward shape gets zero-padded rather than rejected. Two cases still cannot
+be padded away: act-order (<code>g_idx</code>) couples K to the whole-model group layout, so the strict check
+stays (<code>mixed_precision/marlin.py:L62-L69</code>); and a group straddling a tensor-parallel boundary is
+fatal, because the rank does not hold a whole group. The strict check produces the error you will see:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/utils/marlin_utils.py:L179-L196</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if output_size_per_partition % GPTQ_MARLIN_MIN_THREAD_N != 0:
+        raise ValueError(
+            f"Weight output_size_per_partition = "
+            f"{output_size_per_partition} is not divisible by "
+            f" min_thread_n = {GPTQ_MARLIN_MIN_THREAD_N}. "
+            "Consider reducing tensor_parallel_size or running "
+            "with --quantization gptq."
+        )
+
+    # Validate input_size_per_partition
+    if input_size_per_partition % GPTQ_MARLIN_MIN_THREAD_K != 0:
+        raise ValueError(
+            f"Weight input_size_per_partition = "
+            f"{input_size_per_partition} is not divisible "
+            f"by min_thread_k = {GPTQ_MARLIN_MIN_THREAD_K}. "
+            "Consider reducing tensor_parallel_size or running "
+            "with --quantization gptq."
+        )</code></pre>
+</div>
+
+<p>Read the suggested fix carefully: <em>"Consider reducing tensor_parallel_size or running with
+<code>--quantization gptq</code>."</em> The second half is stale at this SHA. As §4.3.8 shows,
+<code>"gptq"</code> and <code>"gptq_marlin"</code> both map to <code>AutoGPTQConfig</code>, so re-running with
+<code>--quantization gptq</code> takes exactly the same path and raises exactly the same error. The real
+fallback is the rest of the priority list &mdash; ExLlama or Triton W4A16 &mdash; reached only if the shape
+check passes and the faster kernels decline for another reason. The supported quantisation grid is narrow by
+design: <code>MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]</code> at <code>marlin_utils.py:L36</code>,
+and a group-96 checkpoint has no Marlin kernel at any shape.</p></div></section>
+<section class="sec" id="machete" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Machete: the Hopper successor</h2></div><div class="sec__body"><p>Marlin is an Ampere-era kernel: <code>cp.async</code>, warp-level <code>mma</code>, hand-written PTX.
+Hopper added two things it cannot use &mdash; the TMA (a hardware descriptor-driven bulk copy engine) and
+<code>wgmma</code> (warpgroup-wide MMA, 128 threads issuing one instruction). Machete is the CUTLASS-based
+rewrite that does. Its README states the relationship plainly:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/machete/Readme.md:L1-L3</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Machete (Mixed Precision Cutlass-Based GEMM)
+
+Machete is a spiritual successor to the Marlin kernel but optimized for Hopper architectures and based on Cutlass. Being based on Cutlass, new type pairs and epilogues are easier to add compared to Marlin.</code></pre>
+</div>
+
+<p>The core trick is the same &mdash; prepack the weights to match the tensor-core layout &mdash; but the
+target layout is a <code>wgmma</code> atom rather than an <code>mma</code> fragment, and the block is bigger:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/machete/machete_prepacked_layout.cuh:L71-L80</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>  // TODO (LucasWilkinson): compare the performance for other sizes
+  // Prepacked block shape, smallest layout atom for loading into registers
+  //   (can contain multiple wgmma instructions worth of data in one block)
+  // We ideally want this to be configured such that a thread can perform 128bit
+  // loads, i.e. we amount of data associated with each thread within a
+  // prepacked block is a multiple of 128bits, when using a cooperative sechdule
+  // we have 256 threads working a single block at a time, this means each
+  // thread works on `sizeof_bits_v&lt;ElementB&gt; * (128*64) / 256` bits of data,
+  // for a 4bit type this would be 128bits</code></pre>
+</div>
+
+<p>Do the arithmetic in the comment: $4 \times (128 \times 64) / 256 = 128$ bits per thread. The 128&times;64
+block size is chosen precisely so that a cooperative two-warpgroup schedule gives every thread a full
+128-bit vector load from shared memory. Marlin's equivalent granularity is one 32-bit word per lane; Machete
+gets 4&times; the load width because it has 4&times; the threads cooperating on one block.</p>
+
+<p>Three further Hopper-specific changes, all visible in <code>machete_mainloop.cuh</code>:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">TMA</span><h4>Bulk async copy</h4>
+    <p><code>GmemTiledCopyA/B</code> are TMA atoms selected from the cluster shape
+    (<code>:L161-L164</code>), with a hard <code>static_assert</code> that operands meet
+    <code>tma_alignment_bytes</code> (<code>:L196-L198</code>). Scales come in via
+    <code>SM90_TMA_LOAD</code> with each stage 128-byte aligned (<code>:L248</code>, <code>:L403</code>).</p></div>
+  <div class="ve-card"><span class="ve-card__k">wgmma</span><h4>Register-source A</h4>
+    <p><code>GMMA::rs_op_selector</code> (<code>machete_prepacked_layout.cuh:L100-L103</code>) picks a
+    <em>register-source</em> warpgroup MMA. That is what makes dequant-in-registers legal at all on Hopper:
+    the upconverted operand can be handed straight to <code>wgmma</code>.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Swap</span><h4>C&#7488; = B&#7488;A&#7488;</h4>
+    <p>Because only the A operand may come from registers, the quantised weights must <em>be</em> A. The
+    kernel computes the transposed product instead (<code>machete_prepacked_layout.cuh:L81-L86</code>) so
+    the weights flow through registers and the activations through shared memory.</p></div>
+</div>
+
+<p>Machete's constraints are tighter than Marlin's, in exchange for the Hopper features:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Marlin vs Machete constraints, read from the <code>can_implement</code> paths.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th></th><th>Marlin</th><th>Machete</th></tr></thead>
+      <tbody>
+        <tr><td>Compute capability</td><td>&ge; 75 (<code>mixed_precision/marlin.py:L36-L38</code>)</td><td><b>exactly 90</b> (<code>mixed_precision/machete.py:L35-L36</code>)</td></tr>
+        <tr><td>Group sizes</td><td>&minus;1, 32, 64, 128</td><td>&minus;1, 64, 128 (fp16/bf16 acts)</td></tr>
+        <tr><td>in_features</td><td>% 128 (or % 64 in the other family), else zero-padded</td><td>% 64, hard requirement</td></tr>
+        <tr><td>out_features</td><td>% 64 (or % 128), else zero-padded</td><td>% 128, hard requirement</td></tr>
+        <tr><td>Weight types</td><td>uint4 / uint4b8 / uint8 / uint8b128 / fp8 / fp4</td><td>uint4b8, uint8b128 (no zp); uint4, uint8 (zp)</td></tr>
+        <tr><td>Act-order across TP ranks</td><td>strict shape check, no padding</td><td>refused outright</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p><code>check_machete_supports_shape</code> is two divisibility checks and is the whole story
+(<code>vllm/model_executor/layers/quantization/utils/machete_utils.py:L37-L51</code>): if
+<code>in_features % 64</code> or <code>out_features % 128</code> is non-zero, Machete declines and the
+selector falls through to Marlin. Note that Machete is checked <em>before</em> Marlin in vLLM's CUDA
+priority list, so on an H100 a divisible shape gets Machete and an awkward one silently gets Marlin.</p></div></section>
+<section class="sec" id="fp8-and-cutlass" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">FP8 GEMMs: why 8 bits are easy</h2></div><div class="sec__body"><p>FP8 needs no dequantisation in the mainloop, because e4m3 is on the tensor-core menu and because the
+scaling is per-tensor or per-row/column &mdash; which, as shown in §4.3.4, factors out of the k-sum entirely.
+So the whole scale story lives in the CUTLASS epilogue:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp:L150-L173</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;typename ElementAcc, typename ElementD, typename TileShape&gt;
+struct ScaledEpilogue
+    : private ScaledEpilogueBase&lt;ElementAcc, ElementD, TileShape&gt; {
+ private:
+  using SUPER = ScaledEpilogueBase&lt;ElementAcc, ElementD, TileShape&gt;;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad&lt;float&gt;;
+  using ScaleB = typename SUPER::template RowOrScalarLoad&lt;float&gt;;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute&lt;
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest&gt;;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT&lt;Compute0, ScaleB, Accum&gt;;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute&lt;
+      cutlass::multiplies, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest&gt;;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT&lt;Compute1, ScaleA, EVTCompute0&gt;;</code></pre>
+</div>
+
+<p>Read the type tree bottom-up: <code>EVTCompute0 = ScaleB * Accum</code> in fp32, then
+<code>EVTCompute = ScaleA * EVTCompute0</code> cast to <code>ElementD</code>. Two fused multiplies on the fp32
+accumulator after the k-loop has finished, with the scale tensors streamed as an epilogue broadcast.
+<code>ColOrScalarLoad</code> and <code>RowOrScalarLoad</code> are the same code path for per-tensor (a scalar)
+and per-token / per-channel (a vector) &mdash; which is why vLLM converts a fused QKV module's per-tensor
+scales to per-channel at load time (<code>scaled_mm/cutlass.py:L58-L69</code>) rather than specialising the
+kernel. The comment above the struct states the requirement: <em>"A and B must have symmetric quantization
+(zero point == 0)"</em> (<code>scaled_mm_epilogues_c3x.hpp:L141</code>). Asymmetric INT8 needs a separate
+azp epilogue and a separate kernel file.</p>
+
+<p>Block-wise FP8 (DeepSeek-V3's 128&times;128 weight blocks) breaks the factoring argument the same way
+group-wise INT4 does, and gets its own kernels: <code>scaled_mm_blockwise_sm90_fp8.cu</code>,
+<code>…sm100…</code>, <code>…sm120…</code>. That is three separate compiled dispatch paths for one format,
+which is a good measure of how much a non-factorable scale costs.</p></div></section>
+<section class="sec" id="kernel-selection" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Kernel selection at runtime</h2></div><div class="sec__body"><p>Start with a framing correction that the source forces. As of <code>a556f3f</code>, <em>Marlin is not a
+quantisation method</em>. The names survive as aliases, but they all resolve to one config class per
+algorithm:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/__init__.py:L139-L153</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    method_to_config: dict[str, type[QuantizationConfig]] = {
+        "awq": AutoAWQConfig,
+        "awq_marlin": AutoAWQConfig,
+        "auto_awq": AutoAWQConfig,
+        "fp8": Fp8Config,
+        "fbgemm_fp8": FBGEMMFp8Config,
+        "fp_quant": FPQuantConfig,
+        "modelopt": ModelOptFp8Config,
+        "modelopt_fp4": ModelOptNvFp4Config,
+        "modelopt_mxfp8": ModelOptMxFp8Config,
+        "modelopt_mixed": ModelOptMixedPrecisionConfig,
+        "auto_gptq": AutoGPTQConfig,
+        "gptq": AutoGPTQConfig,
+        "gptq_marlin": AutoGPTQConfig,</code></pre>
+</div>
+
+<p><code>--quantization gptq</code> and <code>--quantization gptq_marlin</code> load the same
+<code>AutoGPTQConfig</code> and take the same code path; the flag no longer selects a kernel. Whether you get
+Marlin is decided per layer, at weight-creation time, by capability. The decision point is four lines long:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/layers/quantization/auto_gptq.py:L340-L358</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        mp_linear_kernel_config = MPLinearLayerConfig(
+            full_weight_shape=(input_size, output_size),
+            partition_weight_shape=(
+                input_size_per_partition,
+                output_size_per_partition,
+            ),
+            weight_type=self.quant_config.quant_type,
+            act_type=params_dtype if input_dtype is None else input_dtype,
+            group_size=self.quant_config.group_size,
+            zero_points=False,
+            has_g_idx=self.quant_config.desc_act,
+        )
+
+        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+
+        if kernel_type.__name__ not in self._kernel_backends_being_used:
+            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
+            self._kernel_backends_being_used.add(kernel_type.__name__)</code></pre>
+</div>
+
+<p><code>AutoAWQConfig</code> does the identical thing at <code>auto_awq.py:L430-L448</code>, differing only in
+<code>zero_points=self.quant_config.zero_point</code>. That <code>logger.info("Using %s …")</code> line, emitted
+once per distinct backend, is the only place the engine tells you which kernel it chose. There is no flag that
+forces the answer; there is only <code>VLLM_DISABLED_KERNELS</code>, which removes candidates. One check does
+run earlier: <code>AutoGPTQLinearMethod.__init__</code> calls <code>verify_marlin_supported</code>
+(<code>auto_gptq.py:L320-L324</code>), so a checkpoint whose type or group size is outside Marlin's grid fails
+at config time, before any kernel gets a vote.</p>
+
+<p>Below that, vLLM's linear kernels declare their own eligibility through a two-method protocol:
+<code>is_supported(compute_capability)</code> for hardware and <code>can_implement(config)</code> for the
+quantisation config, both returning <code>(bool, reason)</code>
+(<code>vllm/model_executor/kernels/linear/base.py:L168-L210</code>). Selection is then a first-match walk down
+a hand-ordered list:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/kernels/linear/__init__.py:L474-L484</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>_POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        CutlassW4A8LinearKernel,
+        MacheteLinearKernel,
+        AllSparkLinearKernel,
+        MarlinLinearKernel,
+        ConchLinearKernel,
+        ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
+        HummingLinearKernel,
+    ],</code></pre>
+</div>
+
+<p>If nothing matches, the raised <code>ValueError</code> concatenates every kernel's refusal reason
+(<code>kernels/linear/__init__.py:L826-L837</code>) &mdash; the single most useful diagnostic in the whole
+quantisation stack, because it tells you in one message why each of eight kernels declined.
+<code>VLLM_DISABLED_KERNELS</code> knocks one out by class name to see what the next choice does
+(<code>kernels/linear/__init__.py:L809-L813</code>).</p>
+
+<p>That selection happens <em>once, at load time</em>. The M-bucketing happens per call, inside the chosen
+kernel. CUTLASS FP8 on Hopper dispatches on both M and N:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm90_fp8_dispatch.cuh:L322-L349</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>  if (m &lt;= 16) {
+    // m in [1, 16]
+    if (n &lt;= 1280) {
+      return cutlass_gemm_caller_sm90_fp8&lt;Cutlass3xGemmM16_N1280&gt;(
+          out, a, b, b_scales, a_scales, std::forward&lt;EpilogueArgs&gt;(args)...);
+    }
+    return cutlass_gemm_caller_sm90_fp8&lt;Cutlass3xGemmM16_N8192&gt;(
+        out, a, b, b_scales, a_scales, std::forward&lt;EpilogueArgs&gt;(args)...);
+  } else if (m &lt;= 64) {
+    # ...
+  } else if (m &lt;= 128) {
+    // m in (64, 128]
+    return cutlass_gemm_caller_sm90_fp8&lt;Cutlass3xGemmM128&gt;(
+        out, a, b, a_scales, b_scales, std::forward&lt;EpilogueArgs&gt;(args)...);
+  } else if (m &gt;= 8192 &amp;&amp; k &gt;= 6144) {
+    return cutlass_gemm_caller_sm90_fp8&lt;Cutlass3xGemmM8192_K6144&gt;(
+        out, a, b, a_scales, b_scales, std::forward&lt;EpilogueArgs&gt;(args)...);
+  } else {
+    // m in (128, inf)
+    return cutlass_gemm_caller_sm90_fp8&lt;Cutlass3xGemmDefault&gt;(
+        out, a, b, a_scales, b_scales, std::forward&lt;EpilogueArgs&gt;(args)...);
+  }</code></pre>
+</div>
+
+<p>Look at the argument order: for $M \le 64$ the scales are passed <code>b_scales, a_scales</code>, swapped.
+Those configs set the <code>swap_ab</code> template flag &mdash; <em>"enable swap AB for M &lt; 64"</em>
+(<code>:L207</code>) &mdash; and compute $C^{\mathsf T} = B^{\mathsf T}A^{\mathsf T}$ so the skinny dimension
+becomes N, where a tile of 16 is legal. Tile shapes go from <code>_128,_128,_128</code> at large M down to
+<code>_64,_16,_256</code> at M &le; 16: as M shrinks the tile narrows in N and deepens in K, maximising the
+number of concurrent CTAs streaming weights.</p>
+
+<p>Machete's heuristic is generated rather than written, from a Python dict compiled into a Jinja dispatch
+chain:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/libtorch_stable/quantization/machete/generate.py:L509-L537</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
+    default_tile_heuristic_config = {
+        #### M = 257+
+        "M &gt; 256 &amp;&amp; K &lt;= 16384 &amp;&amp; N &lt;= 4096": ((128, 128), (2, 1, 1)),
+        "M &gt; 256": ((128, 256), (2, 1, 1)),
+        #### M = 129-256
+        "M &gt; 128 &amp;&amp; K &lt;= 4096 &amp;&amp; N &lt;= 4096": ((128, 64), (2, 1, 1)),
+        "M &gt; 128 &amp;&amp; K &lt;= 8192 &amp;&amp; N &lt;= 8192": ((128, 128), (2, 1, 1)),
+        "M &gt; 128": ((128, 256), (2, 1, 1)),
+        #### M = 65-128
+        "M &gt; 64 &amp;&amp; K &lt;= 4069 &amp;&amp; N &lt;= 4069": ((128, 32), (2, 1, 1)),
+        "M &gt; 64 &amp;&amp; K &lt;= 4069 &amp;&amp; N &lt;= 8192": ((128, 64), (2, 1, 1)),
+        "M &gt; 64 &amp;&amp; K &gt;= 8192 &amp;&amp; N &gt;= 12288": ((256, 128), (2, 1, 1)),
+        "M &gt; 64": ((128, 128), (2, 1, 1)),
+        #### M = 33-64
+        "M &gt; 32 &amp;&amp; K &lt;= 6144 &amp;&amp; N &lt;= 6144": ((128, 16), (1, 1, 1)),
+        "M &gt; 32 &amp;&amp; K &gt;= 16384 &amp;&amp; N &gt;= 12288": ((256, 64), (2, 1, 1)),
+        "M &gt; 32": ((128, 64), (2, 1, 1)),
+        #### M = 17-32
+        "M &gt; 16 &amp;&amp; K &lt;= 12288 &amp;&amp; N &lt;= 8192": ((128, 32), (2, 1, 1)),
+        "M &gt; 16": ((256, 32), (2, 1, 1)),
+        #### M = 1-16
+        "N &gt;= 26624": ((256, 16), (1, 1, 1)),
+        None: ((128, 16), (1, 1, 1)),
+    }
+
+    # For now we use the same heuristic for all types
+    # Heuristic is currently tuned for H100s</code></pre>
+</div>
+
+<p>The comment <em>"Heuristic is currently tuned for H100s"</em> and the typo <code>4069</code> (twice, for
+4096) are honest evidence about what these tables are: measured on one machine, generated into C++, never
+re-tuned. Read them as a record of an afternoon's benchmarking, not as physics.</p>
+
+<p>The best-documented example in either repo is the ROCm MXFP8 selector, whose docstring explains itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/model_executor/kernels/linear/mxfp8/rocm_native.py:L122-L145</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def _select_cfg(M, N, K):
+    """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
+
+    The M-bucketed, shape-adaptive tile selection here is the speedup over the
+    upstream 2-bucket launcher. Tiles are pipelined (num_stages&gt;=2, larger BLOCK_K)
+    and occupancy- and shape-aware: keyed on the LOCAL (M, N, K), so it adapts to the
+    TP-sharded shapes (e.g. MiniMax-M3 TP=4 vs TP=8, where local N and K differ) —
+    large-K prefill uses BLOCK_K=256; short-K (K=768) widens N. BLOCK_K must divide K
+    (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
+    (served K: 384/768/1024/2048/6144).
+    """
+    if M &lt;= 64:
+        # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
+        # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
+        # parallel) + LARGE BLOCK_K (fewer K-iters, bigger coalesced weight loads).
+        # Tuned by CUDA-graph replay latency. Optimal at both TP=4 and TP=8.
+        if K % 1024 == 0:  # K=2048, 6144 -&gt; graph-best 16x16x1024 (all M)
+            return 16, 16, 1024, 2, 2
+        if K % 512 == 0:
+            return 16, 16, 512, 2, 3
+        if K % 256 == 0:  # K=768 (shared_down) -&gt; graph-best 16x32x256
+            return 16, 32, 256, 4, 3
+        return 16, 32, 128, 4, 3</code></pre>
+</div>
+
+<p>"Tiny-M GEMV is weight-BW + GPU-occupancy bound. The lever is narrow <code>BLOCK_N=16</code> (maximize
+N-tiles so more CUs stream the weight in parallel) + large <code>BLOCK_K</code>." That is the same conclusion
+CUTLASS's <code>_64,_16,_256</code> small-M tile reached independently, on different hardware, in a different
+language. When M is small the goal is not data reuse &mdash; there is none &mdash; it is getting every compute
+unit pulling weight bytes at once.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; two-level kernel selection.</b>
+    Once at load time by quantisation config; then per call by M.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    Q["--quantization gptq OR gptq_marlin<br/>both map to AutoGPTQConfig"] --> L
+    L["AutoGPTQLinearMethod.create_weights<br/>choose_mp_linear_kernel(MPLinearLayerConfig)"] --> M1{"Machete<br/>cc == 90, K%64, N%128,<br/>group in -1/64/128"}
+    M1 -->|yes| MA["MacheteLinearKernel"]
+    M1 -->|no| M2{"Marlin<br/>cc at least 75, group in -1/32/64/128,<br/>pad N to 64, K to 128"}
+    M2 -->|yes| MR["MarlinLinearKernel"]
+    M2 -->|no| M3["Exllama / TritonW4A16<br/>correct and slow"]
+    MA --> D["Per call: mm_dispatch on M, N, K"]
+    MR --> D2["Per call: determine_exec_config"]
+    D --> D3["M up to 16: tile 128x16, cluster 1x1x1<br/>M 17-32: 256x32<br/>M 33-64: 128x64<br/>M over 256: 128x256"]
+    D2 --> D4["M up to 16: small_batch table<br/>128x128x256 threads<br/>M over 16: large_batch table<br/>64x256x256 threads"]
+  </script>
+</div></div></section>
+<section class="sec" id="sglang" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">SGLang: the same Marlin, a different FP8 story</h2></div><div class="sec__body"><p>SGLang's Marlin support is vLLM's, vendored with the attribution in the header
+(<code>python/sglang/srt/layers/quantization/marlin_utils.py:L3</code>) and the same constants &mdash;
+<code>GPTQ_MARLIN_TILE = 16</code>, <code>MIN_THREAD_N = 64</code>, <code>MIN_THREAD_K = 128</code>,
+<code>MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]</code> at <code>:L54-L59</code>. The CUDA is in-tree
+but JIT-compiled rather than shipped as an AOT extension:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/quantization/gptq_marlin.py:L18-L26</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@cache_once
+def _jit_gptq_marlin_module(dtype: torch.dtype) -&gt; Module:
+    args = make_cpp_args(dtype)
+    return load_jit(
+        "gptq_marlin",
+        *args,
+        cuda_files=["gemm/marlin/gptq_marlin.cuh"],
+        cuda_wrappers=[("gptq_marlin_gemm", f"gptq_marlin_gemm&lt;{args}&gt;")],
+    )</code></pre>
+</div>
+
+<p>That <code>gemm/marlin/gptq_marlin.cuh</code> resolves to
+<code>python/sglang/kernels/jit/csrc/gemm/marlin/gptq_marlin.cuh</code>, 1,005 lines against vLLM's 35&nbsp;KB
+<code>marlin.cu</code> plus 82&nbsp;KB template &mdash; an earlier snapshot, with the same
+<code>small_batch_thread_configs</code>/<code>large_batch_thread_configs</code> tables and the same
+<code>pipe_stages = 4</code>.</p>
+
+<p><strong>There is no Machete in SGLang at this SHA.</strong> A repo-wide grep for "machete" over
+<code>python/</code> returns exactly one hit &mdash; a comment inherited from vLLM at
+<code>python/sglang/srt/layers/quantization/utils.py:L508</code> (<em>"For some kernels (namely Machete) the
+zero-points are applied after the"</em>) &mdash; and no kernel, config class or registry entry. On Hopper, a
+GPTQ W4A16 checkpoint that vLLM would run through Machete runs through Marlin in SGLang. The divergence runs
+in both directions:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Backends present in each engine's quantisation layer at the pinned SHAs. Presence checked by directory listing and by grep over the method registry, not inferred.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Backend</th><th>vLLM <code>a556f3f</code></th><th>SGLang <code>7d89325</code></th></tr></thead>
+      <tbody>
+        <tr><td>Marlin (GPTQ/AWQ/FP8/FP4/MXFP4)</td><td>AOT, <code>csrc/libtorch_stable/quantization/marlin/</code></td><td>JIT, <code>python/sglang/kernels/jit/csrc/gemm/marlin/</code></td></tr>
+        <tr><td>Machete (Hopper W4A16)</td><td>present</td><td><b>absent</b> &mdash; one inherited comment, no implementation</td></tr>
+        <tr><td>CUTLASS w8a8 / w4a8 in-tree</td><td>present, <code>quantization/w8a8/cutlass/</code>, <code>cutlass_w4a8/</code></td><td>external only (FlashInfer, sgl_kernel)</td></tr>
+        <tr><td>DeepGEMM FP8 block-scaled</td><td>optional, <code>scaled_mm/deep_gemm.py</code></td><td>first choice in <code>_dispatch_auto_backend</code></td></tr>
+        <tr><td><code>bitsandbytes</code></td><td><b>absent</b> from the dir and from <code>QuantizationMethods</code></td><td><code>quantization/bitsandbytes.py</code></td></tr>
+        <tr><td><code>gguf</code></td><td><b>absent</b> from the dir and from <code>QuantizationMethods</code></td><td><code>quantization/gguf.py</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The <code>QuantizationMethods</code> literal at
+<code>vllm/model_executor/layers/quantization/__init__.py:L12-L46</code> lists twenty-odd names and neither
+<code>"bitsandbytes"</code> nor <code>"gguf"</code> is among them. A bnb-quantised or GGUF checkpoint that
+loads under SGLang will not load under vLLM at this SHA. That is a real capability difference, not a
+kernel-quality one &mdash; and it cuts the other way from Machete, where vLLM has the faster Hopper path.</p>
+
+<p>Where SGLang invests instead is FP8, and it invests in an external package rather than in-tree CUTLASS.
+The auto backend order is explicit:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/fp8_utils.py:L774-L792</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def _dispatch_auto_backend() -&gt; Callable:
+    """Auto-select the best backend based on hardware capabilities."""
+    # Priority order for auto selection:
+    # 1. DeepGEMM (if enabled and available)
+    # 2. FlashInfer TRTLLM (if Blackwell GPU and FlashInfer available)
+    # 3. CUTLASS (if SM120 GPU and CUDA 12.8+)
+    # 4. AITER (if AMD GPU with AITER enabled)
+    # 5. Triton (fallback)
+
+    if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
+        return deepgemm_w8a8_block_fp8_linear_with_fallback
+    elif is_blackwell_supported() and is_flashinfer_available():
+        return flashinfer_gemm_w8a8_block_fp8_linear_with_fallback
+    elif is_sm120_supported():
+        return cutlass_w8a8_block_fp8_linear_with_fallback
+    elif _use_aiter:
+        return aiter_w8a8_block_fp8_linear
+    else:
+        return triton_w8a8_block_fp8_linear</code></pre>
+</div>
+
+<p>DeepGEMM first, everywhere it is available. The wrapper is thin &mdash;
+<code>deep_gemm.fp8_gemm_nt(lhs, rhs, out)</code> at
+<code>python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py:L189-L193</code> &mdash; with the interesting
+work in the gating: SM &ge; 90 required, SM120 explicitly excluded (<em>"DeepGEMM requires TMEM/tcgen05
+(SM100+datacenter), not available on SM120"</em>, <code>configurer.py:L21-L23</code>), and
+<code>DEEPGEMM_SCALE_UE8M0</code> switched on for Blackwell &mdash; the UE8M0 power-of-two block scale that
+<a href="../00-foundations/00-05-numerics.html">§0.5</a> describes.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>DeepGEMM's kernels are not in either repository. Claims about its internal tiling, its FP32 promotion
+  scheme for block-wise scales, or its measured throughput cannot be checked here. The likely location is
+  the external <code>deep-gemm</code> package that <code>deep_gemm_wrapper/configurer.py:L27-L31</code>
+  imports. Similarly, SGLang's compiled non-JIT kernels ship in the external <code>sgl_kernel</code> package
+  and are unreadable at this SHA.</p>
+</div>
+
+<p>SGLang's M-bucketing lives in Python rather than C++, and is unusually well documented. The FlashInfer FP8
+blockscale path is restricted to a 31-row window with the reason spelled out:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/quantization/fp8_utils.py:L915-L934</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    # Keep this backend to 1 &lt;= M &lt; 32, mirroring vLLM's
+    # FlashInferFp8DeepGEMMDynamicBlockScaledKernel. fp8_blockscale_gemm_sm90 is
+    # one entry point over two kernels and only the M &lt; 32 swapAB half is worth
+    # taking:
+    #   M &gt;= 32 picks the non-swapAB kernel, which is slower than DeepGEMM (worst
+    #     just above the threshold) and, on some checkpoints, less accurate.
+    #   M == 0 hard-fails inside the kernel ("Check failed: (input_ptr !=
+    #     nullptr)"). Empty batches are a normal steady-state input, not an edge
+    #     case: DP attention hands an idle rank a zero-token forward so the
+    #     collectives stay in sync (ScheduleBatch.prepare_for_idle).
+    # Same shape of guard as the gfx95 CK M bound below.
+    m_supported = 1 &lt;= input.view(-1, input.shape[-1]).shape[0] &lt; 32
+
+    if not m_supported and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:</code></pre>
+</div>
+
+<p>Same swap-AB idea as CUTLASS, same M threshold neighbourhood, a different implementation, and a
+zero-token edge case that only appears once you run data-parallel attention. Both engines converge on
+"choose by M"; they differ on <em>where</em> that choice lives &mdash; vLLM compiles it into the dispatch
+chain, SGLang keeps it in Python where it can carry a paragraph of justification.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Worked trace: one W4A16 layer, load to launch</h2></div><div class="sec__body"><p>Llama-3-70B, GPTQ 4-bit group 128, no act-order, TP=2, on H100. The <code>down_proj</code> of one decoder
+layer: full shape $N = 8192$, $K = 28672$; per rank $K_{\text{part}} = 14336$.</p>
+
+<ol>
+  <li><b><code>AutoGPTQLinearMethod.create_weights</code></b> (<code>auto_gptq.py:L340-L358</code>) builds an
+  <code>MPLinearLayerConfig</code> from the partitioned shapes and calls
+  <b><code>choose_mp_linear_kernel</code></b> (<code>kernels/linear/__init__.py:L775-L837</code>), which walks
+  <code>_POSSIBLE_KERNELS[CUDA]</code>. <code>CutlassW4A8LinearKernel</code> declines (activations are bf16,
+  not fp8).</li>
+  <li><b><code>MacheteLinearKernel.can_implement</code></b> (<code>mixed_precision/machete.py:L30-L64</code>):
+  cc is 90 &check;, weight type <code>uint4b8</code> &check;, group 128 &check;, then
+  <code>check_machete_supports_shape(14336, 8192)</code> &mdash; $14336 \bmod 64 = 0$ &check;,
+  $8192 \bmod 128 = 0$ &check;. <strong>Machete wins.</strong></li>
+  <li><b><code>process_weights_after_loading</code></b> (<code>machete.py:L70-L104</code>) calls
+  <code>permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)</code> and then
+  <code>ops.machete_prepack_B(...)</code>, which rewrites the packed int4 tensor into 128&times;64 prepacked
+  blocks whose per-thread slices are 128-bit contiguous.</li>
+  <li><b>Decode step, M = 1.</b> <code>machete_mm</code> enters the generated
+  <code>mm_dispatch_&lt;type_sig&gt;</code> (template at <code>generate.py:L45-L57</code>), reads
+  <code>M = args.A.size(0)</code>, falls through every condition to the <code>None</code> default, and
+  selects tile <code>(128, 16)</code> with cluster <code>(1,1,1)</code>.</li>
+  <li><b>Inside the kernel:</b> TMA loads the prepacked B block into shared memory; each thread pulls a
+  128-bit slice into registers; the upconvert runs (interleaved layout, since 4-bit and not converting to
+  fp8/int8 &mdash; <code>machete_prepacked_layout.cuh:L56-L59</code>); <code>wgmma</code> with register-source A
+  accumulates in fp32; the epilogue applies the group scale and stores bf16.</li>
+  <li><b>Prefill step, M = 2048.</b> Same weights, same kernel object, <em>different compiled schedule</em>:
+  <code>"M &gt; 256"</code> matches first, giving tile <code>(128, 256)</code> cluster <code>(2,1,1)</code>.</li>
+</ol>
+
+<p>Now change TP to 3 for the sake of argument: $K_{\text{part}} = 28672/3$ is not an integer, but take a
+model where it is and the result is not divisible by 64 &mdash; Machete's shape check fails, the walk
+continues, and <code>MarlinLinearKernel.can_implement</code> accepts it because Marlin pads. You get a
+working server with a <code>warning_once</code> about tile padding and a slightly slower layer. Nothing in
+the logs says "you lost Machete"; the only signal is the one-off
+<code>Using MarlinLinearKernel for AutoGPTQLinearMethod</code> line at
+<code>auto_gptq.py:L356-L358</code>.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">Symptom</span><h4>ValueError at model load, TP&gt;1 only</h4>
+    <p><code>"Weight input_size_per_partition = N is not divisible by min_thread_k = 128"</code>. TP sharding
+    divided K below the tile granularity. Reduce TP; ignore the second half of the message, which suggests
+    <code>--quantization gptq</code> &mdash; that alias now resolves to the same <code>AutoGPTQConfig</code>
+    and fails identically. Only the act-order path still raises; non-act-order shapes pad instead
+    (<code>marlin_utils.py:L179-L196</code>, <code>mixed_precision/marlin.py:L62-L69</code>).</p></div>
+  <div class="ve-card"><span class="ve-card__k">Symptom</span><h4>Group size straddles a TP rank</h4>
+    <p><code>"in_features per partition {n} is not divisible by group_size = {g}"</code>
+    (<code>mixed_precision/marlin.py:L76-L81</code>). Padding cannot help &mdash; the rank does not own a whole
+    quantisation group, so the scale is meaningless. Only re-quantising at a smaller group size, or a
+    different TP degree, fixes it.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Silent</span><h4>Marlin picked instead of Machete</h4>
+    <p>Machete requires <em>exactly</em> cc 90. On an H200 (also cc 90) it applies; on B200 (cc 100) it does
+    not, and you fall back to Marlin's Ampere-era pipeline on Blackwell silicon. Check the selected kernel
+    in the startup log rather than assuming.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Silent</span><h4>Padding tax on every forward</h4>
+    <p><code>marlin_padded_nk</code> warns once, at load, then every forward pads activations and slices
+    outputs. A model with hidden size 6144 and TP=5 can end up padding to a 15% larger weight and paying for
+    it on every token, with no per-step signal.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Perf</span><h4>atomicAdd reduce is off by default</h4>
+    <p><code>should_use_atomic_add_reduce</code> (<code>marlin_utils.py:L633-L654</code>) would help when
+    <code>n &lt; 2048 and k &gt;= 2048</code> &mdash; the split-K decode shape &mdash; but returns False unless
+    <code>VLLM_MARLIN_USE_ATOMIC_ADD=1</code>. On sm8x with bf16 it is refused outright: no native bf16
+    atomicAdd.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Perf</span><h4>Triton tile that spills</h4>
+    <p>The ROCm MXFP8 selector documents a real regression: a 256&times;128&times;256 tile "was faster only on
+    triton 3.6; on triton 3.7 its large BLOCK_M register/LDS footprint spills or hits <em>out of
+    resources</em>" (<code>rocm_native.py:L165-L170</code>). Tile tables are tuned against a compiler version,
+    not just a GPU.</p></div>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Both kernel families ship a microbenchmark. Marlin's sweeps batch sizes across a model's real layer
+shapes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">from the vLLM checkout root</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># Marlin: default batch sweep is 1,16,32,64,128,256,512,1024,2048,4096,8192
+python benchmarks/kernels/benchmark_marlin.py --batch-sizes 1 16 64 256 1024
+
+# Machete vs Marlin vs bf16 on real layer shapes (defaults: Llama-3-8b, Llama-2-70b)
+python benchmarks/kernels/benchmark_machete.py model_bench --batch-sizes 1 16 32 64 128 256
+
+# Force a kernel out of the running and see what the selector picks next
+VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor-parallel-size 2</code></pre>
+</div>
+
+<p>Three things worth measuring, none of which need a paper to justify:</p>
+
+<ol>
+  <li>Plot Marlin's speedup over bf16 against M and find the crossover. The formula in §4.3.4 predicts
+  $M^{*} \approx 76$ for W4A16 on H100; the measured knee will be lower, because the dequant instructions
+  are not perfectly free and the kernel does not hit 100% of peak.</li>
+  <li>Run the same model with <code>VLLM_DISABLED_KERNELS=MacheteLinearKernel</code> and without, at M=1 and
+  M=256. Machete's advantage should be largest at moderate M where TMA and wgmma pay, and smallest at M=1
+  where both kernels are pure weight streaming.</li>
+  <li>Take a model whose hidden size is not a multiple of 128, load it under TP=2, and read the
+  <code>warning_once</code> about tile padding. Compare per-token latency against the unpadded TP=1 case to
+  price the padding.</li>
+</ol></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the file.</b> Open <code>csrc/libtorch_stable/quantization/marlin/marlin_mma.h</code> and list
+  every distinct PTX <code>mma</code> shape it emits, with the <code>__CUDA_ARCH__</code> guard each is under.
+  Which shape exists only for SM75, and why does that architecture need two instructions where SM80 needs one?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p><code>m16n8k8</code> (fp16, two variants), <code>m16n8k16</code> (fp16 f32-acc, fp16 f16-acc, bf16, e4m3,
+  s8), <code>m16n8k32</code> (e4m3, s8), and <code>m8n8k16</code> (s8). The <code>m16n8k8</code> and
+  <code>m8n8k16</code> forms are inside <code>#if __CUDA_ARCH__ == 750</code> blocks
+  (<code>:L23</code>, <code>:L104</code>). Turing's tensor cores have half the K depth per instruction, so the
+  kernel issues two back-to-back <code>m16n8k8</code>s over the same accumulator to cover k=16, and four
+  <code>m8n8k16</code>s to cover the s8 m16n8k32 case.</p></div></details></li>
+
+  <li><b>Read the file.</b> In <code>gptq_marlin_repack.cu</code>, the 8-bit branch uses
+  <code>pack_idx[4] = {0, 2, 1, 3}</code> and <code>tc_row = (th_id % 4) * 2</code> unchanged, but writes two
+  words instead of one. Why does an 8-bit weight need a different permutation from a 4-bit one, given both
+  target the same <code>m16n8k16</code> fragment?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>The permutation exists to match the <em>dequant</em>, not the mma. For 4 bits, the LOP3 with mask
+  <code>0x000f000f</code> extracts nibbles 0 and 4 together, so the packing must interleave with stride 4.
+  For 8 bits (<code>dequant.h:L226-L250</code>) the extraction masks bytes at a different stride, and one
+  uint32 holds only 4 values, so the fragment needs two words. Same destination lanes, different byte
+  arithmetic to get there.</p></div></details></li>
+
+  <li><b>Predict, then verify.</b> A model has hidden size 5120 and intermediate size 13824, quantised
+  GPTQ-4bit group 128. Predict which vLLM kernel serves <code>gate_proj</code> at TP=4 on an H100, and
+  whether padding occurs. Check by evaluating <code>check_machete_supports_shape</code> and
+  <code>marlin_padded_nk</code> by hand.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>Per rank, $K = 5120$, $N = 13824/4 = 3456$. Machete needs $K \bmod 64 = 0$ (5120/64 = 80 &check;) and
+  $N \bmod 128 = 0$ ($3456/128 = 27$ &check;). Machete takes it, no padding. At TP=6, $N = 2304$ and
+  $2304/128 = 18$ &check; &mdash; still Machete. The lesson: Machete's $N \bmod 128$ is usually satisfied by
+  any TP degree that divides the intermediate size at all, so the constraint that actually bites in practice
+  is $K \bmod 64$ on row-parallel layers.</p></div></details></li>
+
+  <li><b>Derive.</b> Using $M^{*} = (b_{\text{eff}}/8)\,P/(2\,\mathrm{BW})$, compute the crossover batch size
+  for INT4 group-32 weights (fp16 scales) on an A100 (312 TFLOP/s bf16 dense, 2.0 TB/s). Compare with the
+  H100 W4A16 figure and explain the direction of the change.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>$b_{\text{eff}} = 4 + 16/32 = 4.5$ bits $= 0.5625$ B. $M^{*} = 0.5625 \times 312\text{e}12 /
+  (2 \times 2.0\text{e}12) = 43.9$. Lower than H100's 76 because the A100's compute-to-bandwidth ratio
+  (156 FLOP/B) is much lower than the H100's (295 FLOP/B); the tensor cores saturate sooner relative to the
+  memory system, so the weight-only win runs out at a smaller batch. Finer groups raise $b_{\text{eff}}$ and
+  push $M^{*}$ up slightly &mdash; you are streaming more scale bytes, so you stay memory bound a little
+  longer.</p></div></details></li>
+
+  <li><b>Predict, then verify.</b> Machete's generated dispatch has no condition on K or N for
+  $M \le 16$ except <code>"N &gt;= 26624"</code>. Why does that single N threshold exist?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>It selects <code>(256, 16)</code> instead of the default <code>(128, 16)</code>
+  (<code>generate.py:L530-L532</code>). At M &le; 16 the tile's M dimension is mostly wasted; what matters is
+  CTA count. With N that large there are already plenty of N-tiles to fill 132 SMs, so the kernel can afford
+  a taller tile that amortises the weight load over more accumulator registers. Below that N, the taller
+  tile would produce too few CTAs and leave SMs idle.</p></div></details></li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The tensor-core menu is short &mdash; fp16, bf16, e4m3, s8, plus Blackwell's block-scaled fp4 &mdash;
+  and it is the only thing that decides whether a format is fast. Everything else in a low-bit kernel is
+  machinery for getting an off-menu format onto the menu without touching HBM.</li>
+  <li>Dequantising to HBM and calling cuBLAS is 2.3&times; <em>slower</em> than bf16 on a Llama-3-70B FFN
+  weight at M=1 (derived). The win comes entirely from keeping weights packed until the register file.</li>
+  <li>Marlin's contribution is a layout, not an algorithm: the repack writes weights in
+  <code>{0,2,4,6,1,3,5,7}</code> nibble order precisely so that one 32-bit load plus two <code>LOP3</code>s
+  emit the eight fp16 values a lane's <code>mma</code> fragment wants, with no cross-lane movement.</li>
+  <li>Per-tensor and per-channel scales factor out of the k-sum and live in the epilogue; group-wise and
+  block-wise scales do not, and must be applied on register fragments inside the mainloop. That single
+  algebraic fact separates "FP8 is easy" from "INT4 needs a bespoke kernel", and explains why block-wise FP8
+  gets three extra compiled dispatch paths.</li>
+  <li>Marlin is a <em>backend</em>, not a method: <code>gptq</code>, <code>gptq_marlin</code> and
+  <code>auto_gptq</code> all resolve to <code>AutoGPTQConfig</code>, and whether you get Marlin, Machete or
+  ExLlama is decided per layer inside <code>create_weights</code>. The only visibility is one
+  <code>logger.info("Using %s …")</code> line per distinct backend.</li>
+  <li>Kernel choice is two-level: once at load time by quantisation config
+  (<code>can_implement</code> walking a priority list), then per call by M. The crossover
+  $M^{*} = (b_{\text{eff}}/8)\,P/(2\,\mathrm{BW})$ &mdash; 76 for W4A16, 295 for W8A8 FP8 on H100 &mdash;
+  is why every dispatcher in both repos buckets at 16 / 64 / 128 / 256.</li>
+  <li>vLLM and SGLang share Marlin almost verbatim but diverge above and below it: vLLM maintains Machete
+  and CUTLASS in-tree for Hopper but has dropped <code>bitsandbytes</code> and <code>gguf</code> entirely;
+  SGLang keeps both, has no Machete, and routes FP8 to the external DeepGEMM package first with its
+  M-bucketing in Python where it can carry a paragraph of justification.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/IST-DASLab/marlin">IST-DASLab/marlin</a> &mdash; the original kernel and its
+  README, cited in vLLM's header at <code>marlin_template.h:L19</code>. The README carries the authors'
+  own batch-size sweep and the "batch sizes up to 16&ndash;32" framing that the M-bucketing inherits.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/7174">vLLM PR #7174</a> &mdash; Machete: the
+  Hopper-optimised mixed-precision GEMM. The discussion is the best available account of why prepacking to a
+  wgmma layout beats Marlin's fragment layout on Hopper.</li>
+  <li><code>csrc/libtorch_stable/quantization/machete/Readme.md</code> &mdash; short, and the only place the
+  <code>out = (w_q.to(scale_type) * w_s - w_z.to(scale_type)) @ a</code> contract and the FMA-ordering caveat
+  on zero points are written down.</li>
+  <li><code>csrc/libtorch_stable/quantization/marlin/dequant.h:L1-L64</code> &mdash; a genuinely good
+  file-header essay on fusing zero-point subtraction and scaling into the bit-trick conversion, including
+  which fusions are numerically safe and which are not.</li>
+  <li><a href="https://github.com/NVIDIA/cutlass">NVIDIA/cutlass</a> epilogue visitor trees &mdash; the
+  <code>Sm90EVT</code> composition used by <code>ScaledEpilogue</code>. vLLM's
+  <code>csrc/quantization/w8a8/cutlass/Epilogues.md</code> documents the vLLM-specific ones (note the path: the
+  markdown stayed under <code>csrc/quantization/</code> when the sources moved to
+  <code>csrc/libtorch_stable/quantization/</code>).</li>
+  <li><a href="https://github.com/deepseek-ai/DeepGEMM">deepseek-ai/DeepGEMM</a> &mdash; SGLang's first-choice
+  FP8 backend. Not readable from either checkout; see the Unverified callout in §4.3.9.</li>
+</ul></div></section>
+<div class="pager"><a href="04-02-gptq-awq-smoothquant.html"><div class="pager__k">← Previous</div><div class="pager__t">GPTQ, AWQ, SmoothQuant, and calibration</div></a><a class="pager__next" href="04-04-when-quantization-pays.html"><div class="pager__k">Next →</div><div class="pager__t">When quantization pays — and when it does not</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#what-the-tensor-cores-provide">What the tensor cores actually provide</a>
+<a href="#dequant-inside-the-pipeline">Dequantising inside the pipeline</a>
+<a href="#marlin">Marlin: making the layout do the work</a>
+<a href="#machete">Machete: the Hopper successor</a>
+<a href="#fp8-and-cutlass">FP8 GEMMs: why 8 bits are easy</a>
+<a href="#kernel-selection">Kernel selection at runtime</a>
+<a href="#sglang">SGLang: the same Marlin, a different FP8 story</a>
+<a href="#worked-trace">Worked trace: one W4A16 layer, load to launch</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

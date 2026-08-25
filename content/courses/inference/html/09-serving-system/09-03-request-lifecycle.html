@@ -1,0 +1,2195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Streaming and the end-to-end request lifecycle — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i is-current" href="09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 9 · The serving system around the engine · 09-03</div>
+<h1>Streaming and the end-to-end request lifecycle</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/entrypoints/launchers/api_server/entry.py</code></li><li><code>vllm/entrypoints/openai/chat_completion/serving.py</code></li><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>python/sglang/srt/managers/tokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">Eight parts of this book have taken the engine apart one subsystem at a time. This chapter puts it back together by following a single streaming chat request from the TCP socket to the GPU and back out again, hop by hop, in both engines, with the real function name at every step. Read it with both repos checked out; every hop below is a file and a line number you can jump to.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is a log line SGLang emits in production:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L1616-L1624</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        all other fields (meta_info, etc.) are taken from the last chunk.
+        """
+        if len(out_list) &gt;= 20:
+            logger.warning(
+                "Streaming backlog: rid=%s, coalescing %d queued chunks into one. "
+                "This may inflate P99 ITL for affected requests.",
+                rid,
+                len(out_list),
+            )</code></pre>
+</div>
+
+<p>Twenty tokens were generated, detokenised, and handed to the HTTP layer for one request, and the HTTP layer had not picked up a single one of them. At Llama-3-8B's derived decode floor of 4.48&nbsp;ms per step (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>), twenty steps is 90&nbsp;ms of engine time in which the frontend never ran. The client then receives one SSE frame carrying twenty tokens, and the <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a> identity between TPOT and mean ITL quietly breaks: nineteen of those inter-token gaps are zero and one is 90&nbsp;ms.</p>
+
+<p>Nothing in that sentence is about attention kernels, block tables, or sampling. It is about <em>plumbing</em>: which process holds which queue, who wakes whom, and what happens when one side runs faster than the other. That plumbing is also where the resource leaks live &mdash; a request whose client vanished and whose KV blocks nobody freed costs you capacity for as long as the generation would have taken.</p>
+
+<p>So: one streaming chat request, end to end, in both engines, every hop named. Then the three questions only the end-to-end view can answer &mdash; where the latency goes, what a disconnect does, and what happens when requests arrive faster than they retire.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: two clocks and a queue</h2></div><div class="sec__body"><p>The engine step loop and the HTTP connection run on independent clocks and neither can block the other. That single sentence explains most of the architecture.</p>
+
+<p>The step loop is a <code>while True</code> that schedules a batch, launches a forward pass, and processes the result. It has no idea HTTP exists, and its period is set by the GPU: 4.48&nbsp;ms for Llama-3-8B on an H100 at batch 1, and still roughly 4.48&nbsp;ms at batch 32 because that is inside the weight-bandwidth-bound regime (<a href="../04-quantization/04-04-when-quantization-pays.html">&sect;4.4</a> puts the crossover near batch 118). The HTTP side is an asyncio event loop whose period is set by clients, TCP windows, and JSON serialisation. Between them sits a queue, and everything interesting is a property of that queue: how deep it gets, who drains it, what happens if nobody does.</p>
+
+<p>Both engines put the boundary in the same place &mdash; between the part that talks HTTP and the part that owns the GPU &mdash; because a Python process busy serialising JSON for 200 SSE streams cannot also issue CUDA launches on a 4.48&nbsp;ms deadline. <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a> established that topology; this chapter walks a request through it.</p>
+
+<div class="cards cards--2">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">vLLM</span><h4>Two processes, detok in the frontend</h4><p>API server process holds FastAPI, the renderer, <code>AsyncLLM</code>, and the <code>OutputProcessor</code> &mdash; which means incremental detokenisation runs in the same event loop as the SSE writers. <code>EngineCore</code> is a separate process reached over ZMQ with msgpack.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">SGLang</span><h4>Three processes, detok on its own</h4><p>HTTP worker holds FastAPI and <code>TokenizerManager</code>. <code>Scheduler</code> is a separate process that owns the GPU. <code>DetokenizerManager</code> is a <em>third</em> process sitting between them, so detokenisation blocks neither the GPU loop nor the socket writers.</p></div>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the same request, two process topologies.</b> Solid arrows cross a process boundary. Both engines define their wire payloads as <code>msgspec.Struct</code>s; vLLM always encodes them as msgpack, while SGLang pickles them by default and only uses msgpack when <code>SGLANG_USE_PICKLE_IPC=0</code>.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    subgraph V["vLLM - 2 processes"]
+        V1["API server process<br/>FastAPI + OnlineRenderer<br/>AsyncLLM + OutputProcessor<br/>incremental detokenisation HERE"]
+        V2["EngineCore process<br/>run_busy_loop + step<br/>Scheduler + Executor + Workers"]
+        V1 -->|"ZMQ ROUTER to DEALER<br/>EngineCoreRequest, msgpack"| V2
+        V2 -->|"ZMQ PUSH to PULL<br/>EngineCoreOutputs, msgpack"| V1
+    end
+    subgraph S["SGLang - 3 processes"]
+        S1["HTTP worker process<br/>FastAPI + OpenAIServingChat<br/>TokenizerManager"]
+        S2["Scheduler process<br/>event_loop_overlap<br/>TpModelWorker owns the GPU"]
+        S3["DetokenizerManager process<br/>incremental detokenisation HERE"]
+        S1 -->|"ZMQ PUSH to PULL<br/>TokenizedGenerateReqInput"| S2
+        S2 -->|"ZMQ PUSH to PULL<br/>BatchTokenIDOutput"| S3
+        S3 -->|"ZMQ PUSH to PULL<br/>BatchStrOutput"| S1
+    end
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the per-request frontend budget</h2></div><div class="sec__body"><p>One forward pass produces one token for every request in the batch. The frontend must turn each of those into its own SSE frame on its own socket. That gives a hard budget nobody writes down but everybody hits.</p>
+
+<p>Let $T_{\text{step}}$ be the engine step period, $B$ the running batch size, and $c$ the frontend CPU cost of turning one sampled token id into bytes on a socket &mdash; detokenise, build the delta object, serialise to JSON, write. The frontend keeps up only if</p>
+
+<div class="math-display">$$ B \cdot c \;\le\; T_{\text{step}} \qquad\Longleftrightarrow\qquad c \;\le\; \frac{T_{\text{step}}}{B} $$</div>
+
+<p>Instantiate it. Llama-3-8B (L=32, d=4096, h=32, h_kv=8, d_h=128) in bf16 on an H100 SXM: 15.01&nbsp;GB of weights over 3.35&nbsp;TB/s gives $T_{\text{step}} = 4.48$&nbsp;ms, and that number barely moves up to batch ~118. So:</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">140 &micro;s</div><div class="kpi__l">Frontend budget per token at B=32 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">35 &micro;s</div><div class="kpi__l">Same at B=128 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">7,143/s</div><div class="kpi__l">SSE frames the frontend must emit at B=32 (derived)</div></div>
+</div>
+
+<p>These are arithmetic from $T_{\text{step}}$ and $B$, not measurements. The shape is the point: the budget shrinks linearly in batch size while $c$ does not shrink at all, so <b>every serving system eventually becomes frontend-bound, and it happens at a batch size, not at a token rate</b>. Both engines respond the same way &mdash; not by shrinking $c$, but by making the frontend do fewer, bigger units of work when it falls behind. That is what the backlog warning is: coalescing, not dropping.</p>
+
+<p>Two consequences worth holding onto before the traces:</p>
+
+<ul>
+<li><b>The engine never waits for the frontend.</b> In both engines the step loop pushes into a queue and immediately schedules the next batch. A slow client costs that client's ITL distribution; it does not cost throughput until memory runs out.</li>
+<li><b>Coalescing is lossless for tokens and lossy for timing.</b> When the queue drains late, the tokens all arrive &mdash; concatenated. What is destroyed is the per-token timestamp, which is exactly the thing <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>'s ITL is computed from.</li>
+</ul></div></section>
+<section class="sec" id="vllm-trace" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The vLLM trace, hop by hop</h2></div><div class="sec__body"><div class="callout callout--warn">
+  <span class="callout__k">Layout moved</span>
+  <p>As of <code>a556f3f</code>, <code>vllm/entrypoints/openai/api_server.py</code> is a 59-line deprecation shim that re-exports from <code>vllm.entrypoints.launchers.*</code>, and the old <code>serving_chat.py</code> that used to sit in <code>vllm/entrypoints/openai/</code> no longer exists &mdash; the chat handler is <code>vllm/entrypoints/openai/chat_completion/serving.py</code>. Older blog posts and the vLLM docs still point at the old paths. Cite the new ones.</p>
+</div>
+
+<p><b>Hop 1 &mdash; the route.</b> Routers are registered per feature. <code>register_api_routers</code> (<code>vllm/entrypoints/launchers/api_server/routers.py:L12-L20</code>) calls into <code>register_generate_api_routers</code> (<code>vllm/entrypoints/generate/api_router.py:L21-L26</code>), which attaches the chat router. The endpoint itself:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/openai/chat_completion/api_router.py:L40-L53</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@router.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):</code></pre>
+</div>
+
+<p>FastAPI has already validated and coerced the JSON body into a <code>ChatCompletionRequest</code> pydantic model &mdash; that is the entire validation stage, and <a href="../09-serving-system/09-01-openai-api-surface.html">&sect;9.1</a> owns what it does and does not accept. Note <code>@with_cancellation</code>; we come back to it in <a href="#abort">&sect;8</a>.</p>
+
+<p><b>Hop 2 &mdash; chat template and tokenise.</b> <code>OpenAIServingChat.render_chat_request</code> delegates to <code>OnlineRenderer.render_chat</code> (<code>vllm/renderers/online_renderer.py:L117-L218</code>), which validates tool-choice, then calls <code>preprocess_chat</code> &rarr; <code>Renderer.render_chat_async</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/renderers/base.py:L1077-L1091</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if tok_params is None:
+            tok_params = self.default_chat_tok_params
+
+        rendered = [
+            self.render_messages_async(conversation, chat_params)
+            for conversation in conversations
+        ]
+
+        out_conversations = list[list["ConversationMessage"]]()
+        dict_prompts = list[DictPrompt]()
+        for conv, prompt in await asyncio.gather(*rendered):
+            out_conversations.append(conv)
+            dict_prompts.append(prompt)
+
+        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)</code></pre>
+</div>
+
+<p>Both the Jinja render and the tokenizer call are blocking work, so they go into a thread pool built in the renderer constructor (<code>vllm/renderers/base.py:L85-L99</code>), sized by <code>renderer_num_workers</code>, default 1 (<code>vllm/config/model.py:L367</code>). <b>First asynchrony boundary, first pitfall</b>: with one worker, tokenising a 100k-token prompt serialises against every other request's tokenisation, though not against the event loop itself.</p>
+
+<p><b>Hop 3 &mdash; sampling params and the generator.</b> <code>_create_chat_completion</code> converts the request to a <code>SamplingParams</code> (<a href="../06-decoding-algorithms/06-01-sampling-on-gpu.html">&sect;6.1</a> owns what those mean on the GPU). One field matters here:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/openai/chat_completion/protocol.py:L737-L739</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            output_kind=(
+                RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
+            ),</code></pre>
+</div>
+
+<p><code>DELTA</code> is what makes the per-request collector coalesce rather than overwrite. Then:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/openai/chat_completion/serving.py:L370-L398</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                generator = self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    sub_request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=self._get_priority(request, raw_request),
+                    data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
+# ...
+        (result_generator,) = generators
+
+        if request.stream:
+            return self.chat_completion_stream_generator(
+                request,
+                result_generator,
+                request_id,</code></pre>
+</div>
+
+<p><b>Hop 4 &mdash; registration, in two places at once.</b> <code>AsyncLLM.add_request</code> creates a <code>RequestOutputCollector</code> and then does exactly two things:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L424-L436</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    async def _add_request(
+        self,
+        request: EngineCoreRequest,
+        prompt: str | None,
+        parent_req: ParentRequest | None,
+        index: int,
+        queue: RequestOutputCollector,
+    ):
+        # Add the request to OutputProcessor (this process).
+        self.output_processor.add_request(request, prompt, parent_req, index, queue)
+
+        # Add the EngineCoreRequest to EngineCore (separate process).
+        await self.engine_core.add_request_async(request)</code></pre>
+</div>
+
+<p>Read the two comments. The request now exists in two places, and the rest of the chapter &mdash; especially the abort path &mdash; is about keeping those two copies in agreement.</p>
+
+<p><b>Hop 5 &mdash; the process boundary.</b> The <code>EngineCoreRequest</code> is a <code>msgspec.Struct</code> with <code>array_like=True</code> and <code>gc=False</code> (<code>vllm/v1/engine/__init__.py:L107-L122</code>), so it encodes to a msgpack array rather than a map. The send:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core_client.py:L1108-L1151</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def _send_input(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+        engine: EngineIdentity | None = None,
+    ) -&gt; Awaitable[Any]:
+        if engine is None:
+            engine = self.core_engine
+
+        message = (request_type.value, *self.encoder.encode(request))
+        return self._send_input_message(message, engine)
+# ...
+        return self.input_socket.send_multipart((engine,) + message, copy=False)
+# ...
+    async def add_request_async(self, request: EngineCoreRequest) -&gt; None:
+        request.client_index = self.client_index
+        await self._send_input(EngineCoreRequestType.ADD, request)</code></pre>
+</div>
+
+<p>The frontend socket is a <code>zmq.ROUTER</code> and the reply socket a <code>zmq.PULL</code> (<code>vllm/v1/engine/core_client.py:L554-L563</code>); the engine side connects a <code>zmq.DEALER</code> and pushes back on a <code>zmq.PUSH</code> (<code>vllm/v1/engine/core.py:L1690-L1697</code>, <code>L1795-L1800</code>). Every one of these sockets is created with high-water marks explicitly disabled:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/utils/network_utils.py:L336-L342</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.RCVHWM, 0)
+        socket.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        socket.setsockopt(zmq.SNDHWM, 0)
+        socket.setsockopt(zmq.SNDBUF, buf_size)</code></pre>
+</div>
+
+<p>Remember that when you get to <a href="#backpressure">&sect;9</a>: there is deliberately no backpressure at the transport.</p>
+
+<p><b>Hop 6 &mdash; into the engine process.</b> A dedicated IO thread polls the DEALER, decodes, and pushes onto a plain <code>queue.Queue</code> (<code>vllm/v1/engine/core.py:L1674-L1775</code>, ending at <code>self.input_queue.put_nowait((request_type, request))</code>). The busy loop is the consumer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1391-L1402</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def run_busy_loop(self):
+        """Core busy loop of the EngineCore."""
+        while self._handle_shutdown():
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+            # Publish request counts before and after GPU step to ensure freshness.
+            self._maybe_publish_request_counts()
+            # 2) Step the engine core and return the outputs.
+            self._process_engine_step()
+            self._maybe_publish_request_counts()
+
+        raise SystemExit</code></pre>
+</div>
+
+<p><code>_process_input_queue</code> (<code>L1417-L1446</code>) drains the queue through <code>_handle_client_request</code> (<code>L1520-L1553</code>), which for an <code>ADD</code> calls <code>EngineCore.add_request</code> &rarr; <code>self.scheduler.add_request(request)</code> (<code>vllm/v1/engine/core.py:L478</code>). The request is now in the scheduler's waiting queue. Note the loop shape: <b>input is drained only between steps</b>, never during one.</p>
+
+<p><b>Hop 7 &mdash; scheduled, allocated, executed.</b> One step:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L590-L610</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return {}, False
+        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
+            model_output = future.result()
+            if model_output is None:
+                model_output = self.model_executor.sample_tokens(grammar_output)
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )</code></pre>
+</div>
+
+<p>Inside <code>schedule()</code>, admission and the token budget belong to <a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a>; the <code>kv_cache_manager.allocate_slots</code> call at <code>vllm/v1/core/sched/scheduler.py:L639</code> belongs to <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">&sect;2.2</a>; the attention metadata built inside <code>execute_model</code> belongs to <a href="../03-attention-kernels/03-04-flashinfer-and-backends.html">&sect;3.4</a>; sampling belongs to <a href="../06-decoding-algorithms/06-01-sampling-on-gpu.html">&sect;6.1</a>. What this chapter owns is the shape: <b>a single synchronous call chain from one <code>schedule()</code> to one batch of sampled token ids</b>, with no per-request branching anywhere in it.</p>
+
+<p><b>Hop 8 &mdash; the demultiplex begins.</b> <code>update_from_output</code> loops over the batch and appends one struct per request, keyed by the client that submitted it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L2030-L2040</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            if should_emit_output:
+                # Add EngineCoreOutput for this Request.
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids,
+                        finish_reason=finish_reason,
+                        new_logprobs=new_logprobs,
+                        new_sampling_mask=new_sampling_mask,
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        pooling_output=pooler_output,</code></pre>
+</div>
+
+<p>Finish detection happened just before this, in <code>check_stop</code> (<code>vllm/v1/core/sched/utils.py:L94-L130</code>): EOS token, a member of <code>stop_token_ids</code>, <code>max_model_len</code>, or <code>max_tokens</code>. Notice what is <em>not</em> there &mdash; stop <em>strings</em>. Those need text, which the engine process does not have. <a href="../09-serving-system/09-02-tokenization-and-detokenization.html">&sect;9.2</a> owns that split; its consequence appears in hop 11.</p>
+
+<p><b>Hop 9 &mdash; back across the boundary.</b> <code>_process_engine_step</code> puts each <code>(client_index, EngineCoreOutputs)</code> pair on an output queue drained by another IO thread (<code>vllm/v1/engine/core.py:L1812-L1826</code>) that msgpack-encodes and <code>PUSH</code>es. On the frontend, an asyncio task pulls and decodes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core_client.py:L1041-L1046</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        async def process_outputs_socket():
+            try:
+                while True:
+                    frames = await output_socket.recv_multipart(copy=False)
+                    resources.validate_alive(frames)
+                    outputs: EngineCoreOutputs = decoder.decode(frames)</code></pre>
+</div>
+
+<p><b>Hop 10 &mdash; the fan-out.</b> A single background task in the API server process owns the whole demux:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L686-L729</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        async def output_handler():
+            try:
+                while True:
+                    # 1) Pull EngineCoreOutputs from the EngineCore.
+                    outputs = await engine_core.get_output_async()
+                    num_outputs = len(outputs.outputs)
+# ...
+                    # Split outputs into chunks of at most
+                    # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                    # event loop for too long.
+                    engine_core_outputs = outputs.outputs
+                    for start in range(0, num_outputs, chunk_size):
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
+                        # 2) Process EngineCoreOutputs.
+                        processed_outputs = output_processor.process_outputs(
+                            outputs_slice, outputs.timestamp, iteration_stats
+                        )
+                        # NOTE: RequestOutputs are pushed to their queues.
+                        assert not processed_outputs.request_outputs
+# ...
+                        # Allow other asyncio tasks to run between chunks
+                        if end &lt; num_outputs:
+                            await asyncio.sleep(0)
+
+                        # 3) Abort any reqs that finished due to stop strings.
+                        if processed_outputs.reqs_to_abort:
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort
+                            )</code></pre>
+</div>
+
+<p><code>VLLM_V1_OUTPUT_PROC_CHUNK_SIZE</code> defaults to 128 (<code>vllm/envs.py:L169</code>). At batch 256 the handler yields once mid-batch so SSE writers can run; at batch 32 it does not yield at all, and the whole demux is one uninterruptible block of the event loop.</p>
+
+<p><b>Hop 11 &mdash; detokenise and hand off.</b> Inside <code>process_outputs</code>, per request:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/output_processor.py:L676-L702</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                # 2) Detokenize the token ids into text and perform stop checks.
+                stop_string = req_state.detokenizer.update(
+                    new_token_ids, finish_reason == FinishReason.STOP
+                )
+                if stop_string:
+                    finish_reason = FinishReason.STOP
+                    stop_reason = stop_string
+# ...
+            # 4) Create and handle RequestOutput objects.
+            if request_output := req_state.make_request_output(
+                new_token_ids,
+                pooling_output,
+                finish_reason,
+                stop_reason,
+                kv_transfer_params,
+                ec_transfer_params,
+            ):
+                if req_state.streaming_input:
+                    request_output.finished = False
+
+                if req_state.queue is not None:
+                    # AsyncLLM: put into queue for handling by generate().
+                    req_state.queue.put(request_output)</code></pre>
+</div>
+
+<p>This is the exact point where one batched engine output becomes N independent per-request streams. <code>vllm/v1/engine/detokenizer.py</code> is <a href="../09-serving-system/09-02-tokenization-and-detokenization.html">&sect;9.2</a>'s territory; here, note only that it runs <em>in the frontend event loop</em> and that a stop string discovered here has to be sent back across the process boundary as an abort, which is what step 3 of the output handler does.</p>
+
+<p><b>Hop 12 &mdash; the per-request queue.</b> The "queue" is a one-slot mailbox that merges:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/output_processor.py:L48-L75</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class RequestOutputCollector:
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
+
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.request_id = request_id
+        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.ready = asyncio.Event()
+# ...
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -&gt; None:
+        """Non-blocking put operation."""
+        if self.output is None or isinstance(output, Exception):
+            self.output = output
+            self.ready.set()
+        elif isinstance(self.output, RequestOutput) and isinstance(
+            output, RequestOutput
+        ):
+            # This ensures that request outputs with different request indexes
+            # (if n &gt; 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)</code></pre>
+</div>
+
+<p><b><code>put</code> never blocks and never allocates unboundedly.</b> That is vLLM's whole answer to a slow client: merge deltas in place. This is the structural twin of SGLang's backlog warning, minus the warning.</p>
+
+<p><b>Hop 13 &mdash; out of the engine API.</b> <code>AsyncLLM.generate</code> is the consumer:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L601-L614</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            # The output_handler task pushes items into the queue.
+            # This task pulls from the queue and yields to caller.
+            finished = False
+            while not finished:
+                # Note: drain queue without await if possible (avoids
+                # task switching under load which helps performance).
+                out = q.get_nowait() or await q.get()
+
+                # Note: both OutputProcessor and EngineCore handle their
+                # own request cleanup based on finished.
+                assert isinstance(out, RequestOutput)
+                finished = out.finished
+                if out is not STREAM_FINISHED:
+                    yield out</code></pre>
+</div>
+
+<p><b>Hop 14 &mdash; the SSE frame.</b> <code>chat_completion_stream_generator</code> consumes that async generator, builds the delta, and yields raw SSE:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/openai/chat_completion/serving.py:L645-L816</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                    delta_text = output.text
+
+                    if (
+                        not delta_text
+                        and not output.token_ids
+                        and not previous_num_tokens[i]
+                    ):
+                        # Chunked prefill case, don't return empty chunks
+                        continue
+# ...
+                    # handle streaming just a content delta (no parsers)
+                    else:
+                        delta_message = DeltaMessage(content=delta_text)
+# ...
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"</code></pre>
+</div>
+
+<p>The generator is handed to Starlette as <code>StreamingResponse(content=generator, media_type="text/event-stream")</code> (<code>vllm/entrypoints/openai/chat_completion/api_router.py:L74</code>), and uvicorn awaits each <code>send()</code>. That await is where TCP backpressure enters the system. On finish, <code>chat_completion_stream_generator</code> emits the terminal chunk with <code>finish_reason</code>, optionally a usage-only chunk, then <code>yield "data: [DONE]\n\n"</code> (<code>serving.py:L912</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; one streaming chat request through vLLM.</b> Everything above the ZMQ note lives in the API server process; everything below lives in the EngineCore process. The loop repeats once per decode step.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+sequenceDiagram
+    autonumber
+    participant CL as Client
+    participant RT as chat_completion/api_router
+    participant SV as OpenAIServingChat
+    participant AL as AsyncLLM + OutputProcessor
+    participant EC as EngineCore process
+    participant EX as Executor and Workers
+    CL->>RT: POST /v1/chat/completions stream=true
+    RT->>SV: create_chat_completion
+    SV->>SV: render_chat then render_chat_async in thread pool
+    Note over SV: chat template plus tokenise, renderer_num_workers=1
+    SV->>AL: engine_client.generate
+    AL->>AL: output_processor.add_request, RequestOutputCollector
+    Note over AL,EC: PROCESS BOUNDARY - ZMQ ROUTER to DEALER, msgpack EngineCoreRequest
+    AL->>EC: core_client.add_request_async
+    EC->>EC: input IO thread decodes, input_queue.put_nowait
+    EC->>EC: run_busy_loop then _process_input_queue then scheduler.add_request
+    SV-->>CL: HTTP 200 text/event-stream headers
+    loop every engine step, 4.48 ms floor at batch 1
+        EC->>EC: scheduler.schedule allocates KV blocks
+        EC->>EX: model_executor.execute_model then sample_tokens
+        EX-->>EC: next_token_ids for the whole batch
+        EC->>EC: update_from_output builds one EngineCoreOutput per request
+        Note over AL,EC: PROCESS BOUNDARY - ZMQ PUSH to PULL, msgpack EngineCoreOutputs
+        EC->>AL: output IO thread encodes and pushes
+        AL->>AL: output_handler then process_outputs then detokenizer.update
+        AL->>AL: RequestOutputCollector.put merges if consumer is behind
+        AL->>SV: generate yields RequestOutput delta
+        SV->>CL: yield data colon chunk newline newline
+    end
+    EC->>EC: check_stop sets FINISHED_STOPPED then _free_request frees blocks
+    AL->>AL: _finish_request pops request_states
+    SV->>CL: final chunk with finish_reason then data colon DONE
+  </script>
+</div></div></section>
+<section class="sec" id="sglang-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The SGLang trace, hop by hop</h2></div><div class="sec__body"><p><b>Hop 1 &mdash; the route.</b> One flat module holds every endpoint:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/http_server.py:L1722-L1729</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@app.post("/v1/chat/completions", dependencies=[Depends(validate_json_request)])
+async def openai_v1_chat_completions(
+    request: ChatCompletionRequest, raw_request: Request
+):
+    """OpenAI-compatible chat completion endpoint."""
+    return await raw_request.app.state.openai_serving_chat.handle_request(
+        request, raw_request
+    )</code></pre>
+</div>
+
+<p><b>Hop 2 &mdash; validate, template, tokenise.</b> <code>OpenAIServingBase.handle_request</code> (<code>python/sglang/srt/entrypoints/openai/serving_base.py:L73-L109</code>) stamps <code>received_time = monotonic_time()</code> as its very first statement &mdash; that is where SGLang's TTFT clock starts &mdash; then validates and converts. The conversion applies the chat template <em>and tokenises, in the HTTP worker process</em>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/openai/serving_chat.py:L1348-L1359</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            try:
+                rendered_prompt = self.tokenizer_manager.tokenizer.apply_chat_template(
+                    openai_compatible_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    tools=tools,
+                    return_dict=False,
+                    **extra_template_kwargs,
+                )
+                prompt_ids = self.tokenizer_manager.tokenizer.encode(
+                    rendered_prompt, **encode_kwargs
+                )</code></pre>
+</div>
+
+<p>Note the difference from vLLM: this is a plain synchronous call on the event loop, not a thread-pool offload. <code>_convert_to_internal_request</code> then packs <code>prompt_ids</code> into <code>GenerateReqInput(input_ids=...)</code>, so the later <code>_tokenize_one_request</code> short-circuits &mdash; the <code>/v1/chat/completions</code> path never re-tokenises.</p>
+
+<p><b>Hop 3 &mdash; kick the generator before the 200.</b> A detail worth stealing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/entrypoints/openai/serving_chat.py:L1485-L1504</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        generator = self._generate_chat_stream(adapted_request, request, raw_request)
+
+        # Kick-start the generator to trigger validation before HTTP 200 is sent.
+        # If validation fails (e.g., context length exceeded), we can still return
+        # a proper HTTP 400 error response instead of streaming it as SSE payload.
+        try:
+            first_chunk = await generator.__anext__()
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        async def prepend_first_chunk():
+            yield first_chunk
+            async for chunk in generator:
+                yield chunk
+
+        return StreamingResponse(
+            prepend_first_chunk(),
+            media_type="text/event-stream",
+            background=self.tokenizer_manager.create_abort_task(adapted_request),
+        )</code></pre>
+</div>
+
+<p>SGLang holds the response open until the first chunk exists, so a context-length rejection becomes a real HTTP 400 instead of an SSE error frame after a 200. vLLM instead checks <code>engine_client.errored</code> up front and streams errors as SSE (<code>vllm/entrypoints/openai/chat_completion/serving.py:L236-L240</code>, <code>L905-L910</code>). Also note the <code>background=</code> task &mdash; that is the disconnect handler, and we return to it in <a href="#abort">&sect;8</a>.</p>
+
+<p><b>Hop 4 &mdash; register and dispatch.</b> <code>TokenizerManager.generate_request</code> creates the per-request state, tokenises (a no-op here), sends, and then awaits:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L810-L818</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                # Tokenize the request and send it to the scheduler
+                if obj.is_single:
+                    tokenized_obj = await self._tokenize_one_request(obj)
+                    state = self.rid_to_state[obj.rid]
+                    if obj.return_prompt_token_ids:
+                        state.prompt_token_ids = list(tokenized_obj.input_ids)
+                    self._send_one_request(tokenized_obj)
+                    async for response in self._wait_one_response(obj, request):
+                        yield response</code></pre>
+</div>
+
+<p><b>Hop 5 &mdash; the process boundary.</b> <code>_send_one_request</code> stamps a dispatch timestamp and calls <code>_dispatch_to_scheduler</code> &rarr; <code>sock_send</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/io_struct.py:L2421-L2426</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def sock_send(socket: zmq.Socket, obj: Any, flags: int = 0) -&gt; None:
+    if _USE_PICKLE_IPC:
+        socket.send_pyobj(obj, flags=flags, protocol=pickle.HIGHEST_PROTOCOL)
+        return
+
+    socket.send(msgpack_encode(obj), flags=flags)</code></pre>
+</div>
+
+<p>Read the branch order: <b>pickle is the default</b>. <code>_USE_PICKLE_IPC = envs.SGLANG_USE_PICKLE_IPC.get()</code> (<code>python/sglang/srt/managers/io_struct.py:L2381</code>) and that env var defaults to <code>True</code> (<code>python/sglang/srt/environ.py:L337</code>), so a stock SGLang server sends <code>send_pyobj</code> at <code>pickle.HIGHEST_PROTOCOL</code> and never reaches <code>msgpack_encode</code>. The structs are still <code>msgspec.Struct</code>s &mdash; they are just pickled rather than msgpack-encoded, and <code>PickleWrapper</code>, the shim that lets opaque payloads ride inside a msgpack frame, is dead on this path (<code>io_struct.py:L106-L116</code>). Set <code>SGLANG_USE_PICKLE_IPC=0</code> to get the msgpack wire format vLLM always uses. The socket is a <code>zmq.PUSH</code> to the scheduler's <code>PULL</code> (<code>python/sglang/srt/managers/tokenizer_manager.py:L553-L555</code>), and SGLang also disables high-water marks (<code>python/sglang/srt/utils/network.py:L248-L253</code>).</p>
+
+<p><b>Hop 6 &mdash; the scheduler loop.</b> Unlike vLLM's blocking-queue-plus-IO-thread, SGLang polls non-blocking once per iteration:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/request_receiver.py:L118-L125</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                while True:
+                    try:
+                        if self.recv_limit_reached(len(recv_reqs)):
+                            break
+                        recv_req = sock_recv(self.recv_from_tokenizer, zmq.NOBLOCK)
+                    except zmq.ZMQError:
+                        break
+                    recv_reqs.append(recv_req)</code></pre>
+</div>
+
+<p>Only attention-TP rank 0 pulls; <code>_broadcast_reqs_across_ranks</code> then replicates to the other ranks, which is the Model B topology <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a> described. Then:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L1783-L1800</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def event_loop_overlap(self):
+        """A scheduler loop that overlaps the CPU processing and GPU computation."""
+        self.result_queue: Deque[
+            Tuple[ScheduleBatch, Union[GenerationBatchResult, EmbeddingBatchResult]]
+        ] = deque()
+
+        def pop_and_process():
+            # Process the results of the last batch
+            tmp_batch, tmp_result = self.result_queue.popleft()
+            self.process_batch_result(tmp_batch, tmp_result)
+
+        while True:
+            if self.gracefully_exit:
+                break
+
+            # Receive requests
+            recv_reqs = self.request_receiver.recv_requests()
+            self.process_input_requests(recv_reqs)</code></pre>
+</div>
+
+<p><code>process_input_requests</code> dispatches by type (<code>scheduler.py:L1923</code>) into <code>handle_generate_request</code>, which constructs the <code>Req</code> (<code>scheduler.py:L2435-L2470</code>) and enqueues it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L2780-L2788</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _add_request_to_queue(self, req: Req, is_retracted: bool = False):
+        if not self._set_or_validate_priority(req):
+            return
+        if self.disaggregation_mode == DisaggregationMode.NULL:
+            if self._abort_on_queued_limit(req):
+                return
+            self._prefetch_kvcache(req)
+            self.waiting_queue.append(req)
+            req.time_stats.set_wait_queue_entry_time()</code></pre>
+</div>
+
+<p><b>Hop 7 &mdash; batch, run, finish-check.</b> <code>get_next_batch_to_run</code> (<a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a>) picks the batch; <code>run_batch</code> executes it; <code>process_batch_result_decode</code> walks the batch and updates each request:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/batch_result_processor.py:L862-L869</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            req.output_ids.extend(next_token_id)
+            new_accept_len = len(next_token_id)
+
+            self._maybe_update_reasoning_tokens(req, next_token_id)
+            req.time_stats.set_last_decode_finish_time()
+            req.update_finish_state(new_accept_len)
+
+            self._handle_finish_state_updated_req(req, batch, result, i, logits_output)</code></pre>
+</div>
+
+<p><code>Req.update_finish_state</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1632-L1672</code>) is SGLang's <code>check_stop</code> &mdash; and it checks stop <em>strings</em> too, because SGLang keeps a running decoded tail on the <code>Req</code>. That is a real architectural difference from vLLM: SGLang can finish a request in the scheduler process on a stop string; vLLM must round-trip an abort.</p>
+
+<p><b>Hop 8 &mdash; the stream interval gate.</b> Not every step emits:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler_components/output_streamer.py:L362-L384</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def accept(self, *, req: Req) -&gt; None:
+        if req.finished():
+            assert not req.finished_output
+            req.finished_output = True
+            if req.finished_len is None:
+                req.finished_len = len(req.output_ids)
+            should_output = True
+        else:
+            if req.stream:
+                stream_interval = (
+                    req.sampling_params.stream_interval or self.default_stream_interval
+                )
+
+                # origin stream_interval logic
+                should_output = (
+                    len(req.output_ids) % stream_interval == 1
+                    if stream_interval &gt; 1
+                    else len(req.output_ids) % stream_interval == 0
+                )
+
+                if should_output:
+                    # check_match_stop_str_prefix if  tail_str's suffix match stop_str prefix
+                    should_output &amp;= not req.check_match_stop_str_prefix()</code></pre>
+</div>
+
+<p>Default <code>stream_interval</code> is 1 (<code>python/sglang/srt/server_args.py:L1480-L1484</code>), so every token is emitted; raise it and you trade ITL smoothness for frontend CPU. vLLM has the identical knob, applied instead in the frontend at <code>vllm/v1/engine/output_processor.py:L299-L313</code>. The suffix check is the stop-string-prefix hold that <a href="../09-serving-system/09-02-tokenization-and-detokenization.html">&sect;9.2</a> owns.</p>
+
+<p><b>Hop 9 &mdash; to the detokeniser process.</b> The accumulator produces one <code>BatchTokenIDOutput</code> covering the whole batch and pushes it (<code>output_streamer.py:L173-L182</code>). The <code>DetokenizerManager</code> is a bare loop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L167-L175</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def event_loop(self):
+        """The event loop that handles requests"""
+        while True:
+            with self.soft_watchdog.disable():
+                recv_obj = sock_recv(self.recv_from_scheduler)
+            output = self._request_dispatcher(recv_obj)
+            if output is not None:
+                sock_send(self.send_to_tokenizer, output)
+            self.soft_watchdog.feed()</code></pre>
+</div>
+
+<p><code>handle_batch_token_id_out</code> turns <code>BatchTokenIDOutput</code> into <code>BatchStrOutput</code> and pushes it on to the HTTP worker. <b>This is the structural difference from vLLM</b>: detokenisation is a full extra process hop, which costs one more serialise/deserialise round per step and buys immunity from both the GPU loop and the socket writers.</p>
+
+<p><b>Hop 10 &mdash; the fan-out.</b> Back in the HTTP worker, <code>handle_loop</code> (<code>tokenizer_manager.py:L2151-L2164</code>) receives and <code>_handle_batch_output</code> demultiplexes by <code>rid</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L2438-L2446</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            if out_dict is not None:
+                state.out_list.append(out_dict)
+                pending_notify[rid] = state
+
+                if len(pending_notify) &gt;= batch_notify_size:
+                    for s in pending_notify.values():
+                        s.event.set()
+                    pending_notify = {}
+                    await asyncio.sleep(0)</code></pre>
+</div>
+
+<p>SGLang's per-request mailbox is a <em>list</em> plus an <code>asyncio.Event</code>, and it batches the wakeups: <code>batch_notify_size</code> defaults to 16 (<code>python/sglang/srt/server_args.py:L1485-L1489</code>), so at batch 32 the loop wakes 16 request tasks, yields once, then wakes the rest. Compare vLLM: one <code>Event.set()</code> per request, no yield inside the fan-out at all below 128.</p>
+
+<p><b>Hop 11 &mdash; the per-request await.</b> <code>_wait_one_response</code> drains the list atomically:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L1713-L1727</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            # Drain all pending outputs atomically.
+            out_list = state.out_list
+            state.out_list = []
+            finished = state.finished
+            state.event.clear()
+
+            # With incremental streaming, each chunk is a delta — coalesce
+            # multiple queued chunks to avoid dropping token ids.
+            incremental_stream = is_stream and self.incremental_streaming_output
+            if incremental_stream and len(out_list) &gt; 1:
+                out = self._coalesce_streaming_chunks(
+                    out_list,
+                    obj.rid,
+                    state.customized_info_accumulated.keys(),
+                )</code></pre>
+</div>
+
+<p>There is the backlog warning from &sect;1, in context. Where vLLM merges on <em>put</em> and can therefore never accumulate, SGLang appends on put and merges on <em>get</em> &mdash; which is why it can see the depth and log it. Same outcome for the client, better observability.</p>
+
+<p><b>Hop 12 &mdash; the SSE frame.</b> <code>_generate_chat_stream</code> iterates <code>tokenizer_manager.generate_request</code> (<code>serving_chat.py:L1544-L1546</code>), reads <code>content["meta_info"]["finish_reason"]</code>, builds the delta and yields <code>f"data: {chunk.model_dump_json()}\n\n"</code>, closing with <code>yield "data: [DONE]\n\n"</code> (<code>serving_chat.py:L1770</code>).</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; the same request through SGLang.</b> Three processes, so three boundaries per step instead of two. Detokenisation is off the critical path of both the GPU loop and the socket writer.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+sequenceDiagram
+    autonumber
+    participant CL as Client
+    participant HS as http_server route
+    participant SC as OpenAIServingChat
+    participant TM as TokenizerManager
+    participant SD as Scheduler process
+    participant TW as TpModelWorker
+    participant DT as DetokenizerManager process
+    CL->>HS: POST /v1/chat/completions stream=true
+    HS->>SC: handle_request, received_time stamped here
+    SC->>SC: apply_chat_template then tokenizer.encode on the event loop
+    SC->>TM: generate_request with GenerateReqInput input_ids
+    TM->>TM: _init_req_state creates rid_to_state entry
+    Note over TM,SD: PROCESS BOUNDARY - ZMQ PUSH to PULL, msgpack TokenizedGenerateReqInput
+    TM->>SD: _send_one_request then _dispatch_to_scheduler then sock_send
+    SD->>SD: recv_requests NOBLOCK then process_input_requests
+    SD->>SD: handle_generate_request then _add_request_to_queue
+    SC-->>CL: HTTP 200 after first chunk resolves
+    loop every engine step
+        SD->>SD: get_next_batch_to_run allocates KV via the radix cache
+        SD->>TW: run_batch
+        TW-->>SD: next_token_ids for the whole batch
+        SD->>SD: process_batch_result_decode then req.update_finish_state
+        SD->>SD: output_streamer.stream_output, stream_interval gate
+        Note over SD,DT: PROCESS BOUNDARY - BatchTokenIDOutput for the whole batch
+        SD->>DT: send_to_detokenizer
+        DT->>DT: handle_batch_token_id_out, incremental detokenisation
+        Note over TM,DT: PROCESS BOUNDARY - BatchStrOutput
+        DT->>TM: sock_send to tokenizer
+        TM->>TM: handle_loop then _handle_batch_output, append and set event
+        TM->>SC: _wait_one_response drains out_list, coalescing if behind
+        SC->>CL: yield data colon chunk newline newline
+    end
+    SD->>SD: release_kv_cache then tree_cache.cache_finished_req
+    TM->>TM: del rid_to_state on the finished output
+    SC->>CL: final chunk with finish_reason then data colon DONE
+  </script>
+</div></div></section>
+<section class="sec" id="latency" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Latency accounting against the metrics</h2></div><div class="sec__body"><p>Now walk the trace a second time with <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>'s stopwatch. TTFT is $t_1 - t_a$ and each $\mathrm{ITL}_k$ is $t_k - t_{k-1}$, where $t_a$ is arrival and $t_k$ is when the client sees token $k$.</p>
+
+<p><b>Where the clock starts.</b> Neither engine's $t_a$ is the TCP SYN. SGLang stamps <code>received_time = monotonic_time()</code> as the first line of <code>handle_request</code> (<code>serving_base.py:L79</code>), after FastAPI has parsed and pydantic-validated the body; vLLM stamps <code>arrival_time = time.time()</code> at the top of <code>render_chat_async</code> (<code>vllm/renderers/base.py:L1075</code>), later still. <b>Both under-report TTFT relative to what the client measures</b>, by the cost of parse plus validation &mdash; small for a 500-token prompt, not small for a request carrying 200 tool definitions.</p>
+
+<p><b>Where the clock stops.</b> $t_1$ as the engine reports it is when the frame is <code>yield</code>ed, not when it is on the wire. SGLang stamps <code>set_response_sent_to_client_time()</code> just before the yield (<code>tokenizer_manager.py:L1742-L1747</code>). The socket write is asynchronous after that point. Under a slow client the engine's TTFT and the client's TTFT diverge and only the client's is real.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Hops in one ITL gap, and whether they are on the critical path. Times are <b>derived</b> from the book's $T_{\text{step}}$ = 4.48 ms floor (Llama-3-8B bf16, H100 SXM, batch 1) or marked as unmeasured. Nothing here was measured; Lab 12 measures it.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Hop</th><th>Process</th><th>On the client's ITL?</th><th>On the engine's step period?</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td>Scheduler <code>schedule()</code> / <code>get_next_batch_to_run</code></td><td>engine</td><td>yes</td><td>yes</td><td class="num">unmeasured</td></tr>
+        <tr><td>Forward pass + sampling</td><td>engine</td><td>yes</td><td>yes</td><td class="num">4.48 ms</td></tr>
+        <tr><td><code>update_from_output</code> / <code>process_batch_result_decode</code></td><td>engine</td><td>yes</td><td>yes</td><td class="num">unmeasured</td></tr>
+        <tr><td>msgpack encode + ZMQ hop out</td><td>engine IO thread</td><td>yes</td><td><b>no</b></td><td class="num">unmeasured</td></tr>
+        <tr><td>Incremental detokenisation</td><td>vLLM: frontend &middot; SGLang: own process</td><td>yes</td><td><b>no</b></td><td class="num">unmeasured</td></tr>
+        <tr><td>Second ZMQ hop (SGLang only)</td><td>detok &rarr; HTTP worker</td><td>yes</td><td><b>no</b></td><td class="num">unmeasured</td></tr>
+        <tr><td>Delta object + <code>model_dump_json</code></td><td>frontend</td><td>yes</td><td><b>no</b></td><td class="num">unmeasured</td></tr>
+        <tr><td>ASGI <code>send()</code> to socket</td><td>frontend</td><td>yes</td><td><b>no</b></td><td class="num">client-dependent</td></tr>
+        <tr><td>Waiting-queue time</td><td>engine</td><td>TTFT only</td><td>&mdash;</td><td class="num">load-dependent</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The column that matters is the fourth. <b>Only the first three rows are on the engine's critical path.</b> Everything after the ZMQ hop is on the client's ITL but not on the engine's step period, which is why a frontend that falls behind degrades tail ITL long before it degrades tokens per second &mdash; and why you can have a P99 ITL alarm firing while the throughput dashboard looks perfect.</p>
+
+<p>Two structural sources of ITL jitter fall out of the traces. <b>The batch-notify quantum</b>: SGLang wakes request tasks 16 at a time, so request 17 waits on an <code>asyncio.sleep(0)</code> that request 1 did not. <b>The output-processing chunk</b>: vLLM processes up to 128 requests without yielding, so at batch 128 the last SSE writer starts only after all 128 detokenisations have run. Both are deliberate throughput trades, and both show up as ITL variance rather than in the mean.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; one decode token's journey, split by which clock it is on.</b> Bar widths are schematic except the forward pass, which is the derived 4.48 ms floor. The GPU-bound segment is the only part the engine's step period contains.</p>
+  <svg viewBox="0 0 800 300" width="100%" role="img" aria-label="Bar chart attributing one token's latency across engine and frontend hops">
+    <text x="14" y="22" font-family="monospace" font-size="12" fill="currentColor">ENGINE STEP PERIOD - bounds throughput</text>
+    <rect x="14" y="34" width="330" height="30" fill="var(--teal)" opacity="0.30" stroke="var(--teal)"/>
+    <rect x="14" y="34" width="46" height="30" fill="var(--teal)" opacity="0.65"/>
+    <rect x="60" y="34" width="238" height="30" fill="var(--teal)" opacity="0.9"/>
+    <text x="18" y="82" font-family="monospace" font-size="10.5" fill="currentColor">schedule()</text>
+    <text x="140" y="82" font-family="monospace" font-size="10.5" fill="currentColor">forward pass + sample -- 4.48 ms derived floor</text>
+    <text x="300" y="98" font-family="monospace" font-size="10.5" fill="currentColor">update_from_output</text>
+
+    <text x="14" y="132" font-family="monospace" font-size="12" fill="currentColor">CLIENT ITL - bounds tail latency, NOT throughput</text>
+    <rect x="14" y="144" width="720" height="30" fill="var(--copper)" opacity="0.18" stroke="var(--copper)"/>
+    <rect x="14" y="144" width="330" height="30" fill="var(--teal)" opacity="0.55"/>
+    <rect x="344" y="144" width="70" height="30" fill="var(--copper)" opacity="0.55"/>
+    <rect x="414" y="144" width="96" height="30" fill="var(--copper)" opacity="0.7"/>
+    <rect x="510" y="144" width="70" height="30" fill="var(--copper)" opacity="0.55"/>
+    <rect x="580" y="144" width="80" height="30" fill="var(--copper)" opacity="0.85"/>
+    <rect x="660" y="144" width="74" height="30" fill="var(--plum)" opacity="0.7"/>
+    <text x="18" y="192" font-family="monospace" font-size="10.5" fill="currentColor">GPU (above)</text>
+    <text x="348" y="192" font-family="monospace" font-size="10.5" fill="currentColor">msgpack</text>
+    <text x="348" y="206" font-family="monospace" font-size="10.5" fill="currentColor">+ ZMQ</text>
+    <text x="418" y="192" font-family="monospace" font-size="10.5" fill="currentColor">detokenise</text>
+    <text x="418" y="206" font-family="monospace" font-size="10.5" fill="currentColor">(2nd ZMQ too)</text>
+    <text x="514" y="192" font-family="monospace" font-size="10.5" fill="currentColor">wake +</text>
+    <text x="514" y="206" font-family="monospace" font-size="10.5" fill="currentColor">demux</text>
+    <text x="584" y="192" font-family="monospace" font-size="10.5" fill="currentColor">JSON</text>
+    <text x="584" y="206" font-family="monospace" font-size="10.5" fill="currentColor">dump</text>
+    <text x="664" y="192" font-family="monospace" font-size="10.5" fill="currentColor">ASGI</text>
+    <text x="664" y="206" font-family="monospace" font-size="10.5" fill="currentColor">send()</text>
+
+    <text x="14" y="248" font-family="monospace" font-size="11" fill="currentColor">Frontend budget per request per step at batch B:  T_step / B  =  4.48 ms / B</text>
+    <text x="14" y="268" font-family="monospace" font-size="11" fill="currentColor">B=32  -&gt;  140 us      B=64  -&gt;  70 us      B=128  -&gt;  35 us     (derived)</text>
+    <text x="14" y="290" font-family="monospace" font-size="11" fill="currentColor">Exceed it and the per-request mailbox coalesces: tokens survive, per-token timing does not.</text>
+  </svg>
+</div></div></section>
+<section class="sec" id="abort" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Disconnect, abort, and who frees the blocks</h2></div><div class="sec__body"><p>A browser tab closes mid-generation. The GPU does not know. Follow the signal.</p>
+
+<p><b>vLLM.</b> Two mechanisms, and they hand over to each other. Before the response object exists, <code>@with_cancellation</code> races the handler against a task that awaits <code>http.disconnect</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/entrypoints/serve/utils/api_utils.py:L36-L87</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>async def listen_for_disconnect(request: Request) -&gt; None:
+    """Returns if a disconnect message is received"""
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+# ...
+            break
+# ...
+        handler_task = asyncio.create_task(handler_func(*args, **kwargs))
+        cancellation_task = asyncio.create_task(listen_for_disconnect(request))
+
+        done, pending = await asyncio.wait(
+            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()</code></pre>
+</div>
+
+<p>Its own docstring notes that once a <code>StreamingResponse</code> is returned, the response object takes over disconnect listening. Starlette then cancels the generator, which raises <code>GeneratorExit</code> inside <code>AsyncLLM.generate</code>, and that is caught:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/async_llm.py:L616-L758</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # If the request is disconnected by the client, generate()
+        # is cancelled or the generator is garbage collected. So,
+        # we abort the request if we end up here.
+        except (asyncio.CancelledError, GeneratorExit):
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s aborted.", request_id)
+            raise
+# ...
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -&gt; None:
+        """Abort RequestId in OutputProcessor and EngineCore."""
+
+        request_ids = (
+            (request_id,) if isinstance(request_id, str) else as_list(request_id)
+        )
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
+        await self.engine_core.abort_requests_async(all_request_ids)</code></pre>
+</div>
+
+<p>Both copies of the request die: <code>output_processor.abort_requests</code> pops the frontend state (<code>output_processor.py:L508-L513</code>), and <code>abort_requests_async</code> sends an <code>ABORT</code> frame. On the engine side that frame goes onto <em>two</em> queues:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/engine/core.py:L1767-L1775</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                        if request_type == EngineCoreRequestType.ABORT:
+                            # Aborts are added to *both* queues, allows us to eagerly
+                            # process aborts while also ensuring ordering in the input
+                            # queue to avoid leaking requests. This is ok because
+                            # aborting in the scheduler is idempotent.
+                            self.aborts_queue.put_nowait(request)
+
+                    # Push to input queue for core busy loop.
+                    self.input_queue.put_nowait((request_type, request))</code></pre>
+</div>
+
+<p>The extra <code>aborts_queue</code> is drained by <code>_process_aborts_queue()</code> mid-step, between <code>future.result()</code> and <code>update_from_output</code> (<code>core.py:L607</code>). That is why the comment exists: without it, an abort arriving during a long forward pass would wait a full step. The scheduler then does the freeing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/core/sched/scheduler.py:L2400-L2454</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # Remove all requests from queues at once for better efficiency
+        if running_requests_to_remove:
+            self.running = remove_all(self.running, running_requests_to_remove)
+        if waiting_requests_to_remove:
+            self.waiting.remove_requests(waiting_requests_to_remove)
+            self.skipped_waiting.remove_requests(waiting_requests_to_remove)
+
+        # Second pass: set status and free requests
+        for request in valid_requests:
+            delay_free_blocks = False
+# ...
+            request.status = finished_status
+            self._free_request(request, delay_free_blocks=delay_free_blocks)
+# ...
+    def _free_blocks(self, request: Request):
+        assert request.is_finished()
+        self._free_request_blocks(request)
+        del self.requests[request.request_id]</code></pre>
+</div>
+
+<p><b>SGLang.</b> Three paths, and the code names them. The disconnect trigger is a Starlette <em>background task</em> &mdash; it runs after the response finishes, for any reason including a client vanishing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L2112-L2120</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def create_abort_task(self, obj: GenerateReqInput):
+        # Abort the request if the client is disconnected.
+        async def abort_request():
+            await asyncio.sleep(2)
+            if obj.is_single:
+                self.abort_request(obj.rid)
+            else:
+                for rid in obj.rid:
+                    self.abort_request(rid)</code></pre>
+</div>
+
+<p>The two-second sleep is a grace window; <code>abort_request</code> is a no-op if the rid already left <code>rid_to_state</code> (<code>tokenizer_manager.py:L1948-L1953</code>). A second trigger covers requests still queued: <code>_wait_one_response</code> wakes every <code>SGLANG_REQUEST_STATE_WAIT_TIMEOUT</code> seconds (default 4, <code>python/sglang/srt/environ.py:L1217</code>) and calls <code>await request.is_disconnected()</code>. In the scheduler, <code>abort_request</code> then picks one of three methods by where the request is:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L4554-L4691</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            # Abort method 1: directly pop from the queue
+            # This only works for requests that have not started anything.
+            # We still need to send something back to TokenizerManager to clean up the state.
+            req = self.waiting_queue.pop(i)
+# ...
+        # Delete the requests in the grammar queue
+        # Abort method 2: call `set_finish_with_abort`
+        # The request will still run one prefill forward pass.
+# ...
+                # Abort method 3: set `to_finish`
+                # The request will still run one decode forward pass.
+                # Then we reuse all existing code to clean up the KV cache allocation.
+                logger.debug(f"Abort running request. {req.rid=}")
+                req.to_finish = FINISH_ABORT()</code></pre>
+</div>
+
+<p>Method 3 is the interesting one. Rather than reach into the running batch and free pages while a forward pass may still be writing them, SGLang marks the request and lets it exit through the normal path one decode step later, where <code>release_kv_cache</code> &rarr; <code>tree_cache.cache_finished_req</code> (<code>python/sglang/srt/mem_cache/common.py:L214-L219</code>, <code>python/sglang/srt/mem_cache/radix_cache.py:L459-L461</code>) does the freeing. vLLM reaches the same conclusion from the other side: <code>_free_request_blocks</code> defers the return to the block pool when an in-flight step may still write those blocks (<code>vllm/v1/core/sched/scheduler.py:L2463-L2475</code>). <b>Both engines pay one extra forward pass to avoid a use-after-free on KV pages.</b></p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Leak shape</span>
+  <p>The leak to look for is not GPU blocks &mdash; both engines free those through the normal finish path. It is <em>frontend</em> state: an entry in <code>rid_to_state</code> or <code>request_states</code> whose request never produced a finished output. SGLang guards this by wrapping <code>generate_request</code> in an <code>except BaseException</code> that calls <code>_discard_pending_req_states(obj)</code> (<code>tokenizer_manager.py:L822-L831</code>), for the case where validation rejects a request that never reached the scheduler.</p>
+</div>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 5 &mdash; the abort path in both engines, from socket close to freed pages.</b> The three SGLang branches are the source's own numbering.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    D0["Client closes socket"] --> V0["vLLM: StreamingResponse cancels<br/>the generator"]
+    D0 --> S0["SGLang: BackgroundTasks runs<br/>create_abort_task after 2 s"]
+    V0 --> V1["GeneratorExit inside<br/>AsyncLLM.generate"]
+    V1 --> V2["AsyncLLM.abort<br/>internal=True"]
+    V2 --> V3["output_processor.abort_requests<br/>pops frontend state"]
+    V2 --> V4["core_client.abort_requests_async<br/>ZMQ ABORT frame"]
+    V4 --> V5["process_input_sockets pushes to<br/>aborts_queue AND input_queue"]
+    V5 --> V6["_process_aborts_queue runs<br/>mid-step, after future.result"]
+    V6 --> V7["scheduler.finish_requests<br/>FINISHED_ABORTED"]
+    V7 --> V8["_free_request then _free_blocks<br/>deferred if a step may still write"]
+    S0 --> S1["tokenizer_manager.abort_request<br/>no-op if rid already gone"]
+    S1 --> S2["ZMQ AbortReq to scheduler"]
+    S2 --> S3["method 1 - pop from waiting_queue"]
+    S2 --> S4["method 2 - set_finish_with_abort<br/>one cheap prefill still runs"]
+    S2 --> S5["method 3 - req.to_finish = FINISH_ABORT<br/>one decode step still runs"]
+    S3 --> S6["release_kv_cache then<br/>tree_cache.cache_finished_req"]
+    S4 --> S6
+    S5 --> S6
+  </script>
+</div></div></section>
+<section class="sec" id="backpressure" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Backpressure and overload</h2></div><div class="sec__body"><p>Requests arrive faster than the engine retires them. Where do they pile up, what bounds the pile, and what does the client see?</p>
+
+<p><b>Nothing bounds the transport.</b> Both engines set <code>SNDHWM</code> and <code>RCVHWM</code> to 0 on every ZMQ socket in the request path (<code>vllm/utils/network_utils.py:L336-L342</code>; <code>python/sglang/srt/utils/network.py:L248-L253</code>). That is a deliberate choice &mdash; a blocked send inside the engine's IO thread would stall the step loop &mdash; and it means the transport will happily buffer until the machine runs out of RAM.</p>
+
+<p><b>vLLM: unbounded, by design.</b> There is no admission limit at the HTTP layer, no queue-depth cap in <code>EngineCore</code>, and no maximum on the scheduler's waiting queue. A thousand concurrent requests become a thousand <code>RequestOutputCollector</code>s and a waiting queue the scheduler drains at whatever rate <code>max_num_seqs</code> and the KV budget allow. What the client sees is TTFT growing without bound. The only defences are external: a router with a concurrency cap (<a href="../09-serving-system/09-04-routers-and-load-balancing.html">&sect;9.4</a>) and client-side timeouts.</p>
+
+<p><b>SGLang: an explicit cap that returns 503.</b> Set <code>--max-queued-requests</code> (default <code>None</code>, i.e. unbounded, <code>python/sglang/srt/server_args.py:L792-L796</code>) and admission becomes a real decision:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/scheduler.py:L2829-L2874</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _abort_on_queued_limit(self, recv_req: Req) -&gt; bool:
+        """Abort an incoming or existing request if the waiting queue is full. Returns True if the incoming request is aborted."""
+        if (
+            self.max_queued_requests is None
+            or len(self.waiting_queue) + 1 &lt;= self.max_queued_requests
+        ):
+            return False
+
+        # Reject the incoming request by default.
+        req_to_abort = recv_req
+        message = "The request queue is full."
+# ...
+        self.ipc_channels.send_to_tokenizer.send_output(
+            AbortReq(
+                finished_reason={
+                    "type": "abort",
+                    "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+                    "message": message,
+                },
+                rid=req_to_abort.rid,
+            ),
+            req_to_abort,
+        )</code></pre>
+</div>
+
+<p>With priority scheduling on, it will instead evict the least-preferred <em>queued</em> request and admit the new one, with the message <code>"The request is aborted by a higher priority request."</code>. There is a companion timeout: <code>_abort_on_waiting_timeout</code> (<code>scheduler.py:L2878-L2905</code>) sweeps the waiting queue against <code>SGLANG_REQ_WAITING_TIMEOUT</code> and 503s anything older, with <code>"Request waiting timeout reached."</code> &mdash; but that env var defaults to <code>-1</code> and the function returns on the first line when it is <code>&lt;= 0</code>, so on a stock server this sweep never runs. All three reach the client the same way &mdash; <code>_handle_abort_finish_reason</code> maps a <code>SERVICE_UNAVAILABLE</code> abort to a real <code>fastapi.HTTPException</code> for non-streaming requests and to an SSE error chunk for streaming ones (<code>tokenizer_manager.py:L1644-L1683</code>; <code>serving_chat.py:L1590-L1605</code>).</p>
+
+<p><b>The slow-client case is separate, and both engines answer it identically in shape.</b> A slow reader does not slow the engine; it fills its own mailbox, which coalesces &mdash; vLLM on <code>put</code>, SGLang on <code>get</code>. Memory grows by the undelivered text of that one request only. The alternative, letting a slow reader apply backpressure through to the scheduler, would let one client throttle a shared GPU.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Overload policies as read at <code>a556f3f</code> / <code>7d89325</code>. Defaults, not recommendations.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Pressure</th><th>vLLM</th><th>SGLang</th></tr></thead>
+      <tbody>
+        <tr><td>ZMQ transport</td><td>HWM 0 (unbounded)</td><td>HWM 0 (unbounded)</td></tr>
+        <tr><td>Waiting queue depth</td><td>unbounded</td><td><code>--max-queued-requests</code>, default off &rarr; 503</td></tr>
+        <tr><td>Time spent waiting</td><td>unbounded</td><td><code>SGLANG_REQ_WAITING_TIMEOUT</code> &rarr; 503, but it defaults to <code>-1</code> and <code>_abort_on_waiting_timeout</code> returns immediately at <code>&lt;= 0</code> (<code>python/sglang/srt/environ.py:L554</code>, <code>python/sglang/srt/managers/scheduler.py:L2878-L2880</code>), so this is off unless you set it</td></tr>
+        <tr><td>Slow reader</td><td>merge in <code>RequestOutputCollector.put</code></td><td>append then coalesce in <code>_wait_one_response</code>, warns at 20</td></tr>
+        <tr><td>Fan-out yield point</td><td>every <code>VLLM_V1_OUTPUT_PROC_CHUNK_SIZE</code> = 128</td><td>every <code>batch_notify_size</code> = 16</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div></div></section>
+<section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><b>You are reading the wrong file.</b> At <code>a556f3f</code>, <code>vllm/entrypoints/openai/api_server.py</code> still exists but warns <code>"`vllm.entrypoints.openai.api_server` is deprecated and will likely be unsupported in a future version."</code>, and <code>serving_chat.py</code> is simply gone. Anything referencing those paths predates the restructure.</p>
+
+<p><b>The first chunk is empty and you filtered it out.</b> <code>chat_completion_stream_generator</code> has an explicit guard: if <code>delta_text</code> is empty, there are no token ids, and no tokens have been sent yet, <code>continue</code> &mdash; commented <code>"Chunked prefill case, don't return empty chunks"</code> (<code>serving.py:L647-L653</code>). With chunked prefill (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>) the engine emits per-step bookkeeping before any token exists. Client code that measures TTFT from the first SSE frame rather than the first frame with content will report a TTFT that is too low.</p>
+
+<p><b>The stop string arrived one round-trip late.</b> vLLM detects stop strings in the frontend detokeniser, so the engine has already scheduled the next step by the time <code>reqs_to_abort</code> makes it back (<code>async_llm.py:L725-L729</code>); SGLang checks inside the scheduler and stops immediately. Neither leaks the extra text, but vLLM burns the extra decode step. See <a href="../09-serving-system/09-02-tokenization-and-detokenization.html">&sect;9.2</a>.</p>
+
+<p><b>The abort that arrived after the finish.</b> Explicitly handled, not a bug: <code>"Abort request for rid=%s not found in rid_to_state; likely already finished/removed."</code> (<code>tokenizer_manager.py:L3128-L3132</code>), whose comment notes it is <code>"Common under mass client disconnects, amplified by prefix / abort_all fan-out."</code> In bulk it means a load balancer is timing clients out.</p>
+
+<p><b>The detokeniser forgot your request.</b> SGLang's <code>DetokenizerManager</code> keeps per-request incremental-decode state in a <code>LimitedCapacityDict(capacity=DETOKENIZER_MAX_STATES)</code> (<code>python/sglang/srt/managers/detokenizer_manager.py:L143</code>), default $2^{16}$. Exceed it with enough concurrent streams and the oldest entry is evicted while its request is still running:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/detokenizer_manager.py:L363-L373</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            try:
+                s = self.decode_status[rid]
+            except KeyError:
+                raise RuntimeError(
+                    f"Decode status not found for request {rid}. "
+                    "It may be due to the request being evicted from the decode status due to memory pressure. "
+                    "Please increase the maximum number of requests by setting "
+                    "the SGLANG_DETOKENIZER_MAX_STATES environment variable to a bigger value than the default value. "
+                    f"The current value is {DETOKENIZER_MAX_STATES}. "
+                    "For more details, see: https://github.com/sgl-project/sglang/issues/2812"
+                )</code></pre>
+</div>
+
+<p>Note where that <code>raise</code> lands: inside the detokeniser process's event loop, not in any one request's task. The blast radius is process-wide, which is part of the price of the extra hop.</p>
+
+<p><b>A slow tokenizer serialises your frontend.</b> vLLM's renderer thread pool defaults to one worker (<code>vllm/config/model.py:L367</code>), so one 200k-token prompt occupies it while every other arriving request queues behind &mdash; a TTFT spike on requests unrelated to the big one. Raise <code>--renderer-num-workers</code>. SGLang has the sharper version of the same exposure on the chat path: <code>apply_chat_template</code> and <code>encode</code> run directly on the event loop.</p></div></section>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Start a server and watch each hop with the engine's own logs rather than a debugger.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Terminal</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># vLLM: request-level logging plus a single-token stream
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 8192
+
+curl -N -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"meta-llama/Meta-Llama-3-8B-Instruct",
+       "messages":[{"role":"user","content":"Count to twenty."}],
+       "stream":true,"stream_options":{"include_usage":true},"max_tokens":32}'</code></pre>
+</div>
+
+<p>Three things to do with that, in order.</p>
+
+<ol>
+<li><b>Find the boundary in <code>ps</code>.</b> <code>ps -ef | grep -E "VLLM::|sglang"</code>. vLLM shows the API server and an <code>EngineCore</code> child; SGLang shows the HTTP worker, a <code>scheduler</code>, and a <code>detokenizer</code>. Kill the detokeniser on a running SGLang server: generation continues, no bytes reach the client. That is Figure 3's third boundary, demonstrated.</li>
+<li><b>Move the stream interval.</b> Restart SGLang with <code>--stream-interval 8</code> and re-run the curl: same total tokens, eight-fold fewer frames, an ITL distribution of seven zeros and one large gap. Compare vLLM's <code>"stream_interval": 8</code> in the request body, applied at <code>output_processor.py:L299-L313</code> &mdash; different process, identical user-visible effect.</li>
+<li><b>Trip the queue limit.</b> Start SGLang with <code>--max-queued-requests 4</code>, fire 64 concurrent long requests, and read the 503 bodies. You should see <code>The request queue is full.</code> verbatim. Then run the same load against vLLM and observe that you get no 503s at all &mdash; only rising TTFT.</li>
+</ol>
+
+<p><a href="../LABS.html#index">Lab 12, <code>12-read-a-request-through-the-code</code></a>, does this properly: it attaches to a live server and instruments each hop so the "unmeasured" rows in &sect;7's table become real numbers on your hardware.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+<li><b>Read and answer.</b> Open <code>vllm/v1/engine/output_processor.py</code> and read <code>RequestOutputCollector.put</code> (L65-L80) together with <code>RequestOutputKind</code>. What happens to the second of two <code>RequestOutput</code>s if the request was submitted with <code>stream=false</code> rather than <code>stream=true</code>? Why is that correct?</li>
+<li><b>Count the boundaries.</b> For one decode step at batch 32, how many serialise/deserialise operations happen per request in vLLM, and how many in SGLang (note that the two engines do not use the same codec by default)? Count only the request path, not stats. Does the answer change with batch size?</li>
+<li><b>Predict, then verify.</b> Set <code>--stream-interval 4</code> on SGLang. Predict what the reported <code>completion_tokens</code> in the final usage chunk will be for a 17-token generation, and how many SSE data frames the client receives. Then run it and check. (Read <code>output_streamer.py:L370-L380</code> before predicting; the modulo is not what you expect.)</li>
+<li><b>Predict, then verify.</b> A client sends a request with <code>stop: ["\n\n"]</code>. On vLLM, how many forward passes are executed after the step that produced the token completing the stop string? Trace <code>output_processor.process_outputs</code> &rarr; <code>reqs_to_abort</code> &rarr; <code>abort_requests_async</code> &rarr; <code>_process_aborts_queue</code> and count the steps between. Now do the same for SGLang starting at <code>Req.update_finish_state</code>.</li>
+<li><b>Design.</b> vLLM has no bound on its waiting queue; SGLang has <code>--max-queued-requests</code>. Write the argument for each choice in two sentences, then say which failure mode you would rather debug at 3 a.m. and why.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answers</summary>
+  <div class="fold__body">
+  <p><b>1.</b> <code>self.aggregate</code> is <code>output_kind == RequestOutputKind.DELTA</code>, and <code>stream=false</code> maps to <code>FINAL_ONLY</code> (<code>chat_completion/protocol.py:L737-L739</code>). With <code>FINAL_ONLY</code>, <code>make_request_output</code> returns <code>None</code> for every non-final step (<code>output_processor.py:L292-L297</code>), so nothing is ever put until the end &mdash; there is no second output to merge. Correct because a non-streaming client wants one cumulative body, and building it incrementally in the frontend would be pure waste.</p>
+  <p><b>2.</b> vLLM: two per step (encode <code>EngineCoreOutputs</code> in the engine, decode in the frontend) plus one encode/decode pair at submission, amortised to zero over a long generation. SGLang: four per step (scheduler&rarr;detok, detok&rarr;HTTP worker). Neither changes with batch size <em>per step</em>, because both engines encode the whole batch as one struct &mdash; that is the point of <code>EngineCoreOutputs.outputs</code> and <code>BatchTokenIDOutput</code>. Per <em>request</em> the cost therefore falls as batch size rises.</p>
+  <p><b>3.</b> <code>completion_tokens</code> is 17 &mdash; the gate controls emission, not generation, and the finished branch always emits. Frames: the condition for <code>stream_interval &gt; 1</code> is <code>len(req.output_ids) % 4 == 1</code>, which fires at 1, 5, 9, 13, 17; the 17th also finishes, and <code>finished_output</code> suppresses the duplicate. So five content frames plus the terminal frame and <code>[DONE]</code>.</p>
+  <p><b>4.</b> vLLM: at least one extra full step. The stop string is found in <code>detokenizer.update</code> while processing step <em>k</em>; by the time the abort is sent, <code>run_busy_loop</code> has begun step <em>k+1</em>. <code>_process_aborts_queue</code> drains it partway through <em>k+1</em>, so <em>k+1</em> completes for that request and <em>k+2</em> does not include it. SGLang: zero extra steps &mdash; <code>_check_str_based_finish</code> runs inside <code>update_finish_state</code> in the same step.</p>
+  <p><b>5.</b> For unbounded: every request is eventually served, and policy belongs at the router where request-level context lives. For bounded: a 503 lets clients retry elsewhere and gives autoscalers a real signal, whereas an unbounded queue turns overload into a latency cliff that looks like a hang. The 503 is the debuggable one &mdash; a discrete event with a message string in the logs. Rising TTFT with no error is what gets misdiagnosed as a GPU problem.</p>
+  </div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+<li><b>The step loop and the HTTP connection are decoupled by a per-request mailbox, and that mailbox coalesces.</b> vLLM merges on <code>put</code> (<code>RequestOutputCollector</code>); SGLang appends and merges on <code>get</code> (<code>_wait_one_response</code>). Tokens are never lost; per-token <em>timing</em> is, which is why a frontend that falls behind shows up in P99 ITL and not in throughput.</li>
+<li><b>A batched forward pass is demultiplexed at exactly one place per engine</b> &mdash; <code>OutputProcessor.process_outputs</code> in vLLM's API-server process, <code>TokenizerManager._handle_batch_output</code> in SGLang's HTTP worker. Both loop over the batch once, on purpose; the yield granularity of that loop (128 vs 16) is a directly tunable source of ITL variance.</li>
+<li><b>Where detokenisation runs is the load-bearing architectural difference.</b> vLLM puts it in the frontend event loop, which costs one fewer process hop but competes with SSE writers and forces stop-string detection to round-trip an abort. SGLang gives it a process, which costs an extra serialise per step and buys a scheduler that can finish on a stop string with zero wasted forward passes.</li>
+<li><b>Both engines pay one extra forward pass to abort safely.</b> SGLang marks <code>req.to_finish = FINISH_ABORT()</code> and lets the request exit through the normal free path; vLLM defers block return when an in-flight step may still write them. The alternative &mdash; freeing pages under a running kernel &mdash; is a use-after-free on the KV cache.</li>
+<li><b>Neither engine applies backpressure at the transport.</b> Every ZMQ socket in both request paths is created with high-water marks set to 0. Overload policy therefore lives in exactly one place: SGLang's <code>--max-queued-requests</code> and waiting timeout, which return 503 with a real message, or nothing at all, which is vLLM's default and converts overload into unbounded TTFT.</li>
+<li><b>The engines' own TTFT starts late and stops early.</b> The clock starts after JSON parse and validation, and stops at <code>yield</code>, not at the socket. Trust it for relative comparisons between runs; do not trust it against a client-side SLO.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+<li><b>vLLM V1 design notes</b> &mdash; <a href="https://docs.vllm.ai/en/latest/design/arch_overview.html">Architecture overview</a> and the V1 blog post, for the reasoning behind moving <code>EngineCore</code> into its own process. Cross-check every path against the tree; the entrypoints layout changed under the docs.</li>
+<li><b>vLLM <a href="https://github.com/vllm-project/vllm/pull/9826">PR #9826</a>, "[V1] <code>AsyncLLM</code> Implementation"</b> &mdash; the commit that created <code>vllm/v1/engine/core.py</code>, and the thread where the out-of-process <code>EngineCore</code> and its ZMQ boundary were argued out.</li>
+<li><b>vLLM <a href="https://github.com/vllm-project/vllm/pull/11973">PR #11973</a> and <a href="https://github.com/vllm-project/vllm/pull/15156">PR #15156</a></b> &mdash; the first created <code>output_processor.py</code>; the second, "[V1][Perf] Simpler request output queues", is where <code>RequestOutputCollector</code> and its merge-on-put policy landed. Read #15156 for the clearest statement of the slow-client trade.</li>
+<li><b>vLLM <a href="https://github.com/vllm-project/vllm/pull/32240">PR #32240</a>, "[Refactor] [6/N] to simplify the vLLM openai chat_completion serving architecture"</b> &mdash; the commit that moved <code>serving_chat.py</code> into <code>vllm/entrypoints/openai/chat_completion/</code>. Read it before trusting any older write-up of the entrypoints layout.</li>
+<li><b>SGLang <a href="https://github.com/sgl-project/sglang/pull/7565">PR #7565</a>, "throttle requests at scheduler based on --max_queued_requests"</b>, and <a href="https://github.com/sgl-project/sglang/pull/8746">PR #8746</a>, which extended it to evict a queued request in favour of a higher-priority arrival &mdash; the two commits behind <code>_abort_on_queued_limit</code>.</li>
+<li><b>SGLang <a href="https://github.com/sgl-project/sglang/pull/21646">PR #21646</a>, "Clean up TokenizerManager and req_time_stats"</b> &mdash; where <code>_coalesce_streaming_chunks</code> and the backlog warning that opens this chapter were introduced.</li>
+<li><b>Orca (OSDI '22), <a href="https://www.usenix.org/conference/osdi22/presentation/yu">"Orca: A Distributed Serving System for Transformer-Based Generative Models"</a></b> &mdash; iteration-level scheduling, which is what makes the per-step fan-out in this chapter necessary in the first place.</li>
+<li><b>Neighbours:</b> <a href="../09-serving-system/09-01-openai-api-surface.html">&sect;9.1</a> for what the endpoint accepts, <a href="../09-serving-system/09-02-tokenization-and-detokenization.html">&sect;9.2</a> for incremental detokenisation and stop strings, <a href="../11-vllm-deep-dive/11-02-engine-layers.html">&sect;11.2</a> and <a href="../12-sglang-deep-dive/12-02-sglang-request-path.html">&sect;12.2</a> for each engine's internals at repo-tour depth.</li>
+</ul></div></section>
+<div class="pager"><a href="09-02-tokenization-and-detokenization.html"><div class="pager__k">← Previous</div><div class="pager__t">Tokenization and incremental detokenization</div></a><a class="pager__next" href="09-04-routers-and-load-balancing.html"><div class="pager__k">Next →</div><div class="pager__t">Routers, KV-aware balancing, session affinity</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model: two clocks and a queue</a>
+<a href="#first-principles">First principles: the per-request frontend budget</a>
+<a href="#vllm-trace">The vLLM trace, hop by hop</a>
+<a href="#sglang-trace">The SGLang trace, hop by hop</a>
+<a href="#latency">Latency accounting against the metrics</a>
+<a href="#abort">Disconnect, abort, and who frees the blocks</a>
+<a href="#backpressure">Backpressure and overload</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,2059 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Collectives, topology, custom all-reduce — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="systems">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i is-current" href="05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 5 · Parallelism and distributed inference · 05-04</div>
+<h1>Collectives, topology, custom all-reduce</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/distributed/device_communicators/</code></li><li><code>csrc/custom_all_reduce.cuh</code></li><li><code>python/sglang/srt/distributed/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A Llama-3-8B decode step at TP=8 fires 64 all-reduces. Each one carries 64&nbsp;KB at
+batch 8 &mdash; 0.26&nbsp;&micro;s of NVLink time. Yet the 64 of them eat roughly a quarter of the step,
+and about 92% of that quarter is not data movement at all. This chapter is about that 92%.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Tensor parallelism buys you a smaller weight-read per GPU and charges you two all-reduces per
+transformer block (<a href="05-01-tensor-parallelism.html">&sect;5.1</a> derives where they land). The bill
+looks trivial when you write it down as bytes and terrifying when you write it down as events.</p>
+
+<p>Take Llama-3-8B, $L = 32$, $d = 4096$, bf16, TP=8 on one H100 SXM node, batch $t = 8$ decode tokens.
+Each all-reduce carries $t \cdot d \cdot 2 = 65{,}536$ bytes. A ring all-reduce over $N = 8$ ranks
+puts $2(N{-}1)/N \cdot S = 1.75 \times 64\,\mathrm{KiB} = 114{,}688$ bytes on the wire per rank, and NVLink 4
+gives each H100 900&nbsp;GB/s bidirectional &mdash; 450&nbsp;GB/s per direction
+(<a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100</a>). That is
+<b>0.26&nbsp;&micro;s</b> of transfer. Sixty-four of them: 16&nbsp;&micro;s.</p>
+
+<p>Now the other term. Every collective costs something fixed before a byte moves: a kernel launch, and a
+rendezvous in which all eight ranks agree they have arrived. <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a>
+put bare launch overhead at 0.5&ndash;0.9&nbsp;&micro;s pipelined and 6.7&nbsp;&micro;s synchronised; the
+cross-device rendezvous is on top. Call the total $\alpha$ and, for now, take $\alpha = 3\ \mu\mathrm{s}$ &mdash;
+&sect;5.4.3 shows that both engines' hard-coded thresholds imply a number in that band. Then:</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="kpi__n">16 &micro;s</div><div class="kpi__l">bytes on the wire, 64 all-reduces</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">192 &micro;s</div><div class="kpi__l">fixed cost, 64 all-reduces</div></div>
+  <div class="kpi"><div class="kpi__n">560 &micro;s</div><div class="kpi__l">weight read per rank, 1.88 GB at 3.35 TB/s</div></div>
+  <div class="kpi"><div class="kpi__n">27%</div><div class="kpi__l">of the decode step spent in all-reduce</div></div>
+</div>
+
+<p>Derived, not measured &mdash; the arithmetic is above and it scales linearly in $\alpha$. But the shape
+of the answer does not depend on the exact $\alpha$: <b>92% of the all-reduce cost in a decode step is
+fixed overhead, not bandwidth.</b> Doubling NVLink bandwidth would save you 8&nbsp;&micro;s a step;
+halving $\alpha$ would save you 96.</p>
+
+<p>This is the opposite of the training regime everyone's intuition comes from. A 100&nbsp;MB gradient
+bucket all-reduced over the same eight GPUs puts 175&nbsp;MB on the wire, 389&nbsp;&micro;s of transfer,
+against the same 3&nbsp;&micro;s of fixed cost &mdash; 0.8%. Same collective, same hardware, same NCCL. The
+message is fifteen hundred times bigger and the engineering problem inverts completely.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Scope</span>
+  <p>Which collectives each parallelism strategy emits is owned elsewhere: TP's two per block in
+  <a href="05-01-tensor-parallelism.html">&sect;5.1</a>, PP's point-to-point in
+  <a href="05-02-pipeline-parallelism.html">&sect;5.2</a>, EP's all-to-all and DP-attention's
+  all-gather/reduce-scatter pair in <a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>, and
+  process launch in <a href="05-05-worker-orchestration.html">&sect;5.5</a>. This chapter costs them, and
+  explains the two kernels both engines wrote because NCCL is the wrong shape for a decode step.</p>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A collective has two costs that do not mix. One is proportional to bytes and is set by the slowest link
+the algorithm touches. The other is a constant $\alpha$ per invocation, set by launch machinery and by how
+many times the ranks have to synchronise with each other. Ring algorithms minimise the first at the expense
+of the second: they achieve the information-theoretic minimum wire traffic but need $2(N{-}1)$ lock-step
+rounds to do it. At $N = 8$ that is fourteen sequential handshakes to move 229&nbsp;KB.</p>
+
+<p>Direct peer-to-peer algorithms invert the trade. If every GPU can address every other GPU's memory &mdash;
+which NVSwitch plus CUDA IPC gives you inside a node &mdash; a rank can simply <em>read all seven peer
+buffers and sum them locally</em>. That moves $(N{-}1)S$ bytes instead of $1.75S$, four times more at
+$N=8$, but it needs exactly <b>one</b> synchronisation instead of fourteen. Below some message size the
+extra bytes are cheaper than the extra handshakes. That size is the crossover, and both engines hard-code
+it.</p>
+
+<p>The reason this matters so much for inference and so little for training is that the decode all-reduce
+sits on the critical path between two dependent matmuls. The output projection produces a partial sum; the
+residual add needs the reduced sum; nothing else in that layer is ready to run. There is no other work to
+hide the collective behind.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one Llama-3-70B transformer block at TP=8, batch 8, with the two all-reduces on the critical path.</b>
+    Shapes are per-rank. Nothing in the block can overlap the collectives, because each one's output is the next operation's input.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    IN["hidden states<br/>tokens=8, d=8192, bf16<br/>128 KB, replicated on all 8 ranks"] --> QKV["qkv_proj - column parallel<br/>local shard 8 of 64 heads<br/>no communication"]
+    QKV --> ATT["attention<br/>local heads only"]
+    ATT --> O["o_proj - row parallel<br/>emits a PARTIAL sum<br/>tokens=8, d=8192 = 128 KB"]
+    O --> AR1["ALL-REDUCE 1<br/>S = 128 KB<br/>wire 1.75 x S = 229 KB = 0.51 us<br/>fixed alpha = 3 us"]
+    AR1 --> RES["residual add + RMSNorm<br/>needs the FULL sum"]
+    RES --> UP["gate_proj and up_proj - column parallel<br/>no communication"]
+    UP --> DN["down_proj - row parallel<br/>emits a PARTIAL sum<br/>128 KB"]
+    DN --> AR2["ALL-REDUCE 2<br/>same 128 KB, same 3.51 us"]
+    AR2 --> OUT["residual add<br/>x 80 layers = 160 all-reduces per decode step"]
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: cost models for every collective inference uses</h2></div><div class="sec__body"><p>Define the symbols once. $N$ is the number of ranks in the group. $S$ is the message size in bytes
+&mdash; for an all-reduce, the size of the tensor each rank contributes and receives. $B$ is the achievable
+unidirectional bandwidth of the link a rank uses, in bytes/second. $\alpha$ is the fixed per-invocation cost:
+kernel launch plus one rendezvous. $\alpha_{\mathrm{step}}$ is the incremental cost of one additional
+lock-step synchronisation inside the algorithm.</p>
+
+<h3>Ring all-reduce</h3>
+
+<p>A ring all-reduce splits the tensor into $N$ chunks of $S/N$ bytes and runs two phases. Phase one,
+reduce-scatter: $N{-}1$ steps, in each of which every rank sends one chunk to its successor and accumulates
+the chunk it receives. After $N{-}1$ steps each rank owns exactly one fully reduced chunk. Phase two,
+all-gather: $N{-}1$ more steps circulating those finished chunks. Every step every rank sends $S/N$ bytes,
+so:</p>
+
+<div class="math-display">$$ T_{\mathrm{ring}}(S) \;=\; \alpha \;+\; 2(N-1)\,\alpha_{\mathrm{step}} \;+\; \frac{2(N-1)}{N}\cdot\frac{S}{B} $$</div>
+
+<p>The $2(N{-}1)/N$ coefficient is the reason ring is the default: it is provably the minimum number of
+bytes any rank must send, and it tends to $2S$ as $N$ grows rather than to $NS$. The $2(N{-}1)\alpha_{\mathrm{step}}$
+term is the reason it is wrong for decode: it grows linearly in $N$ and does not shrink with $S$.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; ring all-reduce over 4 ranks, step by step.</b>
+    Byte counts for $S = 128$&nbsp;KB, which is what Llama-3-70B at $d = 8192$ produces at batch 8. Six lock-step rounds; 192&nbsp;KB leaves each rank.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    S0["start: each of ranks 0..3 holds<br/>a full 128 KB partial sum<br/>split into 4 chunks of 32 KB"]
+    S0 --> R1["reduce-scatter step 1<br/>rank r sends chunk r to rank r+1<br/>32 KB per link, 4 links busy"]
+    R1 --> R2["reduce-scatter step 2<br/>rank r forwards the partial it just accumulated<br/>32 KB"]
+    R2 --> R3["reduce-scatter step 3<br/>32 KB<br/>now rank r owns chunk r+1 fully reduced"]
+    R3 --> G1["all-gather step 4<br/>rank r broadcasts its finished chunk onward<br/>32 KB"]
+    G1 --> G2["all-gather step 5<br/>32 KB"]
+    G2 --> G3["all-gather step 6<br/>32 KB<br/>every rank now holds all 4 reduced chunks"]
+    G3 --> T["per-rank totals<br/>6 sequential rounds<br/>6 x 32 KB = 192 KB sent<br/>= 2 x 3 / 4 x 128 KB<br/>at 450 GB per second: 0.43 us of transfer"]
+  </script>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; per-rank wire bytes and transfer time for each collective, $N = 8$, over H100 NVLink 4 at 450&nbsp;GB/s per direction (bandwidth <a href="https://www.nvidia.com/en-us/data-center/h100/">cited to NVIDIA</a>). Fixed costs excluded; that is the point of the next table.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Collective</th><th>Wire bytes per rank</th><th>Sync rounds</th><th class="num">Bytes at S=128&nbsp;KiB</th><th class="num">Transfer time</th><th>Used by</th></tr></thead>
+      <tbody>
+        <tr><td>All-reduce, ring</td><td>$2(N{-}1)S/N$</td><td>$2(N{-}1) = 14$</td><td class="num">229 KB</td><td class="num">0.51 &micro;s</td><td>TP, per block &times;2</td></tr>
+        <tr><td>All-reduce, one-shot P2P</td><td>$(N{-}1)S$</td><td>2</td><td class="num">917 KB</td><td class="num">2.04 &micro;s</td><td>TP, small messages</td></tr>
+        <tr><td>All-reduce, two-shot P2P</td><td>$2(N{-}1)S/N$</td><td>2</td><td class="num">229 KB</td><td class="num">0.51 &micro;s</td><td>TP, medium messages</td></tr>
+        <tr><td>All-gather, ring</td><td>$(N{-}1)S/N$</td><td>$N{-}1 = 7$</td><td class="num">115 KB</td><td class="num">0.26 &micro;s</td><td>DP attention, sequence parallel</td></tr>
+        <tr><td>Reduce-scatter, ring</td><td>$(N{-}1)S/N$</td><td>$N{-}1 = 7$</td><td class="num">115 KB</td><td class="num">0.26 &micro;s</td><td>DP attention, sequence parallel</td></tr>
+        <tr><td>All-to-all</td><td>$(N{-}1)S/N$</td><td>1 on full bisection</td><td class="num">115 KB</td><td class="num">0.26 &micro;s</td><td>Expert parallelism dispatch/combine</td></tr>
+        <tr><td>Point-to-point send/recv</td><td>$S$</td><td>1</td><td class="num">131 KB</td><td class="num">0.29 &micro;s</td><td>Pipeline stage boundary</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>All-gather and reduce-scatter are each exactly half an all-reduce &mdash; which is why DP-attention's
+gather-then-scatter pair costs the same wire bytes as the TP all-reduce it replaces, and why the choice
+between them is about where the tokens live, not about bandwidth (<a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>).</p>
+
+<h3>Two-shot: the ring's byte count without the ring's rounds</h3>
+
+<p>The third row is the interesting one. Two-shot does a direct-P2P reduce-scatter followed by a direct-P2P
+all-gather. Rank $r$ reads the $r$-th shard from all $N$ peers and reduces it &mdash; $(N{-}1)S/N$ bytes
+pulled &mdash; then, after one barrier, every rank pulls the $N$ finished shards &mdash; another
+$(N{-}1)S/N$. Total $2(N{-}1)S/N$: <em>identical to ring</em>. The difference is that it needs two
+synchronisation rounds instead of fourteen, because a full-mesh fabric lets a rank talk to every peer
+simultaneously instead of only its ring successor.</p>
+
+<div class="math-display">$$ T_{\mathrm{1shot}} = \alpha + \frac{(N-1)S}{B}, \qquad T_{\mathrm{2shot}} = \alpha + \alpha_{\mathrm{step}} + \frac{2(N-1)S}{NB} $$</div>
+
+<p>One-shot wins while its extra bytes cost less than two-shot's extra barrier. Setting the two equal:</p>
+
+<div class="math-display">$$ \frac{(N-1)S^{*}}{B}-\frac{2(N-1)S^{*}}{NB} = \alpha_{\mathrm{step}} \quad\Longrightarrow\quad S^{*} = \frac{N\,B\,\alpha_{\mathrm{step}}}{(N-1)(N-2)} $$</div>
+
+<p>vLLM does not tune this at runtime; it hard-codes $S^{*}$ per world size. So run the formula
+backwards and ask what barrier cost those constants imply. At $N = 8$ the constant is 256&nbsp;KiB, giving
+$\alpha_{\mathrm{step}} = 262144 \times 42 / (8 \times 450\times10^{9}) = 3.06\ \mu\mathrm{s}$. At $N = 4$
+the constant is 512&nbsp;KiB, giving $524288 \times 6/(4 \times 450\times10^{9}) = 1.75\ \mu\mathrm{s}$.
+Two independently chosen magic numbers, one formula, and the implied barrier cost lands in the
+1.7&ndash;3.1&nbsp;&micro;s band and <em>grows with $N$</em> &mdash; exactly what an $N$-way flag rendezvous
+should do, and exactly the microsecond scale <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a>
+established for anything involving a launch or a device-wide sync. That consistency is why $\alpha = 3\
+\mu\mathrm{s}$ is a defensible working figure for the whole chapter.</p>
+
+<h3>Where a decode step actually sits on this curve</h3>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived &mdash; all-reduce message size $S = t \cdot d \cdot 2$ bytes for one TP all-reduce, and the whole-step accounting at TP=8 with $\alpha = 3\ \mu\mathrm{s}$. Weight-read time is <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>'s
+  <em>streamed</em> bf16 bytes (15.01&nbsp;GB for the 8B, embedding table excluded) divided by 8 ranks at
+  3.35&nbsp;TB/s. Arithmetic only; no measurement.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Model / batch</th><th class="num">S per all-reduce</th><th class="num">All-reduces per step</th><th class="num">Wire time total</th><th class="num">Fixed cost total</th><th class="num">Weight read</th><th class="num">AR share of step</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3-8B, $t=1$</td><td class="num">8 KiB</td><td class="num">64</td><td class="num">2 &micro;s</td><td class="num">192 &micro;s</td><td class="num">560 &micro;s</td><td class="num">26%</td></tr>
+        <tr><td>Llama-3-8B, $t=8$</td><td class="num">64 KiB</td><td class="num">64</td><td class="num">16 &micro;s</td><td class="num">192 &micro;s</td><td class="num">560 &micro;s</td><td class="num">27%</td></tr>
+        <tr><td>Llama-3-70B, $t=1$</td><td class="num">16 KiB</td><td class="num">160</td><td class="num">10 &micro;s</td><td class="num">480 &micro;s</td><td class="num">5.22 ms</td><td class="num">8.6%</td></tr>
+        <tr><td>Llama-3-70B, $t=8$</td><td class="num">128 KiB</td><td class="num">160</td><td class="num">82 &micro;s</td><td class="num">480 &micro;s</td><td class="num">5.22 ms</td><td class="num">9.7%</td></tr>
+        <tr><td>Llama-3-70B, $t=256$</td><td class="num">4 MiB</td><td class="num">160</td><td class="num">2.61 ms</td><td class="num">480 &micro;s</td><td class="num">5.22 ms</td><td class="num">37%</td></tr>
+        <tr><td>Training bucket, 100 MB</td><td class="num">100 MB</td><td class="num">1</td><td class="num">389 &micro;s</td><td class="num">3 &micro;s</td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Read the last two rows together. At batch 256 the wire term finally dominates and you are in the
+training regime, where NCCL's ring is the right algorithm and there is nothing to optimise. At batch 1 to
+8 &mdash; where every latency-sensitive deployment lives &mdash; the fixed cost is 96&times; the wire cost
+for the small model. <b>The custom all-reduce exists to attack $\alpha$, not $B$.</b></p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; all-reduce latency versus message size at $N = 8$, log-log.</b>
+    The two solid curves are the derived models above with $B = 450$&nbsp;GB/s, $\alpha = 3\ \mu\mathrm{s}$, $\alpha_{\mathrm{step}} = 3\ \mu\mathrm{s}$.
+    The shaded region is where both engines hand the message to NCCL; its <em>lower</em> edge is bounded by the code's own thresholds, but its
+    absolute height is not measured here &mdash; nobody in this book has run an H100. Vertical markers are constants read from source, not fits.</p>
+  <svg viewBox="0 0 900 430" width="100%" role="img" aria-labelledby="crossTitle crossDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="crossTitle">All-reduce latency versus message size with the custom-kernel crossovers marked</title>
+    <desc id="crossDesc">Log-log plot from 4 kibibytes to 64 mebibytes. The one-shot peer-to-peer curve starts near 3
+    microseconds and rises steeply with a slope of seven times S over B. The two-shot curve starts near 6 microseconds and
+    rises with a quarter of that slope, crossing one-shot at 256 kibibytes. Vertical markers sit at 128 kibibytes for
+    SGLang's SM90 eight-rank threshold, 256 kibibytes for vLLM's one-stage to two-stage switch, and 8 mebibytes for vLLM's
+    handover to NCCL. Decode operating points for Llama-3-70B at batch 1, 8 and 32 are marked at 16, 128 and 512 kibibytes.</desc>
+
+    <g stroke="currentColor" stroke-opacity="0.30" stroke-width="1">
+      <line x1="90" y1="350" x2="866" y2="350"/>
+      <line x1="90" y1="30" x2="90" y2="350"/>
+      <line x1="90" y1="288" x2="866" y2="288" stroke-dasharray="2 4"/>
+      <line x1="90" y1="221" x2="866" y2="221" stroke-dasharray="2 4"/>
+      <line x1="90" y1="92" x2="866" y2="92" stroke-dasharray="2 4"/>
+    </g>
+
+    <rect x="695" y="30" width="171" height="320" fill="currentColor" fill-opacity="0.07"/>
+
+    <g fill="currentColor" fill-opacity="0.6" font-size="11">
+      <text x="82" y="354" text-anchor="end">1</text>
+      <text x="82" y="292" text-anchor="end">3</text>
+      <text x="82" y="225" text-anchor="end">10</text>
+      <text x="82" y="96" text-anchor="end">100</text>
+      <text x="82" y="34" text-anchor="end">300</text>
+      <text x="14" y="190" font-size="11.5">latency</text>
+      <text x="14" y="204" font-size="11.5">(us)</text>
+      <text x="90" y="370" text-anchor="middle">4 KiB</text>
+      <text x="310" y="370" text-anchor="middle">64 KiB</text>
+      <text x="530" y="370" text-anchor="middle">1 MiB</text>
+      <text x="750" y="370" text-anchor="middle">16 MiB</text>
+      <text x="860" y="370" text-anchor="middle">64 MiB</text>
+      <text x="478" y="392" text-anchor="middle">message size S, log scale</text>
+    </g>
+
+    <polyline fill="none" stroke="currentColor" stroke-opacity="0.85" stroke-width="2.2"
+      points="90,288 200,284 310,272 365,259 420,240 530,184 640,113 695,75 750,37"/>
+    <polyline fill="none" stroke="currentColor" stroke-opacity="0.85" stroke-width="2.2" stroke-dasharray="7 4"
+      points="90,249 200,249 310,247 365,245 420,241 530,220 640,176 695,145 750,111 860,36"/>
+
+    <g stroke="currentColor" stroke-opacity="0.55" stroke-width="1.4" stroke-dasharray="3 3">
+      <line x1="365" y1="30" x2="365" y2="350"/>
+      <line x1="420" y1="30" x2="420" y2="350"/>
+      <line x1="695" y1="30" x2="695" y2="350"/>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.85" font-size="11.5">
+      <text x="360" y="46" text-anchor="end">128 KiB</text>
+      <text x="360" y="60" text-anchor="end">SGLang SM90 TP=8</text>
+      <text x="360" y="74" text-anchor="end">1shot push threshold</text>
+      <text x="426" y="104">256 KiB</text>
+      <text x="426" y="118">vLLM 1stage to 2stage</text>
+      <text x="701" y="46">8 MiB</text>
+      <text x="701" y="60">vLLM max_size:</text>
+      <text x="701" y="74">above this, NCCL</text>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.75" font-size="12">
+      <text x="600" y="128" transform="rotate(-33 600 128)">one-shot: alpha + 7S/B</text>
+      <text x="640" y="205" transform="rotate(-19 640 205)">two-shot: alpha + alpha_step + 1.75S/B</text>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.9">
+      <circle cx="200" cy="350" r="3.5"/>
+      <circle cx="365" cy="350" r="3.5"/>
+      <circle cx="475" cy="350" r="3.5"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.72" font-size="11">
+      <text x="200" y="410" text-anchor="middle">bs 1</text>
+      <text x="365" y="410" text-anchor="middle">bs 8</text>
+      <text x="475" y="410" text-anchor="middle">bs 32</text>
+      <text x="330" y="425" text-anchor="middle">Llama-3-70B decode operating points, d=8192 bf16</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="topology" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Topology decides the parallelism plan</h2></div><div class="sec__body"><p>Every number above assumed one link speed. Real clusters have three, an order of magnitude apart, and
+which one a collective lands on is decided entirely by how you assign ranks to GPUs.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; two H100 SXM nodes, drawn with the fabrics that actually carry inference traffic.</b>
+    All bandwidths <a href="https://www.nvidia.com/en-us/data-center/h100/">cited to NVIDIA</a>: NVLink 4 at 900&nbsp;GB/s bidirectional per H100 through NVSwitch,
+    InfiniBand NDR at 400&nbsp;Gb/s = 50&nbsp;GB/s per direction per port. PCIe Gen5 x16 at roughly 64&nbsp;GB/s is what you get
+    <em>instead of</em> NVLink on a PCIe-form-factor node.</p>
+  <svg viewBox="0 0 900 460" width="100%" role="img" aria-labelledby="topoTitle topoDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
+    <title id="topoTitle">Two-node H100 topology with NVLink inside and InfiniBand across</title>
+    <desc id="topoDesc">Two node boxes each containing eight GPUs attached to an NVSwitch fabric at 900 gigabytes per second
+    bidirectional per GPU, and eight InfiniBand NDR host channel adapters at 50 gigabytes per second per direction feeding a
+    spine switch between the nodes. Annotations assign tensor parallelism inside a node and pipeline or data parallelism across.</desc>
+
+    <rect x="20" y="60" width="380" height="180" fill="none" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6"/>
+    <rect x="500" y="60" width="380" height="180" fill="none" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6"/>
+    <g fill="currentColor" fill-opacity="0.85" font-size="13">
+      <text x="30" y="80">node 0 &mdash; 8x H100 SXM</text>
+      <text x="510" y="80">node 1 &mdash; 8x H100 SXM</text>
+    </g>
+
+    <g>
+      <rect x="34" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="79" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="124" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="169" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="214" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="259" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="304" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="349" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+    </g>
+    <g>
+      <rect x="514" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="559" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="604" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="649" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="694" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="739" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="784" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+      <rect x="829" y="94" width="40" height="34" fill="currentColor" fill-opacity="0.22" stroke="currentColor" stroke-opacity="0.5"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.7" font-size="10.5" text-anchor="middle">
+      <text x="54" y="115">g0</text><text x="99" y="115">g1</text><text x="144" y="115">g2</text><text x="189" y="115">g3</text>
+      <text x="234" y="115">g4</text><text x="279" y="115">g5</text><text x="324" y="115">g6</text><text x="369" y="115">g7</text>
+      <text x="534" y="115">g0</text><text x="579" y="115">g1</text><text x="624" y="115">g2</text><text x="669" y="115">g3</text>
+      <text x="714" y="115">g4</text><text x="759" y="115">g5</text><text x="804" y="115">g6</text><text x="849" y="115">g7</text>
+    </g>
+
+    <rect x="34" y="158" width="355" height="30" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-opacity="0.65" stroke-width="1.4"/>
+    <rect x="514" y="158" width="355" height="30" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-opacity="0.65" stroke-width="1.4"/>
+    <g fill="currentColor" fill-opacity="0.9" font-size="12" text-anchor="middle">
+      <text x="211" y="178">NVSwitch &mdash; NVLink 4, 900 GB/s bidirectional per GPU, full bisection</text>
+      <text x="691" y="178">NVSwitch &mdash; NVLink 4, 900 GB/s bidirectional per GPU</text>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.5" stroke-width="1.2">
+      <line x1="54" y1="128" x2="54" y2="158"/><line x1="99" y1="128" x2="99" y2="158"/>
+      <line x1="144" y1="128" x2="144" y2="158"/><line x1="189" y1="128" x2="189" y2="158"/>
+      <line x1="234" y1="128" x2="234" y2="158"/><line x1="279" y1="128" x2="279" y2="158"/>
+      <line x1="324" y1="128" x2="324" y2="158"/><line x1="369" y1="128" x2="369" y2="158"/>
+      <line x1="534" y1="128" x2="534" y2="158"/><line x1="579" y1="128" x2="579" y2="158"/>
+      <line x1="624" y1="128" x2="624" y2="158"/><line x1="669" y1="128" x2="669" y2="158"/>
+      <line x1="714" y1="128" x2="714" y2="158"/><line x1="759" y1="128" x2="759" y2="158"/>
+      <line x1="804" y1="128" x2="804" y2="158"/><line x1="849" y1="128" x2="849" y2="158"/>
+    </g>
+
+    <rect x="150" y="204" width="120" height="26" fill="none" stroke="currentColor" stroke-opacity="0.5"/>
+    <rect x="630" y="204" width="120" height="26" fill="none" stroke="currentColor" stroke-opacity="0.5"/>
+    <g fill="currentColor" fill-opacity="0.8" font-size="11" text-anchor="middle">
+      <text x="210" y="221">8x NDR HCA</text>
+      <text x="690" y="221">8x NDR HCA</text>
+    </g>
+    <g stroke="currentColor" stroke-opacity="0.5" stroke-width="1.2">
+      <line x1="210" y1="188" x2="210" y2="204"/>
+      <line x1="690" y1="188" x2="690" y2="204"/>
+    </g>
+
+    <rect x="380" y="284" width="140" height="34" fill="currentColor" fill-opacity="0.10" stroke="currentColor" stroke-opacity="0.65" stroke-width="1.4"/>
+    <text x="450" y="306" fill="currentColor" fill-opacity="0.9" font-size="12" text-anchor="middle">IB spine switch</text>
+    <g stroke="currentColor" stroke-opacity="0.65" stroke-width="1.8">
+      <line x1="210" y1="230" x2="210" y2="301"/><line x1="210" y1="301" x2="380" y2="301"/>
+      <line x1="690" y1="230" x2="690" y2="301"/><line x1="690" y1="301" x2="520" y2="301"/>
+    </g>
+    <g fill="currentColor" fill-opacity="0.85" font-size="11.5">
+      <text x="222" y="258">InfiniBand NDR 400 Gb/s</text>
+      <text x="222" y="272">= 50 GB/s per direction</text>
+      <text x="222" y="286">9x slower than NVLink, and far higher alpha</text>
+    </g>
+
+    <g fill="currentColor" fill-opacity="0.9" font-size="12">
+      <text x="20" y="356">RULE, derived below:</text>
+      <text x="20" y="376">TP group must fit inside one NVSwitch domain &mdash; it emits 160 all-reduces per decode step.</text>
+      <text x="20" y="396">PP crosses the fabric &mdash; one point-to-point of tokens x d x 2 per micro-batch per stage boundary.</text>
+      <text x="20" y="416">DP crosses the fabric &mdash; replicas share no activations at all; only the router talks.</text>
+      <text x="20" y="440">EP all-to-all is the exception: it crosses when the expert count forces it. See section 5.3.</text>
+    </g>
+  </svg>
+</div>
+
+<p>Derive the rule instead of asserting it. Put a TP=8 group across two nodes, four GPUs each. Lay the ring
+out 0&ndash;3 on node&nbsp;0 and 4&ndash;7 on node&nbsp;1: exactly two of the eight ring links cross the
+InfiniBand fabric. Each of the fourteen steps pushes $S/8$ down every link, so a crossing link carries
+$14 \times S/8 = 1.75S$ over the whole collective &mdash; 229&nbsp;KB at $S = 128$&nbsp;KiB. At 50&nbsp;GB/s
+that is <b>4.59&nbsp;&micro;s</b> against 0.51&nbsp;&micro;s all-NVLink, and because ring steps are
+lock-step the slow link sets the pace for everyone. Nine times worse on bytes, and the fixed cost per step
+is worse still, because an IB hop is not a device-side flag poll.</p>
+
+<p>Multiply by 160 collectives per decode step: roughly 736&nbsp;&micro;s of pure cross-fabric transfer,
+added to a 5.2&nbsp;ms Llama-3-70B step, before counting the additional $\alpha$. Now the alternative.
+PP=2 &times; TP=4 with each TP group inside one node: all 160 all-reduces stay on NVLink at
+$1.5S/B = 0.44\ \mu\mathrm{s}$ each, and the cross-fabric traffic collapses to <b>one</b> point-to-point
+send of the hidden state per micro-batch per stage boundary &mdash; 128&nbsp;KiB at batch 8, 2.6&nbsp;&micro;s
+on NDR. The ratio of cross-fabric events per decode step is <b>160 to 1</b>. That is the entire argument,
+and it does not depend on $\alpha$ at all.</p>
+
+<p>The PCIe case is worse and both engines simply refuse to play. A PCIe Gen5 x16 link is roughly
+64&nbsp;GB/s bidirectional, about 32&nbsp;GB/s each way, and PCIe GPUs are not a full mesh &mdash; traffic
+hairpins through a root complex. At $S = 128$&nbsp;KiB the two-shot byte cost becomes 7.2&nbsp;&micro;s,
+14&times; NVLink, and with contention it is worse. vLLM detects this and turns the custom kernel off
+entirely rather than shipping a slow path:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/custom_all_reduce.py:L165-L186</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        fully_connected = False
+        if same_node:
+            physical_device_id = (
+                current_platform.visible_device_id_to_physical_device_id(device.index)
+            )
+# ...
+            fully_connected = current_platform.is_fully_connected(physical_device_ids)
+        if same_node and world_size &gt; 2 and not fully_connected:
+            logger.warning(
+                "Custom allreduce is disabled because it's not supported on"
+                " more than two PCIe-only GPUs. To silence this warning, "
+                "specify disable_custom_all_reduce=True explicitly."
+            )
+            return</code></pre>
+</div>
+
+<p><code>is_fully_connected</code> is not a heuristic &mdash; it asks NVML for the pairwise NVLink P2P
+status of every pair in the group and demands all of them be one hop:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/platforms/cuda.py:L789-L804</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    @classmethod
+    @with_nvml_context
+    def is_fully_connected(cls, physical_device_ids: list[int]) -&gt; bool:
+        """
+        query if the set of gpus are fully connected by nvlink (1 hop)
+        """
+        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids]
+        for i, handle in enumerate(handles):
+            for j, peer_handle in enumerate(handles):
+                if i &lt; j:
+                    try:
+                        p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                            handle,
+                            peer_handle,
+                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK,
+                        )</code></pre>
+</div></div></section>
+<section class="sec" id="production" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM's custom all-reduce, from the CUDA up</h3>
+
+<p>The core file is 356 lines and contains two kernels. The one-shot kernel is the whole idea in fifteen
+lines: barrier, read all $N$ peer pointers, sum, barrier.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/custom_all_reduce.cuh:L7-L23</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;typename T, int ngpus&gt;
+__global__ void __launch_bounds__(512, 1)
+    cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+                               T* __restrict__ result, int rank, int size) {
+  using P = typename packed_t&lt;T&gt;::P;
+  using A = typename packed_t&lt;T&gt;::A;
+  // note: we don't reorder the address so the accumulation order is the same
+  // for all ranks, ensuring bitwise identical results
+  auto dp = *_dp;
+  barrier_at_start&lt;ngpus&gt;(sg, self_sg, rank);
+  // do the actual reduction
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx &lt; size;
+       idx += gridDim.x * blockDim.x) {
+    ((P*)result)[idx] = packed_reduce&lt;P, ngpus, A&gt;((const P**)&amp;dp.ptrs[0], idx);
+  }
+  barrier_at_end&lt;ngpus, true&gt;(sg, self_sg, rank);
+}</code></pre>
+</div>
+
+<p><code>dp.ptrs[i]</code> is a device pointer into <em>rank i's</em> memory, valid because the ranks
+exchanged <code>cudaIpcMemHandle_t</code> at setup and each opened the others with
+<code>cudaIpcOpenMemHandle(..., cudaIpcMemLazyEnablePeerAccess)</code>. NCCL is not involved; the load
+instruction goes straight over NVLink. The comment on line 13 is worth pausing on: because every rank sums
+the pointers in the same order, every rank produces bit-identical output. A ring cannot promise that, and
+&sect;5.4.8 shows SGLang trading the whole custom path away to get determinism.</p>
+
+<p>The barrier is a spin on peer flags &mdash; no NCCL, no host involvement, one 32-bit store and one poll
+per participating GPU per block:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/custom_collective_common.cuh:L202-L217</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>template &lt;int ngpus&gt;
+DINLINE void barrier_at_start(const RankSignals&amp; sg, Signal* self_sg,
+                              int rank) {
+  uint32_t flag = self_sg-&gt;_flag[blockIdx.x] + 1;
+  if (threadIdx.x &lt; ngpus) {
+    auto peer_counter_ptr = &amp;sg.signals[threadIdx.x]-&gt;start[blockIdx.x][rank];
+    auto self_counter_ptr = &amp;self_sg-&gt;start[blockIdx.x][threadIdx.x];
+    // Write the expected counter value to peer and wait for correct value
+    // from peer.
+    st_flag_volatile(peer_counter_ptr, flag);
+    while (ld_flag_volatile(self_counter_ptr) != flag);
+  }
+  __syncthreads();
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg-&gt;_flag[blockIdx.x] = flag;
+}</code></pre>
+</div>
+
+<p>The two-shot kernel at <code>csrc/custom_all_reduce.cuh:L30-L75</code> does the reduce-scatter into a
+per-rank scratch region (<code>get_tmp_buf</code>, the few megabytes sitting immediately after each
+<code>Signal</code>), barriers, then all-gathers. Its stage-2 comment names a subtlety that is easy to get
+wrong: <em>"it's important to match the tid between the two stages, because visibility across devices is
+only guaranteed between threads that have the same tid."</em></p>
+
+<p>Algorithm selection is a compile-time macro with the crossovers written as literals:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">csrc/custom_all_reduce.cuh:L291-L310</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>#define REDUCE_CASE(ngpus)                              \
+  case ngpus: {                                         \
+    if (force_1stage) {                                 \
+      KL(ngpus, cross_device_reduce_1stage);            \
+    } else if (force_2stage) {                          \
+      KL(ngpus, cross_device_reduce_2stage);            \
+    } else {                                            \
+      if (world_size_ == 2) {                           \
+        KL(ngpus, cross_device_reduce_1stage);          \
+      } else if (fully_connected_) {                    \
+        if ((world_size_ &lt;= 4 &amp;&amp; bytes &lt; 512 * 1024) || \
+            (world_size_ &lt;= 8 &amp;&amp; bytes &lt; 256 * 1024)) { \
+          KL(ngpus, cross_device_reduce_1stage);        \
+        } else {                                        \
+          KL(ngpus, cross_device_reduce_2stage);        \
+        }                                               \
+      }                                                 \
+    }                                                   \
+    break;                                              \
+  }</code></pre>
+</div>
+
+<p>Those are the 512&nbsp;KiB and 256&nbsp;KiB constants &sect;5.4.3 inverted. At $N = 2$ two-shot is never
+used, which the formula predicts: $S^{*} \to \infty$ as $N \to 2$, because $(N{-}1)(N{-}2) = 0$ &mdash;
+with two ranks, one-shot and two-shot move identical bytes and one-shot has fewer barriers.</p>
+
+<p>Three constraints bound the whole design. The grid is capped at 36 blocks
+(<code>csrc/custom_collective_common.cuh:L34-L39</code>, <code>kMaxBlocks = 36</code>), with the
+author's note that <em>"too many SMs will cause contention on NVLink bus"</em>. The world size must be one
+of 2, 4, 6, 8, 16. And the message must be small enough to fit the registered staging buffer, whose default
+is 8&nbsp;MiB (<code>max_size=8192 * 1024</code>). All three land in the Python gate:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/custom_all_reduce.py:L348-L361</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    def should_custom_ar(self, inp: torch.Tensor):
+        if self.disabled or self.world_size &gt; 8:
+            return False
+        inp_size = inp.numel() * inp.element_size()
+        # custom allreduce requires input byte size to be multiples of 16
+        if inp_size % 16 != 0:
+            return False
+        if not is_weak_contiguous(inp):
+            return False
+        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
+        # little performance improvement over NCCL.
+        if self.world_size == 2 or self.fully_connected:
+            return inp_size &lt; self.max_size
+        return False</code></pre>
+</div>
+
+<p>And the dispatch chain in <code>cuda_communicator.py</code> tries five accelerated paths before falling
+back to NCCL, in a fixed priority order:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/cuda_communicator.py:L287-L327</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        # always try quick reduce first, then flashinfer, then the AITER or vLLM
+        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
+        qr_comm = self.qr_comm
+# ...
+        ca_comm = self.ca_comm
+        if (
+            ca_comm is not None
+            and not ca_comm.disabled
+            and ca_comm.should_custom_ar(input_)
+        ):
+            out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
+        symm_mem_comm = self.symm_mem_comm
+        if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
+            out = symm_mem_comm.all_reduce(input_)</code></pre>
+</div>
+
+<p>QuickReduce, first in that list, is ROCm-only and does something the CUDA path does not: it
+<em>quantises the message</em> inside a two-shot all-reduce, with Q8/Q6/Q4 codecs
+(<code>csrc/quickreduce/quick_reduce.h:L208-L230</code>). Being a bandwidth optimisation it turns on at the
+opposite end of the size axis &mdash; the bf16 $N=8$ minimum size is 16&nbsp;MB for the unquantised regime
+(<code>vllm/distributed/device_communicators/quick_all_reduce.py:L49-L62</code>), well past where decode
+lives.</p>
+
+<h3>SGLang: the same idea, tuned per architecture</h3>
+
+<p>SGLang's v1 communicator is a close relative of vLLM's, down to the 8&nbsp;MiB
+<code>_MAX_CAR_SIZE = 8192 * 1024</code> and the same 16-byte alignment gate
+(<code>python/sglang/srt/distributed/device_communicators/custom_all_reduce.py:L260-L283</code>; the only
+substantive difference is <code>&lt;=</code> where vLLM has <code>&lt;</code>). The interesting divergence is
+v2, which replaces the two hard-coded literals with a per-architecture, per-world-size table and adds a
+third algorithm.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/distributed/device_communicators/custom_all_reduce_v2.py:L310-L324</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    def _pick_algo(
+        self, nbytes: int, can_use_graph: bool
+    ) -&gt; Tuple[Optional[AllReduceAlgo], _PullMode]:
+        heuristic = self.config.graph if can_use_graph else self.config.eager
+        default_mode = _PullMode.GRAPH if can_use_graph else _PullMode.EAGER
+        use_multicast = self.config.num_mc_blocks is not None
+        if nbytes &lt;= heuristic.one_shot_push_threshold:
+            return AllReduceAlgo.ONE_SHOT_PUSH, _PullMode.EAGER
+        if nbytes &lt;= heuristic.one_shot_pull_threshold:
+            return AllReduceAlgo.ONE_SHOT_PULL, default_mode
+        if use_multicast and heuristic.mc.contains(nbytes):
+            return AllReduceAlgo.TWO_SHOT_PULL, _PullMode.MULTICAST
+        if nbytes &lt;= heuristic.two_shot_pull_threshold:
+            return AllReduceAlgo.TWO_SHOT_PULL, default_mode
+        return None, _PullMode.EAGER</code></pre>
+</div>
+
+<p><em>Push</em> versus <em>pull</em> is the new axis. vLLM's one-shot is a pull: each rank reads seven peer
+buffers. A push has each rank <em>write</em> its contribution into every peer's workspace and then reduce
+locally &mdash; same byte count, but the write is fire-and-forget while a read stalls on the round trip.
+Push wins at the smallest sizes; pull wins once the workspace copy starts to matter. And the H100 (SM90)
+table at TP=8 puts both crossovers at exactly 128&nbsp;KiB:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/distributed/device_communicators/configs/custom_all_reduce_v2.py:L216-L220</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        8: config(
+            8,
+            graph=(128.0 * KB, 128.0 * KB, 32.00 * MB, Range(512 * KB, 128 * MB)),
+            eager=(128.0 * KB, 128.0 * KB, 128.0 * MB, Range(0, 128 * MB)),
+        ),</code></pre>
+</div>
+
+<p>Read that as (one-shot-push threshold, one-shot-pull threshold, two-shot-pull threshold, multicast
+range). Two things stand out. First, the crossover shrinks monotonically with world size in that table
+&mdash; 16&nbsp;MB at TP=2, 384&nbsp;KB at TP=4, 128&nbsp;KB at TP=8 &mdash; which is the
+$S^{*} \propto N/[(N{-}1)(N{-}2)]$ shape the formula predicts. Second, the graph and eager columns differ,
+because CUDA-graph replay (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">&sect;8.1</a>, which owns the mechanism) removes the host launch from $\alpha$ and therefore moves the crossover.</p>
+
+<p>The fourth entry is the Blackwell-and-later multicast path: NVLink SHARP lets the switch itself perform
+the reduction, so a rank issues one multicast store and the fabric does the $N$-way sum. That eliminates the
+$(N{-}1)$ factor from the byte count entirely, but it needs NVLS-capable hardware and is gated by
+<code>num_mc_blocks</code>, which is <code>None</code> below TP=4.</p>
+
+<p>SGLang carries one genuinely measured crossover in a source comment. It is Blackwell, not Hopper, so it
+does not transfer &mdash; but it is the only real number about these algorithms available from either
+checkout:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/k3_ar_fusion.py:L36-L38</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code># push wins below ~0.5 MB on B200x8/GB300 (bs&lt;=32 @ H=7168); NVLS 2shot wins
+# above (measured: push 8.5us vs pull 11.0us at 448KB, 15.5 vs 11.0 at 896KB)
+_PUSH_MAX_BYTES = 512 * 1024</code></pre>
+</div>
+
+<p>Note the absolute scale: 8.5&nbsp;&micro;s for a 448&nbsp;KB all-reduce on eight B200s. Bytes at
+NVLink-5 speed would be well under a microsecond. Almost all of that 8.5 is $\alpha$.</p>
+
+<p>SGLang also ships an mscclpp path (<code>--enable-mscclpp</code>, "for small messages"), gated by a
+tuned config lookup rather than a threshold, and explicitly barred from any piecewise-CUDA-graph phase
+because switching dispatch mid-compile triggers recompilation
+(<code>python/sglang/srt/distributed/device_communicators/pymscclpp.py:L328-L353</code>).</p></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: a 128 KB all-reduce through vLLM</h2></div><div class="sec__body"><p>Llama-3-70B, TP=8, H100 SXM node, batch 8 decode, inside <code>o_proj</code>'s row-parallel forward.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 5 &mdash; the dispatch path for one 131,072-byte bf16 all-reduce at TP=8, with the decision at each hop.</b>
+    Every predicate shown is read from the source cited in &sect;5.4.5.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    A["RowParallelLinear.forward<br/>partial sum, 8 x 8192 bf16 = 131072 B"] --> B["GroupCoordinator.all_reduce<br/>parallel_state.py L662<br/>world_size is 8, not 1, so continue"]
+    B --> C["CudaCommunicator.all_reduce<br/>cuda_communicator.py L278"]
+    C --> D["qr_comm - ROCm QuickReduce<br/>None on CUDA, skip"]
+    D --> E["fi_ar_comm - FlashInfer fused AR<br/>skip unless enabled"]
+    E --> F["ca_comm.should_custom_ar<br/>131072 mod 16 is 0 - ok<br/>weak contiguous - ok<br/>fully_connected true via NVML<br/>131072 less than 8388608 - ok"]
+    F --> G["CustomAllreduce.custom_all_reduce<br/>inside a captured graph, so registered=True<br/>peer pointers come from graph_unreg_buffers_"]
+    G --> H["ops.all_reduce calls CustomAllreduce allreduce<br/>bytes = 131072<br/>world_size 8 and bytes less than 262144<br/>so ONE-SHOT"]
+    H --> I["cross_device_reduce_1stage<br/>36 blocks x 512 threads<br/>barrier_at_start, read 7 peer buffers,<br/>packed_reduce, barrier_at_end"]
+    I --> J["out tensor, fully reduced, bit-identical on all 8 ranks<br/>917504 B pulled over NVLink = 2.04 us<br/>plus 2 barriers"]
+  </script>
+</div>
+
+<p>Change one thing &mdash; batch 8 to batch 32 &mdash; and $S$ becomes 524,288 bytes. Step F still passes
+(under 8&nbsp;MiB), but step H now takes the else branch and launches
+<code>cross_device_reduce_2stage</code>: 917&nbsp;KB pulled instead of 3.67&nbsp;MB, at the price of one
+extra barrier. Change it to batch 512 and $S = 8{,}388{,}608 = $ <code>max_size</code> exactly;
+<code>inp_size &lt; self.max_size</code> is now false, <code>should_custom_ar</code> returns
+<code>False</code>, and the message goes to pynccl. Three different code paths across one batch-size sweep,
+with no log line telling you which one you got.</p></div></section>
+<section class="sec" id="overlap" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Overlap: the honest answer</h2></div><div class="sec__body"><p>The obvious optimisation is to put communication on its own stream and let compute proceed. For a decode
+step, the honest answer is that there is very little to overlap, and both engines' code reflects that.</p>
+
+<p>vLLM's pynccl calls take a <code>stream</code> argument that defaults to
+<code>current_stream()</code> &mdash; the compute stream:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/pynccl.py:L186-L196</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclAllReduce(
+            buffer_type(in_tensor.data_ptr()),
+            buffer_type(out_tensor.data_ptr()),
+            in_tensor.numel(),
+            ncclDataTypeEnum.from_torch(in_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op),
+            self.comm,
+            cudaStream_t(stream.cuda_stream),
+        )</code></pre>
+</div>
+
+<p>The one place a separate stream appears is graph <em>capture</em>, and it is a capture-mechanics stream,
+not an overlap stream &mdash; the code explicitly joins it to the current stream first
+(<code>vllm/distributed/parallel_state.py:L653-L660</code>). Inside the replayed graph, the all-reduce is a
+node between two matmul nodes with a data dependency on both sides. Figure 1 is not a simplification; it is
+the dependency graph.</p>
+
+<p>So the real work goes into <b>fusion</b> rather than overlap: if you cannot hide the collective, make it
+cost one launch instead of two, or fold it into an adjacent kernel. SGLang pushes hardest here.</p>
+
+<p><b>Fusion 1: all-reduce + residual + RMSNorm.</b> The FlashInfer path submits the pattern
+<code>kARResidualRMSNorm</code>, so the reduction, the residual add and the norm are one kernel with one
+rendezvous instead of three launches:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/flashinfer_comm_fusion.py:L852-L864</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    kwargs = dict(
+        input=input_tensor,
+        workspace=workspace_manager.workspace,
+        pattern=_flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+        launch_with_pdl=True,
+        residual_out=residual_out,
+        norm_out=norm_out,
+        residual_in=residual,
+        rms_gamma=weight,
+        rms_eps=eps,
+        use_oneshot=use_oneshot,
+        fp32_acc=fp32_acc,
+    )</code></pre>
+</div>
+
+<p>The layer decides whether to take it in <code>should_fuse_mlp_allreduce_with_next_layer</code>
+(<code>python/sglang/srt/layers/communicator.py:L809-L866</code>), which is gated on
+<code>batch_size &lt;= FUSE_ALLREDUCE_MAX_BATCH_SIZE</code> &mdash; 2048, at
+<code>python/sglang/srt/layers/communicator.py:L162-L179</code> &mdash; and refuses under hybrid
+EP+TP, because the fused kernel reduces over one group and the post-experts reduction spans two disjoint
+ones, so fusing would <em>"silently return under-reduced activations"</em>.</p>
+
+<p><b>Fusion 2: GEMM + all-reduce in one kernel.</b> This is the more radical one, and it is worth
+understanding because it removes the barrier from the critical path rather than amortising it. A row-parallel
+<code>o_proj</code> is a matmul whose output is immediately all-reduced. Those are two kernels with a full
+dependency between them: the matmul must finish, then the collective launches, barriers, moves bytes,
+barriers again. But the matmul finishes <em>tile by tile</em>. If the GEMM's epilogue pushes each finished
+output tile straight into the peers' comm region, the communication of early tiles overlaps the computation
+of later ones, and the only remaining serialisation is one flag boundary at the end:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/kernels/ops/kimi_k3/gemm_ar.py:L1-L15</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>"""K3 fused o_proj GEMM + all-reduce for decode (bf16, TP row-parallel).
+
+# ... one line naming the external .cuh elided; see the Unverified note below ...
+rank computes the local ``x_r [M, K] @ W_r [7168, K]^T`` partial AND the
+cross-rank sum -- the epilogue pushes finished tiles straight into a
+peer-mapped P2P comm region, one flag boundary, then a tile-local reduce
+writes the fully reduced ``out [M, 7168]`` on every rank. Replaces the
+o_proj GEMM + NCCL all-reduce pair with one launch (see GEMM_AR_README.md).
+
+Contracts:
+
+* bf16 only; ``out = sum_r bf16(x_r @ W_r^T)`` (partials round to bf16
+  pre-sum -- same numerics as the unfused bf16 GEMM + ring AR).
+* M in [1, 512]; internally rounded up to a tuned cell {8, 16, 32, 64,
+  128, 256, 512}. ``out`` is allocated with ``cell`` rows and sliced.
+# ...</code></pre>
+</div>
+
+<p>The constraints are exactly what the technique implies. Decode shapes only &mdash; $M \le 512$ tokens,
+because the comm region must be preallocated and the flag ring sized per dispatch cell. Peer-mapped P2P, so
+full NVLink. SM100+ and $2 \le \mathrm{TP} \le 8$
+(<code>python/sglang/srt/layers/k3_gemm_ar.py:L36-L44</code>). And the wrapper is careful about
+<em>when</em> it initialises: the comm region and JIT compile happen at model build, well before graph
+capture, because <em>"capture must only see the ready-to-launch path"</em>
+(<code>python/sglang/srt/layers/k3_gemm_ar.py:L50-L55</code>). It swaps
+<code>o_proj.forward</code> for a wrapper that falls back to the ordinary GEMM-plus-all-reduce whenever
+<code>mod.fits(x)</code> is false &mdash; prefill, non-2D input, wrong dtype.</p>
+
+<div class="callout callout--unverified">
+  <span class="callout__k">Unverified</span>
+  <p>The CUDA for the fused GEMM+AR lives in <code>kimi_k3/comm/gemm_ar.cuh</code> under the external
+  <code>sgl_kernel</code> CUDA tree, which is not present at this SHA; the JIT loader in
+  <code>python/sglang/kernels/ops/kimi_k3/gemm_ar.py:L56-L60</code> references it by name only. I read the
+  Python contract and the dispatch, not the epilogue. Whether the tile push is
+  truly overlapped with the mainloop or merely fused into one launch is stated in that docstring and not
+  independently verifiable here.</p>
+</div>
+
+<p>vLLM's counterpart is <code>flashinfer_all_reduce.py</code> plus the symmetric-memory path, and it also
+maintains fused all-gather and reduce-scatter kernels in
+<code>csrc/custom_all_gather_reduce_scatter.cuh</code> for the DP-attention pattern &mdash;
+<code>cross_device_all_gather</code> is the same barrier/P2P-copy/barrier skeleton with the reduce removed
+(<code>csrc/custom_all_gather_reduce_scatter.cuh:L13-L31</code>), plus Lamport-flag variants for multi-node
+NVLink where a barrier is too expensive and the receiver polls for non-sentinel payload instead.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h3>A collective hang is almost never a network fault</h3>
+
+<p>The symptom is a process that stops producing tokens, pins one SM at 100%, and never times out at the
+socket layer. SGLang's watchdog will eventually say so:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/utils/watchdog.py:L152-L163</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        pyspy_dump_schedulers()
+        logger.error(
+            f"{self.debug_name} watchdog timeout "
+            f"({self.watchdog_timeout=}, {self.soft=})"
+        )
+        print(file=sys.stderr, flush=True)
+        print(file=sys.stdout, flush=True)
+
+        if not self.soft:
+            # Wait for some time so that the parent process can print the error.
+            time.sleep(5)
+            self.parent_process.send_signal(signal.SIGQUIT)</code></pre>
+</div>
+
+<p>The reason it is almost never the network is structural. A collective is a rendezvous: it completes when
+every rank has entered it <em>with matching arguments</em>. If one rank enters with a different tensor size,
+or takes a branch that skips the collective entirely, the others wait forever. The fabric is doing exactly
+what it was told. SGLang's own debugging notes name the four causes as size mismatch, branch divergence,
+cascading state drift, and one rank crashing
+(<code>.claude/skills/debug-distributed-hang/SKILL.md</code>), and record a real diagnosis where a CUDA
+coredump showed <code>ncclDevKernel_AllGather_RING_LL</code> as the stuck kernel and a py-spy stack pointed
+at <code>LogitsProcessor.forward</code> &rarr; <code>tensor_model_parallel_all_gather</code> &mdash; an
+all-gather size mismatch between TP ranks, not a bad cable.</p>
+
+<p>This is why every fallback predicate in this chapter has to be <b>rank-invariant</b>, and why the code
+says so out loud:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/layers/flashinfer_comm_fusion.py:L888-L893</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    Every check here is rank-invariant by construction, and must stay that way:
+    a rank that quietly falls back to NCCL while its peers enter the kernel
+    mismatches and hangs. The unavailable flag and workspace initialization are
+    cross-rank synced at init time (``_sync_allreduce_unavailable_across_tp``);
+    the rest are pure functions of the group identity and of tensor metadata,
+    which is identical on every rank of the group.</code></pre>
+</div>
+
+<p>Read <code>should_custom_ar</code> again with that lens. Every clause &mdash; byte size, alignment,
+contiguity, world size, <code>fully_connected</code> &mdash; is either identical on all ranks by
+construction or synchronised at init. Not one of them reads a per-rank runtime value. That is not
+incidental; it is the invariant that keeps the fallback from deadlocking.</p>
+
+<h3>Diagnosis order</h3>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">first</span><h4>Which collective, which rank</h4>
+    <p><code>py-spy dump --pid</code> on every scheduler process. Diff the stacks. The rank whose stack is
+    <em>not</em> in a collective is the one that diverged; the ones waiting are innocent.</p></div>
+  <div class="ve-card"><span class="ve-card__k">second</span><h4>NCCL's own view</h4>
+    <p><code>NCCL_DEBUG=INFO</code> with <code>NCCL_DEBUG_SUBSYS=COLL</code> logs the last collective each
+    rank entered, with its size. Mismatched counts are visible directly.</p></div>
+  <div class="ve-card"><span class="ve-card__k">third</span><h4>Only then, the fabric</h4>
+    <p>Run vLLM's sanity script (&sect;5.4.9). If <em>that</em> hangs, you have a hardware or driver problem;
+    <code>NCCL_P2P_DISABLE=1</code> and <code>NCCL_SOCKET_IFNAME</code> are the documented temporary
+    workarounds, not fixes.</p></div>
+</div>
+
+<h3>Non-determinism, and the price of removing it</h3>
+
+<p>One-shot's fixed accumulation order gives bit-identical output across ranks. NCCL's ring does not: the
+tree shape and channel count depend on message size, so the same logical reduction can associate differently
+at different batch sizes. If you need run-to-run determinism, SGLang throws the entire fast path away:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/server_args.py:L8351-L8364</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>                else:
+                    # CUDA: use NCCL tree algorithm
+                    os.environ["NCCL_ALGO"] = "allreduce:tree"
+                    self.disable_custom_all_reduce = True
+                    # should_torch_symm_mem_allreduce() takes the
+                    # symmetric-memory path only below a byte threshold, so
+                    # which reduce runs would follow the token count.
+                    self.enable_torch_symm_mem = False
+                    # Each channel carries a differently shaped tree and the
+                    # channel count is picked from the message size, so a
+                    # token's reduction order would follow the token count.
+                    nchannels = str(envs.SGLANG_DETERMINISTIC_NCCL_NCHANNELS.get())
+                    os.environ["NCCL_MIN_NCHANNELS"] = nchannels
+                    os.environ["NCCL_MAX_NCHANNELS"] = nchannels</code></pre>
+</div>
+
+<p>That comment is the clearest statement of the problem anywhere in either repo: <em>a token's reduction
+order would follow the token count</em>. Batch a request differently and you get a different sum. Pinning
+the channel count and forcing the tree algorithm fixes it, and costs you the custom kernel, the
+symmetric-memory kernel, and NCCL's own size-adaptive tuning &mdash; every $\alpha$ optimisation in this
+chapter, in exchange for reproducibility. On AMD, SGLang keeps the one-stage kernel instead, precisely
+because <em>"each GPU reads all data from all GPUs, reduces locally in fixed order"</em>.</p>
+
+<h3>The silent P2P failure</h3>
+
+<p>A driver can report <code>can_device_access_peer == True</code> while P2P does not actually work. vLLM
+found this the hard way and now runs a real cross-process IPC write before trusting it
+(<code>vllm/distributed/device_communicators/all_reduce_utils.py:L236-L263</code>, which cites
+<a href="https://github.com/vllm-project/vllm/issues/2728">issue #2728</a>). If the check subprocess
+fails you get:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/device_communicators/all_reduce_utils.py:L404-L408</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>                raise RuntimeError(
+                    f"Error happened when batch testing "
+                    f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
+                    f"{returned.stderr.decode()}"
+                ) from e</code></pre>
+</div>
+
+<p>It is cached, so a stale cache after a driver change is a real failure mode.
+<code>VLLM_SKIP_P2P_CHECK=1</code> bypasses the test &mdash; and, on a broken driver, hands you silently
+wrong numerics instead of a warning.</p></div></section>
+<section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. Prove the fabric works before blaming the engine.</b> vLLM ships the script; run it at your TP
+size. It exercises PyTorch NCCL, GLOO, pynccl, and pynccl inside a CUDA graph &mdash; four distinct failure
+surfaces:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/usage/troubleshooting.md:L155</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>NCCL_DEBUG=TRACE torchrun --nproc-per-node=&lt;number-of-GPUs&gt; test.py</code></pre>
+</div>
+
+<p><b>2. Measure what the custom kernel is worth on your box.</b> Both engines expose one flag, so you can
+A/B the whole mechanism:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm bench latency --model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 8 \
+    --input-len 128 --output-len 128 --batch-size 8
+vllm bench latency --model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 8 \
+    --input-len 128 --output-len 128 --batch-size 8 --disable-custom-all-reduce
+
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B --tp 8
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B --tp 8 --disable-custom-all-reduce</code></pre>
+</div>
+
+<p>The table in &sect;5.4.3 predicts the gap is largest at small batch and small model, and shrinks toward
+zero as $t$ grows past a few hundred. If your measured gap does not have that shape, your $\alpha$ is not
+what this chapter assumed &mdash; and you now have a real measurement, which is worth more than the model.</p>
+
+<p><b>3. Force each algorithm and find your own crossover.</b> vLLM reads an environment variable inside
+the kernel dispatcher, so you can pin the algorithm without recompiling
+(<code>csrc/custom_all_reduce.cuh:L270-L285</code>):</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">shell</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>VLLM_CUSTOM_ALLREDUCE_ALGO=oneshot vllm bench latency ...   # also: 1stage, 2stage, twoshot</code></pre>
+</div>
+
+<p>Sweep <code>--batch-size</code> from 1 to 512 under each setting. The batch size where the two curves
+cross, times $d \times 2$ bytes, is your machine's $S^{*}$. Compare it with vLLM's hard-coded 256&nbsp;KiB
+and with SGLang's 128&nbsp;KiB for SM90 TP=8.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the source.</b> Open <code>csrc/custom_all_reduce.cuh</code> and find
+  <code>cross_device_reduce_2stage</code>. In stage 2, why must thread <code>tid</code> gather index
+  <code>tid</code> from every rank, rather than any convenient index? Quote the comment that answers it, and
+  say what would break if you ignored it.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>The comment at <code>csrc/custom_all_reduce.cuh:L59-L63</code>: <em>"it's important to match the tid
+  between the two stages, because visibility across devices is only guaranteed between threads that have the
+  same tid."</em> The inter-device barrier is per-block and per-rank-slot; it establishes a happens-before
+  edge for a thread's own writes as observed by the correspondingly-indexed thread on the peer. A thread
+  reading an index some <em>other</em> thread wrote has no such guarantee and may observe a stale value.
+  The failure would be a silent, rare, load-dependent numerical corruption &mdash; the worst kind.</p>
+  </div></details></li>
+
+  <li><b>Predict, then verify.</b> You run Llama-3-70B (d=8192, bf16) at TP=4 in vLLM. For batch sizes 8,
+  16, 32, 64 and 512, predict which code path each all-reduce takes: one-shot, two-shot, or NCCL. Then check
+  your answers against <code>REDUCE_CASE</code> and <code>should_custom_ar</code>.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>$S = t \times 8192 \times 2$. At TP=4 the one-shot bound is <code>bytes &lt; 512 * 1024</code> and the
+  custom bound is <code>inp_size &lt; 8388608</code>.</p>
+  <p>t=8: 131,072 B &rarr; one-shot. t=16: 262,144 &rarr; one-shot. t=32: 524,288 &rarr; <em>not</em> less
+  than 524,288, so two-shot &mdash; the boundary is strict. t=64: 1,048,576 &rarr; two-shot. t=512:
+  8,388,608 &rarr; equals <code>max_size</code>, so <code>should_custom_ar</code> returns False and it goes
+  to pynccl. Note the two off-by-one traps: both bounds are strict <code>&lt;</code>, and both land exactly
+  on a power-of-two batch size for this model.</p>
+  </div></details></li>
+
+  <li><b>Do the arithmetic.</b> Your cluster has 16 H100s in two NVSwitch nodes. You want to serve
+  Llama-3-70B. Compare TP=16 across both nodes against PP=2 &times; TP=8, at batch 8, counting only
+  cross-fabric transfer time per decode step. Assume NDR 400&nbsp;Gb/s and ignore $\alpha$.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>TP=16: $S = 8 \times 8192 \times 2 = 131{,}072$ B. Ring over 16 ranks puts $2 \times 15/16 \times S =
+  245{,}760$ B on each link across 30 steps; two of the sixteen ring links cross the fabric and carry that
+  full amount. At 50&nbsp;GB/s: 4.92&nbsp;&micro;s per collective, and there are 160 of them &rarr;
+  <b>787&nbsp;&micro;s</b> of cross-fabric time per decode step.</p>
+  <p>PP=2 &times; TP=8: every all-reduce is intra-node. Cross-fabric traffic is one hidden-state send per
+  micro-batch per stage boundary: 131,072 B / 50&nbsp;GB/s = <b>2.6&nbsp;&micro;s</b>. A 300&times;
+  difference. Against a 5.2&nbsp;ms step, TP=16 across nodes costs about 15% before you count $\alpha$ on 320
+  cross-fabric ring steps; PP costs 0.05% plus a pipeline bubble
+  (<a href="05-02-pipeline-parallelism.html">&sect;5.2</a>) that may well be the larger term.</p>
+  </div></details></li>
+
+  <li><b>Read two files and compare.</b> Put vLLM's <code>REDUCE_CASE</code> next to SGLang's
+  <code>_sm90_configs</code> table. Both target H100. Why does SGLang need a table where vLLM needs two
+  literals, and what does SGLang's split between <code>graph</code> and <code>eager</code> columns tell you
+  about $\alpha$?
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>vLLM's two literals cover world sizes in bands (&le;4 and &le;8) and one architecture family. SGLang's
+  table is keyed on world size 2 through 8 <em>and</em> compute capability, because $S^{*} \propto
+  N/[(N{-}1)(N{-}2)]$ falls off fast &mdash; 16&nbsp;MB at TP=2 down to 128&nbsp;KB at TP=8 &mdash; and
+  because it also supports the push/pull and multicast axes that vLLM does not. The graph column is always
+  at or below the eager column (e.g. 384&nbsp;KB graph vs 896&nbsp;KB eager at TP=4). Since $S^{*} \propto
+  \alpha_{\mathrm{step}}$, a lower graph threshold means graph replay <em>reduces</em> the incremental
+  synchronisation cost &mdash; consistent with CUDA graphs removing the host-side launch from the barrier's
+  critical path.</p>
+  </div></details></li>
+
+  <li><b>Break it deliberately.</b> Modify <code>should_custom_ar</code> to return
+  <code>self.rank == 0 or inp_size &lt; self.max_size</code>. Predict what happens at TP=8 with a 16&nbsp;MB
+  message, then explain why the flashinfer comment in &sect;5.4.8 forbids exactly this.
+  <details class="fold"><summary>Answer</summary><div class="fold__body">
+  <p>Rank 0 enters <code>cross_device_reduce_1stage</code>'s barrier and spins on peer flags that will never
+  be written. Ranks 1&ndash;7 enter <code>ncclAllReduce</code> and block waiting for a contribution that will
+  never arrive. Nothing errors; both sides are waiting correctly. You get a hang with no message until the
+  watchdog fires, and the py-spy dump shows rank 0 in the custom kernel and everyone else in NCCL &mdash;
+  which is, usefully, the signature of exactly this class of bug. The predicate became rank-<em>variant</em>,
+  which is the one thing the flashinfer comment says must never happen.</p>
+  </div></details></li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>A decode-step all-reduce is 8&ndash;128&nbsp;KB, not megabytes. At Llama-3-8B TP=8 batch 8 the wire
+  time is 16&nbsp;&micro;s across all 64 collectives and the fixed cost is roughly 192&nbsp;&micro;s
+  (derived). Every optimisation in both engines attacks $\alpha$, not $B$ &mdash; which is why the training
+  intuition that "NCCL is a solved problem" is exactly backwards here.</li>
+  <li>Ring achieves the minimum wire bytes $2(N{-}1)S/N$ and pays $2(N{-}1)$ lock-step rounds for it.
+  Two-shot P2P achieves the <em>same</em> byte count in two rounds, because a full NVSwitch mesh lets a rank
+  address every peer at once instead of only its successor. One-shot spends $(N{-}1)S$ bytes to get down to
+  one round. The whole design space is that trade.</li>
+  <li>The crossover $S^{*} = NB\alpha_{\mathrm{step}}/[(N{-}1)(N{-}2)]$ is not a fitted curve: running
+  vLLM's two hard-coded constants (512&nbsp;KiB at TP&le;4, 256&nbsp;KiB at TP&le;8) backwards through it
+  yields an implied barrier cost of 1.75 and 3.06&nbsp;&micro;s &mdash; the same microsecond band
+  <a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> gives for launch and device sync,
+  and growing with $N$ as an $N$-way rendezvous should.</li>
+  <li>The custom path is not a tuning knob, it is a set of hard requirements: full one-hop NVLink verified
+  through NVML, a verified real P2P write, world size in {2,4,6,8}, 16-byte alignment, and a message under
+  the 8&nbsp;MiB registered buffer. Miss any one and both engines fall back to NCCL, usually with only a
+  <code>logger.warning</code> to tell you.</li>
+  <li>Topology fixes the plan by arithmetic, not preference. A TP group spanning nodes turns 160 NVLink
+  collectives per decode step into 160 collectives with an InfiniBand leg &mdash; 9&times; the bytes on the
+  slow link, and it sets the pace for all ranks. PP across the same boundary sends one hidden-state tensor
+  per micro-batch per stage. 160 cross-fabric events versus 1.</li>
+  <li>Almost nothing overlaps in a decode step: the all-reduce sits between two dependent matmuls, and both
+  engines run it on the compute stream. The wins therefore come from fusion &mdash; all-reduce+residual+norm
+  in one kernel, or SGLang's fused GEMM+all-reduce whose epilogue pushes finished tiles into peer memory so
+  that only one flag boundary remains on the critical path.</li>
+  <li>A collective hang means rank divergence until proven otherwise. Every fallback predicate must be
+  rank-invariant &mdash; a rank that quietly takes NCCL while its peers enter a custom kernel deadlocks with
+  no error, and diffing py-spy stacks across ranks finds it faster than any network tool.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/vllm-project/vllm/pull/2192">vLLM PR #2192</a>, "Implement custom all
+  reduce kernels" &mdash; the commit that created <code>csrc/custom_all_reduce.cuh</code>. Its follow-ups
+  <a href="https://github.com/vllm-project/vllm/pull/2642">#2642</a> (no repeated IPC open) and
+  <a href="https://github.com/vllm-project/vllm/pull/8558">#8558</a> (unsafe synchronisation) are the
+  best record of how the barrier reached its current form.</li>
+  <li><a href="https://github.com/sgl-project/sglang/pull/19880">SGLang PR #19880</a> &mdash; "Support JIT
+  custom all reduce (rewrite as v2)", where the push/pull/multicast split and the per-architecture
+  threshold table landed. <a href="https://github.com/sgl-project/sglang/pull/32541">#32541</a> is where
+  the fused GEMM+all-reduce arrived.</li>
+  <li><a href="https://github.com/vllm-project/vllm/issues/2728">vLLM issue #2728</a> &mdash; why
+  <code>can_device_access_peer</code> cannot be trusted, and the origin of the
+  <code>can_actually_p2p</code> subprocess test. Read it before you set
+  <code>VLLM_SKIP_P2P_CHECK</code>.</li>
+  <li><a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/">The NCCL user guide</a>, and in
+  particular its Environment Variables page &mdash; the authoritative list. <code>NCCL_ALGO</code>,
+  <code>NCCL_MIN_NCHANNELS</code> and <code>NCCL_DEBUG_SUBSYS</code> are the three that matter for the
+  material in this chapter.</li>
+  <li><a href="https://developer.nvidia.com/blog/massively-scale-deep-learning-training-nccl-2-4/">Massively
+  Scale Your Deep Learning Training with NCCL 2.4</a> &mdash; NVIDIA's own account of why the double binary
+  tree beats ring at small message sizes. The argument is the latency-vs-bandwidth split of this chapter,
+  made for a different workload.</li>
+  <li><a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 product page</a> and the
+  <a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVLink and NVSwitch</a> page &mdash; the source
+  of the 900&nbsp;GB/s bidirectional per-GPU figure used throughout.</li>
+  <li><code>python/sglang/srt/distributed/device_communicators/configs/custom_all_reduce_v2.py</code>
+  &mdash; the most useful single artefact in either repo for this topic: a per-architecture,
+  per-world-size crossover table someone actually measured, with the SM90 and SM100 numbers side by side.</li>
+  <li><code>.claude/skills/debug-distributed-hang/SKILL.md</code> in the SGLang tree &mdash; a genuinely
+  good short methodology for collective hangs, including the CUDA user-triggered coredump recipe and the
+  per-rank logging pattern for binary-searching a divergence point.</li>
+</ul></div></section>
+<div class="pager"><a href="05-03-data-and-expert-parallelism.html"><div class="pager__k">← Previous</div><div class="pager__t">Data parallelism, attention-DP, expert parallelism</div></a><a class="pager__next" href="05-05-worker-orchestration.html"><div class="pager__k">Next →</div><div class="pager__t">Worker orchestration and multi-node serving</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: cost models for every collective inference uses</a>
+<a href="#topology">Topology decides the parallelism plan</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: a 128 KB all-reduce through vLLM</a>
+<a href="#overlap">Overlap: the honest answer</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

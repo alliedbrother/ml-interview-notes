@@ -1,0 +1,1812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workload characterization — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="../09-serving-system/09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="../09-serving-system/09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="../09-serving-system/09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i" href="../09-serving-system/09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="../09-serving-system/09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i is-current" href="10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 10 · Benchmarking and performance engineering · 10-01</div>
+<h1>Workload characterization</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/</code></li><li><code>python/sglang/benchmark/serving.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">One H100. One Llama-3-8B. One engine, one set of flags. Change nothing but the shape
+of the requests and output throughput moves by 29&times;. Every number in the rest of this book is
+conditional on a workload description, and a benchmark result published without one is not a
+result — it is a rumour with three significant figures.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Two teams run the same command against the same server. Team A summarises support tickets:
+8,000 input tokens, 200 output tokens. Team B runs a chat assistant: 500 in, 500 out. Both
+saturate the GPU. Both report "Llama-3-8B on an H100."</p>
+
+<p>Team A would see <strong>447 output tokens/s</strong>. Team B, <strong>12,796</strong>.
+Neither is wrong. Neither is comparable to the other. And neither number tells you anything about
+what the third team — the one running a coding agent at 1,000 in and 8,000 out — is going to see.</p>
+
+<p>The derivation uses only constants this book has already established. Prefill of $S$ tokens costs
+$t_{\text{pre}}(S) = 40.6\,\mu\text{s} \cdot S + 6.63{\times}10^{-10}\,\text{s} \cdot S^2$ —
+reproducing <a href="../01-the-core-loop/01-01-prefill-vs-decode.html">&sect;1.1</a>'s 86&nbsp;ms
+at 2,048 tokens and 2,041&nbsp;ms at 32,768 to within 0.2%. The KV pool holds
+<strong>428,569 resident tokens</strong> at 128&nbsp;KiB/token
+(<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html#first-principles">&sect;2.1</a>), and
+filling it makes a decode step cost
+$4.48\,\text{ms} + 56.2\,\text{GB}/3.35\,\text{TB/s} = 21.25\,\text{ms}$, regardless of workload.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — three workloads on one H100 running Llama-3-8B bf16, TP=1, KV pool saturated. Arithmetic only; nothing here was measured.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Workload</th><th class="num">in</th><th class="num">out</th><th class="num">mean resident $\bar s$</th><th class="num">$B_{\max}$</th><th class="num">prefill ms/req</th><th class="num">decode ms/req</th><th class="num">prefill share</th><th class="num">out tok/s</th></tr></thead>
+      <tbody>
+        <tr><td>Summarisation</td><td class="num">8,000</td><td class="num">200</td><td class="num">8,100</td><td class="num">52</td><td class="num">367.5</td><td class="num">80.3</td><td class="num">82.1%</td><td class="num">447</td></tr>
+        <tr><td>Chat</td><td class="num">500</td><td class="num">500</td><td class="num">750</td><td class="num">571</td><td class="num">20.5</td><td class="num">18.6</td><td class="num">52.4%</td><td class="num">12,796</td></tr>
+        <tr><td>Agentic / reasoning</td><td class="num">1,000</td><td class="num">8,000</td><td class="num">5,000</td><td class="num">85</td><td class="num">41.3</td><td class="num">1,983</td><td class="num">2.0%</td><td class="num">3,952</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">28.7&times;</div><div class="kpi__l">output tok/s, chat vs. summarisation</div></div>
+  <div class="kpi"><div class="kpi__n">82% &rarr; 2%</div><div class="kpi__l">share of engine time in prefill</div></div>
+  <div class="kpi"><div class="kpi__n">52 &rarr; 571</div><div class="kpi__l">concurrent requests the pool allows</div></div>
+</div>
+
+<p>Same silicon, same weights, same scheduler. The spread comes entirely from two numbers per
+request. That is the thesis of this chapter and of Part 10: <strong>workload shape is not a
+footnote on a benchmark, it is the dominant term.</strong> Before you tune a flag, before you
+compare two engines, before you believe a blog post, you characterise the workload.</p></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A workload is not "chat" or "RAG". Those are product categories. A workload, for the purpose of
+predicting what a GPU will do, is <strong>four distributions</strong>:</p>
+
+<div class="cards cards--2">
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">AXIS 1</span><h4>Input length distribution</h4><p>Sets prefill cost (super-linear), KV footprint per request, and therefore how many requests fit — which sets your decode arithmetic intensity. The <em>distribution</em>, not the mean: a heavy tail is head-of-line blocking.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">AXIS 2</span><h4>Output length distribution</h4><p>Sets the number of decode steps and how long a sequence holds its KV. Unknown at admission time, which is why schedulers must reserve pessimistically.</p></div>
+  <div class="ve-card"><span class="ve-card__k">AXIS 3</span><h4>Arrival process</h4><p>Rate and variability. Variability, not rate, is what inflates queueing — and queueing is 90&ndash;99% of p99 TTFT.</p></div>
+  <div class="ve-card"><span class="ve-card__k">AXIS 4</span><h4>Prefix-sharing structure</h4><p>How much of each input is shared and <em>where</em> the sharing sits. A shared prefix deletes prefill work. A shared suffix deletes nothing.</p></div>
+</div>
+
+<p>Axes 1 and 2 place you on the roofline. Axis 3 decides whether the queue in front of the
+roofline is empty or 300 deep. Axis 4 decides how much of axis 1's cost you actually pay.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; the three canonical workloads on the H100 roofline, with their prefill:decode time splits.</b>
+    Derived. Prefill sits far right of the ridge in all three; the decode step's intensity is set by how many requests the KV pool allows, which is set by input length.</p>
+  <svg viewBox="0 0 820 430" width="100%" role="img" aria-labelledby="f1t f1d">
+    <title id="f1t">Roofline placement of three workloads</title>
+    <desc id="f1d">Log-log roofline for H100 SXM bf16 with ridge point at 295 FLOP per byte. Decode steps for summarisation, agentic and chat workloads sit at 14.8, 22.3 and 132 FLOP per byte respectively. Prefill for all three sits between 400 and 1630 FLOP per byte, above the ridge. Bars at the bottom show prefill to decode time splits of 82:18, 2:98 and 52:48.</desc>
+    <g stroke="var(--border)" stroke-width="1" fill="none">
+      <path d="M70 300 H 780 M70 300 V 40"/>
+    </g>
+    <g fill="var(--text-dim)" font-family="var(--font-mono)" font-size="10">
+      <text x="70" y="318" text-anchor="middle">1</text>
+      <text x="212" y="318" text-anchor="middle">10</text>
+      <text x="354" y="318" text-anchor="middle">100</text>
+      <text x="496" y="318" text-anchor="middle">1k</text>
+      <text x="638" y="318" text-anchor="middle">10k</text>
+      <text x="425" y="336" text-anchor="middle">arithmetic intensity I (FLOP/byte, log)</text>
+      <text x="62" y="304" text-anchor="end">3.35</text>
+      <text x="62" y="215" text-anchor="end">33.5</text>
+      <text x="62" y="126" text-anchor="end">335</text>
+      <text x="62" y="66" text-anchor="end">989</text>
+      <text x="18" y="170" text-anchor="middle" transform="rotate(-90 18 170)">TFLOP/s (log)</text>
+    </g>
+    <path d="M70 300 L 425 63 L 780 63" stroke="var(--text)" stroke-width="2" fill="none"/>
+    <g stroke="var(--border-bright)" stroke-width="1" stroke-dasharray="3 3">
+      <path d="M425 63 V 300"/>
+    </g>
+    <text x="431" y="82" fill="var(--text-dim)" font-family="var(--font-mono)" font-size="10">ridge I* = 295</text>
+    <g font-family="var(--font-mono)" font-size="10">
+      <circle cx="235" cy="238" r="5" fill="var(--plum)"/>
+      <text x="246" y="235" fill="var(--plum)">decode summarisation &mdash; I=14.8, 50 TFLOP/s</text>
+      <circle cx="261" cy="228" r="5" fill="var(--olive)"/>
+      <text x="272" y="252" fill="var(--olive)">decode agentic &mdash; I=22.3, 75 TFLOP/s</text>
+      <circle cx="370" cy="156" r="5" fill="var(--teal)"/>
+      <text x="381" y="153" fill="var(--teal)">decode chat &mdash; I=132, 442 TFLOP/s</text>
+      <circle cx="432" cy="63" r="5" fill="var(--copper)"/>
+      <circle cx="491" cy="63" r="5" fill="var(--copper)"/>
+      <circle cx="522" cy="63" r="5" fill="var(--copper)"/>
+      <text x="500" y="52" fill="var(--copper)">prefill, all three (I = 402 &hellip; 1631)</text>
+    </g>
+    <g font-family="var(--font-mono)" font-size="10">
+      <text x="70" y="366" fill="var(--text-dim)">prefill : decode share of engine time</text>
+      <rect x="70" y="376" width="164" height="14" fill="var(--copper)"/><rect x="234" y="376" width="36" height="14" fill="var(--plum)"/>
+      <text x="280" y="387" fill="var(--text)">summarisation 82 : 18</text>
+      <rect x="70" y="396" width="4" height="14" fill="var(--copper)"/><rect x="74" y="396" width="196" height="14" fill="var(--olive)"/>
+      <text x="280" y="407" fill="var(--text)">agentic 2 : 98</text>
+      <rect x="70" y="416" width="105" height="10" fill="var(--copper)"/><rect x="175" y="416" width="95" height="10" fill="var(--teal)"/>
+      <text x="280" y="425" fill="var(--text)">chat 52 : 48</text>
+    </g>
+  </svg>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: two constants and one ratio</h2></div><div class="sec__body"><p>The table in &sect;1 came out of a two-constant model. Deriving it is worth five minutes because
+the model then predicts any workload you care to name.</p>
+
+<p><strong>Prefill constant.</strong> From <a href="../FORMULAS.html">FORMULAS</a>,
+$F_{\text{prefill}}(S) = 2PS + 2Lh d_h S^2$. Calibrating against the book's 86&nbsp;ms for a
+2,048-token Llama-3-8B prefill gives an effective throughput of 395&nbsp;TFLOP/s — 39.9% MFU —
+and splits into a per-token term and a quadratic term:</p>
+
+<div class="math-display">$$t_{\text{pre}}(S) \;=\; \underbrace{c_p\,S}_{\text{weight GEMMs}} + \underbrace{c_q\,S^{2}}_{\text{attention}}, \qquad c_p = 40.6\,\mu\text{s},\quad c_q = 6.63{\times}10^{-10}\,\text{s}$$</div>
+
+<p>The quadratic term is 3.2% of prefill at $S = 2{,}048$, 11.6% at 8,000, and 34.9% at 32,768. Below
+about 4k tokens you can pretend prefill is linear; above it you cannot.</p>
+
+<p><strong>Decode constant.</strong> A saturated engine runs at $B = N_{\max}/\bar{s}$ concurrent
+requests, where $N_{\max} = 428{,}569$ is the pool in tokens and $\bar{s}$ is the mean resident
+sequence length. Each step costs $t_{\text{step}} = 4.48\,\text{ms} + kN_{\max}/\beta = 21.25$&nbsp;ms
+— a machine constant, not a workload one, because the pool is full either way. The <em>engine time</em>
+one request's decode phase consumes is its share of those steps:</p>
+
+<div class="math-display">$$t_{\text{dec}} \;=\; S_{\text{out}} \cdot \frac{t_{\text{step}}}{B} \;=\; S_{\text{out}}\,\bar{s}\;\underbrace{\frac{t_{\text{step}}}{N_{\max}}}_{c_d} , \qquad c_d = 4.96{\times}10^{-8}\,\text{s}$$</div>
+
+<p>Read that carefully. Decode engine time is <strong>bilinear in output length and resident
+length</strong>. Doubling the input length doubles the cost of every decode step the request will
+ever take, because it halves the batch that shares the weight stream. This is the mechanism by
+which axis 1 controls decode performance, and it is invisible if you only look at prefill.</p>
+
+<h3>The ratio that predicts everything</h3>
+
+<div class="math-display">$$\frac{t_{\text{pre}}}{t_{\text{dec}}} \;\approx\; \frac{c_p}{c_d}\cdot\frac{S_{\text{in}}}{S_{\text{out}}\,\bar{s}}, \qquad \frac{c_p}{c_d} = 820$$</div>
+
+<p>For a symmetric workload with $S_{\text{in}} = S_{\text{out}} = x$ and $\bar{s} = 1.5x$, prefill
+and decode cost exactly the same engine time at:</p>
+
+<div class="math-display">$$x^{*} = \frac{c_p}{1.5\,c_d - c_q} \;=\; 551 \text{ tokens.}$$</div>
+
+<p>That is the balance point for Llama-3-8B on an H100, and it is why "chat" feels like the neutral
+workload: a 500-in/500-out request lands within 10% of a 50/50 split, by coincidence of model shape
+and hardware. Move either number and the split collapses fast — $t_{\text{pre}}/t_{\text{dec}}$
+is 4.58 for summarisation and 0.021 for agentic, a factor of 220 between them.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Consequence</span>
+  <p>Speculative decoding helps the agentic workload (98% decode) and is nearly worthless on
+  summarisation (18% decode) — before you even consider that
+  <a href="../06-decoding-algorithms/06-02-speculative-decoding.html">&sect;6.2</a>'s speedup
+  condition turns negative at high batch. Chunked prefill
+  (<a href="../01-the-core-loop/01-05-chunked-prefill.html#first-principles">&sect;1.5</a>) is
+  load-bearing for summarisation and a rounding error for agentic. Neither statement is a property
+  of the engine. Both are properties of the ratio.</p>
+</div>
+
+<h3>Where each lands on the roofline</h3>
+
+<p>Prefill intensity is $I(T) = 2Td/(b(2T+d))$, and every prefill in this chapter — 402 at $T=500$,
+1,631 at $T=8{,}000$ — sits far right of the 295 ridge
+(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html#first-principles">&sect;0.4</a>).
+Prefill is compute-bound in all three workloads. The interesting variation is in decode, where the
+whole-step intensity is $B(2P + 4Lhd_hs)$ FLOPs over 71.2&nbsp;GB of traffic &mdash; 15.01&nbsp;GB of
+<em>streamed</em> weights (the 7.505&nbsp;B non-embedding parameters; the embedding table is resident
+but never read, <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>)
+plus the 56.17&nbsp;GB pool:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — decode-step arithmetic intensity at KV saturation. Same 71.2&nbsp;GB and the same step duration (21.25 ms) in every row; the FLOPs differ by 8.9&times;.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Workload</th><th class="num">$B$</th><th class="num">step FLOPs</th><th class="num">$I$ (FLOP/byte)</th><th class="num">$\beta I$</th><th class="num">% of bf16 peak</th></tr></thead>
+      <tbody>
+        <tr><td>Summarisation</td><td class="num">52</td><td class="num">1.06 &times; 10<sup>12</sup></td><td class="num">14.8</td><td class="num">50 TFLOP/s</td><td class="num">5.0%</td></tr>
+        <tr><td>Agentic</td><td class="num">85</td><td class="num">1.59 &times; 10<sup>12</sup></td><td class="num">22.3</td><td class="num">75 TFLOP/s</td><td class="num">7.6%</td></tr>
+        <tr><td>Chat</td><td class="num">571</td><td class="num">9.40 &times; 10<sup>12</sup></td><td class="num">132</td><td class="num">442 TFLOP/s</td><td class="num">44.7%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>A chat decode step does 8.9&times; the arithmetic of a summarisation decode step <em>in the same
+21.25&nbsp;ms</em>, because 571 rows amortise the weight stream instead of 52. If someone shows you
+a "5% MFU" decode measurement and calls it an engine problem, ask what the input lengths were.</p></div></section>
+<section class="sec" id="four-axes" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The four axes, mechanically</h2></div><div class="sec__body"><h3>Axis 1 — input length: the mean is the wrong statistic</h3>
+
+<p>Take a mixed production workload: 80% short chat turns at 600 tokens, 15% short documents at
+4,000, 5% long documents at 16,000. Mean input length: <strong>1,880 tokens</strong>. Now take a
+synthetic workload where every request is exactly 1,880 tokens. Identical means, identical token
+volume, identical arrival rate.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — two input-length distributions with the same mean. $C^2$ is the squared coefficient of variation, $\mathrm{Var}/\mu^2$.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Statistic</th><th class="num">Fixed 1,880</th><th class="num">80/15/5 mix</th></tr></thead>
+      <tbody>
+        <tr><td>Mean input tokens</td><td class="num">1,880</td><td class="num">1,880</td></tr>
+        <tr><td>$C^2$ of input length</td><td class="num">0.00</td><td class="num">3.38</td></tr>
+        <tr><td>Mean prefill time</td><td class="num">78.7 ms</td><td class="num">86.7 ms</td></tr>
+        <tr><td>Worst-case prefill (one request)</td><td class="num">78.7 ms</td><td class="num">819.9 ms</td></tr>
+        <tr><td>Share of prefill time in the top 5%</td><td class="num">5.0%</td><td class="num">47.3%</td></tr>
+        <tr><td>Kingman $\mathbb{E}[W]$ at $\rho = 0.8$, Poisson arrivals</td><td class="num">2.00 $S$</td><td class="num">8.76 $S$</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The mean prefill time differs by 10%. The mean <em>queueing delay</em> differs by
+<strong>4.4&times;</strong>, because <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html#further-reading">&sect;1.2</a>'s
+Kingman correction scales the wait by $(C_a^2 + C_s^2)/2$, and service-time variability comes
+straight off the input-length distribution. The table sets $C_s^2$ equal to the length $C^2$, which
+is exact only if prefill were linear in $S$; carrying the $S^2$ term through raises $C_s^2$ to 4.14
+and the gap to 5.1&times;, so 4.4&times; is the conservative reading, not the generous one. Five percent of requests carry 47% of the prefill work
+and set the tail. Without chunked prefill, each of those 16k prefills stalls every decoding request
+in the batch for 820&nbsp;ms — the head-of-line blocking derived in
+<a href="../01-the-core-loop/01-01-prefill-vs-decode.html#pitfalls">&sect;1.1</a>.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; two input-length distributions with identical means.</b>
+    Derived. The mean (dashed) sits in a bin that almost nobody occupies. The 5% tail bar is 27&times; wider than the mode and owns 47% of all prefill time.</p>
+  <svg viewBox="0 0 820 300" width="100%" role="img" aria-labelledby="f2t f2d">
+    <title id="f2t">Input length distributions, fixed versus heavy-tailed</title>
+    <desc id="f2d">Left panel: all mass at 1880 tokens. Right panel: 80 percent at 600 tokens, 15 percent at 4000, 5 percent at 16000, with the mean of 1880 marked between the first two bars and the 5 percent tail highlighted.</desc>
+    <g font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">
+      <text x="30" y="24">A — fixed length, C² = 0</text>
+      <text x="440" y="24">B — 80/15/5 mix, C² = 3.38</text>
+    </g>
+    <g stroke="var(--border)" stroke-width="1"><path d="M30 230 H 390 M440 230 H 800" fill="none"/></g>
+    <rect x="150" y="60" width="40" height="170" fill="var(--teal)"/>
+    <text x="170" y="248" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)" text-anchor="middle">1,880</text>
+    <text x="170" y="52" font-family="var(--font-mono)" font-size="10" fill="var(--teal)" text-anchor="middle">100%</text>
+    <path d="M170 230 V 46" stroke="var(--text)" stroke-width="1" stroke-dasharray="4 3" fill="none"/>
+    <rect x="470" y="60" width="34" height="170" fill="var(--teal)"/>
+    <text x="487" y="248" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)" text-anchor="middle">600</text>
+    <text x="487" y="52" font-family="var(--font-mono)" font-size="10" fill="var(--teal)" text-anchor="middle">80%</text>
+    <rect x="560" y="198" width="34" height="32" fill="var(--olive)"/>
+    <text x="577" y="248" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)" text-anchor="middle">4,000</text>
+    <text x="577" y="190" font-family="var(--font-mono)" font-size="10" fill="var(--olive)" text-anchor="middle">15%</text>
+    <rect x="700" y="219" width="34" height="11" fill="var(--plum)"/>
+    <text x="717" y="248" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)" text-anchor="middle">16,000</text>
+    <text x="717" y="211" font-family="var(--font-mono)" font-size="10" fill="var(--plum)" text-anchor="middle">5%</text>
+    <path d="M521 230 V 46" stroke="var(--text)" stroke-width="1" stroke-dasharray="4 3" fill="none"/>
+    <text x="521" y="40" font-family="var(--font-mono)" font-size="10" fill="var(--text)" text-anchor="middle">mean 1,880 — 0% of requests</text>
+    <g stroke="var(--plum)" stroke-width="1.5" fill="none"><path d="M694 262 H 740"/></g>
+    <text x="746" y="266" font-family="var(--font-mono)" font-size="10" fill="var(--plum)">47% of all prefill time</text>
+    <text x="440" y="286" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">input tokens (bars not to horizontal scale)</text>
+  </svg>
+</div>
+
+<h3>Axis 2 — output length: unknown at admission</h3>
+
+<p>Input length is known when the request arrives. Output length is not. The scheduler has, at best,
+<code>max_tokens</code> — an upper bound the client picked, often the model's context limit. This
+asymmetry is why admission control has to guess, and both engines guess differently.</p>
+
+<p>SGLang guesses explicitly, with a scalar it tunes online. <code class="c-sglang">new_token_ratio</code>
+scales the KV reservation for each running request
+(<a href="../01-the-core-loop/01-04-the-scheduler.html#queues-and-policy">&sect;1.4</a>), and
+retraction snaps it up towards the observed generation fraction before decaying back — additive
+increase, additive decrease, on KV admission. Read that as a feedback loop that <em>learns your
+output-length distribution at runtime</em>. If your workload's real generation fraction is 5% of
+<code>max_tokens</code>, the controller settles low and admits aggressively. If it is 90%, it
+settles high and your effective batch shrinks. Two workloads with identical input lengths and
+identical arrival rates will therefore run at different concurrency, purely from axis 2.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">Characterise this</span>
+  <p>Log both <code>max_tokens</code> and the realised output length. Their <em>ratio</em>
+  distribution is the input to SGLang's controller and the thing that decides whether
+  <code>--schedule-conservativeness</code> needs touching. vLLM exports both:
+  <code>vllm:request_params_max_tokens</code> and <code>vllm:request_generation_tokens</code>.</p>
+</div>
+
+<h3>Axis 3 — the arrival process changes the physics</h3>
+
+<p><a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html#first-principles">&sect;1.2</a>
+owns the queueing result: at $\rho \in [0.5, 0.95]$, 89&ndash;99% of p99 TTFT is queueing. It states
+Kingman's correction and leaves the arrival-variability treatment here. So:</p>
+
+<div class="math-display">$$\mathbb{E}[W] \;\approx\; \frac{\rho}{1-\rho}\cdot\frac{C_a^{2}+C_s^{2}}{2}\cdot S$$</div>
+
+<p>with $C_a^2$ the squared CV of inter-arrival times and $C_s^2$ that of service times. Both
+harnesses let you set $C_a^2$, and in vLLM's case the mapping is exact. vLLM draws inter-arrival
+gaps from a Gamma distribution:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L456-L467</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>            if current_request_rate == float("inf"):
+                delay_ts.append(0)
+            elif burstiness == float("inf"):
+                # when burstiness tends to infinity, the delay time becomes constant
+                # and tends to the inverse of the request rate
+                delay_ts.append(1.0 / current_request_rate)
+            else:
+                theta = 1.0 / (current_request_rate * burstiness)
+
+                # Sample the request interval from the gamma distribution.
+                # If burstiness is 1, it follows exponential distribution.
+                delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))</code></pre>
+</div>
+
+<p>Gamma with shape $\kappa = \texttt{burstiness}$ and scale $\theta = 1/(\lambda\kappa)$ has mean
+$\kappa\theta = 1/\lambda$ and variance $\kappa\theta^2 = 1/(\lambda^2\kappa)$. So:</p>
+
+<div class="math-display">$$C_a^{2} \;=\; \frac{\mathrm{Var}}{\mu^{2}} \;=\; \frac{1}{\texttt{burstiness}}$$</div>
+
+<p>The flag <em>is</em> the queueing parameter, inverted. At $\rho = 0.8$ with the mixed workload
+above ($C_s^2 = 3.38$), the same offered rate gives $\mathbb{E}[W] = 7.26\,S$ at
+<code>--burstiness 4</code>, $8.76\,S$ at the Poisson default, and $14.76\,S$ at
+<code>--burstiness 0.25</code>. Two engineers benchmarking "at 10 req/s" can differ by 2&times; in
+mean queueing delay and 0% in throughput. SGLang has no equivalent knob — it samples exponential
+only, i.e. $C_a^2 = 1$, permanently:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/serving.py:L1083-L1092</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            yield request
+
+            if request_rate == float("inf"):
+                # If the request rate is infinity, then we don't need to wait.
+                continue
+
+            # Sample the request interval from the exponential distribution.
+            interval = np.random.exponential(1.0 / request_rate)
+            # The next request will be sent after the interval.
+            await asyncio.sleep(interval)</code></pre>
+</div>
+
+<p><strong>Open loop versus closed loop is not a methodology preference; it is a different
+experiment.</strong> Both harnesses implement closed loop the same way, as a semaphore around the
+request coroutine:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/serve.py:L961-L972</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    pbar = None if disable_tqdm else tqdm(total=len(input_requests))
+
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency
+        else contextlib.nullcontext()
+    )
+
+    async def limited_request_func(request_func_input, session, pbar):
+        async with semaphore:
+            return await request_func(
+                request_func_input=request_func_input, session=session, pbar=pbar</code></pre>
+</div>
+
+<p>With <code>--max-concurrency N</code> and no rate limit, Little's Law runs backwards: you have
+fixed $\bar{L} = N$, so $\lambda = N/\bar{W}$ is an <em>output</em>. If the engine slows, arrivals
+slow with it. The queue never grows, TTFT never diverges, and <strong>you cannot observe
+overload</strong> — the experiment has no $\rho$ to exceed 1. Resident tokens are bounded by
+$N\bar{s}$, so preemption may never fire and that entire code path goes unmeasured. In open loop
+you fix $\lambda$, $\rho = \lambda/\mu$ is yours to choose, and at $\rho \to 1$ the waiting queue
+grows without bound — which is precisely when admission control, preemption, and starvation
+handling become load-bearing. The two modes execute different code.
+<a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> owns which to run and how;
+the physics is that they measure different systems.</p>
+
+<h3>Axis 4 — prefix sharing: position matters more than volume</h3>
+
+<p>Both engines match prefixes and only prefixes: vLLM by chaining block hashes from token 0
+(<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html#first-principles">&sect;2.3</a>),
+SGLang by walking a radix tree from the root
+(<a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a>). A 2,000-token
+preamble at the front of every request is worth $2000 \times 40.6\,\mu\text{s} = 81$&nbsp;ms of
+prefill per request. The same 2,000 tokens appended <em>after</em> per-request content is worth
+exactly zero. And &sect;2.3's alignment result makes this brittle in one direction: prepending a
+single token — a user id, a timestamp — changes $h_0$, and the chain makes every subsequent hash
+miss. You do not lose a block; you lose all of them.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 &mdash; where the sharing sits decides whether it is worth anything.</b>
+    Derived, Llama-3-8B on H100 at 40% MFU. Shaded spans are KV that a second request can reuse.</p>
+  <svg viewBox="0 0 820 330" width="100%" role="img" aria-labelledby="f3t f3d">
+    <title id="f3t">Shared prefix versus shared suffix versus misaligned prefix</title>
+    <desc id="f3d">Three cases. Case A: two requests share a 2000 token prefix, all of it reusable, saving 81 milliseconds. Case B: two requests share a 2000 token suffix after unique content, none reusable, saving zero. Case C: one request has a 12 token id prepended before the shared 2000 tokens, none reusable.</desc>
+    <g font-family="var(--font-mono)" font-size="10">
+      <text x="20" y="22" fill="var(--text)">A — shared PREFIX</text>
+      <rect x="20" y="32" width="300" height="20" fill="var(--teal)"/><rect x="320" y="32" width="120" height="20" fill="var(--border-bright)"/>
+      <text x="170" y="46" fill="var(--surface)" text-anchor="middle">system prompt, 2,000 tok</text>
+      <text x="380" y="46" fill="var(--text)" text-anchor="middle">question 800</text>
+      <rect x="20" y="58" width="300" height="20" fill="var(--teal-dim)" stroke="var(--teal)" stroke-dasharray="3 2"/><rect x="320" y="58" width="90" height="20" fill="var(--border-bright)"/>
+      <text x="170" y="72" fill="var(--teal)" text-anchor="middle">HIT — 2,000 tok reused</text>
+      <text x="450" y="72" fill="var(--teal)">saves 81 ms of prefill on request 2</text>
+
+      <text x="20" y="118" fill="var(--text)">B — shared SUFFIX</text>
+      <rect x="20" y="128" width="150" height="20" fill="var(--border-bright)"/><rect x="170" y="128" width="270" height="20" fill="var(--copper)"/>
+      <text x="95" y="142" fill="var(--text)" text-anchor="middle">doc A 1,000</text>
+      <text x="305" y="142" fill="var(--surface)" text-anchor="middle">instructions, 2,000 tok</text>
+      <rect x="20" y="154" width="190" height="20" fill="var(--border-bright)"/><rect x="210" y="154" width="270" height="20" fill="var(--copper)"/>
+      <text x="115" y="168" fill="var(--text)" text-anchor="middle">doc B 1,300</text>
+      <text x="345" y="168" fill="var(--surface)" text-anchor="middle">instructions, 2,000 tok</text>
+      <text x="500" y="168" fill="var(--plum)">MISS at token 0 — saves 0 ms</text>
+
+      <text x="20" y="214" fill="var(--text)">C — misaligned prefix</text>
+      <rect x="20" y="224" width="300" height="20" fill="var(--teal)"/><rect x="320" y="224" width="120" height="20" fill="var(--border-bright)"/>
+      <text x="170" y="238" fill="var(--surface)" text-anchor="middle">system prompt, 2,000 tok</text>
+      <rect x="20" y="250" width="22" height="20" fill="var(--plum)"/><rect x="42" y="250" width="300" height="20" fill="var(--teal)"/><rect x="342" y="250" width="90" height="20" fill="var(--border-bright)"/>
+      <text x="31" y="264" fill="var(--surface)" text-anchor="middle">id</text>
+      <text x="192" y="264" fill="var(--surface)" text-anchor="middle">same 2,000 tok, shifted by 12</text>
+      <text x="450" y="264" fill="var(--plum)">MISS — chained hash breaks at block 0</text>
+      <text x="20" y="300" fill="var(--text-dim)">Characterise sharing in absolute matched tokens, not as a fraction of the input. See §9.4 for why the distinction has teeth.</text>
+    </g>
+  </svg>
+</div>
+
+<p>That last line is not decorative. SGLang's cache-aware router gates on
+<code>match_rate = matched_char_count / input_char_count</code> and falls back to load balancing
+below <code>cache_threshold</code>
+(<a href="../09-serving-system/09-04-routers-and-load-balancing.html#pitfalls">&sect;9.4</a>). A
+ratio penalises exactly the workload where the absolute shared prefix is largest: long-context RAG,
+where a valuable 2,048-token preamble is diluted by an 8,000-token retrieved document to a match
+rate of 0.20 — under both defaults. Characterise your sharing in <em>tokens matched per request</em>
+and separately as a ratio, because the router only sees the ratio and the GPU only feels the tokens.</p></div></section>
+<section class="sec" id="production" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">What the shipped datasets actually produce</h2></div><div class="sec__body"><p><a href="../10-benchmarking/10-02-benchmark-harnesses.html">&sect;10.2</a> covers the harnesses;
+what matters here is the <em>distribution each loader emits</em>, because that is the workload you
+are silently choosing. In vLLM the real code is
+<code>vllm/benchmarks/datasets/datasets.py</code> — 4,814 lines — not the deprecated root-level
+shim.</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Dataset inventory at <code>a556f3f</code> / <code>7d89325</code>. Registries: <code>vllm/benchmarks/datasets/datasets.py:L1615-L1635</code> and <code>python/sglang/benchmark/datasets/__init__.py:L18-L32</code>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Name</th><th>Engine</th><th>What it actually produces</th><th>Bias</th></tr></thead>
+      <tbody>
+        <tr><td><code>sharegpt</code></td><td>both</td><td>First user turn / first assistant reply of each conversation</td><td>Multi-turn structure discarded &rarr; zero prefix sharing. vLLM additionally truncates the tail (below)</td></tr>
+        <tr><td><code>random</code></td><td>both</td><td>Synthetic lengths; vLLM emits arithmetic token ids, SGLang tiles a ShareGPT prompt to length</td><td>Length variance is a flag, not a property; the two engines disagree on what the flag means</td></tr>
+        <tr><td><code>sonnet</code></td><td>vLLM</td><td>200-token fixed poem prefix + sampled lines, fixed 150-token output</td><td>Prefix sharing is 100% and output variance is exactly 0</td></tr>
+        <tr><td><code>prefix_repetition</code></td><td>vLLM</td><td>10 random prefixes &times; N random suffixes, 256/256/128 by default</td><td>Ideal cache-affinity workload; sharing rate is a dial, not a measurement</td></tr>
+        <tr><td><code>burstgpt</code></td><td>vLLM</td><td>Real GPT-4 trace lengths, synthetic token ids, rows shuffled</td><td>Length distribution real; arrival times and prefix structure destroyed</td></tr>
+        <tr><td><code>timed_trace</code></td><td>vLLM</td><td>JSONL trace with timestamps <em>and</em> <code>hash_ids</code> expanded into deterministic 16-token blocks</td><td>The only vLLM loader that reproduces all three of lengths, arrivals, and sharing</td></tr>
+        <tr><td><code>generated-shared-prefix</code></td><td>SGLang</td><td>Groups sharing a system prompt; uniform or Zipf group popularity, optional multi-turn</td><td>Synthetic content, but the sharing <em>structure</em> is parameterised properly</td></tr>
+        <tr><td><code>mooncake</code></td><td>SGLang</td><td>Replays the Mooncake FAST'25 traces by timestamp, multi-round</td><td>Four distinct workloads under one flag: <code>mooncake</code>, <code>conversation</code>, <code>synthetic</code>, <code>toolagent</code></td></tr>
+        <tr><td><code>agentic-trace</code></td><td>SGLang</td><td>Multi-turn OpenHands-style traces; real assistant replies fed into the next round</td><td>The one loader whose growing-context shape matches agentic serving</td></tr>
+        <tr><td><code>longbench_v2</code></td><td>SGLang</td><td>Long context + multiple choice, default output <strong>10 tokens</strong></td><td>The extreme long-in/short-out corner</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h3>The same flag, two different distributions</h3>
+
+<p><code>--random-range-ratio</code> exists in both harnesses and means different things. vLLM
+samples symmetrically around the target length:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/datasets/utils.py:L74-L99, L98-L101</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    output_low = math.floor(output_len * (1 - output_range_ratio))
+    output_high = math.ceil(output_len * (1 + output_range_ratio))
+    # Ensure the lower bound for output length is at least 1 to
+    # prevent sampling 0 tokens.
+    output_low = max(output_low, 1)
+    output_high = max(output_high, 1)
+# ...
+    input_lens = rng.integers(input_low, input_high + 1, size=num_requests)
+    output_lens = rng.integers(output_low, output_high + 1, size=num_requests)</code></pre>
+</div>
+
+<p>SGLang samples <em>downward</em> from the target, treating the ratio as a floor:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/benchmark/datasets/common.py:L56-L64</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>def compute_random_lens(full_len: int, range_ratio: float, num: int) -&gt; List[int]:
+    # full_len=0 is valid for embedding benchmarks where no output tokens are generated
+    if full_len &lt;= 0:
+        return [0] * num
+    return np.random.randint(
+        max(int(full_len * range_ratio), 1),
+        full_len + 1,
+        size=num,
+    ).tolist()</code></pre>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived from the two loaders above, <code>--random-input-len 1024</code>. Both defaults are <code>range_ratio = 0.0</code>.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th class="num">range_ratio</th><th class="num">vLLM mean</th><th class="num">vLLM $C^2$</th><th class="num">SGLang mean</th><th class="num">SGLang $C^2$</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0.0 (default)</td><td class="num">1,024</td><td class="num">0.000</td><td class="num">512</td><td class="num">0.333</td></tr>
+        <tr><td class="num">0.5</td><td class="num">1,024</td><td class="num">0.083</td><td class="num">768</td><td class="num">0.037</td></tr>
+        <tr><td class="num">1.0</td><td class="num">rejected</td><td class="num">&mdash;</td><td class="num">1,024</td><td class="num">0.000</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>At the shipped default, the "same" synthetic workload has a 2&times; different mean input length
+and a variance that is zero in one engine and $C^2 = 1/3$ in the other. The ratio's meaning is
+inverted: 1.0 is maximum variance in vLLM and zero variance in SGLang, where vLLM rejects it
+outright (<code>input_range_ratio must be in [0, 1)</code>). Any cross-engine comparison run on
+<code>random</code> with a non-zero range ratio is comparing two workloads.</p>
+
+<h3>ShareGPT is not one dataset either</h3>
+
+<p>Both loaders keep only the first two turns — SGLang's comment says so in as many words at
+<code>python/sglang/benchmark/datasets/sharegpt.py:L88</code>, and vLLM indexes
+<code>entry["conversations"][0]</code> and <code>[1]</code> directly at
+<code>vllm/benchmarks/datasets/datasets.py:L1393-L1396</code>. That alone deletes the multi-turn
+prefix growth that makes real chat cacheable. But vLLM also prunes:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/benchmarks/datasets/datasets.py:L341-L356</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>def is_valid_sequence(
+    prompt_len: int,
+    output_len: int,
+    min_len: int = 4,
+    max_prompt_len: int = 1024,
+    max_total_len: int = 2048,
+    skip_min_output_len_check: bool = False,
+) -&gt; bool:
+    """
+    Validate a sequence based on prompt and output lengths.
+
+    Default pruning criteria are copied from the original `sample_hf_requests`
+    and `sample_sharegpt_requests` functions in benchmark_serving.py, as well as
+    from `sample_requests` in benchmark_throughput.py.
+    """</code></pre>
+</div>
+
+<p>Every ShareGPT conversation with a prompt over 1,024 tokens, or a prompt-plus-completion over
+2,048, is dropped. SGLang applies no such bound by default —
+<code>--sharegpt-context-len</code> defaults to <code>None</code>. <strong>vLLM's ShareGPT has had
+its tail amputated; SGLang's has not.</strong> The two harnesses, pointed at the same JSON file,
+produce different length distributions, and the difference is exactly the part of the distribution
+that dominates queueing.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Read the tree</span>
+  <p>SGLang's <code>benchmark/</code> directory is itself workload evidence:
+  <code>benchmark/hicache/bench_multiturn.py</code> (256 clients, 5 rounds, 512-token turns,
+  Poisson or uniform intervals), <code>bench_long_context.py</code>,
+  <code>benchmark/prefill_only/</code>. When a project ships a bespoke harness for a workload, that
+  workload broke the general one.</p>
+</div></div></section>
+<section class="sec" id="worked-trace" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Worked trace: characterising your own traffic</h2></div><div class="sec__body"><p>You cannot tune against a dataset. Here is the procedure, using only what the engines already
+export.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 &mdash; the characterisation pipeline.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    L["Per-request log<br/>arrival_ts, prompt_tokens,<br/>generation_tokens, max_tokens,<br/>cached_tokens"]
+    L --> D1["Input length dist<br/>p50 p90 p99 + C squared"]
+    L --> D2["Output length dist<br/>p50 p90 p99 + realised/max_tokens"]
+    L --> D3["Inter-arrival gaps<br/>C_a squared = Var/mean squared"]
+    L --> D4["Sharing rate<br/>sum cached / sum prompt"]
+    D1 --> R["Ratio S_in / S_out<br/>at p50 and at p99"]
+    D2 --> R
+    R --> P["Predict prefill:decode split<br/>t_pre/t_dec = 820 x S_in / (S_out x s_bar)"]
+    D1 --> K["Predict queueing<br/>Kingman with C_a sq + C_s sq"]
+    D3 --> K
+    D4 --> C["Predict effective prefill<br/>t_pre x (1 - sharing rate)"]
+    P --> B["Benchmark config that<br/>reproduces production"]
+    K --> B
+    C --> B
+  </script>
+</div>
+
+<p><strong>vLLM.</strong> Every finished request carries a full timing and token breakdown:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/stats.py:L239-L255</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>@dataclass
+class FinishedRequestStats:
+    """Stats associated with a finished request."""
+
+    finish_reason: "FinishReason"
+    request_id: str | None = None
+    e2e_latency: float = 0.0
+    num_prompt_tokens: int = 0
+    num_generation_tokens: int = 0
+    max_tokens_param: int | None = None
+    queued_time: float = 0.0
+    prefill_time: float = 0.0
+    inference_time: float = 0.0
+    decode_time: float = 0.0
+    mean_time_per_output_token: float = 0.0
+    is_corrupted: bool = False
+    num_cached_tokens: int = 0</code></pre>
+</div>
+
+<p>That single dataclass gives you axes 1, 2 and 4 directly, plus <code>queued_time</code>, which is
+Kingman's $W$ measured rather than predicted. <code>PrefillStats</code> splits the cache term
+further — local prefix cache versus external KV transfer versus tokens newly written to the cache
+(<code>vllm/v1/metrics/stats.py:L258-L276</code>) — which is what you need to tell "my workload
+shares prefixes" from "my workload re-reads its own recent prefixes".</p>
+
+<p>Without touching the code, the Prometheus endpoint carries the distributions as histograms with
+1&ndash;2&ndash;5 decade buckets up to <code>max_model_len</code>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/v1/metrics/loggers.py:L730-L747</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>        histogram_num_prompt_tokens_request = self._histogram_cls(
+            name="vllm:request_prompt_tokens",
+            documentation="Number of prefill tokens processed.",
+            buckets=build_1_2_5_buckets(max_model_len),
+            labelnames=labelnames,
+        )
+        self.histogram_num_prompt_tokens_request = create_metric_per_engine(
+            histogram_num_prompt_tokens_request, per_engine_labelvalues
+        )
+
+        histogram_num_generation_tokens_request = self._histogram_cls(
+            name="vllm:request_generation_tokens",
+            documentation="Number of generation tokens processed.",
+            buckets=build_1_2_5_buckets(max_model_len),
+            labelnames=labelnames,
+        )</code></pre>
+</div>
+
+<p>Twelve buckets is coarse — <code>[1, 2, 5, 10, &hellip; 5000]</code> at
+<code>max_model_len = 8192</code> — so a p99 read off this histogram lands somewhere in
+<code>[2000, 5000)</code>. Good enough to classify the workload, not good enough to size a KV pool.
+For that, log per-request.</p>
+
+<p><strong>SGLang.</strong> Start the server with <code>--export-metrics-to-file</code> plus the
+mandatory <code>--export-metrics-to-file-dir</code>, and <code>FileRequestMetricsExporter</code>
+writes one JSON record per request combining the request parameters with <code>meta_info</code>
+(<code>python/sglang/srt/observability/request_metrics_exporter.py:L33-L62</code>). The cache term
+lives there:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/tokenizer_manager.py:L2238-L2245</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            if not isinstance(recv_obj, BatchEmbeddingOutput):
+                meta_info.update(
+                    {
+                        "reasoning_tokens": recv_obj.reasoning_tokens[i],
+                        "completion_tokens": recv_obj.completion_tokens[i],
+                        "cached_tokens": recv_obj.cached_tokens[i],
+                    }
+                )</code></pre>
+</div>
+
+<p><strong>The six statistics.</strong> From that log, compute — and publish alongside every
+benchmark number you ever quote:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">The minimum workload description. Percentiles, never means.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Statistic</th><th>How</th><th>What it predicts</th></tr></thead>
+      <tbody>
+        <tr><td>Input length p50 / p90 / p99</td><td>quantiles of <code>num_prompt_tokens</code></td><td>Prefill cost, KV footprint, $B_{\max}$, head-of-line risk</td></tr>
+        <tr><td>Output length p50 / p90 / p99</td><td>quantiles of <code>num_generation_tokens</code></td><td>Decode step count, KV residency time</td></tr>
+        <tr><td>Realised / <code>max_tokens</code></td><td>ratio distribution</td><td>How pessimistic admission control has to be</td></tr>
+        <tr><td>Ratio at p50 <em>and</em> p99</td><td>$S_{\text{in}}/S_{\text{out}}$ per request, then quantiles</td><td>Prefill:decode split. Never the ratio of the means &mdash; Jensen</td></tr>
+        <tr><td>$C_a^2$ of arrivals</td><td>$\mathrm{Var}(\Delta t)/\overline{\Delta t}^2$ over gaps</td><td>Queueing inflation via Kingman; the <code>--burstiness</code> to set</td></tr>
+        <tr><td>Sharing rate</td><td>$\sum_i \texttt{cached\_tokens}_i \,/\, \sum_i \texttt{prompt\_tokens}_i$, <em>and</em> the absolute p50 of matched tokens</td><td>Effective prefill cost; whether cache-aware routing will engage</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Note the cap: &sect;2.3 established that a fully cached prompt reports a hit of at most
+$B\lfloor(S-1)/B\rfloor$ tokens, so a sharing rate of 1.0 is unreachable by construction. Do not
+chase the last percent.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls</h2></div><div class="sec__body"><div class="cards cards--2">
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Benchmarked on ShareGPT, deployed on RAG</h4><p>vLLM's ShareGPT caps prompts at 1,024 tokens and totals at 2,048, so $\bar{s} \approx 1{,}500$ and $B_{\max} \approx 285$. Your RAG traffic runs $\bar{s} = 8{,}100$ and $B_{\max} = 52$. Decode intensity falls from ~68 to 14.8 FLOP/byte and output throughput falls by an order of magnitude. Nothing regressed; you measured a different workload.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Mean-only characterisation, p99 blows up in prod</h4><p>Two distributions with identical 1,880-token means differ by 4.4&times; in mean queueing delay at $\rho=0.8$, and the top 5% of requests own 47% of prefill time. If your workload doc says "average prompt ~2k tokens" and stops there, it has told you nothing about the tail that sets your SLO.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Prefix sharing ignored, then production is fast</h4><p>Run <code>--dataset-name random</code> and prefix sharing is zero by construction. Production shares a system prompt and does 3&times; better than your capacity model. You over-provisioned. Run <code>sonnet</code> or <code>prefix_repetition</code> instead and sharing is near-100% by construction, and you under-provision. Both are dials, not measurements.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Concurrency sweep silently changes scheduler policy</h4><p>SGLang's <code>_determine_active_policy</code> downgrades <code>lpm</code> to <code>fcfs</code> above 128 queued requests (<a href="../01-the-core-loop/01-04-the-scheduler.html#queues-and-policy">&sect;1.4</a>, <code>python/sglang/srt/managers/schedule_policy.py:L290-L294</code>). A sweep from 16 to 512 concurrency crosses that line mid-run and measures two different schedulers, with no log line. Pin it with <code>--schedule-policy fcfs</code>.</p></div>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The compound trap</span>
+  <p>These interact. A concurrency sweep on <code>--dataset-name random</code> with default range
+  ratio has zero length variance in vLLM and $C^2 = 1/3$ in SGLang, zero prefix sharing in both,
+  and crosses SGLang's policy threshold somewhere around concurrency 130. Three independent
+  confounds in a single command that looks like a controlled experiment.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Isolate one axis at a time. Fix everything else, including the seed.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Arrival variability only — vLLM. Same rate, same dataset, same seed.</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>for B in 0.25 1.0 4.0; do
+  vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --dataset-name random --random-input-len 1024 --random-output-len 256 \
+    --random-range-ratio 0.0 --num-prompts 1000 --seed 0 \
+    --request-rate 12 --burstiness $B \
+    --percentile-metrics ttft,tpot,itl,e2el --metric-percentiles 50,99 \
+    --result-filename burst-$B.json --save-result
+done</code></pre>
+</div>
+
+<p>Throughput should be flat across the three (you fixed $\lambda$); TTFT p99 should rise as
+burstiness falls, by roughly the $(C_a^2+C_s^2)/2$ factor with $C_a^2 = 1/B$. That is Kingman,
+visible, on one GPU.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Prefix-sharing structure only — vLLM prefix_repetition vs. random.</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
+  --dataset-name prefix_repetition --prefix-repetition-prefix-len 2048 \
+  --prefix-repetition-suffix-len 256 --prefix-repetition-num-prefixes 8 \
+  --num-prompts 512 --request-rate 8 --seed 0
+# then scrape the hit rate the engine itself reports:
+curl -s localhost:8000/metrics | grep -E 'vllm:(prefix_cache|request_prompt_tokens)'</code></pre>
+</div>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">Sharing structure with popularity skew — SGLang. Zipf group distribution. Pin the policy on the server, not the client.</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># server: pin the policy so a concurrency change cannot silently switch it,
+# and dump one JSON record per request
+python3 -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+  --schedule-policy fcfs \
+  --export-metrics-to-file --export-metrics-to-file-dir ./reqlog
+
+# client
+python3 -m sglang.benchmark.serving --backend sglang \
+  --dataset-name generated-shared-prefix --gsp-num-groups 64 \
+  --gsp-prompts-per-group 32 --gsp-system-prompt-len 2048 --gsp-question-len 256 \
+  --gsp-output-len 256 --gsp-group-distribution zipf --gsp-zipf-alpha 1.1 \
+  --request-rate 8 --num-prompts 2048</code></pre>
+</div>
+
+<p>Then re-run with <code>--gsp-group-distribution uniform</code>. Identical sharing <em>rate</em>,
+different sharing <em>concentration</em>: the Zipf run keeps its hot prefixes resident and the
+uniform run thrashes them out. This is the experiment that tells you whether your cache is big
+enough for your workload's popularity distribution rather than for its average.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li>Using $c_p = 40.6\,\mu\text{s}$, $c_d = 4.96{\times}10^{-8}$ and $c_q = 6.63{\times}10^{-10}$,
+  find the input length at which a 128-token-output workload spends 90% of engine time in prefill.
+  Then say which of chunked prefill, speculative decoding, and KV quantization is worth tuning.</li>
+
+  <li>Read <code>vllm/benchmarks/datasets/utils.py:L64-L101</code> and
+  <code>python/sglang/benchmark/datasets/common.py:L56-L64</code>. For
+  <code>--random-input-len 2048 --random-range-ratio 0.25</code>, give the exact support, mean and
+  $C^2$ of the input-length distribution each harness produces.</li>
+
+  <li>Predict, then verify: you run a concurrency sweep on SGLang at 16, 64, 256, 1024 with
+  <code>--schedule-policy lpm</code> on a workload with a shared 2,048-token prefix. Where in the
+  sweep does the measured prefix-cache hit rate change discontinuously, and why? Find the
+  responsible line with <code>grep -n "_determine_active_policy" -A 5</code>.</li>
+
+  <li>A workload has $S_{\text{in}}$ = 500 at p50 and 24,000 at p99; $S_{\text{out}}$ = 400 at both.
+  Compute the p50 and p99 prefill:decode ratios. Then compute the ratio using the <em>means</em>
+  (assume the p99 tail is 1% of traffic and everything else is at p50). Explain the gap.</li>
+
+  <li>Read <code>vllm/benchmarks/datasets/datasets.py:L1502-L1533</code>. Explain how
+  <code>timed_trace</code> turns a list of <code>hash_ids</code> into token sequences that actually
+  hit vLLM's prefix cache, and why <code>timed_trace_chunk_hash_size</code> defaulting to 16 is not
+  a coincidence.</li>
+</ol>
+
+<details class="fold">
+  <summary>Answer — 1</summary>
+  <div class="fold__body"><p>Set $t_{\text{pre}} = 9\,t_{\text{dec}}$ with $S_{\text{out}} = 128$ and
+  $\bar{s} = S_{\text{in}} + 64$. Ignoring $c_q$: $40.6{\times}10^{-6}S = 9 \cdot 128 \cdot
+  4.96{\times}10^{-8}(S+64)$, i.e. $40.6{\times}10^{-6}S = 5.71{\times}10^{-5}(S+64)$ — the linear
+  coefficients are already close, so include $c_q$: solving
+  $c_pS + c_qS^2 = 9c_d\cdot128\cdot(S+64)$ gives $S \approx 2{,}600$ tokens. Above that, tune
+  prefill: chunked prefill (to protect decoders from head-of-line blocking) and anything that
+  raises prefill MFU. Speculative decoding is nearly worthless — it accelerates the 10%. KV
+  quantization helps capacity but, per
+  <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">&sect;2.5</a>'s crossover
+  $N^{*} = 1.23{\times}10^5$ tokens, it also changes decode step bytes here since the pool holds
+  428,569 tokens — so it is a genuine latency lever too, unlike at batch 1.</p></div>
+</details>
+
+<details class="fold">
+  <summary>Answer — 2</summary>
+  <div class="fold__body"><p>vLLM: <code>input_low = floor(2048 &times; 0.75) = 1536</code>,
+  <code>input_high = ceil(2048 &times; 1.25) = 2560</code>, sampled with
+  <code>rng.integers(low, high+1)</code> so the support is the integers $[1536, 2560]$ — minus the
+  tokenizer's special-token count, which is subtracted from <code>input_len</code> first. Mean
+  2,048, $C^2 = r^2/3 = 0.0208$. SGLang: <code>np.random.randint(max(int(2048&times;0.25),1),
+  2049)</code>, support $[512, 2048]$, mean 1,280, $C^2 = (1-r)^2/(3(1+r)^2) = 0.12$. Same flag,
+  same value: a 60% difference in mean and a 5.8&times; difference in $C^2$.</p></div>
+</details>
+
+<details class="fold">
+  <summary>Answer — 3</summary>
+  <div class="fold__body"><p>Between the 64 and 256 points, when the waiting queue first exceeds
+  128 — <code>if self.policy == CacheAwarePolicy.LPM and len(waiting_queue) &gt; 128</code> returns
+  <code>CacheAgnosticPolicy.FCFS</code>
+  (<code>python/sglang/srt/managers/schedule_policy.py:L290-L294</code>). LPM sorts the waiting
+  queue by matched prefix length so requests sharing a prefix are admitted together; FCFS does not,
+  so the shared prefix is more likely to be evicted between users of it. The hit rate drops with no
+  log line, and the cliff looks like a capacity effect. Note the strict inequality: the downgrade
+  fires at 129 queued requests, not 128.</p></div>
+</details>
+
+<details class="fold">
+  <summary>Answer — 4</summary>
+  <div class="fold__body"><p>p50: $\bar{s} = 700$, ratio $= 820 \times 500/(400 \times 700) = 1.46$.
+  p99: $\bar{s} = 24{,}200$, ratio $= 820 \times 24000/(400 \times 24200) = 2.03$ from the linear
+  term — but at 24k the quadratic term is 28% of prefill, pushing the true ratio to about 2.8.
+  Using means: $\bar{S}_{\text{in}} = 0.99(500) + 0.01(24000) = 735$, $\bar{s} = 935$, ratio
+  $= 820 \times 735/(400 \times 935) = 1.61$. The mean-based ratio says "mildly prefill-heavy"; the
+  p99 requests are twice that and each takes 1.05&nbsp;s of exclusive prefill. The gap is Jensen's
+  inequality plus the $S^2$ term: both are convex in $S_{\text{in}}$, so the ratio of the means
+  understates the mean of the ratios.</p></div>
+</details>
+
+<details class="fold">
+  <summary>Answer — 5</summary>
+  <div class="fold__body"><p><code>_expand_prompt</code> maps each hash id to a cache key
+  <code>f"{h}:{expanded_size}"</code>, derives a 32-bit seed from it, and generates a deterministic
+  token block with <code>random.Random(seed).choices(...)</code>, memoising in
+  <code>self._expanded_generated_prompts</code>. Two trace entries sharing a hash-id prefix
+  therefore produce byte-identical token prefixes, which is what vLLM's chained block hash needs to
+  hit. The chunk size is 16 because vLLM's default <code>block_size</code> is 16: expanding at any
+  other granularity would misalign every hash-id boundary against a block boundary, and
+  <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html#first-principles">&sect;2.3</a>'s
+  result says a misaligned prefix is a total miss, not a partial one.</p></div>
+</details></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li>The prefill:decode split is $820 \cdot S_{\text{in}}/(S_{\text{out}}\,\bar{s})$ for Llama-3-8B
+  on an H100, and it swings from 82% prefill to 2% prefill across ordinary product workloads. Every
+  optimisation in this book is worth something on one side of that split and nothing on the other.</li>
+
+  <li>Input length controls decode performance, not just prefill: it sets KV footprint, which sets
+  $B_{\max}$, which sets decode arithmetic intensity. Same 21.25&nbsp;ms step, 14.8 FLOP/byte at
+  8k inputs versus 132 at 500. A "low MFU" decode measurement is usually a long-input workload.</li>
+
+  <li><code>--burstiness</code> in vLLM is exactly $1/C_a^2$ — the Gamma shape parameter is the
+  reciprocal of Kingman's arrival-variability term. SGLang has no equivalent and is pinned at
+  Poisson. Two "10 req/s" benchmarks can differ 2&times; in queueing delay and 0% in throughput.</li>
+
+  <li>Closed loop (<code>--max-concurrency</code>) and open loop (<code>--request-rate</code>) are
+  not two ways to measure the same thing. Closed loop cannot represent overload, bounds resident
+  tokens at $N\bar{s}$, and may never exercise preemption at all.</li>
+
+  <li>The shipped datasets are dials, not observations. <code>random</code> has zero prefix sharing
+  and a length variance that means opposite things in the two harnesses; <code>sonnet</code> has
+  100% sharing and zero output variance; vLLM's <code>sharegpt</code> has had everything above 1,024
+  prompt tokens deleted. Only <code>timed_trace</code>, <code>mooncake</code> and
+  <code>agentic-trace</code> reproduce arrivals and sharing together.</li>
+
+  <li>Publish six numbers with every benchmark: input p50/p99, output p50/p99, $C_a^2$, and the
+  absolute matched-token p50. Without them the number is not reproducible, and Part 10 is about
+  numbers that are.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://arxiv.org/abs/2407.00079">Mooncake: A KVCache-centric Disaggregated
+  Architecture for LLM Serving</a> (FAST'25). The source of the four traces SGLang replays via
+  <code>--dataset-name mooncake</code>; the paper's workload analysis is the best published account
+  of real arrival and sharing structure.</li>
+  <li><a href="https://arxiv.org/abs/2401.17644">BurstGPT: A Real-world Workload Dataset to Optimize
+  LLM Serving Systems</a>. The trace behind vLLM's <code>burstgpt</code> loader — note the loader
+  keeps the lengths and discards the timestamps.</li>
+  <li><a href="https://arxiv.org/abs/2412.15204">LongBench v2</a>, whose SGLang loader defaults to a
+  10-token output and is therefore the sharpest long-in/short-out probe either repo ships.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/10105">vLLM PR #10105</a> — "Add
+  Gamma-Distribution Request Generation Support for Serving Benchmark", which is where
+  <code>--burstiness</code> and therefore a controllable $C_a^2$ entered the harness;
+  <a href="https://github.com/vllm-project/vllm/pull/26941">#26941</a> later added the
+  <code>inf</code> (deterministic, $C_a^2 = 0$) case.</li>
+  <li><a href="https://github.com/vllm-project/vllm/pull/39795">vLLM PR #39795</a> — timed trace
+  replay, the only vLLM path that reproduces arrivals and prefix structure together;
+  <a href="https://github.com/vllm-project/vllm/pull/20638">#20638</a> for
+  <code>PrefixRepetitionRandomDataset</code>.</li>
+  <li><a href="https://github.com/sgl-project/sglang/pull/29215">SGLang PR #29215</a> — the
+  <code>agentic-trace</code> multi-turn dataset;
+  <a href="https://github.com/sgl-project/sglang/pull/3211">#3211</a> for the hierarchical-cache
+  serving benchmarks in <code>benchmark/hicache/</code>, and
+  <a href="https://github.com/sgl-project/sglang/pull/19077">#19077</a> for the refactor that split
+  the dataset loaders out of <code>bench_serving</code>.</li>
+  <li>John Kingman, <em>The single server queue in heavy traffic</em> (1961) — the diffusion
+  approximation this chapter leans on. The modern statement is in Hopp &amp; Spearman,
+  <em>Factory Physics</em>, ch. 8.</li>
+  <li><a href="../10-benchmarking/10-02-benchmark-harnesses.html">&sect;10.2</a> for what the
+  harnesses do with these datasets, and
+  <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> for warmup, saturation,
+  and the reporting discipline that makes two runs comparable.</li>
+</ul></div></section>
+<div class="pager"><a href="../09-serving-system/09-05-observability-and-failure.html"><div class="pager__k">← Previous</div><div class="pager__t">Observability, failure modes, recovery</div></a><a class="pager__next" href="10-02-benchmark-harnesses.html"><div class="pager__k">Next →</div><div class="pager__t">The benchmark harnesses in both repos</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: two constants and one ratio</a>
+<a href="#four-axes">The four axes, mechanically</a>
+<a href="#production">What the shipped datasets actually produce</a>
+<a href="#worked-trace">Worked trace: characterising your own traffic</a>
+<a href="#pitfalls">Pitfalls</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>

@@ -1,0 +1,1797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Routers, KV-aware balancing, session affinity — The Inference Engineering Book</title>
+<meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<style>
+/* ==================================================================
+   The Inference Engineering Book — stylesheet
+   Aesthetic: technical blueprint on warm paper.
+   Ink-teal primary, copper accent, fine engineering grid.
+   Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
+   ================================================================== */
+
+:root {
+  --font-body: 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+
+  --bg: #f3f1ec;
+  --grid-line: rgba(28, 50, 54, 0.052);
+  --surface: #fcfbf8;
+  --surface2: #eae7e0;
+  --surface-elevated: #ffffff;
+  --border: rgba(28, 50, 54, 0.14);
+  --border-bright: rgba(28, 50, 54, 0.28);
+  --text: #16242a;
+  --text-dim: #5c6b70;
+
+  --teal:   #0d6a6e;  --teal-dim:   rgba(13, 106, 110, 0.075);
+  --copper: #a8551c;  --copper-dim: rgba(168, 85, 28, 0.085);
+  --olive:  #55701c;  --olive-dim:  rgba(85, 112, 28, 0.085);
+  --plum:   #8a2846;  --plum-dim:   rgba(138, 40, 70, 0.075);
+  --steel:  #46586b;  --steel-dim:  rgba(70, 88, 107, 0.085);
+
+  /* vLLM / SGLang identity colours — used consistently book-wide */
+  --vllm:   var(--teal);    --vllm-dim:   var(--teal-dim);
+  --sglang: var(--copper);  --sglang-dim: var(--copper-dim);
+
+  /* per-part accent, overridden by <body data-track> */
+  --accent: var(--teal);
+  --accent-dim: var(--teal-dim);
+}
+
+body[data-track="loop"]     { --accent: var(--copper); --accent-dim: var(--copper-dim); }
+body[data-track="kernels"]  { --accent: var(--plum);   --accent-dim: var(--plum-dim); }
+body[data-track="systems"]  { --accent: var(--olive);  --accent-dim: var(--olive-dim); }
+body[data-track="practice"] { --accent: var(--steel);  --accent-dim: var(--steel-dim); }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1417;
+    --grid-line: rgba(140, 196, 200, 0.05);
+    --surface: #151d21;
+    --surface2: #1b262b;
+    --surface-elevated: #1f2c32;
+    --border: rgba(160, 200, 205, 0.13);
+    --border-bright: rgba(160, 200, 205, 0.28);
+    --text: #dde7e9;
+    --text-dim: #8ea2a8;
+
+    --teal:   #4dbdb4;  --teal-dim:   rgba(77, 189, 180, 0.13);
+    --copper: #e0955a;  --copper-dim: rgba(224, 149, 90, 0.14);
+    --olive:  #a8c95e;  --olive-dim:  rgba(168, 201, 94, 0.13);
+    --plum:   #e37b96;  --plum-dim:   rgba(227, 123, 150, 0.13);
+    --steel:  #93a9bd;  --steel-dim:  rgba(147, 169, 189, 0.13);
+  }
+}
+
+/* ---------------- reset ---------------- */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+  background-attachment: fixed;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.72;
+  overflow-wrap: break-word;
+  -webkit-font-smoothing: antialiased;
+}
+
+.grid > *, .flex > * { min-width: 0; }
+
+@keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.sec { animation: fadeUp .38s ease-out both; animation-delay: calc(var(--i,0) * .03s); }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------------- shell ---------------- */
+.shell {
+  max-width: 1560px; margin: 0 auto;
+  display: grid; grid-template-columns: 252px minmax(0, 1fr) 196px;
+  gap: 0 46px; padding: 32px 40px 90px;
+}
+.main { grid-column: 2; min-width: 0; max-width: 880px; }
+
+/* ---------------- left nav ---------------- */
+.nav {
+  grid-column: 1; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-right: 6px;
+}
+.nav::-webkit-scrollbar { width: 3px; }
+.nav::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.nav__brand { display: block; text-decoration: none; color: inherit; margin-bottom: 18px; }
+.nav__brand-k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 2.2px;
+  text-transform: uppercase; color: var(--copper); display: flex; align-items: center; gap: 7px;
+}
+.nav__brand-k::before { content: ''; width: 18px; height: 1.5px; background: currentColor; }
+.nav__brand-t { font-size: 15px; font-weight: 600; letter-spacing: -.35px; margin-top: 5px; line-height: 1.25; }
+
+.nav__meta {
+  font-family: var(--font-mono); font-size: 9px; line-height: 1.6; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; margin-bottom: 14px;
+  background: var(--surface);
+}
+.nav__meta b { color: var(--text); font-weight: 600; }
+
+.nav__grp {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); margin: 15px 0 6px; padding-bottom: 5px;
+  border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 8px;
+}
+.nav__grp:first-of-type { margin-top: 0; }
+.nav__grp span { opacity: .65; }
+
+.nav a.nav__i {
+  display: flex; gap: 9px; align-items: baseline; font-size: 11.6px; line-height: 1.4;
+  color: var(--text-dim); text-decoration: none; padding: 4.5px 8px; border-radius: 5px;
+  border-left: 2px solid transparent; margin-bottom: 1px; transition: color .14s, background .14s;
+}
+.nav a.nav__i:hover { color: var(--text); background: var(--surface2); }
+.nav a.nav__i.is-current {
+  color: var(--text); background: var(--surface); border-left-color: var(--accent); font-weight: 500;
+}
+.nav__n { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
+.nav a.nav__i.is-current .nav__n { color: var(--accent); }
+
+/* ---------------- right toc ---------------- */
+.toc {
+  grid-column: 3; grid-row: 1 / -1;
+  position: sticky; top: 24px; align-self: start;
+  max-height: calc(100dvh - 48px); overflow-y: auto; padding-top: 4px;
+}
+.toc::-webkit-scrollbar { width: 3px; }
+.toc::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+.toc__h {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.9px;
+  text-transform: uppercase; color: var(--text-dim); padding-bottom: 6px; margin-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+.toc a {
+  display: block; font-size: 11px; line-height: 1.42; color: var(--text-dim); text-decoration: none;
+  padding: 4px 7px; border-radius: 4px; border-left: 2px solid transparent; margin-bottom: 1px;
+  transition: color .14s, background .14s;
+}
+.toc a:hover { color: var(--text); background: var(--surface2); }
+.toc a.active { color: var(--text); border-left-color: var(--accent); background: var(--surface); }
+
+/* ---------------- page header ---------------- */
+.hd { margin-bottom: 32px; }
+.hd__k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 2.3px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 13px;
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+}
+.hd__k::before { content: ''; width: 24px; height: 1.5px; background: currentColor; }
+.hd h1 { font-size: 40px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.08; text-wrap: balance; }
+.hd__sub { margin-top: 12px; font-size: 17px; line-height: 1.6; color: var(--text-dim); max-width: 62ch; }
+
+/* frontmatter strip on chapter pages */
+.fm {
+  margin-top: 22px; display: grid; gap: 0;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--surface);
+  font-size: 12.5px;
+}
+.fm__row { display: grid; grid-template-columns: 132px minmax(0,1fr); gap: 0; border-bottom: 1px solid var(--border); }
+.fm__row:last-child { border-bottom: none; }
+.fm__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.3px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 13px;
+  background: var(--surface2); border-right: 1px solid var(--border); display: flex; align-items: center;
+}
+.fm__v { padding: 9px 14px; line-height: 1.6; color: var(--text-dim); }
+.fm__v a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+.fm__v ul { margin: 0; padding: 0; list-style: none; }
+.fm__v li { padding-left: 15px; position: relative; }
+.fm__v li::before { content: ''; position: absolute; left: 3px; top: .68em; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); opacity: .6; }
+.fm code { font-size: .85em; }
+
+/* ---------------- sections ---------------- */
+.sec { margin-bottom: 12px; scroll-margin-top: 22px; }
+.sec__h {
+  display: flex; align-items: baseline; gap: 13px; margin: 46px 0 16px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border-bright);
+}
+.sec__n { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent); flex-shrink: 0; letter-spacing: .8px; }
+.sec__t { font-size: 22px; font-weight: 600; letter-spacing: -.45px; line-height: 1.25; }
+
+.sec--takeaways .sec__h, .sec--exercises .sec__h { border-bottom-color: transparent; margin-bottom: 0; }
+.sec--takeaways .sec__body, .sec--exercises .sec__body {
+  border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px 6px; background: var(--surface);
+}
+.sec--takeaways .sec__body {
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent) 10%);
+  border-color: color-mix(in srgb, var(--border) 45%, var(--accent) 55%);
+  box-shadow: 0 3px 16px rgba(22,36,42,.07);
+}
+.sec--exercises .sec__body { border-left: 3px solid var(--copper); }
+
+/* ---------------- prose ---------------- */
+.sec__body h3 { font-size: 16.5px; font-weight: 600; letter-spacing: -.2px; margin: 28px 0 10px; }
+.sec__body h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-dim); font-family: var(--font-mono); letter-spacing: .3px; }
+.sec__body p { margin-bottom: 15px; }
+.sec__body > p:first-child { margin-top: 0; }
+
+.lead { font-size: 17.5px; line-height: 1.66; color: var(--text-dim); margin-bottom: 20px; }
+.lead strong { color: var(--text); }
+
+.sec__body ul, .sec__body ol, ul.plain, ol.plain { margin: 0 0 16px; padding: 0; list-style: none; }
+.sec__body li, ul.plain li, ol.plain li { position: relative; padding-left: 20px; margin-bottom: 7px; }
+.sec__body ul > li::before, ul.plain > li::before {
+  content: ''; position: absolute; left: 5px; top: .62em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .55;
+}
+.sec__body ol, ol.plain { counter-reset: li; }
+.sec__body ol > li, ol.plain > li { padding-left: 27px; }
+.sec__body ol > li::before, ol.plain > li::before {
+  counter-increment: li; content: counter(li);
+  position: absolute; left: 0; top: 0;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--accent);
+  width: 20px; text-align: right;
+}
+.sec__body li > ul, .sec__body li > ol { margin-top: 7px; margin-bottom: 0; }
+
+.sec__body a, .prose a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); transition: border-color .14s; }
+.sec__body a:hover, .prose a:hover { border-bottom-color: var(--accent); }
+
+.sec__body strong { font-weight: 600; color: var(--text); }
+
+code {
+  font-family: var(--font-mono); font-size: .855em;
+  background: var(--accent-dim); color: var(--accent);
+  padding: 1.5px 5px; border-radius: 3px; word-break: break-word;
+}
+h1 code, h2 code, h3 code, .sec__t code { font-size: .82em; background: none; padding: 0; }
+
+/* engine-tagged inline code */
+code.c-vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+code.c-sglang { background: var(--sglang-dim); color: var(--sglang); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 30px 0; }
+
+/* ---------------- callouts ---------------- */
+.callout {
+  background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--copper);
+  border-radius: 0 10px 10px 0; padding: 15px 20px; margin: 20px 0;
+  font-size: 14px; line-height: 1.68; color: var(--text-dim);
+}
+.callout > p:last-child { margin-bottom: 0; }
+.callout strong { color: var(--text); }
+.callout__k {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--copper); display: block; margin-bottom: 6px;
+}
+.callout--warn { border-left-color: var(--plum); }
+.callout--warn .callout__k { color: var(--plum); }
+.callout--unverified {
+  border-left-color: var(--plum);
+  background: color-mix(in srgb, var(--surface) 92%, var(--plum) 8%);
+}
+.callout--unverified .callout__k { color: var(--plum); }
+.callout--note { border-left-color: var(--teal); }
+.callout--note .callout__k { color: var(--teal); }
+
+/* ---------------- code ---------------- */
+.code-file {
+  border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 18px 0;
+  background: color-mix(in srgb, var(--bg) 66%, var(--surface) 34%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+.code-file__hd {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1px;
+  color: var(--text-dim); padding: 8px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 12px; align-items: center;
+}
+.code-file__hd .src { color: var(--text); font-weight: 600; }
+.code-file__hd .tag {
+  font-size: 8.5px; letter-spacing: 1.4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
+.tag--vllm   { background: var(--vllm-dim);   color: var(--vllm); }
+.tag--sglang { background: var(--sglang-dim); color: var(--sglang); }
+.tag--pseudo { background: var(--plum-dim);   color: var(--plum); }
+.tag--shell  { background: var(--steel-dim);  color: var(--steel); }
+
+pre.code-block {
+  font-family: var(--font-mono); font-size: 12.4px; line-height: 1.62;
+  padding: 15px 17px; margin: 0; overflow-x: auto;
+  white-space: pre; tab-size: 4;
+}
+pre.code-block code { background: none; color: var(--text); padding: 0; font-size: inherit; }
+pre.code-block--wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------------- tables ---------------- */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; overflow: hidden; margin: 20px 0;
+}
+.table-wrap__cap {
+  font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; color: var(--text-dim); padding: 9px 15px;
+  background: var(--surface2); border-bottom: 1px solid var(--border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 12.8px; line-height: 1.56; }
+table.dt th {
+  background: var(--surface2); font-family: var(--font-mono); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); text-align: left;
+  padding: 12px 14px; border-bottom: 2px solid var(--border-bright); white-space: nowrap;
+  position: sticky; top: 0; z-index: 2;
+}
+table.dt td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.dt tbody tr:last-child td { border-bottom: none; }
+table.dt tbody tr:nth-child(even) { background: var(--accent-dim); }
+table.dt tbody tr { transition: background .14s; }
+table.dt tbody tr:hover { background: var(--surface2); }
+table.dt td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: .95em; }
+table.dt code { font-size: .88em; }
+table.dt p { margin: 0; }
+table.dt small { color: var(--text-dim); display: block; margin-top: 3px; }
+
+/* status pills */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.1px;
+  text-transform: uppercase; padding: 2.5px 8px; border-radius: 3px; white-space: nowrap;
+}
+.pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.pill--todo     { background: var(--steel-dim);  color: var(--steel); }
+.pill--draft    { background: var(--copper-dim); color: var(--copper); }
+.pill--verified { background: var(--olive-dim);  color: var(--olive); }
+.pill--blocked  { background: var(--plum-dim);   color: var(--plum); }
+.pill--new      { background: var(--teal-dim);   color: var(--teal); }
+
+/* ---------------- cards ---------------- */
+.cards { display: grid; gap: 14px; margin: 20px 0; }
+.cards--2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.cards--3 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.cards > * { min-width: 0; }
+.ve-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 16px 18px; font-size: 13.5px; line-height: 1.62; color: var(--text-dim);
+}
+.ve-card h4 { font-family: var(--font-body); font-size: 14.5px; font-weight: 600; color: var(--text); margin: 0 0 7px; letter-spacing: -.2px; }
+.ve-card__k {
+  font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px; display: block;
+}
+.ve-card p:last-child { margin-bottom: 0; }
+.ve-card--hero {
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%);
+  box-shadow: 0 4px 20px rgba(22,36,42,.08); padding: 22px 24px;
+}
+.ve-card--recessed {
+  background: color-mix(in srgb, var(--bg) 62%, var(--surface) 38%);
+  box-shadow: inset 0 1px 3px rgba(22,36,42,.05);
+}
+a.ve-card { text-decoration: none; display: block; transition: transform .15s, box-shadow .15s, border-color .15s; }
+a.ve-card:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+
+/* KPI row */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 22px 0; }
+.kpi {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.kpi__n { font-family: var(--font-mono); font-size: 26px; font-weight: 600; letter-spacing: -1px; color: var(--text); line-height: 1.1; }
+.kpi__l { font-family: var(--font-mono); font-size: 8.5px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-top: 6px; }
+.kpi--hero { background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%); border-color: color-mix(in srgb, var(--border) 40%, var(--accent) 60%); }
+.kpi--hero .kpi__n { color: var(--accent); font-size: 30px; }
+
+/* ---------------- details ---------------- */
+details.fold {
+  border: 1px solid var(--border); border-radius: 10px; margin: 16px 0;
+  background: var(--surface); overflow: hidden;
+}
+details.fold > summary {
+  cursor: pointer; list-style: none; padding: 12px 17px;
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--accent); background: var(--surface2);
+  display: flex; align-items: center; gap: 9px;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: '+'; font-size: 13px; width: 11px; }
+details.fold[open] > summary::before { content: '–'; }
+details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-height: 1.68; }
+
+/* ---------------- math ---------------- */
+.math-display { margin: 20px 0; padding: 4px 0; overflow-x: auto; overflow-y: hidden; text-align: center; max-width: 100%; }
+.math-inline { overflow-wrap: anywhere; }
+.katex { font-size: 1.03em; }
+.math-display .katex-display { margin: 0; }
+
+/* ---------------- mermaid ---------------- */
+.diagram-shell { position: relative; margin: 22px 0; }
+.diagram-shell__cap {
+  font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+  margin-bottom: 7px; display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+}
+.diagram-shell__cap b { color: var(--text); font-weight: 600; }
+.diagram-shell__cap .hint { opacity: .65; }
+.mermaid-wrap {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 26px 20px; overflow: hidden;
+  display: flex; justify-content: center; align-items: center; min-height: 250px; cursor: grab;
+}
+.mermaid-wrap.is-panning { cursor: grabbing; user-select: none; }
+.zoom-controls {
+  position: absolute; top: 8px; right: 8px; display: flex; gap: 2px; z-index: 10;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px;
+}
+.zoom-controls button {
+  width: 27px; height: 27px; border: none; background: transparent; color: var(--text-dim);
+  font-family: var(--font-mono); font-size: 12.5px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; transition: background .14s, color .14s;
+}
+.zoom-controls button:hover { background: var(--surface2); color: var(--text); }
+.mermaid-viewport { position: relative; overflow: hidden; width: 100%; height: 100%; min-height: 210px; }
+.mermaid-canvas { position: absolute; top: 0; left: 0; }
+.zoom-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-dim); padding: 0 6px; white-space: nowrap; }
+
+.mermaid .nodeLabel { font-family: var(--font-body) !important; font-size: 16px !important; }
+.mermaid .edgeLabel { font-family: var(--font-mono) !important; font-size: 12px !important; }
+.mermaid .node rect, .mermaid .node circle, .mermaid .node polygon { stroke-width: 1.5px !important; }
+.mermaid .edge-pattern-solid { stroke-width: 1.5px !important; }
+.mermaid .cluster rect { rx: 8px !important; }
+
+/* ---------------- pager / footer ---------------- */
+.pager { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 54px; }
+.pager > * { min-width: 0; }
+.pager a {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+  padding: 15px 18px; transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.pager a:hover { transform: translateY(-2px); box-shadow: 0 5px 18px rgba(22,36,42,.09); border-color: var(--border-bright); }
+.pager__k { font-family: var(--font-mono); font-size: 9px; font-weight: 600; letter-spacing: 1.7px; text-transform: uppercase; color: var(--text-dim); }
+.pager__t { font-size: 14.5px; font-weight: 600; margin-top: 5px; letter-spacing: -.25px; line-height: 1.3; }
+.pager__next { text-align: right; }
+.pager__spacer { visibility: hidden; }
+
+.foot {
+  margin-top: 44px; padding-top: 20px; border-top: 1px solid var(--border);
+  font-size: 11.5px; line-height: 1.7; color: var(--text-dim);
+}
+.foot a { color: var(--accent); text-decoration: none; }
+.foot code { font-size: 10.5px; background: var(--surface2); color: var(--text); }
+
+/* ---------------- mobile ---------------- */
+.navtoggle { display: none; }
+
+@media (max-width: 1280px) {
+  .shell { grid-template-columns: 232px minmax(0, 1fr); gap: 0 38px; }
+  .toc { display: none; }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; padding: 0 20px 70px; gap: 0; }
+  .main { grid-column: 1; max-width: none; padding-top: 22px; }
+  .nav {
+    grid-column: 1; grid-row: auto;
+    position: sticky; top: 0; z-index: 200; max-height: none;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    margin: 0 -20px; padding: 0 20px;
+  }
+  .nav__brand { display: flex; align-items: center; justify-content: space-between; margin: 0; padding: 11px 0; }
+  .nav__brand-t { font-size: 13px; margin-top: 2px; }
+  .nav__meta { display: none; }
+  .navtoggle {
+    display: block; font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 1.2px; text-transform: uppercase; color: var(--accent);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 11px; cursor: pointer; flex-shrink: 0;
+  }
+  .nav__list { display: none; padding-bottom: 14px; max-height: 62dvh; overflow-y: auto; }
+  .nav.is-open .nav__list { display: block; }
+  .hd h1 { font-size: 27px; }
+  .hd__sub { font-size: 15.5px; }
+  .sec__t { font-size: 19px; }
+  .fm__row { grid-template-columns: 1fr; }
+  .fm__k { border-right: none; border-bottom: 1px solid var(--border); }
+  .pager { grid-template-columns: 1fr; }
+  .pager__next { text-align: left; }
+  body { font-size: 15px; }
+}
+
+</style>
+</head>
+<body data-track="practice">
+<div class="shell">
+<nav class="nav" id="nav">
+<a class="nav__brand" href="../index.html">
+<span><span class="nav__brand-k">Inference Engineering</span>
+<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
+</a>
+<div class="nav__list" id="navlist">
+<div class="nav__meta">vllm <b>a556f3f</b><br>sglang <b>7d89325</b><br>pinned <b>2026-08-21</b></div>
+<div class="nav__grp">Book<span>&nbsp;</span></div>
+<a class="nav__i" href="../README.html"><span class="nav__n">·</span><span>Start here</span></a>
+<a class="nav__i" href="../OUTLINE.html"><span class="nav__n">·</span><span>Outline</span></a>
+<a class="nav__i" href="../SOURCES.html"><span class="nav__n">·</span><span>Sources</span></a>
+<a class="nav__i" href="../PROGRESS.html"><span class="nav__n">·</span><span>Progress</span></a>
+<a class="nav__i" href="../GLOSSARY.html"><span class="nav__n">·</span><span>Glossary</span></a>
+<a class="nav__i" href="../FORMULAS.html"><span class="nav__n">·</span><span>Formulas</span></a>
+<a class="nav__i" href="../LABS.html"><span class="nav__n">·</span><span>Labs</span></a>
+<div class="nav__grp">00 · Foundations<span>5/5</span></div>
+<a class="nav__i" href="../00-foundations/00-01-what-inference-is.html"><span class="nav__n">01</span><span>Inference is not training</span></a>
+<a class="nav__i" href="../00-foundations/00-02-decode-loop-and-kv-cache.html"><span class="nav__n">02</span><span>The decode loop and why the KV cache exists</span></a>
+<a class="nav__i" href="../00-foundations/00-03-gpu-architecture.html"><span class="nav__n">03</span><span>GPU architecture for inference engineers</span></a>
+<a class="nav__i" href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html"><span class="nav__n">04</span><span>Arithmetic intensity and the roofline</span></a>
+<a class="nav__i" href="../00-foundations/00-05-numerics.html"><span class="nav__n">05</span><span>Numerics: FP32 to INT4, and why bf16 won</span></a>
+<div class="nav__grp">01 · The core serving loop<span>6/6</span></div>
+<a class="nav__i" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><span class="nav__n">01</span><span>Prefill and decode are two different computers</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-02-latency-metrics-and-slos.html"><span class="nav__n">02</span><span>TTFT, TPOT, ITL, E2E, goodput</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-03-continuous-batching.html"><span class="nav__n">03</span><span>Static, dynamic, and continuous batching</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-04-the-scheduler.html"><span class="nav__n">04</span><span>The scheduler: states, admission, preemption</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-05-chunked-prefill.html"><span class="nav__n">05</span><span>Chunked prefill</span></a>
+<a class="nav__i" href="../01-the-core-loop/01-06-pd-disaggregation.html"><span class="nav__n">06</span><span>Prefill–decode disaggregation</span></a>
+<div class="nav__grp">02 · Memory and the KV cache<span>6/6</span></div>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><span class="nav__n">01</span><span>The KV cache size formula</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-02-pagedattention.html"><span class="nav__n">02</span><span>PagedAttention: fragmentation, blocks, block tables</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html"><span class="nav__n">03</span><span>Prefix caching by hash (vLLM)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-04-radixattention.html"><span class="nav__n">04</span><span>RadixAttention: the tree (SGLang)</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-05-kv-quantization.html"><span class="nav__n">05</span><span>KV cache quantization</span></a>
+<a class="nav__i" href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><span class="nav__n">06</span><span>Offload, hierarchical cache, and budgeting VRAM</span></a>
+<div class="nav__grp">03 · Attention kernels<span>6/6</span></div>
+<a class="nav__i" href="../03-attention-kernels/03-01-naive-attention-and-online-softmax.html"><span class="nav__n">01</span><span>Naive attention and the online softmax</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-02-flashattention.html"><span class="nav__n">02</span><span>FlashAttention 1 → 2 → 3</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-03-decode-attention.html"><span class="nav__n">03</span><span>Decode attention: FlashDecoding, split-K, paged kernels</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-04-flashinfer-and-backends.html"><span class="nav__n">04</span><span>FlashInfer and the attention-backend abstraction</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html"><span class="nav__n">05</span><span>MHA → MQA → GQA → MLA</span></a>
+<a class="nav__i" href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><span class="nav__n">06</span><span>RoPE, scaling, sliding window, attention sinks</span></a>
+<div class="nav__grp">04 · Quantization<span>4/4</span></div>
+<a class="nav__i" href="../04-quantization/04-01-the-design-space.html"><span class="nav__n">01</span><span>The design space: PTQ/QAT, weight-only, W+A, KV</span></a>
+<a class="nav__i" href="../04-quantization/04-02-gptq-awq-smoothquant.html"><span class="nav__n">02</span><span>GPTQ, AWQ, SmoothQuant, and calibration</span></a>
+<a class="nav__i" href="../04-quantization/04-03-formats-and-kernels.html"><span class="nav__n">03</span><span>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</span></a>
+<a class="nav__i" href="../04-quantization/04-04-when-quantization-pays.html"><span class="nav__n">04</span><span>When quantization pays — and when it does not</span></a>
+<div class="nav__grp">05 · Parallelism and distributed inference<span>5/5</span></div>
+<a class="nav__i" href="../05-parallelism/05-01-tensor-parallelism.html"><span class="nav__n">01</span><span>Tensor parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-02-pipeline-parallelism.html"><span class="nav__n">02</span><span>Pipeline parallelism and bubbles</span></a>
+<a class="nav__i" href="../05-parallelism/05-03-data-and-expert-parallelism.html"><span class="nav__n">03</span><span>Data parallelism, attention-DP, expert parallelism</span></a>
+<a class="nav__i" href="../05-parallelism/05-04-collectives-and-topology.html"><span class="nav__n">04</span><span>Collectives, topology, custom all-reduce</span></a>
+<a class="nav__i" href="../05-parallelism/05-05-worker-orchestration.html"><span class="nav__n">05</span><span>Worker orchestration and multi-node serving</span></a>
+<div class="nav__grp">06 · Decoding algorithms<span>6/6</span></div>
+<a class="nav__i" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><span class="nav__n">01</span><span>Sampling on the GPU</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-02-speculative-decoding.html"><span class="nav__n">02</span><span>Speculative decoding and the correctness proof</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-03-draft-sources.html"><span class="nav__n">03</span><span>Draft sources: draft models, n-gram, suffix decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-04-eagle-medusa-mtp.html"><span class="nav__n">04</span><span>Medusa, EAGLE-1/2/3, MTP, and tree attention</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-05-structured-decoding.html"><span class="nav__n">05</span><span>Structured and constrained decoding</span></a>
+<a class="nav__i" href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><span class="nav__n">06</span><span>The speculative decoding zoo</span></a>
+<div class="nav__grp">07 · Architectures that change the inference story<span>5/5</span></div>
+<a class="nav__i" href="../07-architectures/07-01-mixture-of-experts.html"><span class="nav__n">01</span><span>Mixture of Experts</span></a>
+<a class="nav__i" href="../07-architectures/07-02-mla-in-depth.html"><span class="nav__n">02</span><span>MLA in full detail</span></a>
+<a class="nav__i" href="../07-architectures/07-03-ssm-and-hybrids.html"><span class="nav__n">03</span><span>Hybrid SSM / Mamba models and non-KV state</span></a>
+<a class="nav__i" href="../07-architectures/07-04-multimodal-serving.html"><span class="nav__n">04</span><span>Multimodal serving</span></a>
+<a class="nav__i" href="../07-architectures/07-05-lora-and-pooling-models.html"><span class="nav__n">05</span><span>LoRA serving, embeddings, rerankers, pooling</span></a>
+<div class="nav__grp">08 · Compilation and runtime<span>4/4</span></div>
+<a class="nav__i" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><span class="nav__n">01</span><span>CUDA graphs and kernel-launch overhead</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-02-torch-compile.html"><span class="nav__n">02</span><span>torch.compile, Inductor, piecewise capture</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-03-triton-and-cutlass.html"><span class="nav__n">03</span><span>Writing a Triton kernel; CUTLASS at a glance</span></a>
+<a class="nav__i" href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html"><span class="nav__n">04</span><span>Weight loading, sharded loaders, adding a model</span></a>
+<div class="nav__grp">09 · The serving system around the engine<span>5/5</span></div>
+<a class="nav__i" href="09-01-openai-api-surface.html"><span class="nav__n">01</span><span>The OpenAI-compatible API surface</span></a>
+<a class="nav__i" href="09-02-tokenization-and-detokenization.html"><span class="nav__n">02</span><span>Tokenization and incremental detokenization</span></a>
+<a class="nav__i" href="09-03-request-lifecycle.html"><span class="nav__n">03</span><span>Streaming and the end-to-end request lifecycle</span></a>
+<a class="nav__i is-current" href="09-04-routers-and-load-balancing.html"><span class="nav__n">04</span><span>Routers, KV-aware balancing, session affinity</span></a>
+<a class="nav__i" href="09-05-observability-and-failure.html"><span class="nav__n">05</span><span>Observability, failure modes, recovery</span></a>
+<div class="nav__grp">10 · Benchmarking and performance engineering<span>5/5</span></div>
+<a class="nav__i" href="../10-benchmarking/10-01-workload-characterization.html"><span class="nav__n">01</span><span>Workload characterization</span></a>
+<a class="nav__i" href="../10-benchmarking/10-02-benchmark-harnesses.html"><span class="nav__n">02</span><span>The benchmark harnesses in both repos</span></a>
+<a class="nav__i" href="../10-benchmarking/10-03-honest-benchmarking.html"><span class="nav__n">03</span><span>Running a benchmark that is not a lie</span></a>
+<a class="nav__i" href="../10-benchmarking/10-04-batch-invariance.html"><span class="nav__n">04</span><span>Batch invariance and reproducible inference</span></a>
+<a class="nav__i" href="../10-benchmarking/10-05-profiling-and-capacity.html"><span class="nav__n">05</span><span>Profiling, roofline of a decode step, capacity planning</span></a>
+<div class="nav__grp">11 · vLLM deep dive<span>5/5</span></div>
+<a class="nav__i" href="../11-vllm-deep-dive/11-01-repo-map-and-v1.html"><span class="nav__n">01</span><span>Repo map, and what V1 changed</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-02-engine-layers.html"><span class="nav__n">02</span><span>AsyncLLM → EngineCore → Executor → Worker</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-03-the-v1-scheduler-in-code.html"><span class="nav__n">03</span><span>The V1 scheduler, in code</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-04-model-runner-and-backends.html"><span class="nav__n">04</span><span>GPUModelRunner, the input batch, the attention backend</span></a>
+<a class="nav__i" href="../11-vllm-deep-dive/11-05-vllm-extension-points.html"><span class="nav__n">05</span><span>Extension points</span></a>
+<div class="nav__grp">12 · SGLang deep dive<span>4/4</span></div>
+<a class="nav__i" href="../12-sglang-deep-dive/12-01-repo-map-and-processes.html"><span class="nav__n">01</span><span>Repo map and process architecture</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-02-sglang-request-path.html"><span class="nav__n">02</span><span>TokenizerManager → Scheduler → TpModelWorker → ModelRunner</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-03-radix-cache-in-code.html"><span class="nav__n">03</span><span>RadixAttention and the memory pools, in code</span></a>
+<a class="nav__i" href="../12-sglang-deep-dive/12-04-frontend-grammar-router.html"><span class="nav__n">04</span><span>Frontend DSL, grammar backends, router, extension points</span></a>
+<div class="nav__grp">13 · Comparison, frontier, and practice<span>4/4</span></div>
+<a class="nav__i" href="../13-comparison-and-frontier/13-01-head-to-head.html"><span class="nav__n">01</span><span>Head-to-head design comparison</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-02-choosing-an-engine.html"><span class="nav__n">02</span><span>Choosing an engine for a workload</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-03-open-problems.html"><span class="nav__n">03</span><span>Open problems</span></a>
+<a class="nav__i" href="../13-comparison-and-frontier/13-04-what-to-build-next.html"><span class="nav__n">04</span><span>What to build next</span></a>
+</div>
+</nav>
+<main class="main">
+<header class="hd">
+<div class="hd__k">Part 9 · The serving system around the engine · 09-04</div>
+<h1>Routers, KV-aware balancing, session affinity</h1>
+
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>sgl-model-gateway/</code></li><li><code>python/sglang/srt/managers/disagg_service.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+</header>
+<div class="prose"><p class="lead">A prefix cache is a per-process data structure. It lives inside one engine, in one GPU's HBM, and no other replica can see it. The moment you put a load balancer in front of eight replicas, the balancer — not the cache — decides your hit rate. Round-robin, the default everywhere, is the one policy guaranteed to destroy it.</p></div>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You run eight H100s, one Llama-3-8B replica each, behind an nginx round-robin. Your product is a B2B assistant: a thousand customers, each with their own 2,048-token system prompt — persona, tool schemas, retrieval preamble — followed by a short user turn. Traffic is 60 requests per second. Prefix caching is on in every replica. You measured a 90% hit rate in staging with one replica. In production you see 10%.</p>
+
+<p>Nothing is broken. Here is the arithmetic, all of it derived from numbers this book has already established.</p>
+
+<p>One replica's KV pool on an 80&nbsp;GB H100 is 52.32&nbsp;GiB, which at 128&nbsp;KiB per token is 428,569 resident tokens (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>, derived). Live requests occupy roughly half of it, so call it ~214,000 tokens available to hold cached prefixes: <b>104 distinct 2,048-token system prompts</b> per replica.</p>
+
+<p>Under round-robin, every replica sees a uniform sample of all 1,000 prompts. Its LRU set converges to a random 104 of them, so the hit probability is $104/1000 = 10.4\%$. Under a routing policy that maps each prompt to one replica, a replica only ever sees $1000/8 = 125$ prompts and holds 104 of them: $104/125 = 83.2\%$.</p>
+
+<p>A miss on a 2,048-token prefix costs a full prefill of those tokens: 34.0&nbsp;TFLOP, <b>86&nbsp;ms</b> of H100 time at 40% of the bf16 peak (<a href="../01-the-core-loop/01-01-prefill-vs-decode.html">&sect;1.1</a>, derived). Multiply out.</p>
+
+<div class="kpis">
+  <div class="kpi kpi--hero"><div class="kpi__n">58%</div><div class="kpi__l">of an 8&times;H100 fleet burned on redundant prefix prefill under round-robin (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">3.8</div><div class="kpi__l">H100s recovered by cache-aware routing, same hardware (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">77 &rarr; 14 ms</div><div class="kpi__l">mean prefix-recompute contribution to TTFT (derived)</div></div>
+</div>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Derived — 1,000 distinct 2,048-token prefixes, 60 req/s, 8 Llama-3-8B replicas on H100 SXM. Pool capacity from &sect;2.1, prefill cost from &sect;1.1. Nothing measured; no GPU was involved.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Policy</th><th class="num">prefixes seen per replica</th><th class="num">hit rate</th><th class="num">misses/s</th><th class="num">prefill GPU-s per wall-s</th><th class="num">fleet tax</th></tr></thead>
+      <tbody>
+        <tr><td><code>round_robin</code></td><td class="num">1000</td><td class="num">10.4%</td><td class="num">53.8</td><td class="num">4.62</td><td class="num">57.8%</td></tr>
+        <tr><td>perfect affinity</td><td class="num">125</td><td class="num">83.2%</td><td class="num">10.1</td><td class="num">0.87</td><td class="num">10.8%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>You did not lose the cache to a bug. You lost it to a scheduling decision made by a component that has never heard of a KV cache. vLLM's own integration documentation states the failure in one line:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">docs/deployment/integrations/llm-d.md:L9-L11</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>A single vLLM server is fast, but at scale the picture changes: across many replicas,
+cache locality breaks under round-robin load balancing, long prompts inflate
+time-to-first-token, and accelerators sit underused. llm-d adds the cluster-level layer
+that vLLM does not aim to provide on its own:
+
+- **[Prefix-aware routing](https://llm-d.ai/docs/guides/precise-prefix-cache-aware).**
+  Instead of round-robin, llm-d reads vLLM's KV-cache events and routes each request to
+  the replica that already holds its prefix, reusing cache instead of recomputing it.</code></pre>
+</div></div></section>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of the fleet's aggregate cache as a set-associative cache where <em>the router is the placement function</em>. Round-robin is a placement function that maps every key to every set — so the fleet's distinct-key capacity is one replica's capacity, no matter how many replicas you buy. An affinity function that maps each key to one replica gives the fleet $N$ times the distinct-key capacity for exactly the same HBM. The routing decision, not the memory, is what multiplies.</p>
+
+<p>The hard part is that the router cannot read the placement function's own output. It does not know what any replica currently holds: the engine evicts on its own schedule, under its own memory pressure, with its own block granularity. So the router keeps a <em>model</em> of each replica's cache, built from what it has sent where, and decays that model on a timer. Everything interesting in this chapter follows from that model being an approximation.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 1 — the same workload under two placement functions.</b>
+    All figures derived from &sect;2.1 pool sizing and &sect;1.1 prefill cost; nothing measured.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    W["Workload<br/>1000 distinct system prompts, 2048 tokens each<br/>60 req/s, 8 replicas, Llama-3-8B on H100"]
+    W --> RR["round_robin<br/>next(cycler) - ignores request body"]
+    W --> CA["cache_aware<br/>longest prefix match against router-side tree"]
+    RR --> RR1["every replica sees all 1000 prefixes<br/>LRU pool holds 104<br/>hit rate 10.4 percent"]
+    CA --> CA1["every replica sees 125 prefixes<br/>LRU pool holds 104<br/>hit rate 83.2 percent"]
+    RR1 --> RRC["53.8 misses/s x 86 ms prefill<br/>4.62 GPU-seconds per wall second<br/>57.8 percent of the fleet - DERIVED"]
+    CA1 --> CAC["10.1 misses/s x 86 ms prefill<br/>0.87 GPU-seconds per wall second<br/>10.8 percent of the fleet - DERIVED"]
+    RRC --> T["Same 8 GPUs.<br/>Difference is 3.8 H100s of pure recompute."]
+    CAC --> T
+  </script>
+</div></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: cache dilution</h2></div><div class="sec__body"><p>Let $N$ be the number of replicas, $M$ the number of distinct cached prefixes one replica's KV pool can hold, and $W$ the size of the workload's distinct-prefix working set. Assume uniform prefix popularity — the worst case for caching, and close to reality for per-tenant system prompts.</p>
+
+<p>Under round-robin each replica's request stream is a uniform sample of all $W$ prefixes, so its resident set is a uniform random $M$-subset and the steady-state hit rate is</p>
+
+<div class="math-display">$$H_{\mathrm{rr}} = \min\!\left(1, \frac{M}{W}\right)$$</div>
+
+<p>Under an affinity map $h : \text{prefix} \to \text{replica}$ that is stable and roughly balanced, a replica only ever sees $W/N$ distinct prefixes:</p>
+
+<div class="math-display">$$H_{\mathrm{aff}} = \min\!\left(1, \frac{MN}{W}\right)$$</div>
+
+<p>The fleet's effective distinct-prefix capacity is $M$ under round-robin and $MN$ under affinity. Call the gap <b>cache dilution</b>: round-robin replicates every hot prefix onto all $N$ replicas, so you pay $N\times$ the HBM for the same working set. It is the exact dual of the false-sharing problem in a multi-core cache.</p>
+
+<p>The cost of a miss is a full prefill of the shared prefix. With arrival rate $\lambda$ and prefix length $L_p$, the wasted GPU time, in GPU-seconds per wall-second, is</p>
+
+<div class="math-display">$$G_{\mathrm{waste}} = \lambda \,(1 - H)\, t_{\mathrm{prefill}}(L_p)$$</div>
+
+<p>Work it for the opening scenario. $N = 8$, $W = 1000$, $L_p = 2048$. Llama-3-8B ($L=32$, $h_{kv}=8$, $d_h=128$) stores $2 L h_{kv} d_h b = 131{,}072$ bytes = 128&nbsp;KiB of KV per token. The 52.32&nbsp;GiB pool holds 428,569 tokens; half of it is live-request KV, so $M = \lfloor 214{,}284 / 2048 \rfloor = 104$.</p>
+
+<p>$H_{\mathrm{rr}} = 104/1000 = 0.104$. $H_{\mathrm{aff}} = \min(1, 832/1000) = 0.832$. A 2,048-token prefill is $2P\cdot T + 2 L h d_h T(T{-}1) = 32.9 + 1.1 = 34.0$&nbsp;TFLOP, and at 40% of the H100's 989&nbsp;TFLOP/s bf16 peak that is $t_{\mathrm{prefill}} = 86$&nbsp;ms. So $G_{\mathrm{waste}}$ is $60 \times 0.896 \times 0.086 = 4.62$ against $60 \times 0.168 \times 0.086 = 0.87$. On a fleet with 8 GPU-seconds of capacity per wall-second, that is 58% versus 11%.</p>
+
+<div class="callout callout--note">
+  <span class="callout__k">Where the model breaks</span>
+  <p>Uniform popularity is pessimistic. If prefix popularity is Zipfian — one system prompt serving 40% of traffic — round-robin looks far better, because every replica caches the head of the distribution anyway. Cache-aware routing pays off in proportion to how <em>flat and wide</em> your prefix distribution is. Measure that distribution before you tune the router; <a href="../10-benchmarking/10-01-workload-characterization.html">&sect;10.1</a> owns how.</p>
+</div>
+
+<p>And here is the tension that makes this a genuinely hard problem rather than a hash function. A perfect affinity map sends every request for the hot prefix to one replica. If that prefix carries 40% of traffic, one replica gets 40% of the load and the other seven idle. Maximising hit rate and balancing queue depth are directly opposed objectives, and every real policy is a blend.</p></div></section>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>SGLang: a router as a separate product</h3>
+
+<p>SGLang ships its router as its own Rust workspace, <code class="c-sglang">sgl-model-gateway/</code>, with Python and Go bindings. <b>Reading Rust is not a prerequisite here</b> — the design and the policy semantics are what matter, and the Python launcher under <code>sgl-model-gateway/bindings/python/src/sglang_router/</code> is ordinary readable Python. Eight policies are registered at this SHA:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/factory.rs:L76-L91</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    /// Create a policy by name (for dynamic loading)
+    pub fn create_by_name(name: &amp;str) -&gt; Option&lt;Arc&lt;dyn LoadBalancingPolicy&gt;&gt; {
+        match name.to_lowercase().as_str() {
+            "random" =&gt; Some(Arc::new(RandomPolicy::new())),
+            "round_robin" | "roundrobin" =&gt; Some(Arc::new(RoundRobinPolicy::new())),
+            "power_of_two" | "poweroftwo" =&gt; Some(Arc::new(PowerOfTwoPolicy::new())),
+            "cache_aware" | "cacheaware" =&gt; Some(Arc::new(CacheAwarePolicy::new())),
+            "bucket" =&gt; Some(Arc::new(BucketPolicy::new())),
+            "manual" =&gt; Some(Arc::new(ManualPolicy::new())),
+            "consistent_hashing" | "consistenthashing" =&gt; {
+                Some(Arc::new(ConsistentHashingPolicy::new()))
+            }
+            "prefix_hash" | "prefixhash" =&gt; Some(Arc::new(PrefixHashPolicy::with_defaults())),
+            _ =&gt; None,
+        }
+    }</code></pre>
+</div>
+
+<div class="cards cards--3">
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">random / round_robin</span><h4>Body-blind</h4><p>Uniform selection over healthy workers. <code>needs_request_text()</code> is false, so the router never parses the prompt.</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">power_of_two</span><h4>Load-aware</h4><p>Picks two workers at random, takes the lighter. Fed by a polling <code>LoadMonitor</code>, not by the router's own counters.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">cache_aware</span><h4>Radix affinity</h4><p>Longest-prefix match against a per-pool tree of what the router has sent where, with a shortest-queue escape hatch. The default.</p></div>
+  <div class="ve-card"><span class="ve-card__k">prefix_hash</span><h4>Hash affinity</h4><p>Hashes the first 256 tokens onto a consistent-hash ring, then walks clockwise if the landing worker exceeds 1.25&times; average load.</p></div>
+  <div class="ve-card"><span class="ve-card__k">consistent_hashing / manual</span><h4>Session affinity</h4><p>Key-to-worker stickiness from an HTTP header, with different rebalancing behaviour on scale events.</p></div>
+  <div class="ve-card"><span class="ve-card__k">bucket</span><h4>Length-balanced prefill</h4><p>Partitions the request-length distribution into per-worker ranges and re-fits the boundaries every 5&nbsp;s so each prefill worker gets equal <em>character</em> load, not equal request count.</p></div>
+</div>
+
+<h3>cache_aware: the approximate tree, and the escape hatch</h3>
+
+<p>The policy's own header comment is unusually candid about what it is doing:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L21-L32</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>    This strategy maintains an approximate radix tree for each worker based on request history,
+    eliminating the need for direct cache state queries. The tree stores raw text characters
+    instead of token IDs to avoid tokenization overhead.
+
+    Process:
+    a. For each request, find the worker with the highest prefix match
+    b. If match rate &gt; cache_threshold:
+    Route to the worker with highest match (likely has relevant data cached)
+    c. If match rate ≤ cache_threshold:
+    Route to the worker with smallest tree size (most available cache capacity)
+    d. Background maintenance:
+    Periodically evict least recently used leaf nodes to prevent memory overflow</code></pre>
+</div>
+
+<p>Three design commitments are packed into that. <b>Approximate</b>: the router never asks a replica what it holds. <b>Characters, not tokens</b>: the tree is keyed on raw request text, so the router does not have to run a tokenizer on the hot path — but its notion of a shared prefix is therefore character-level, and can disagree with the engine's 16-token block hashing (<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a>) and RadixAttention's token-level tree (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a>). <b>History-driven</b>: the tree records what was <em>sent</em>, never what was <em>kept</em>.</p>
+
+<p>The load check runs <em>before</em> the tree lookup, and short-circuits it:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L405-L424</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        let (min_load, max_load) = workers.iter().fold((usize::MAX, 0usize), |(min, max), w| {
+            let load = w.load();
+            (min.min(load), max.max(load))
+        });
+        let min_load = if min_load == usize::MAX { 0 } else { min_load };
+
+        // Check if load is imbalanced
+        let is_imbalanced = max_load.saturating_sub(min_load) &gt; self.config.balance_abs_threshold
+            &amp;&amp; (max_load as f32) &gt; (min_load as f32 * self.config.balance_rel_threshold);
+
+        if is_imbalanced {
+            return self.select_worker_min_load(
+                workers,
+                &amp;request_text,
+                &amp;healthy_indices,
+                &amp;tree_key,
+                max_load,
+                min_load,
+            );
+        }</code></pre>
+</div>
+
+<p>Both conditions must hold — an absolute gap <em>and</em> a ratio. This is the blend the tension demands: affinity while the fleet is level, shortest-queue the moment one replica falls behind. Note the <code>&amp;&amp;</code>. A fleet of two where one worker has 100 in flight and the other 90 is not "imbalanced" under the Rust defaults ($100-90 = 10 \not&gt; 32$), so the router keeps concentrating on the hot replica.</p>
+
+<p>When balanced, the tree decides:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L436-L450</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            let result = tree.prefix_match_with_counts(text);
+            let match_rate = if result.input_char_count == 0 {
+                0.0
+            } else {
+                result.matched_char_count as f32 / result.input_char_count as f32
+            };
+
+            // Select worker without String allocation
+            let selected_idx = if match_rate &gt; self.config.cache_threshold {
+                // Cache hit path: find worker by URL (compare &amp;str directly, no allocation)
+                let tenant_url: &amp;str = &amp;result.tenant;
+                workers
+                    .iter()
+                    .position(|w| w.url() == tenant_url)
+                    .filter(|&amp;idx| workers[idx].is_healthy())</code></pre>
+</div>
+
+<p><code>match_rate</code> is a <em>fraction of the whole input</em>, not an absolute prefix length. Hold that thought; it is the sharpest edge in the chapter and &sect;7 returns to it.</p>
+
+<p>Whichever branch fires, the router then writes the request back into the tree, tagging this worker as the "tenant" of that prefix — including in the imbalanced branch, so the model stays current even while affinity is suspended:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L469-L471</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            if let Some(idx) = selected_idx {
+                // Update the tree with this request (use worker URL directly, no allocation)
+                tree.insert(text, workers[idx].url());</code></pre>
+</div>
+
+<p>Decay is a background LRU sweep, not a subscription to engine evictions:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L127-L147</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        // Start background eviction thread if configured
+        let eviction_task = if config.eviction_interval_secs &gt; 0 {
+            let trees_clone = Arc::clone(&amp;trees);
+            let max_tree_size = config.max_tree_size;
+
+            Some(PeriodicTask::spawn(
+                config.eviction_interval_secs,
+                "Eviction",
+                move || {
+                    for tree_ref in trees_clone.iter() {
+                        let tree_key = tree_ref.key();
+                        let tree = tree_ref.value();
+                        tree.evict_tenant_by_size(max_tree_size);</code></pre>
+</div>
+
+<p><code>evict_tenant_by_size</code> walks the tree, pushes every leaf into a min-heap ordered by <code>tenant_last_access_time</code>, and pops LRU leaves until each tenant's character count is at or below <code>max_size</code> (<code>sgl-model-gateway/src/policies/tree.rs:L718-L753</code>). Pure LRU on the router's own record of what it sent.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 2 — the router's approximate cache model and how it decays.</b>
+    Defaults read from source; the residency comparison is derived arithmetic.
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    ROOT["Tree keyed by pool::model<br/>e.g. prefill::llama-3-8b, decode::llama-3-8b<br/>nodes store raw CHARACTERS"]
+    ROOT --> N1["You are a helpful assistant for "]
+    N1 --> N2["ACME Corp. Tools: ...<br/>tenant = http://replica-3:30000"]
+    N1 --> N3["GLOBEX Ltd. Tools: ...<br/>tenant = http://replica-7:30000"]
+    N2 --> INS["tree.insert(text, worker_url) after EVERY selection<br/>records what the router SENT"]
+    N3 --> INS
+    INS --> GAP["the engine evicts on its own schedule<br/>the router is never told<br/>so the model drifts optimistic"]
+    GAP --> EV["PeriodicTask Eviction, default every 30 s<br/>evict_tenant_by_size(max_tree_size)"]
+    EV --> HEAP["min-heap on tenant_last_access_time<br/>pop LRU leaves until tenant chars fit budget"]
+    HEAP --> CMP["Rust default budget 10 000 chars per tenant<br/>Python launcher default 2 to the 26 = 67.1 M chars<br/>replica really holds about 428 569 tokens = 1.7 M chars<br/>DERIVED at 4 chars per token"]
+  </script>
+</div>
+
+<h3>Session affinity</h3>
+
+<p>Cache-aware routing already gives multi-turn chat most of what it needs, because turn <em>n</em> shares a long prefix with turn <em>n</em>&minus;1. That only works if the router keys on the whole conversation, which is a lesson the project learned the hard way:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/routers/http/pd_router.rs:L950-L960</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>    /// Builds the text used for cache-aware routing of a chat request.
+    ///
+    /// This must reflect the *full* conversation (system prompt, prior turns,
+    /// the current message and tool context) so that KV-cache prefix matching
+    /// routes to the worker that actually shares the most prefix. Using only the
+    /// first message ignores the conversation history that drives KV reuse in
+    /// multi-turn chats. See https://github.com/sgl-project/sglang/issues/26263.
+    ///
+    /// Returns `None` when the conversation has no text to route on, preserving
+    /// the prior behavior of not feeding an empty key into prefix matching.
+    fn build_chat_request_text(body: &amp;ChatCompletionRequest) -&gt; Option&lt;String&gt; {</code></pre>
+</div>
+
+<p>For explicit stickiness there are two policies with deliberately different failure behaviour. <code>consistent_hashing</code> hashes a routing key onto a ring, so a scale event moves only ~1/N of keys — and it will infer a key from stable headers when the client sends none:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/consistent_hashing.rs:L136-L150</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        // Priority 3: Implicit routing key from stable headers (session affinity)
+        let implicit_key = info.headers.and_then(|h| {
+            h.get("authorization")
+                .or_else(|| h.get("x-forwarded-for"))
+                .or_else(|| h.get("cookie"))
+                .and_then(|v| v.to_str().ok())
+                .filter(|s| !s.is_empty())
+        });
+
+        if let Some(key) = implicit_key {
+            return match Self::find_by_consistent_hash(workers, info, key) {
+                Some(idx) =&gt; (Some(idx), Branch::RoutingKeyHit),
+                None =&gt; (None, Branch::NoHealthyWorkers),
+            };
+        }</code></pre>
+</div>
+
+<p><code>manual</code> is stronger and states its contract up front:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/manual.rs:L1-L14</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>//! Manual routing policy based on routing key header
+//!
+//! This policy provides sticky session routing where each unique routing key
+//! is consistently mapped to the same worker. Unlike consistent hashing,
+//! this policy:
+//! - Does NOT redistribute any sessions when workers are added
+//! - Only remaps sessions when their assigned worker becomes unhealthy
+//! - Maintains up to 2 candidate workers per routing key for fast failover
+//!
+//! Use this when you need stronger stickiness guarantees than consistent hashing,
+//! for example with stateful chat sessions where context is stored on the worker.
+//!
+//! ## Header
+//! - `X-SMG-Routing-Key`: The routing key for sticky session routing</code></pre>
+</div>
+
+<p>The mechanism is a <code>DashMap</code> from routing key to a bounded candidate list, refreshed on every hit and TTL-evicted after <code>max_idle_secs</code> (default 4 hours). The occupied-but-unhealthy branch is the interesting one: it silently re-assigns and appends the new worker to the candidate list (<code>manual.rs:L170-L192</code>). What breaks affinity, then, is exactly three things: <b>the replica dies</b> (health check flips it, the candidate list re-rolls), <b>scale-down removes it</b> (registry removal makes it un-selectable), and <b>TTL expiry</b>. Only the first two are visible to the user, as a sudden cold turn in the middle of a long conversation.</p>
+
+<h3>vLLM: no router in-tree, but the ground truth exported</h3>
+
+<p>At <code>a556f3f</code>, vLLM has no first-class router in the repository. What exists is a demo proxy under <code>examples/</code>, and its entire policy surface is this:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">examples/disaggregated/disaggregated_serving/disagg_proxy_demo.py:L336-L341</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class RoundRobinSchedulingPolicy(SchedulingPolicy):
+    def __init__(self):
+        super().__init__()
+
+    def schedule(self, cycler: itertools.cycle) -&gt; str:
+        return next(cycler)</code></pre>
+</div>
+
+<p>One policy, over two <code>itertools.cycle</code> objects — one for prefill instances, one for decode. The dispatch is sequential rather than concurrent: prefill first with <code>max_tokens = 1</code>, awaited to completion, then decode.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">examples/disaggregated/disaggregated_serving/disagg_proxy_demo.py:L250-L268</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>    async def create_completion(self, raw_request: Request):
+        try:
+            request = await raw_request.json()
+
+            kv_prepare_request = request.copy()
+            kv_prepare_request["max_tokens"] = 1
+
+            prefill_instance = self.schedule(self.prefill_cycler)
+            try:
+                async for _ in self.forward_request(
+                    f"http://{prefill_instance}/v1/completions", kv_prepare_request
+                ):
+                    continue
+            except HTTPException as http_exc:
+                self.remove_instance_endpoint("prefill", prefill_instance)
+                raise http_exc
+
+            # Perform kv recv and decoding stage
+            decode_instance = self.schedule(self.decode_cycler)</code></pre>
+</div>
+
+<p><b>That asymmetry is itself the finding</b>, and it is a deliberate architectural split rather than an omission. vLLM's contribution to routing is not a router; it is a feed of ground truth for somebody else's router. Turn on <code>--kv-events-config</code> and the engine publishes every block insertion and eviction over ZMQ:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">vllm/distributed/kv_events.py:L50-L101, L97-L101</span>
+    <span class="tag tag--vllm">vLLM</span>
+  </div>
+  <pre class="code-block"><code>class BlockStored(KVCacheEvent):
+    block_hashes: list[ExternalBlockHash]
+    parent_block_hash: ExternalBlockHash | None
+    token_ids: list[int]
+    block_size: int
+# ...
+class BlockRemoved(KVCacheEvent):
+    block_hashes: list[ExternalBlockHash]
+    medium: str | None
+    group_idx: int | None = None
+    locality: str | None = None</code></pre>
+</div>
+
+<p>The publisher keeps a replay buffer so a router that restarts or drops frames can resynchronise — "subscribers can request missed batches by sending the starting sequence number as an 8-byte big-endian integer" (<code>vllm/distributed/kv_events.py:L290-L313</code>), with <code>replay_endpoint</code> and <code>buffer_steps</code> (default 10,000) in <code>vllm/config/kv_events.py:L27-L36</code>.</p>
+
+<p>The contrast is clean and worth stating precisely:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Read from source at the pinned SHAs. Not a ranking — two different bets about where cluster knowledge should live.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Question</th><th>SGLang <code>sgl-model-gateway</code></th><th>vLLM at <code>a556f3f</code></th></tr></thead>
+      <tbody>
+        <tr><td>Router in tree?</td><td>Yes — a Rust workspace with Python/Go bindings</td><td>No — demo proxies under <code>examples/</code> only</td></tr>
+        <tr><td>Cache model the <em>router</em> uses</td><td>Approximate: a radix tree of what the router sent. SGLang's engine can publish exact <code>BlockStored</code>/<code>BlockRemoved</code> events too (<code>python/sglang/srt/disaggregation/kv_events.py:L112-L135</code>, gated on <code>--kv-events-config</code>), but nothing in <code>sgl-model-gateway/</code> subscribes to them</td><td>Exact: the engine publishes <code>BlockStored</code>/<code>BlockRemoved</code>, and the consumer is out of tree</td></tr>
+        <tr><td>Who consumes it</td><td>The router itself, in-process</td><td>An out-of-tree router (llm-d, production-stack)</td></tr>
+        <tr><td>Tokenizer on the routing path</td><td>No — characters, to avoid the cost</td><td>Yes, implicitly — events carry token-level block hashes</td></tr>
+        <tr><td>Staleness</td><td>Bounded only by the LRU sweep interval</td><td>Bounded by ZMQ delivery, with replay on gaps</td></tr>
+        <tr><td>Failure if the model is wrong</td><td>Silent hit-rate loss</td><td>Silent hit-rate loss, plus a dropped-event alarm you can build</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>The published effect of closing this gap, <em>cited</em> from vLLM's own integration docs (Llama&nbsp;3.1&nbsp;70B on AMD MI300X): "<b>3x higher output throughput</b> and <b>2x faster TTFT</b> from prefix-aware routing vs round-robin" (<code>docs/deployment/integrations/llm-d.md:L23</code>). That is somebody else's benchmark on hardware this book has not touched; treat the ratio, not the absolute.</p></div></section>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: P/D dual dispatch and the shared bootstrap_room</h2></div><div class="sec__body"><p>The most readable artefact in either repository is <code>mini_lb.py</code>, SGLang's 462-line Python load balancer for prefill/decode disaggregation. It is explicitly a debugging tool:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L54-L70</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>    def _validate_router_args(self, router_args: RouterArgs):
+        logger.warning(
+            "\x1b[33mMiniLB is only for debugging purposes, it only supports random policy!\033[0m"
+        )
+
+        # NOTE: too many arguments unsupported, just validate some important ones
+        if router_args.policy != "random":
+            logger.warning("[MiniLB] Overriding policy to random")
+            router_args.policy = "random"
+
+        if not router_args.pd_disaggregation:
+            raise ValueError("MiniLB only supports PD disaggregation mode")</code></pre>
+</div>
+
+<p>Follow one <code>POST /generate</code> through it.</p>
+
+<p><b>Step 1 — pick a pair.</b> <code>handle_generate_request</code> calls <code>lb.select_pair()</code>, which draws one prefill URL (with its bootstrap port) and one decode URL independently at random (<code>mini_lb.py:L103-L112</code>). The router must therefore know two disjoint pools and their <em>roles</em>: prefill workers additionally carry a bootstrap port, decode workers do not. The Rust gateway keeps that distinction all the way into the cache tree, keying trees by <code>pool::model</code> so a prefill lookup can never evict a decode tenant (<code>sgl-model-gateway/src/policies/cache_aware.rs:L76-L91</code>).</p>
+
+<p><b>Step 2 — mint a rendezvous token.</b> The router rewrites the body, adding three fields:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L356-L383</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>@app.post("/generate")
+async def handle_generate_request(request_data: dict):
+    prefill_server, bootstrap_port, decode_server = lb.select_pair()
+
+    # Parse and transform prefill_server for bootstrap data
+    parsed_url = urllib.parse.urlparse(prefill_server)
+    hostname = maybe_wrap_ipv6_address(parsed_url.hostname)
+    modified_request = request_data.copy()
+
+    batch_size = _get_request_batch_size(modified_request)
+    if batch_size is not None:
+        modified_request.update(
+            {
+                "bootstrap_host": [hostname] * batch_size,
+                "bootstrap_port": [bootstrap_port] * batch_size,
+                "bootstrap_room": [
+                    _generate_bootstrap_room() for _ in range(batch_size)
+                ],
+            }
+        )
+    else:
+        modified_request.update(
+            {
+                "bootstrap_host": hostname,
+                "bootstrap_port": bootstrap_port,
+                "bootstrap_room": _generate_bootstrap_room(),
+            }
+        )</code></pre>
+</div>
+
+<p><code>_generate_bootstrap_room()</code> is <code>random.randint(0, 2**63 - 1)</code> (<code>mini_lb.py:L436-L437</code>). It is a 63-bit rendezvous nonce, nothing more. <code>bootstrap_host</code>/<code>bootstrap_port</code> point at the KV bootstrap server that <em>only prefill instances start</em>:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">python/sglang/srt/managers/disagg_service.py:L21-L30</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>    if disagg_mode == DisaggregationMode.PREFILL:
+        # only start bootstrap server on prefill tm
+        kv_bootstrap_server_class = get_kv_class(
+            transfer_backend, KVClassType.BOOTSTRAP_SERVER
+        )
+        bootstrap_server = kv_bootstrap_server_class(
+            host=server_args.host,
+            port=server_args.disaggregation_bootstrap_port,
+        )</code></pre>
+</div>
+
+<p><b>Step 3 — dispatch the same body to both.</b> This is the pattern worth internalising:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/bindings/python/src/sglang_router/mini_lb.py:L129-L141</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=self.timeout
+            )  # Add timeout for request reliability
+        ) as session:
+
+            tasks = [
+                session.post(f"{prefill_server}/{endpoint}", json=prefill_req),
+                session.post(f"{decode_server}/{endpoint}", json=decode_req),
+            ]
+
+            # Wait for both responses to complete. Prefill should end first.
+            prefill_response, decode_response = await asyncio.gather(*tasks)</code></pre>
+</div>
+
+<p>Why the <em>same</em> body to both? Because the decode instance needs the full request to allocate its own KV pages, set up sampling state and know the output length — it is running a real request, not replaying a transcript. What it does <em>not</em> do is recompute the prompt: it registers <code>bootstrap_room</code> with the prefill side's bootstrap server, blocks in <code>WaitingForInput</code>, and receives the KV pages over the transport that <a href="../01-the-core-loop/01-06-pd-disaggregation.html">&sect;1.6</a> owns. The room number is the join key between two independent HTTP requests to two independent processes.</p>
+
+<p>The comment "Prefill should end first" is the whole invariant in four words. If it does not, something is wrong: the decode instance is blocked waiting for KV that will never arrive. The production Rust router encodes that suspicion explicitly, polling both futures with <code>biased</code> so prefill is checked first, and treating an early decode completion as a rejection:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/routers/http/pd_router.rs:L711-L732</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        // Poll both until prefill resolves; decode normally resolves later, but
+        // may resolve first if it rejects the request outright.
+        let prefill_result;
+        let mut decode_early: Option&lt;Result&lt;reqwest::Response, reqwest::Error&gt;&gt; = None;
+        loop {
+            tokio::select! {
+                biased;
+                pr = &amp;mut prefill_fut =&gt; {
+                    prefill_result = pr;
+                    break;
+                }
+                dr = &amp;mut decode_fut, if decode_early.is_none() =&gt; {
+                    decode_early = Some(dr);
+                }
+            }
+        }
+
+        // Decode can't generate without prefill's KV, so any prefill failure
+        // (non-2xx / transport error) dooms the paired decode request, which would
+        // otherwise block in WaitingForInput until the 300s disaggregation
+        // timeout. Drop the decode future to close its connection; the decode
+        // engine then detects the disconnect and aborts the request in ~4-8s.</code></pre>
+</div>
+
+<p><b>Step 4 — return decode's response, not prefill's.</b> The client's tokens come from the decode server. The prefill response is discarded, except when <code>return_logprob</code> is set, in which case the router splices prefill's <code>input_token_logprobs</code> onto decode's output (<code>mini_lb.py:L143-L156</code>) — the prompt logprobs physically only exist on the machine that computed the prompt.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 3 — P/D dual dispatch: one client request becomes two HTTP requests joined by a 63-bit nonce.</b>
+    <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button type="button" data-action="zoom-in" title="Zoom in">+</button>
+      <button type="button" data-action="zoom-out" title="Zoom out">&minus;</button>
+      <button type="button" data-action="zoom-fit" title="Smart fit">&#8634;</button>
+      <button type="button" data-action="zoom-one" title="Actual size">1:1</button>
+      <button type="button" data-action="zoom-expand" title="Open full size">&#x26F6;</button>
+      <span class="zoom-label">Loading&hellip;</span>
+    </div>
+    <div class="mermaid-viewport"><div class="mermaid mermaid-canvas"></div></div>
+  </div>
+  <script type="text/plain" class="diagram-source">
+flowchart TD
+    C["client POST /generate"] --> SEL["select_pair()<br/>prefill_url + bootstrap_port, decode_url<br/>two disjoint pools, two policies"]
+    SEL --> INJ["modified_request.update<br/>bootstrap_host, bootstrap_port,<br/>bootstrap_room = randint 0 to 2^63-1"]
+    INJ --> P["POST prefill/generate<br/>IDENTICAL body"]
+    INJ --> D["POST decode/generate<br/>IDENTICAL body"]
+    P --> BSS["prefill-side KV bootstrap server<br/>disagg_service.py, PREFILL mode only"]
+    D --> BSS
+    BSS --> XFER["rendezvous on bootstrap_room<br/>KV pages move prefill to decode<br/>transport owned by section 1.6"]
+    P --> J["asyncio.gather<br/>comment: Prefill should end first"]
+    D --> J
+    J --> OUT["stream decode response to client<br/>prefill JSON kept only for input_token_logprobs"]
+    J --> FAIL["if prefill fails, drop the decode future<br/>else decode blocks 300 s in WaitingForInput"]
+  </script>
+</div></div></section>
+<section class="sec" id="autoscaling" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Autoscaling, cold start, and the lifecycle</h2></div><div class="sec__body"><p>Autoscaling a stateless web service is a solved problem because a new replica is useful within a second of starting. An LLM replica is not. Here is what a scale-up event actually costs, taking the weight-load times <a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a> derived for Llama-3-70B at TP=8 (141.1&nbsp;GB of bf16 weights, read once per node).</p>
+
+<p>And then add the part nobody budgets for: <b>the new replica's prefix cache is empty</b>. It is not merely late, it is <em>slower than its peers</em> for as long as it takes to refill. Derive that too. A 70B TP=8 node's KV pool holds 1,332,954 tokens (&sect;2.1); filling it with 2,048-token prefixes takes 651 prefills. One 2,048-token prefill of Llama-3-70B is $2P T + 2 L h d_h T(T{-}1) = 289.3 + 5.5 = 294.8$&nbsp;TFLOP, and eight H100s at 40% MFU deliver 3,165&nbsp;TFLOP/s, so 93&nbsp;ms each — <b>61&nbsp;s of pure prefill</b> to reach cache parity with its neighbours, all of it stolen from serving traffic.</p>
+
+<div class="diagram-shell">
+  <p class="diagram-shell__cap"><b>Figure 4 — time to <em>parity</em> for one scale-up event, Llama-3-70B TP=8.</b>
+    Weight-load segments are &sect;8.4's derived link-rate arithmetic; the cold-cache segment is derived here from &sect;2.1 pool sizing and &sect;1.1 prefill cost. Nothing measured.</p>
+<svg viewBox="0 0 900 268" width="100%" role="img" aria-label="Timeline showing weight load time plus prefix cache warm-up time for four storage media">
+<line x1="160" y1="212" x2="866" y2="212" stroke="var(--border-bright)" stroke-width="1"/>
+<line x1="160" y1="212" x2="160" y2="218" stroke="var(--border-bright)" stroke-width="1"/>
+<text x="160" y="232" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="middle">0</text>
+<line x1="335" y1="212" x2="335" y2="218" stroke="var(--border-bright)" stroke-width="1"/>
+<text x="335" y="232" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="middle">200</text>
+<line x1="510" y1="212" x2="510" y2="218" stroke="var(--border-bright)" stroke-width="1"/>
+<text x="510" y="232" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="middle">400</text>
+<line x1="685" y1="212" x2="685" y2="218" stroke="var(--border-bright)" stroke-width="1"/>
+<text x="685" y="232" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="middle">600</text>
+<line x1="860" y1="212" x2="860" y2="218" stroke="var(--border-bright)" stroke-width="1"/>
+<text x="860" y="232" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="middle">800</text>
+<text x="866" y="252" font-family="var(--font-mono)" font-size="11" fill="var(--text-dim)" text-anchor="end">seconds after the scale-up decision -- DERIVED, not measured</text>
+<text x="8" y="36" font-family="var(--font-mono)" font-size="11" fill="var(--text)">local NVMe</text>
+<text x="8" y="50" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">7.0 GB/s</text>
+<rect x="160" y="26" width="17.7" height="26" rx="2" fill="var(--teal)" fill-opacity="0.35" stroke="var(--teal)" stroke-width="1"/>
+<rect x="177.7" y="26" width="53.4" height="26" rx="2" fill="var(--copper)" fill-opacity="0.28" stroke="var(--copper)" stroke-width="1"/>
+<text x="241" y="44" font-family="var(--font-mono)" font-size="11" fill="var(--text)">20.2 s weights + 61 s cold cache = 81 s</text>
+<text x="8" y="80" font-family="var(--font-mono)" font-size="11" fill="var(--text)">NFS, 25 GbE</text>
+<text x="8" y="94" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">3.125 GB/s</text>
+<rect x="160" y="70" width="39.6" height="26" rx="2" fill="var(--teal)" fill-opacity="0.35" stroke="var(--teal)" stroke-width="1"/>
+<rect x="199.6" y="70" width="53.4" height="26" rx="2" fill="var(--copper)" fill-opacity="0.28" stroke="var(--copper)" stroke-width="1"/>
+<text x="263" y="88" font-family="var(--font-mono)" font-size="11" fill="var(--text)">45.2 s + 61 s = 106 s</text>
+<text x="8" y="124" font-family="var(--font-mono)" font-size="11" fill="var(--text)">NFS, 10 GbE</text>
+<text x="8" y="138" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">1.25 GB/s</text>
+<rect x="160" y="114" width="98.8" height="26" rx="2" fill="var(--teal)" fill-opacity="0.35" stroke="var(--teal)" stroke-width="1"/>
+<rect x="258.8" y="114" width="53.4" height="26" rx="2" fill="var(--copper)" fill-opacity="0.28" stroke="var(--copper)" stroke-width="1"/>
+<text x="322" y="132" font-family="var(--font-mono)" font-size="11" fill="var(--text)">112.9 s + 61 s = 174 s</text>
+<text x="8" y="168" font-family="var(--font-mono)" font-size="11" fill="var(--text)">object store</text>
+<text x="8" y="182" font-family="var(--font-mono)" font-size="10" fill="var(--text-dim)">0.2 GB/s</text>
+<rect x="160" y="158" width="617.3" height="26" rx="2" fill="var(--teal)" fill-opacity="0.35" stroke="var(--teal)" stroke-width="1"/>
+<rect x="777.3" y="158" width="53.4" height="26" rx="2" fill="var(--copper)" fill-opacity="0.28" stroke="var(--copper)" stroke-width="1"/>
+<text x="468" y="176" font-family="var(--font-mono)" font-size="11" fill="var(--text)" text-anchor="middle">705.5 s weight pull -- 11.8 minutes before the first token</text>
+<rect x="600" y="20" width="12" height="10" rx="2" fill="var(--teal)" fill-opacity="0.35" stroke="var(--teal)" stroke-width="1"/>
+<text x="618" y="29" font-family="var(--font-mono)" font-size="10.5" fill="var(--text-dim)">weight load</text>
+<rect x="700" y="20" width="12" height="10" rx="2" fill="var(--copper)" fill-opacity="0.28" stroke="var(--copper)" stroke-width="1"/>
+<text x="718" y="29" font-family="var(--font-mono)" font-size="10.5" fill="var(--text-dim)">cold prefix cache, 651 prefills</text>
+</svg>
+</div>
+
+<p>The router's own defaults tell you the maintainers know this:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/config/types.rs:L512-L515</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            max_payload_size: 536_870_912,     // 512MB
+            request_timeout_secs: 1800,        // 30 minutes
+            worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
+            worker_startup_check_interval_secs: 30,</code></pre>
+</div>
+
+<p>A thirty-minute default startup budget is not defensive programming, it is a statement about the domain. Three consequences follow, and none of them is an implementation detail:</p>
+
+<div class="cards cards--3">
+  <div class="ve-card"><span class="ve-card__k">over-provision</span><h4>Headroom is the only fast lever</h4><p>If scale-up takes 81&ndash;174&nbsp;s, the fleet must already hold that much slack. Reactive autoscaling on queue depth arrives after the incident.</p></div>
+  <div class="ve-card"><span class="ve-card__k">warm pools</span><h4>Pay to keep weights loaded</h4><p>A paused replica with weights resident starts in seconds. That is a rental cost traded against a latency SLO, and it is a business decision, not an SRE one.</p></div>
+  <div class="ve-card"><span class="ve-card__k">predictive</span><h4>Scale on the calendar</h4><p>Diurnal traffic is forecastable minutes ahead. Scaling on a forecast is the only way a 174-second replica is ever ready on time.</p></div>
+</div>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The second-order trap</span>
+  <p>Scale up under load with cache-aware routing and the new replica is chosen mostly by the low-match branch — it has no tenancies, so it attracts the requests <em>nobody</em> has a prefix for. Those are exactly the expensive ones. The replica you added to shed load spends its first minute doing the most expensive work in the queue, at a lower hit rate than its peers, while <code>load()</code> reports it as the least-loaded worker. Expect p99 to get worse before it gets better.</p>
+</div>
+
+<h3>Ready, not merely up</h3>
+
+<p>"Up" means the process accepted a TCP connection. "Ready" means it has loaded weights, allocated the KV pool, captured CUDA graphs and can produce a token. The gateway distinguishes them at two levels. In Kubernetes discovery, a pod counts only when the kubelet's own readiness gate has passed:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/service_discovery.rs:L144-L150, L219-L221</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>        let is_ready = if let Some(conditions) = &amp;status.conditions {
+            conditions
+                .iter()
+                .any(|condition| condition.type_ == "Ready" &amp;&amp; condition.status == "True")
+        } else {
+            false
+        };
+# ...
+    pub fn is_healthy(&amp;self) -&gt; bool {
+        self.is_ready &amp;&amp; self.status == "Running"
+    }</code></pre>
+</div>
+
+<p>At runtime, a hysteretic probe keeps flapping replicas out of the pool:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/core/worker.rs:L568-L579</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>impl Default for HealthConfig {
+    fn default() -&gt; Self {
+        Self {
+            timeout_secs: 5,
+            check_interval_secs: 30,
+            endpoint: "/health".to_string(),
+            failure_threshold: 3,
+            success_threshold: 2,
+            disable_health_check: false,
+        }
+    }
+}</code></pre>
+</div>
+
+<p>Do the arithmetic on those defaults: <b>three consecutive failures at 30-second intervals is up to 90 seconds of routing requests into a dead replica</b> before <code>set_healthy(false)</code> fires (<code>worker.rs:L733-L782</code>). The per-worker circuit breaker is what actually catches a fast failure; the health probe is the slow, hysteretic backstop. Note also that <code>/health</code> is a liveness ping, whereas <code>/health_generate</code> runs a real generation — <code>mini_lb.py:L248-L257</code> fans it out to every prefill and decode server, which is why it is a startup gate and not a 30-second probe.</p>
+
+<h3>Draining</h3>
+
+<p>Draining a replica without killing in-flight streams is two separate acts. First, remove it from the registry — <code>DELETE /workers/{worker_id}</code> ends in <code>WorkerRegistry::remove_by_url</code> (<code>sgl-model-gateway/src/core/worker_registry.rs:L364-L370</code>), after which <code>get_healthy_worker_indices</code> can no longer select it, so no <em>new</em> request is routed there. Second, let the existing streams finish: the router's own shutdown path hands <code>axum_server</code> a grace period (<code>sgl-model-gateway/src/server.rs:L1061-L1065</code>) whose CLI default is 180 seconds (<code>sgl-model-gateway/src/main.rs:L290-L292</code>). Kill the pod inside that window and every open SSE stream terminates mid-token; <a href="09-03-request-lifecycle.html">&sect;9.3</a> covers what the client sees.</p>
+
+<p>One structural constraint on co-location while you are here: an embedding model and a chat model cannot share an engine process, because pooling and generation cannot share a batch (<a href="../07-architectures/07-05-lora-and-pooling-models.html">&sect;7.5</a>). A RAG deployment is therefore always at least two pools with two independent caches, and the router must model them separately — which is exactly why the cache tree is keyed by <code>pool::model</code> rather than by model alone.</p></div></section>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><b>1. <code>cache_threshold</code> is a ratio, and long unique suffixes suppress it.</b> <code>match_rate = matched_char_count / input_char_count</code>. Send a 2,048-token system prompt followed by an 8,000-token retrieved document and the match rate is roughly $2048/10048 = 0.20$ — below both defaults, so the router takes the min-load branch and throws away a hit worth 86&nbsp;ms. The threshold suppresses cache-aware routing exactly when the shared prefix is most valuable in absolute terms. If your workload is long-context RAG with a shared preamble, lower <code>--cache-threshold</code> deliberately and watch queue depth.</p>
+
+<p><b>2. The Rust defaults and the Python launcher's defaults are different.</b> Both are in-tree, both are current at this SHA:</p>
+
+<div class="table-wrap">
+  <div class="table-wrap__cap">Read from source at <code>7d89325</code>. Which set you get depends on which entry point you launched.</div>
+  <div class="table-scroll">
+    <table class="dt">
+      <thead><tr><th>Knob</th><th class="num">Rust <code>CacheAwareConfig::default</code></th><th class="num">Python <code>RouterArgs</code></th></tr></thead>
+      <tbody>
+        <tr><td><code>cache_threshold</code></td><td class="num">0.5</td><td class="num">0.3</td></tr>
+        <tr><td><code>balance_abs_threshold</code></td><td class="num">32</td><td class="num">64</td></tr>
+        <tr><td><code>balance_rel_threshold</code></td><td class="num">1.1</td><td class="num">1.5</td></tr>
+        <tr><td><code>eviction_interval_secs</code></td><td class="num">30</td><td class="num">60</td></tr>
+        <tr><td><code>max_tree_size</code></td><td class="num">10,000</td><td class="num">67,108,864</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>Sources: <code>sgl-model-gateway/src/policies/mod.rs:L96-L116</code> and <code>sgl-model-gateway/bindings/python/src/sglang_router/router_args.py:L53-L64</code>. The <code>max_tree_size</code> gap is four orders of magnitude and it matters. 10,000 characters per tenant is roughly 2,500 tokens — <em>one</em> system prompt — so the Rust default forgets almost everything every 30 seconds. 2<sup>26</sup> characters is roughly 16.8M tokens, about 39&times; the 428,569 tokens a Llama-3-8B replica can actually hold (derived, at ~4 characters per token), so the Python default believes in prefixes the engine evicted long ago. Neither default is calibrated to your pool; compute $M \times L_p \times 4$ and set it.</p>
+
+<p><b>3. The balance guard almost never fires at moderate load.</b> With the Python defaults, "imbalanced" needs $(\max-\min) &gt; 64$ <em>and</em> $\max &gt; 1.5\min$. At 60&nbsp;req/s across 8 replicas with ~1-second requests, mean in-flight is 7.5 per replica; a 64-request gap is a fleet already in trouble. Concentration on a hot prefix therefore goes uncorrected until it is severe. If you want the guard to engage earlier, <code>--balance-abs-threshold</code> is the knob, and the cost is hit rate.</p>
+
+<p><b>4. <code>load()</code> is the router's in-flight counter, not the engine's queue depth.</b> The polling <code>LoadMonitor</code> exists, but it feeds only power-of-two:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/core/worker_manager.rs:L350-L357</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block"><code>            let power_of_two_policies = policy_registry.get_all_power_of_two_policies();
+
+            if power_of_two_policies.is_empty() {
+                debug!("No PowerOfTwo policies found, skipping load fetch");
+                continue;
+            }
+
+            let result = WorkerManager::get_all_worker_loads(&amp;worker_registry, &amp;client).await;</code></pre>
+</div>
+
+<p>So <code>cache_aware</code>'s balance decision is made on requests the router has dispatched and not yet seen complete. A replica that is thrashing its KV pool but holding few concurrent requests reads as lightly loaded.</p>
+
+<p><b>5. A stale tenancy silently disables affinity.</b> If the tree's tenant for a prefix is gone or unhealthy, the router removes the tenancy and falls back to <code>healthy_indices.first()</code> — the same worker for every such request until the tree re-learns (<code>cache_aware.rs:L492-L512</code>). And if the pool tree was never seeded at all, the log is explicit about the consequence:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">sgl-model-gateway/src/policies/cache_aware.rs:L514-L521</span>
+    <span class="tag tag--sglang">SGLang</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>            warn!(
+                "cache_aware: no tree found for key '{}', falling back to random \
+                 worker selection — pool tree was not seeded \
+                 (init_pd_cache_aware_policies missed or a race during worker \
+                 registration); cache affinity is effectively disabled until this \
+                 clears",
+                tree_key
+            );</code></pre>
+</div>
+
+<p>Grep for that string first when hit rate is inexplicably at random-routing levels.</p>
+
+<p><b>6. In P/D mode, a prefill failure strands the decode request for 300 seconds.</b> The decode instance is blocked in <code>WaitingForInput</code> on a <code>bootstrap_room</code> that will never be filled. The router mitigates by dropping the decode future so the engine sees a disconnect and aborts in ~4&ndash;8&nbsp;s (<code>pd_router.rs:L728-L732</code>) — but a router that merely fires and forgets, as a naive proxy would, leaves decode slots pinned for five minutes each.</p>
+
+<div class="callout callout--warn">
+  <span class="callout__k">The feed exists; the router ignores it</span>
+  <p>The gateway's tree has no input from the engine at all: its only decay is its own LRU sweep. That is
+  <em>not</em> because SGLang lacks the signal. The engine ships the same event schema vLLM does —
+  <code>BlockStored</code>, <code>BlockStoredWithMetadata</code>, <code>BlockRemoved</code>,
+  <code>AllBlocksCleared</code> at <code>python/sglang/srt/disaggregation/kv_events.py:L112-L135</code>,
+  published per step by <code>SchedulerKvEventsPublisher</code>
+  (<code>python/sglang/srt/managers/scheduler_components/kv_events_publisher.py:L45-L75</code>) whenever
+  <code>--kv-events-config</code> is set (<code>python/sglang/srt/server_args.py:L1650-L1654</code>, default
+  <code>None</code>, so off). <a href="../13-comparison-and-frontier/13-01-head-to-head.html">&sect;13.1</a>
+  reads the two schemas side by side and finds them field-for-field alike. What is missing is the other
+  half of the wire: a <code>grep -ri "blockremoved\|kv_event" sgl-model-gateway/src/</code> at
+  <code>7d893255</code> returns nothing. Both projects publish exact cache state and neither ships the
+  consumer that would close the loop &mdash; SGLang's own router included.</p>
+</div></div></section>
+<section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Two replicas, two policies, one workload with a shared prefix. No cluster required — two GPUs, or two CPU-mode servers if you only want to watch the routing decisions.</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">measure the routing effect yourself</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code># two engine replicas
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30001 &amp;
+python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30002 &amp;
+
+# router A: the wrong answer
+python3 -m sglang_router.launch_router \
+  --worker-urls http://127.0.0.1:30001 http://127.0.0.1:30002 \
+  --policy round_robin --port 30000
+
+# router B: the right one, with the tree budget sized to the pool
+python3 -m sglang_router.launch_router \
+  --worker-urls http://127.0.0.1:30001 http://127.0.0.1:30002 \
+  --policy cache_aware \
+  --cache-threshold 0.3 --max-tree-size 8388608 \
+  --eviction-interval 60 --log-level debug --port 30000
+
+# hit rate is reported by the engines, not the router:
+curl -s http://127.0.0.1:30001/metrics | grep -i cache
+curl -s http://127.0.0.1:30002/metrics | grep -i cache
+
+# and the router's own view:
+curl -s http://127.0.0.1:30000/workers</code></pre>
+</div>
+
+<p>Drive it with a generator that emits, say, 40 distinct 2,000-token system prompts and short user turns, and compare cached-token counters between the two runs. Then flip one knob at a time: raise <code>--cache-threshold</code> to 0.9 and watch affinity collapse; drop <code>--balance-abs-threshold</code> to 2 and watch it collapse for the opposite reason.</p>
+
+<p>For the vLLM side, watch the ground-truth feed a router would consume:</p>
+
+<div class="code-file">
+  <div class="code-file__hd">
+    <span class="src">examples/disaggregated/disaggregated_serving/kv_events.sh:L37-L45</span>
+    <span class="tag tag--shell">shell</span>
+  </div>
+  <pre class="code-block code-block--wrap"><code>vllm serve "$MODEL_NAME" \
+    --port 8100 \
+    --max-model-len 100 \
+    --enforce-eager \
+    --gpu-memory-utilization 0.8 \
+    --trust-remote-code \
+    --kv-events-config \
+    '{"enable_kv_cache_events": true, "publisher": "zmq", "topic": "kv-events"}' &amp;</code></pre>
+</div>
+
+<p>Run <code>examples/features/kv_events/kv_events_subscriber.py</code> against it and send two prompts that share a prefix. You will see one <code>BlockStored</code> batch for the first and a shorter one for the second — that difference is precisely the signal SGLang's router is guessing at.</p></div></section>
+<section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
+  <li><b>Read the source.</b> Open <code>sgl-model-gateway/src/policies/cache_aware.rs</code> and answer: in the <em>imbalanced</em> branch, does the router still update the tree? Which function, which line, and why does the answer matter for what happens after the imbalance clears?
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>Yes. <code>select_worker_min_load</code> inserts the request text against the min-load worker at <code>cache_aware.rs:L354</code> (<code>tree.insert(text, worker_url)</code>), guarded by <code>if let Some(text) = request_text</code>. It matters because affinity is re-established against the <em>new</em> placement once the fleet levels out: the shortest-queue detour permanently re-tenants those prefixes rather than snapping back to the old owner. That is what stops the router oscillating between two tenants for the same prefix.</p></div></details>
+  </li>
+
+  <li><b>Predict, then verify.</b> With the Python launcher defaults, you send a request whose input is 40,000 characters, of which the first 6,000 exactly match a prefix tenanted to replica&nbsp;2. Which branch fires and which replica is chosen? Verify by reading <code>cache_aware.rs:L436-L466</code>.
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>match_rate = 6000/40000 = 0.15</code>, below the Python default <code>cache_threshold</code> of 0.3, so the <em>else</em> branch fires: minimum <code>load()</code> among healthy workers, ties broken at random. Replica&nbsp;2 is chosen only by coincidence. The 6,000 characters of hit are discarded — roughly 1,500 tokens, about 63&nbsp;ms of Llama-3-8B prefill at 40% MFU (derived). Now predict the Rust binary's behaviour with <code>cache_threshold = 0.5</code>: worse, not better.</p></div></details>
+  </li>
+
+  <li><b>Size the tree.</b> Your replicas are Llama-3-70B at TP=8 with a 1,332,954-token KV pool (&sect;2.1). Assuming 4 characters per token and that half the pool is live-request KV, what <code>--max-tree-size</code> makes the router's model match reality? Compare with both shipped defaults.
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>Cacheable tokens ≈ 666,477; at 4 chars/token that is ≈ 2,665,908 characters per tenant, so <code>--max-tree-size 2665908</code> (round to 2<sup>21</sup>&nbsp;=&nbsp;2,097,152 to be conservative). The Rust default of 10,000 is 266&times; too small — the router forgets a prefix it could still hit. The Python default of 67,108,864 is 25&times; too large — the router routes to a tenant whose blocks were evicted, converting a predicted hit into a full prefill plus a lost balancing opportunity. Both defaults are wrong in <em>opposite</em> directions, which is why neither is safe to leave alone.</p></div></details>
+  </li>
+
+  <li><b>Design under a real constraint.</b> Traffic doubles every 4 minutes during a product launch. Weights live on a 10&nbsp;GbE network filesystem. Using Figure 4's derived 174&nbsp;s to parity, how much headroom must the fleet carry to never queue? What changes if you move weights to local NVMe?
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>Demand grows by $2^{174/240} = 1.65\times$ during one scale-up. You must therefore run at ≤61% utilisation at the moment you trigger, i.e. carry ~64% headroom — and that is with a <em>perfect</em> predictor. Moving to NVMe cuts it to 81&nbsp;s, so $2^{81/240} = 1.26\times$, i.e. ~26% headroom. Note that 61 of those 81 seconds are the cold cache, not the weights: past a certain link speed, the only remaining lever is a warm pool or seeding the new replica's cache from a shared KV tier. This is why "just autoscale" is not an answer for LLM serving.</p></div></details>
+  </li>
+
+  <li><b>Compare the two architectures.</b> vLLM publishes <code>BlockStored</code>/<code>BlockRemoved</code>; SGLang's router infers. Name one workload where the approximation is <em>better</em>, and one failure mode the exact feed has that the approximation does not.
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>Better: short-prompt, high-QPS chat. The approximate tree costs one character-wise walk and no tokenizer call on the routing path, while the event feed's volume scales with block churn, which at high QPS and short prompts is enormous relative to its value. Failure mode unique to the exact feed: it is a lossy transport. The ZMQ publisher has a high-water mark (default 100,000) and drops when a consumer falls behind (<code>vllm/config/kv_events.py:L37-L40</code>). A router silently behind on events has a <em>confidently wrong</em> index, which is worse than an admittedly approximate one — hence the replay endpoint and sequence numbers.</p></div></details>
+  </li>
+</ol></div></section>
+<section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
+  <li><b>The load balancer sets your cache hit rate, and round-robin sets it to $M/W$.</b> Because caches are per-replica, round-robin replicates every hot prefix onto all $N$ replicas, so the fleet's distinct-prefix capacity is one replica's. For 1,000 tenant prompts across 8 H100s that is 10.4% versus 83.2%, which is 3.8 H100s of pure recompute (derived).</li>
+  <li><b>The router cannot know what a replica holds, so it models it.</b> SGLang keeps a per-<code>pool::model</code> radix tree of raw <em>characters</em> recording what it <em>sent</em>, decayed by an LRU sweep on a 30&ndash;60&nbsp;s timer. Every pathology in this chapter is the gap between that model and the engine's actual pool.</li>
+  <li><b>Affinity and balance are opposed, and the blend is a two-condition guard.</b> <code>cache_aware</code> checks $(\max-\min) &gt; \text{abs}$ <em>and</em> $\max &gt; \text{rel}\cdot\min$ before it looks at the tree. With <code>abs = 64</code> that guard rarely fires at moderate load, so concentration goes uncorrected until it is severe — a deliberate bias toward hit rate.</li>
+  <li><b>P/D routing is dual dispatch on a shared nonce.</b> The identical body goes to a prefill and a decode server with the same 63-bit <code>bootstrap_room</code>; decode allocates and blocks, prefill computes and pushes KV. The router must own the pairing, the invariant that prefill finishes first, and the abort when it does not — otherwise a decode slot pins for 300 seconds.</li>
+  <li><b>A new replica is useful in 81&ndash;766 seconds, and 61 of those are an empty cache.</b> Weight-load time (&sect;8.4) is only the visible half; the cold prefix cache makes the new replica slower than its peers for a further minute while cache-aware routing preferentially hands it the requests nobody has a prefix for. Reactive autoscaling cannot win that race — headroom, warm pools and forecasting can.</li>
+  <li><b>The two projects bet differently on where cluster knowledge lives &mdash; but neither closes the loop.</b> SGLang ships a router that approximates from its own send history; vLLM ships no router and exports exact <code>BlockStored</code>/<code>BlockRemoved</code> events with a replay endpoint for an out-of-tree one. The twist is that SGLang's <em>engine</em> publishes the same events (<a href="../13-comparison-and-frontier/13-01-head-to-head.html">&sect;13.1</a>) and its own gateway does not subscribe. Neither approach is free: approximation drifts, and an exact feed can silently drop under its high-water mark.</li>
+</ul></div></section>
+<section class="sec" id="further-reading" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
+  <li><a href="https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway">SGLang <code>sgl-model-gateway</code></a> — the router workspace. Its README is the only prose documentation of the policy set; §"Load Balancing Policies" names the flags each policy reads.</li>
+  <li><a href="https://github.com/sgl-project/sglang/issues/26263">SGLang issue #26263</a> — cache-aware routing keyed on only the first chat message, which broke multi-turn affinity. The fix comment is quoted in &sect;4 and is the clearest short statement of why the routing key must be the whole conversation.</li>
+  <li><a href="https://github.com/sgl-project/sglang/pull/19524">SGLang PR #19524</a> — cited in <code>pd_router.rs:L697-L699</code> as the origin of the upstream-cancel behaviour that makes a client disconnect cancel the paired decode request.</li>
+  <li><a href="https://lmsys.org/blog/2024-01-17-sglang/">SGLang: RadixAttention</a> — the per-engine cache the router is trying to keep hot. <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> covers it properly; note that the engine's tree is over tokens and the router's is over characters.</li>
+  <li><a href="https://llm-d.ai/docs/guides/precise-prefix-cache-aware">llm-d: precise prefix-cache-aware routing</a> and <a href="https://github.com/vllm-project/production-stack">vLLM production-stack</a> — the two out-of-tree routers vLLM's docs point at. Both consume the KV event stream described in <code>vllm/distributed/kv_events.py</code>.</li>
+  <li><a href="https://github.com/vllm-project/vllm/blob/main/examples/disaggregated/disaggregated_serving/disagg_proxy_multiturn.py">vLLM <code>disagg_proxy_multiturn.py</code></a> — a proxy that keys cached KV-transfer parameters by a non-standard <code>conversation_id</code> so turn <em>n</em>+1's prefill can read turn <em>n</em>'s decode blocks. A different answer to the same multi-turn problem: move the cache instead of the request.</li>
+  <li><a href="https://www.usenix.org/conference/nsdi24/presentation/qiu">Preble / prefix-aware scheduling literature</a> and the Mooncake paper — the academic framing of the affinity-versus-balance tradeoff this chapter derives from first principles.</li>
+  <li>Neighbours: <a href="../01-the-core-loop/01-06-pd-disaggregation.html">&sect;1.6</a> for the KV transport behind <code>bootstrap_room</code>; <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> and <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> for the caches routing is trying to hit; <a href="../05-parallelism/05-03-data-and-expert-parallelism.html">&sect;5.3</a> for DP-rank routing inside one engine; <a href="09-03-request-lifecycle.html">&sect;9.3</a> for the single-request lifecycle the router wraps; <a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a> for the cold-start arithmetic reused in Figure 4; <a href="../13-comparison-and-frontier/13-01-head-to-head.html">&sect;13.1</a> for where this asymmetry sits in the wider comparison.</li>
+</ul></div></section>
+<div class="pager"><a href="09-03-request-lifecycle.html"><div class="pager__k">← Previous</div><div class="pager__t">Streaming and the end-to-end request lifecycle</div></a><a class="pager__next" href="09-05-observability-and-failure.html"><div class="pager__k">Next →</div><div class="pager__t">Observability, failure modes, recovery</div></a></div>
+<footer class="foot">
+<p>The Inference Engineering Book · code read at
+<code>vllm@a556f3fccb</code> and
+<code>sglang@7d893255c3</code>, pinned 2026-08-21.
+See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
+</footer>
+</main>
+<aside class="toc" id="toc"><div class="toc__h">On this page</div><a href="#the-problem">The problem</a>
+<a href="#mental-model">Mental model</a>
+<a href="#first-principles">First principles: cache dilution</a>
+<a href="#production">How production systems do it</a>
+<a href="#worked-trace">Worked trace: P/D dual dispatch and the shared bootstrap_room</a>
+<a href="#autoscaling">Autoscaling, cold start, and the lifecycle</a>
+<a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#hands-on">Hands-on</a>
+<a href="#exercises">Exercises</a>
+<a href="#takeaways">Key takeaways</a>
+<a href="#further-reading">Further reading</a></aside>
+</div>
+<script>
+/* scroll-spy for the right-hand TOC + mobile nav toggle */
+(function () {
+  const toc = document.getElementById('toc');
+  if (toc) {
+    const links = [...toc.querySelectorAll('a')];
+    const sections = links
+      .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
+      .filter(s => s.el);
+    if (sections.length) {
+      const obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          links.forEach(l => l.classList.remove('active'));
+          const m = sections.find(s => s.el === en.target);
+          if (m) m.link.classList.add('active');
+        });
+      }, { rootMargin: '-8% 0px -78% 0px' });
+      sections.forEach(s => obs.observe(s.el));
+    }
+  }
+  const nav = document.getElementById('nav');
+  const btn = document.getElementById('navtoggle');
+  if (nav && btn) {
+    btn.addEventListener('click', () => {
+      const open = nav.classList.toggle('is-open');
+      btn.textContent = open ? 'Close' : 'Contents';
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  }
+})();
+
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous"
+  onload="renderMathInElement(document.body,{delimiters:[
+    {left:'$$',right:'$$',display:true},
+    {left:'\\[',right:'\\]',display:true},
+    {left:'$',right:'$',display:false}],throwOnError:false});"></script>
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+import elkLayouts from 'https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk/dist/mermaid-layout-elk.esm.min.mjs';
+
+const config = {
+  fitPadding: 26, minHeight: 250, maxHeightPx: 940, maxHeightVh: 0.82,
+  maxInitialZoom: 1.8, minZoom: 0.08, maxZoom: 6.5, zoomStep: 0.14,
+  readabilityFloor: 0.40
+};
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+let activeDrag = null;
+addEventListener('mousemove', e => activeDrag?.onMove(e));
+addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
+
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+
+mermaid.registerLayoutLoaders(elkLayouts);
+mermaid.initialize({
+  startOnLoad: false, theme: 'base', look: 'classic', layout: 'elk',
+  themeVariables: {
+    fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+    fontSize: '17px',
+    primaryColor:         isDark ? '#12363a' : '#dcecea',
+    primaryBorderColor:   isDark ? '#4dbdb4' : '#0d6a6e',
+    primaryTextColor:     isDark ? '#dde7e9' : '#16242a',
+    secondaryColor:       isDark ? '#382519' : '#f7e9dc',
+    secondaryBorderColor: isDark ? '#e0955a' : '#a8551c',
+    secondaryTextColor:   isDark ? '#dde7e9' : '#16242a',
+    tertiaryColor:        isDark ? '#25301a' : '#edf2df',
+    tertiaryBorderColor:  isDark ? '#a8c95e' : '#55701c',
+    tertiaryTextColor:    isDark ? '#dde7e9' : '#16242a',
+    lineColor:            isDark ? '#8ea2a8' : '#5c6b70',
+    clusterBkg:           isDark ? '#1b262b' : '#eae7e0',
+    clusterBorder:        isDark ? 'rgba(160,200,205,0.28)' : 'rgba(28,50,54,0.28)',
+    noteBkgColor:         isDark ? '#382519' : '#f7e9dc',
+    noteTextColor:        isDark ? '#dde7e9' : '#16242a',
+    noteBorderColor:      isDark ? '#e0955a' : '#a8551c'
+  }
+});
+
+function initDiagram(shell) {
+  const wrap = shell.querySelector('.mermaid-wrap');
+  const viewport = shell.querySelector('.mermaid-viewport');
+  const canvas = shell.querySelector('.mermaid-canvas');
+  const source = shell.querySelector('.diagram-source');
+  const label = shell.querySelector('.zoom-label');
+  if (!wrap || !viewport || !canvas || !source || !label) return;
+
+  let zoom = 1, fitMode = 'contain', panX = 0, panY = 0, svgW = 0, svgH = 0;
+  let sx = 0, sy = 0, spx = 0, spy = 0, touchDist = 0, touchCx = 0, touchCy = 0;
+
+  function constrainPan() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const rW = svgW * zoom, rH = svgH * zoom, pad = config.fitPadding;
+    panX = (rW + pad * 2 <= vpW) ? (vpW - rW) / 2 : clamp(panX, vpW - rW - pad, pad);
+    panY = (rH + pad * 2 <= vpH) ? (vpH - rH) / 2 : clamp(panY, vpH - rH - pad, pad);
+  }
+  function applyTransform() {
+    const svg = canvas.querySelector('svg');
+    if (!svg || !svgW) return;
+    constrainPan();
+    svg.style.width = (svgW * zoom) + 'px';
+    svg.style.height = (svgH * zoom) + 'px';
+    canvas.style.transform = `translate(${panX}px, ${panY}px)`;
+    label.textContent = Math.round(zoom * 100) + '% — ' + fitMode;
+  }
+  function canPan() {
+    return svgW * zoom + config.fitPadding * 2 > viewport.clientWidth
+        || svgH * zoom + config.fitPadding * 2 > viewport.clientHeight;
+  }
+  function computeSmartFit() {
+    const vpW = viewport.clientWidth, vpH = viewport.clientHeight;
+    const aW = Math.max(80, vpW - config.fitPadding * 2);
+    const aH = Math.max(80, vpH - config.fitPadding * 2);
+    const contain = Math.min(aW / svgW, aH / svgH);
+    let z = contain, mode = 'contain';
+    if (contain < config.readabilityFloor) {
+      if (svgH / svgW >= vpH / Math.max(vpW, 1)) { z = aW / svgW; mode = 'width-priority'; }
+      else { z = aH / svgH; mode = 'height-priority'; }
+    }
+    return { zoom: clamp(z, config.minZoom, config.maxInitialZoom), mode };
+  }
+  function fitDiagram() {
+    if (!svgW) return;
+    const fit = computeSmartFit();
+    zoom = fit.zoom; fitMode = fit.mode;
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function setOneToOne() {
+    zoom = clamp(1, config.minZoom, config.maxZoom); fitMode = '1:1';
+    panX = (viewport.clientWidth - svgW * zoom) / 2;
+    panY = (viewport.clientHeight - svgH * zoom) / 2;
+    applyTransform();
+  }
+  function zoomAround(factor, cx, cy) {
+    const next = clamp(zoom * factor, config.minZoom, config.maxZoom);
+    const ratio = next / zoom;
+    panX = cx - ratio * (cx - panX); panY = cy - ratio * (cy - panY);
+    zoom = next; fitMode = 'custom'; applyTransform();
+  }
+  function readSvgNaturalSize(svg) {
+    let w = 0, h = 0;
+    if (svg.viewBox?.baseVal?.width > 0) { w = svg.viewBox.baseVal.width; h = svg.viewBox.baseVal.height; }
+    if (!w) { w = parseFloat(svg.getAttribute('width')) || 0; h = parseFloat(svg.getAttribute('height')) || 0; }
+    if (!w) { const b = svg.getBBox(); w = b.width; h = b.height; }
+    if (!w) { const r = svg.getBoundingClientRect(); w = r.width || 1000; h = r.height || 700; }
+    if (!svg.getAttribute('viewBox')) svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    return { w, h };
+  }
+  function setAdaptiveHeight() {
+    if (!svgW) return;
+    const usableW = Math.max(280, wrap.getBoundingClientRect().width - 2);
+    const idealH = (svgH / svgW) * usableW + config.fitPadding * 2;
+    const maxVp = Math.floor(innerHeight * config.maxHeightVh);
+    const hardMax = Math.min(config.maxHeightPx, Math.max(config.minHeight + 40, maxVp));
+    wrap.style.height = Math.round(clamp(idealH, config.minHeight, hardMax)) + 'px';
+  }
+  function openInNewTab() {
+    const svg = canvas.querySelector('svg');
+    if (!svg) return;
+    const clone = svg.cloneNode(true);
+    clone.style.width = ''; clone.style.height = '';
+    const bg = isDark ? '#0e1417' : '#f3f1ec';
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-height:90vh;height:auto}
+</style></head><body>${clone.outerHTML}</body></html>`;
+    open(URL.createObjectURL(new Blob([html], { type: 'text/html' })), '_blank');
+  }
+  async function render() {
+    try {
+      const code = source.textContent.trim();
+      if (!code) { label.textContent = 'Error: empty source'; return; }
+      const id = 'd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+      const { svg } = await mermaid.render(id, code);
+      canvas.innerHTML = svg;
+      const svgNode = canvas.querySelector('svg');
+      if (!svgNode) { label.textContent = 'Error: no SVG'; return; }
+      const size = readSvgNaturalSize(svgNode);
+      svgW = size.w; svgH = size.h;
+      svgNode.removeAttribute('width'); svgNode.removeAttribute('height');
+      svgNode.style.maxWidth = 'none'; svgNode.style.display = 'block';
+      setAdaptiveHeight(); fitDiagram();
+    } catch (err) {
+      console.error('Mermaid render failed:', err);
+      label.textContent = 'Error: ' + (err.message || 'render failed');
+    }
+  }
+  const actions = {
+    'zoom-in': () => zoomAround(1 + config.zoomStep, viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-out': () => zoomAround(1 / (1 + config.zoomStep), viewport.clientWidth / 2, viewport.clientHeight / 2),
+    'zoom-fit': fitDiagram, 'zoom-one': setOneToOne, 'zoom-expand': openInNewTab
+  };
+  Object.entries(actions).forEach(([a, h]) => wrap.querySelector(`[data-action="${a}"]`)?.addEventListener('click', h));
+  viewport.addEventListener('dblclick', fitDiagram);
+  viewport.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      zoomAround(e.deltaY < 0 ? 1 + config.zoomStep : 1 / (1 + config.zoomStep), e.clientX - rect.left, e.clientY - rect.top);
+      return;
+    }
+    if (canPan()) { e.preventDefault(); panX -= e.deltaX; panY -= e.deltaY; applyTransform(); }
+  }, { passive: false });
+  viewport.addEventListener('mousedown', e => {
+    if (e.target.closest('.zoom-controls') || !canPan()) return;
+    wrap.classList.add('is-panning');
+    sx = e.clientX; sy = e.clientY; spx = panX; spy = panY;
+    e.preventDefault();
+    activeDrag = {
+      onMove: ev => { panX = spx + (ev.clientX - sx); panY = spy + (ev.clientY - sy); applyTransform(); },
+      onEnd: () => wrap.classList.remove('is-panning')
+    };
+  });
+  viewport.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; }
+    else if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      touchDist = Math.sqrt(dx * dx + dy * dy);
+      const r = viewport.getBoundingClientRect();
+      touchCx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left;
+      touchCy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top;
+    }
+  }, { passive: true });
+  viewport.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && canPan()) {
+      if (touchDist > 0) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; spx = panX; spy = panY; touchDist = 0; }
+      e.preventDefault();
+      panX = spx + (e.touches[0].clientX - sx); panY = spy + (e.touches[0].clientY - sy); applyTransform();
+    } else if (e.touches.length === 2 && touchDist > 0) {
+      e.preventDefault();
+      const dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      zoomAround(d / touchDist, touchCx, touchCy); touchDist = d;
+    }
+  }, { passive: false });
+  new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  render();
+}
+document.querySelectorAll('.diagram-shell').forEach(initDiagram);
+
+</script>
+</body>
+</html>
