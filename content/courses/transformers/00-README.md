@@ -87,18 +87,21 @@ flowchart TD
     M02 --> M03[03 Self-Attention from Scratch]
     M03 --> M04[04 Multi-Head Attention]
     M03 --> M05[05 Positional Encodings]
+    M04 --> M05
     M04 --> M06[06 The Transformer Block]
     M05 --> M06
     M06 --> M07[07 FFN and Activations]
     M07 --> M08[08 Encoder, Decoder, Masking]
     M08 --> M09[09 MQA, GQA, MLA]
     M08 --> M12[12 Mixture of Experts]
+    M09 --> M12
     M09 --> M10[10 Sparse and Long Context]
-    M09 --> M11[11 FlashAttention and KV Cache]
+    M09 --> M11[11 Hardware-Aware Attention]
+    M10 --> M11
     M10 --> M15[15 Case Studies]
     M11 --> M14[14 Inference Optimizations]
     M12 --> M15
-    M08 --> M13[13 Training Considerations]
+    M12 --> M13[13 Training Considerations]
     M13 --> M14
     M14 --> M15
     M15 --> M16[16 End-to-End Forward Pass]

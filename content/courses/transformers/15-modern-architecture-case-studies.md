@@ -327,7 +327,7 @@ frontier scale.
 ## 15.6 The master comparison
 
 ```mermaid
-flowchart TD
+flowchart LR
     ROOT["The 2026 decoder block"] --> ATT["Attention slot"]
     ROOT --> FFN["FFN slot"]
     ROOT --> NORM["Norm slot"]
@@ -345,7 +345,7 @@ flowchart TD
     NORM --> N3["Both — Gemma 2/3/4"]
     NORM --> N4["Four, depth-scaled — Trinity Large"]
     POS --> P1["RoPE — nearly all"]
-    POS --> P2["Partial RoPE — MiniMax-M2, Gemma 4"]
+    POS --> P2["Partial RoPE — Qwen3-Next, MiniMax-M2, Gemma 4"]
     POS --> P3["NoPE in some layers — SmolLM3, Kimi Linear, Trinity"]
 ```
 
@@ -406,8 +406,8 @@ The practical payoff of this course. Open any model's `config.json` and answer:
 ```mermaid
 flowchart TD
     S["New model released"] --> Q1["num_key_value_heads vs num_attention_heads?"]
-    Q1 --> A1["equal -&gt; MHA<br/>fewer -&gt; GQA<br/>absent + kv_lora_rank -&gt; MLA"]
-    A1 --> Q2["num_experts / num_experts_per_tok present?"]
+    Q1 --> A1["equal -&gt; MHA<br/>fewer -&gt; GQA (=1 -&gt; MQA)<br/>absent + kv_lora_rank -&gt; MLA"]
+    A1 --> Q2["num_local_experts / num_experts_per_tok present?"]
     Q2 --> A2["absent -&gt; dense<br/>present -&gt; MoE, note granularity and shared count"]
     A2 --> Q3["sliding_window set and non-null?"]
     Q3 --> A3["check layer_types for the local:global ratio"]

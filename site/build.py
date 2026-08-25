@@ -96,6 +96,13 @@ def build_md() -> MarkdownIt:
         tok = tokens[idx]
         info = (tok.info or "").strip().lower()
         content = tok.content.rstrip("\n")
+        if info == "html":
+            # Raw passthrough for interactive widgets. Content in this repo is
+            # trusted (it arrives by reviewed pull request), so this is a
+            # deliberate escape hatch, not a hole — markdown-it still runs with
+            # html:False for everything else.
+            env.setdefault("raw_html", []).append(content)
+            return content + "\n"
         if info == "mermaid":
             env.setdefault("diagrams", []).append(content)
             # <script type="text/plain"> is a RAW TEXT element: entities are not
@@ -337,7 +344,8 @@ class Site:
         notes_dir = CONTENT / "notes"
         self.notes = (
             sorted(
-                (Page(p, f"/notes/{p.stem}/", "Notes") for p in sorted(notes_dir.glob("*.md"))),
+                (Page(p, f"/notes/{p.stem}/", "Notes") for p in sorted(notes_dir.glob("*.md"))
+                 if not p.stem.startswith("_")),
                 key=lambda p: (p.order, p.title),
             )
             if notes_dir.is_dir() else []
@@ -521,8 +529,14 @@ def render_note(site: Site, page: Page, md: MarkdownIt, urls: dict[Path, str]) -
     <div class="sec__body">{body_html}</div>
   </main>
 </div>"""
+    # Pages may pull in extra scripts (interactive widgets) via front matter.
+    extra = "".join(
+        f'\n<script src="{html.escape(s, quote=True)}" defer></script>'
+        for s in page.meta.get("scripts", [])
+    )
     return document(site, title=f"{page.title} — {site.title}",
-                    description=page.title, body=body, scripts=MATH_SCRIPTS), env
+                    description=page.description or page.title,
+                    body=body, scripts=MATH_SCRIPTS + extra), env
 
 
 def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
@@ -534,6 +548,59 @@ def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
         f'<p class="card__b">{html.escape(blurb)}</p>'
         f"{meta_html}</a>"
     )
+
+
+STATUS_LABEL = {"done": "Done", "progress": "In progress", "planned": "Planned"}
+
+
+def render_status(site: Site, roadmap_file: Path) -> str:
+    """Render the build-status checklist from roadmap.yml."""
+    cfg = yaml.safe_load(roadmap_file.read_text(encoding="utf-8"))
+    all_items = [i for s in cfg["sections"] for i in s["items"]]
+    done = sum(1 for i in all_items if i["status"] == "done")
+
+    def bar(items: list) -> str:
+        n = len(items)
+        d = sum(1 for i in items if i["status"] == "done")
+        p = sum(1 for i in items if i["status"] == "progress")
+        pct = round(100 * d / n) if n else 0
+        return (
+            f'<div class="prog"><div class="prog__track">'
+            f'<span class="prog__fill" style="width:{pct}%"></span>'
+            f'<span class="prog__fill prog__fill--p" style="width:{round(100 * p / n) if n else 0}%"></span>'
+            f'</div><div class="prog__n">{d} of {n} done</div></div>'
+        )
+
+    blocks = []
+    for section in cfg["sections"]:
+        rows = "\n".join(
+            f'<li class="chk chk--{i["status"]}">'
+            f'<span class="chk__mark" aria-hidden="true"></span>'
+            f'<div class="chk__body"><div class="chk__t">{html.escape(i["title"])}'
+            f'<span class="chk__s">{STATUS_LABEL[i["status"]]}</span></div>'
+            f'<p class="chk__d">{html.escape(" ".join(i.get("detail", "").split()))}</p></div></li>'
+            for i in section["items"]
+        )
+        blurb = f'<p class="lp__p">{html.escape(" ".join(section.get("blurb", "").split()))}</p>' if section.get("blurb") else ""
+        blocks.append(
+            f'<section class="lp__sec"><h2 class="lp__h">{html.escape(section["name"])}</h2>'
+            f'{blurb}{bar(section["items"])}<ul class="chks">{rows}</ul></section>'
+        )
+
+    body = f"""{topbar(site, "/status/")}
+<div class="shell shell--plain">
+  <main class="main main--wide">
+    <header class="hd">
+      <div class="hd__k">{html.escape(cfg.get("title", "Build status"))}</div>
+      <h1>{html.escape(cfg.get("title", "Build status"))}</h1>
+      <p class="lede">{html.escape(" ".join(cfg.get("lede", "").split()))}</p>
+      <div class="tally"><strong>{done}</strong> of <strong>{len(all_items)}</strong> tracked items complete</div>
+    </header>
+    {"".join(blocks)}
+  </main>
+</div>"""
+    return document(site, title=f'{cfg.get("title", "Build status")} — {site.title}',
+                    description=" ".join(cfg.get("lede", "").split()), body=body)
 
 
 def render_landing(site: Site, *, active: str, kicker: str, title: str, lede: str,
@@ -620,6 +687,12 @@ def build() -> int:
         ))
         pages_written += 1
 
+    # ---- build status / roadmap
+    roadmap_file = CONTENT / "roadmap.yml"
+    if roadmap_file.is_file():
+        write(OUT / "status" / "index.html", render_status(site, roadmap_file))
+        pages_written += 1
+
     # ---- home
     home_sections = [("Courses", f'<div class="cards">{course_cards}</div>')]
     if site.notes:
@@ -639,8 +712,21 @@ def build() -> int:
     # ---- assets and Pages plumbing
     assets = OUT / "assets"
     assets.mkdir(parents=True, exist_ok=True)
-    for name in ("style.css", "page.js", "mermaid.js", "katex-init.js", "favicon.svg"):
+    # style.css is concatenated from every *.css in the theme, base first, so
+    # separate concerns can live in separate files without an @import round trip.
+    css_files = [THEME / "style.css"] + sorted(
+        f for f in THEME.glob("*.css") if f.name != "style.css")
+    (assets / "style.css").write_text(
+        "\n".join(f.read_text(encoding="utf-8") for f in css_files), encoding="utf-8")
+    for name in ("page.js", "mermaid.js", "katex-init.js", "favicon.svg"):
         shutil.copyfile(THEME / name, assets / name)
+    page_assets = CONTENT / "notes" / "_assets"
+    if page_assets.is_dir():
+        dest = assets / "pages"
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in page_assets.glob("*.js"):
+            shutil.copyfile(f, dest / f.name)
+
     (OUT / "CNAME").write_text(site.domain + "\n", encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
 

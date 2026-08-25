@@ -179,7 +179,7 @@ attends only to itself; row 2 to positions 1–2; row 3 to all three.
 flowchart TD
     Q["Q"] --> S["scores = Q K_transpose / sqrt(d_k)"]
     K["K"] --> S
-    S --> M["add causal mask<br/>upper triangle = minus infinity"]
+    S --> M["add causal mask<br/>STRICTLY upper triangle (j > i) = minus infinity<br/>diagonal stays 0"]
     M --> SM["softmax<br/>(minus infinity becomes exactly 0)"]
     SM --> W["masked weights<br/>lower-triangular"]
     W --> O["out = W @ V"]

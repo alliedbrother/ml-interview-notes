@@ -231,7 +231,7 @@ $$\text{expected tokens per target pass} = \frac{1 - \alpha^{k+1}}{1 - \alpha}$$
 
 | `α` | `k=3` | `k=5` | `k=7` |
 |---|---|---|---|
-| 0.6 | 2.0 | 2.3 | 2.4 |
+| 0.6 | 2.2 | 2.4 | 2.5 |
 | 0.8 | 2.9 | 3.7 | 4.2 |
 | 0.9 | 3.4 | 4.7 | 5.7 |
 
@@ -337,13 +337,13 @@ A production serving system in 2026:
 flowchart TD
     REQ["incoming requests"] --> SCHED["Continuous batching scheduler"]
     SCHED --> PC{"prefix cache hit?"}
-    PC -->|yes| SKIP["reuse cached KV blocks<br/>skip prefill"]
-    PC -->|no| PF["chunked prefill<br/>FlashAttention"]
+    PC -->|hit| SKIP["reuse cached KV blocks<br/>for the matched prefix"]
+    PC -->|miss| PF["chunked prefill<br/>FlashAttention"]
+    SKIP --> PF
     PF --> KV["PagedAttention KV cache<br/>16-token blocks, INT8"]
-    SKIP --> KV
-    KV --> DEC["decode step<br/>FlashDecoding<br/>INT4 weights"]
-    DEC --> SPEC["speculative decoding<br/>MTP draft heads"]
-    SPEC --> OUT["stream tokens out"]
+    KV --> SPEC["speculative draft<br/>MTP heads propose k tokens"]
+    SPEC --> DEC["target decode step<br/>verifies k+1 positions in one pass<br/>FlashDecoding, INT4 weights"]
+    DEC --> OUT["stream accepted tokens out"]
     OUT --> SCHED
 ```
 

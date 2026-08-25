@@ -34,7 +34,7 @@ flowchart TD
         R -->|"top-k selection"| E1["Expert 1"]
         R --> E2["Expert 2"]
         R -.->|"not selected"| E3["Expert 3"]
-        R -.-> E4["Expert 4 ... Expert 256"]
+        R -.-> E4["Expert 4 ... Expert N<br/>(k of N active; DeepSeek V3: 8 of 256)"]
         E1 --> W["weighted sum"]
         E2 --> W
         W --> M3["out"]
@@ -250,10 +250,10 @@ frees the routed experts to specialise.
 flowchart TD
     X["token x"] --> SH["SHARED expert<br/>always active<br/>learns common patterns"]
     X --> RT["Router"]
-    RT --> R1["Routed expert 17"]
-    RT --> R2["Routed expert 93"]
-    RT -.-> RN["...254 not selected"]
-    SH --> SUM(("+"))
+    RT --> R1["Routed expert e_1<br/>(e.g. 17)"]
+    RT --> R2["Routed expert e_8<br/>(e.g. 93)"]
+    RT -.-> RN["...remaining 248 routed experts<br/>not selected (k = 8 of 256)"]
+    SH --> SUM(("weighted<br/>sum"))
     R1 --> SUM
     R2 --> SUM
     SUM --> OUT["output"]
@@ -306,8 +306,7 @@ flowchart LR
     subgraph MANY["Many small experts — DeepSeekMoE style"]
         M1["256 experts x 2048 hidden<br/>activate 8 + 1 shared<br/>fine specialisation"]
     end
-    FEW --> TREND["2025-26 trend points this way"]
-    MANY --> TREND
+    FEW -->|"2025-26 trend moves this way"| MANY
 ```
 
 ### The 2026 configuration table
