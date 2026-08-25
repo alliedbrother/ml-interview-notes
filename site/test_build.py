@@ -47,7 +47,8 @@ def main() -> int:
     check(bool(pages), "no pages were built")
 
     # ---- every source markdown produced a page
-    sources = [p for p in CONTENT.rglob("*.md")]
+    sources = [p for p in CONTENT.rglob("*.md")
+               if not any(part.startswith("_") for part in p.relative_to(CONTENT).parts)]
     check(bool(sources), "no markdown sources found in content/")
     for src in sources:
         rel = src.relative_to(CONTENT)
@@ -89,6 +90,7 @@ def main() -> int:
     check((OUT / ".nojekyll").is_file(), "missing .nojekyll")
     check((OUT / "index.html").is_file(), "missing site home")
     check((OUT / "courses" / "index.html").is_file(), "missing courses index")
+    check((OUT / "status" / "index.html").is_file(), "missing build status page")
 
     # ---- every mermaid fence became a diagram shell
     for src in (CONTENT / "courses").rglob("*.md"):
