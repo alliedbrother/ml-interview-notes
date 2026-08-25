@@ -104,6 +104,11 @@ def main() -> int:
             rel_page = page.relative_to(OUT)
             check('href="/assets/prebuilt-bridge.css"' in text,
                   f"{rel_page}: prebuilt page not re-themed")
+            # every page with the course rail must also carry the Labs group;
+            # a mis-anchored injection fails by silently changing nothing
+            if '<nav class="nav"' in text:
+                check('nav__grp">Labs<span>' in text,
+                      f"{rel_page}: course rail is missing the Labs group")
             # must be in the BODY: a naive injection can bury it in a CSS
             # comment inside <head>, where the browser discards it silently
             head_end = text.find("</head>")

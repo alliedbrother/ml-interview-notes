@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import os
 import re
 import shutil
 import sys
@@ -441,7 +442,8 @@ MATH_SCRIPTS = """<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk" crossorigin="anonymous"></script>
 <script src="/assets/katex-init.js"></script>
 <script type="module" src="/assets/mermaid.js"></script>
-<script src="/assets/page.js"></script>"""
+<script src="/assets/page.js"></script>
+<script src="/assets/rail-scroll.js" defer></script>"""
 
 
 # ---------------------------------------------------------------- render
@@ -602,6 +604,60 @@ def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
     )
 
 
+def read_labs(root: Path) -> list[tuple[Path, str]]:
+    """(page path, title) for each lab, in the order LABS.html lists them.
+
+    LABS.html is the source of truth rather than the directory listing, which
+    also contains a _shared/ helper directory that is not a lab.
+    """
+    index = root / "LABS.html"
+    if not index.is_file():
+        return []
+    text = index.read_text(encoding="utf-8")
+    out = []
+    for href in dict.fromkeys(re.findall(r'href="(labs/[^"]+README\.html)"', text)):
+        page = root / href
+        if not page.is_file():
+            continue
+        m = re.search(r"<title>(.*?)</title>", page.read_text(encoding="utf-8"), re.S)
+        title = m.group(1).split("—")[0].strip() if m else page.parent.name
+        out.append((page, title))
+    return out
+
+
+def inject_lab_nav(text: str, page: Path, dest: Path,
+                   labs: list[tuple[Path, str]]) -> str:
+    """Append a Labs group to the end of the course's own left rail.
+
+    The rail links relatively and every page sits at a different depth, so each
+    href is computed from that page's directory rather than assumed.
+    """
+    if not labs:
+        return text
+    # Anchor on the COURSE rail, not just any <nav>: the grafted-on site top bar
+    # contains a <nav class="topbar__nav"> that appears earlier in the document,
+    # and searching from there finds the wrong closing tag.
+    m = re.search(r'<nav class="nav"[^>]*>', text)
+    if not m:
+        return text
+    nav_end = text.find("</nav>", m.end())
+    if nav_end == -1:
+        return text
+    close = text.rfind("</div>", m.end(), nav_end)   # closes nav__list
+    if close == -1:
+        return text
+
+    rows = [f'<div class="nav__grp">Labs<span>{len(labs)}</span></div>']
+    for i, (lab_page, title) in enumerate(labs, 1):
+        href = os.path.relpath(lab_page, page.parent).replace(os.sep, "/")
+        cur = " is-current" if lab_page.resolve() == page.resolve() else ""
+        rows.append(
+            f'<a class="nav__i{cur}" href="{href}">'
+            f'<span class="nav__n">{i:02d}</span><span>{title}</span></a>'
+        )
+    return text[:close] + "\n" + "\n".join(rows) + "\n" + text[close:]
+
+
 def render_prebuilt(site: Site, course: Course) -> int:
     """Copy a prebuilt HTML course into the site and graft the site chrome on.
 
@@ -615,7 +671,9 @@ def render_prebuilt(site: Site, course: Course) -> int:
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
 
     bar = topbar(site, "/courses/")
-    bridge_link = '<link rel="stylesheet" href="/assets/prebuilt-bridge.css">\n</head>'
+    bridge_link = ('<link rel="stylesheet" href="/assets/prebuilt-bridge.css">\n'
+                   '<script src="/assets/rail-scroll.js" defer></script>\n</head>')
+    labs = read_labs(dest)
     touched = 0
     for page in sorted(dest.rglob("*.html")):
         text = page.read_text(encoding="utf-8")
@@ -634,6 +692,7 @@ def render_prebuilt(site: Site, course: Course) -> int:
         body_end = head_end + m.end()
         text = (text[:head_end] + bridge_link
                 + text[head_end + len("</head>"):body_end] + "\n" + bar + text[body_end:])
+        text = inject_lab_nav(text, page, dest, labs)
         page.write_text(text, encoding="utf-8")
         touched += 1
     return touched
@@ -812,7 +871,7 @@ def build() -> int:
         f for f in THEME.glob("*.css") if f.name != "style.css")
     (assets / "style.css").write_text(
         "\n".join(f.read_text(encoding="utf-8") for f in css_files), encoding="utf-8")
-    for name in ("page.js", "mermaid.js", "katex-init.js", "favicon.svg"):
+    for name in ("page.js", "mermaid.js", "katex-init.js", "favicon.svg", "rail-scroll.js"):
         shutil.copyfile(THEME / name, assets / name)
     page_assets = CONTENT / "notes" / "_assets"
     if page_assets.is_dir():
