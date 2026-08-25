@@ -104,6 +104,8 @@ def main() -> int:
             rel_page = page.relative_to(OUT)
             check('href="/assets/prebuilt-bridge.css"' in text,
                   f"{rel_page}: prebuilt page not re-themed")
+            check('href="/assets/favicon.svg"' in text,
+                  f"{rel_page}: missing favicon link (browser falls back to /favicon.ico)")
             # every page with the course rail must also carry the Labs group;
             # a mis-anchored injection fails by silently changing nothing
             if '<nav class="nav"' in text:

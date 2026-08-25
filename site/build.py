@@ -672,6 +672,7 @@ def render_prebuilt(site: Site, course: Course) -> int:
 
     bar = topbar(site, "/courses/")
     bridge_link = ('<link rel="stylesheet" href="/assets/prebuilt-bridge.css">\n'
+                   '<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">\n'
                    '<script src="/assets/rail-scroll.js" defer></script>\n</head>')
     labs = read_labs(dest)
     touched = 0
