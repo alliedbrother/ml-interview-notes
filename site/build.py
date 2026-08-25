@@ -10,8 +10,10 @@ Content model
   content/site.yml                     site title, tagline, top nav
   content/courses/<slug>/course.yml    course title, blurb, track definitions
   content/courses/<slug>/NN-*.md       modules; 00 becomes the course index
-  content/notes/<slug>.md              note pages (optional YAML front matter:
-                                       order, description, meta)
+  content/notes/<slug>.md              a note CATEGORY page
+  content/notes/<slug>/<topic>.md      a TOPIC inside that category
+                                       (front matter: order, description, meta,
+                                        scripts)
 
 The home page and section indexes are generated from this content, so adding a
 course or a note needs no code change.
@@ -245,6 +247,8 @@ class Page:
         self.url = url
         self.track = track
         self.src_dir = path.parent
+        self.topics: list["Page"] = []   # categories only
+        self.parent: "Page | None" = None  # topics only
         m = re.match(r"(\d+)", path.stem)
         self.num = int(m.group(1)) if m else 0
 
@@ -341,15 +345,30 @@ class Site:
         self.repo = cfg["repo"]
         self.nav = cfg.get("nav", [])
         self.courses = [Course(d) for d in sorted((CONTENT / "courses").iterdir()) if d.is_dir()]
+        # Notes are two levels: a category is content/notes/<slug>.md, and its
+        # topics live in content/notes/<slug>/*.md. A topic is a page inside its
+        # category, never a sibling of it.
         notes_dir = CONTENT / "notes"
-        self.notes = (
-            sorted(
+        self.notes: list[Page] = []
+        if notes_dir.is_dir():
+            self.notes = sorted(
                 (Page(p, f"/notes/{p.stem}/", "Notes") for p in sorted(notes_dir.glob("*.md"))
                  if not p.stem.startswith("_")),
                 key=lambda p: (p.order, p.title),
             )
-            if notes_dir.is_dir() else []
-        )
+            for cat in self.notes:
+                topic_dir = notes_dir / cat.path.stem
+                cat.topics = sorted(
+                    (Page(t, f"/notes/{cat.path.stem}/{t.stem}/", cat.title)
+                     for t in sorted(topic_dir.glob("*.md")) if not t.stem.startswith("_")),
+                    key=lambda p: (p.order, p.title),
+                ) if topic_dir.is_dir() else []
+                for t in cat.topics:
+                    t.parent = cat
+
+    @property
+    def note_topics(self) -> list[Page]:
+        return [t for c in self.notes for t in c.topics]
 
     def url_map(self) -> dict[Path, str]:
         """Source path -> URL, for rewriting inter-page markdown links."""
@@ -357,9 +376,10 @@ class Site:
         for c in self.courses:
             for p in c.pages:
                 m[p.path.resolve()] = p.url
-        for p in self.notes:
+        for p in self.notes + self.note_topics:
             m[p.path.resolve()] = p.url
         return m
+
 
 
 # ---------------------------------------------------------------- chrome
@@ -519,11 +539,22 @@ def render_module(site: Site, course: Course, page: Page, md: MarkdownIt,
 def render_note(site: Site, page: Page, md: MarkdownIt, urls: dict[Path, str]) -> tuple[str, dict]:
     env = {"src_dir": page.src_dir, "urls": urls, "broken": [], "diagrams": []}
     body_html = md.render(page.body, env)
+
+    # A topic links back to the category it belongs to.
+    crumb = (
+        f'<a class="crumb" href="{page.parent.url}">&larr; {html.escape(page.parent.title)}</a>'
+        if page.parent else ""
+    )
+
+    # A category page's own topic table is the index — the build does not add a
+    # second, generated list of the same topics underneath it.
+
     body = f"""{topbar(site, "/notes/")}
 <div class="shell shell--plain">
   <main class="main">
     <header class="hd">
       <div class="hd__k">{html.escape(page.eyebrow)}</div>
+      {crumb}
       <h1>{html.escape(page.title)}</h1>
     </header>
     <div class="sec__body">{body_html}</div>
@@ -653,8 +684,8 @@ def build() -> int:
             shutil.copytree(code_dir, OUT / course.base.strip("/") / "code",
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
-    # ---- notes
-    for page in site.notes:
+    # ---- notes: categories, then the topics inside each
+    for page in site.notes + site.note_topics:
         doc, env = render_note(site, page, md, urls)
         write(page.out_path, doc)
         broken += [f"{page.path.name}: {b}" for b in env["broken"]]
@@ -678,7 +709,7 @@ def build() -> int:
         note_cards = "\n".join(
             card(p.url, "Notes", p.title, p.description or "Notes in progress.",
                  p.meta.get("meta", ""))
-            for p in site.notes
+            for p in site.notes          # categories only — topics live inside them
         )
         write(OUT / "notes" / "index.html", render_landing(
             site, active="/notes/", kicker="Notes", title="Notes",

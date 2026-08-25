@@ -60,7 +60,8 @@ def main() -> int:
                 else OUT / "courses" / course / stem / "index.html"
             )
         elif rel.parts[0] == "notes":
-            expected = OUT / "notes" / src.stem / "index.html"
+            # a category is notes/<slug>.md; a topic is notes/<slug>/<topic>.md
+            expected = OUT.joinpath(*rel.parts[:-1], src.stem, "index.html")
         else:
             continue
         check(expected.is_file(), f"no page built for source {rel}")

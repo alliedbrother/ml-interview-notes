@@ -15,7 +15,7 @@ Mathematical foundations essential for Machine Learning including linear algebra
 
 | Topic | Level | Tags |
 |---|---|---|
-| [Linear Algebra](./linear-algebra.md) ✅ | intermediate | vectors, matrices, eigenvalues, SVD |
+| [Linear Algebra](./math/linear-algebra.md) ✅ | intermediate | vectors, matrices, eigenvalues, SVD |
 | Calculus | intermediate | derivatives, gradients, optimization |
 | Probability & Statistics | intermediate | probability, distributions, MLE, hypothesis testing |
 | Optimization Techniques | advanced | convex optimization, gradient descent, SGD |
