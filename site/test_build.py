@@ -139,6 +139,28 @@ def main() -> int:
         check("layoutEngine" in src and "'dagre'" in src,
               f"{rel}: no dagre fallback when elk is unavailable")
 
+    # ---- roadmap.yml integrity. An auto-resolved merge once kept BOTH sides of
+    #      a conflict, leaving "Libraries — 9 written (done)" beside a stale
+    #      "Libraries — 6 topics (in progress)". The file stayed valid YAML and
+    #      every page built, so nothing caught it. Titles are keyed on the part
+    #      before " — " so a status change that also rewords the suffix is still
+    #      recognised as the same item.
+    roadmap = CONTENT / "roadmap.yml"
+    if roadmap.is_file():
+        cfg = yaml.safe_load(roadmap.read_text(encoding="utf-8"))
+        allowed = {"done", "progress", "planned"}
+        for section in cfg.get("sections", []):
+            seen: dict[str, str] = {}
+            for item in section.get("items", []):
+                title = item.get("title", "")
+                key = title.split(" — ")[0].split(" - ")[0].strip().lower()
+                check(item.get("status") in allowed,
+                      f"roadmap [{section['name']}] '{title}': bad status {item.get('status')!r}")
+                check(key not in seen,
+                      f"roadmap [{section['name']}]: duplicate item '{title}' "
+                      f"(also '{seen.get(key)}') — likely a mis-resolved merge")
+                seen.setdefault(key, title)
+
     # ---- assets exist
     for asset in ("style.css", "page.js", "mermaid.js", "katex-init.js", "favicon.svg"):
         check((OUT / "assets" / asset).is_file(), f"missing asset assets/{asset}")
