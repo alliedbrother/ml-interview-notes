@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PagedAttention: fragmentation, blocks, block tables — The Inference Engineering Book</title>
+<title>PagedAttention: fragmentation, blocks, block tables — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,26 +623,26 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 2 · Memory and the KV cache · 02-02</div>
 <h1>PagedAttention: fragmentation, blocks, block tables</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/block_pool.py</code></li><li><code>vllm/v1/core/kv_cache_manager.py</code></li><li><code>vllm/v1/worker/block_table.py</code></li><li><code>python/sglang/srt/mem_cache/allocator/</code></li><li><code>python/sglang/srt/mem_cache/memory_pool.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/block_pool.py</code></li><li><code>vllm/v1/core/kv_cache_manager.py</code></li><li><code>vllm/v1/worker/block_table.py</code></li><li><code>python/sglang/srt/mem_cache/allocator/</code></li><li><code>python/sglang/srt/mem_cache/memory_pool.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">A contiguous KV allocator must reserve for the worst case it can be asked for. On an H100 running Llama-3-8B at a 32k context window that is 4 GiB per sequence, which caps the server at thirteen concurrent requests — while the tokens actually in flight occupy under 1 GiB. PagedAttention is the data structure that recovers the other 51.</p></div>
+<div class="prose"><p class="lead">A fixed-extent, maximum-length contiguous KV allocator reserves for the worst case; growable virtual-memory mappings and relocation schemes are alternative designs. On an H100 running Llama-3-8B at a 32k context window that is 4 GiB per sequence, which caps the server at thirteen concurrent requests — while the tokens actually in flight occupy under 1 GiB. PagedAttention is the data structure that recovers the other 51.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the reference machine from <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>: one H100 SXM, 80 GB. Serve Llama-3-8B in bf16 with <code>--max-model-len 32768</code>. <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">§2.1</a> did this budget in full — 79.65 GiB of HBM, times the default <code>gpu_memory_utilization</code> of 0.92, minus 14.96 GiB of bf16 weights, minus a 6.0 GiB allowance for activations, CUDA graph pools (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>) and workspace — and landed on a <b>52.32 GiB</b> KV pool. Take that as given here. One token of Llama-3-8B KV costs</p>
 
 <div class="math-display">$$2 \cdot L \cdot h_{kv} \cdot d_h \cdot b = 2 \cdot 32 \cdot 8 \cdot 128 \cdot 2 = 131{,}072\ \text{B} = 128\ \text{KiB}$$</div>
 
 <p>where $L$ is layer count, $h_{kv}$ the number of KV heads, $d_h$ the head dimension and $b$ the bytes per element. Carved into <code>block_size=16</code> blocks, 52.32 GiB is 26,785 blocks — <b>428,560 token-slots</b> (§2.1 works the two floor divisions). That is a lot of tokens. The question is how many <em>requests</em> it is.</p>
 
-<p>If the allocator hands each sequence one contiguous extent, it has to size that extent when the request is admitted — before a single token has been generated, and therefore before anyone knows how long the output will be. The only safe size is <code>max_model_len</code>. That is 32,768 &times; 128 KiB = <strong>4 GiB per sequence</strong>, and 52.32 GiB / 4 GiB = <strong>13 concurrent sequences</strong>. Thirteen, on a GPU that can comfortably run a decode batch of several hundred.</p>
+<p>For the fixed maximum-length contiguous-reservation baseline, each sequence gets max_model_len slots at admission. At 32768 tokens and 128 KiB/token this is 4 GiB, so 13 such reservations fit a 52.32 GiB pool. This is one allocator design, not a necessity for every contiguous virtual-address layout. Use a context-capable Llama-3.1 checkpoint for the long-context commands below; the original Llama-3 checkpoint's native limit is 8192.</p>
 
 <p>Now count what those thirteen sequences actually use. A typical chat turn is a 512-token prompt and 100 generated tokens: 612 tokens, 76.5 MiB. Thirteen of them is 0.97 GiB of live KV inside a 52.32 GiB pool.</p>
 
 <div class="kpis">
   <div class="kpi kpi--hero"><div class="kpi__n">13</div><div class="kpi__l">concurrent seqs, contiguous, 32k window</div></div>
   <div class="kpi"><div class="kpi__n">1.9%</div><div class="kpi__l">of the pool holding real KV</div></div>
-  <div class="kpi"><div class="kpi__n">99.7%</div><div class="kpi__l">waste on a 100-token generation</div></div>
+  <div class="kpi"><div class="kpi__n">98.1%</div><div class="kpi__l">waste for 512 prompt + 100 output tokens</div></div>
 </div>
 
-<p>The last figure is the one people quote. A request that produces 100 tokens against a 32,768-token reservation writes 0.305% of what it holds. It wastes 99.7% of its own allocation, and it holds that allocation for its entire lifetime.</p>
+<p>Count both prompt and output state: a 512-token prompt plus 100 outputs uses 612 of 32768 reserved slots, so the waste is 1-612/32768=98.13%. Counting only the 100 output tokens would incorrectly omit the prompt KV.</p>
 
 <p>The waste has three distinct sources and they behave differently, so split them before fixing them. All three numbers below are derived arithmetic on the setup above, not measurements.</p>
 
@@ -991,7 +991,7 @@ class KVCacheBlock:
         )</code></pre>
 </div>
 
-<p>Note the shape. <code>max_num_blocks_per_req</code> is <code>max_model_len / block_size</code> &mdash; the table itself is still sized for the worst case, because it must be a fixed-shape tensor for CUDA graphs. But it costs 4 bytes per logical block instead of 128 KiB: at <code>max_num_reqs=256</code> and a 32k window, 256 &times; 2048 &times; 4 = 2 MiB of metadata to index 52.32 GiB of KV. That ratio &mdash; 4 bytes of index per 32 KiB of data &mdash; is what makes the indirection affordable, and it is exactly the ratio <code>block_size</code> controls.</p>
+<p>Note the shape. <code>max_num_blocks_per_req</code> is <code>max_model_len / block_size</code> &mdash; the table itself is still sized for the worst case, because it must be a fixed-shape tensor for CUDA graphs. But it costs 4 bytes per logical block instead of 2 MiB of all-layer KV payload: at <code>max_num_reqs=256</code> and a 32k window, 256 &times; 2048 &times; 4 = 2 MiB of metadata to index 52.32 GiB of KV. That ratio &mdash; 4 bytes of index per 2 MiB of all-layer KV data (16 tokens times 128 KiB/token) &mdash; is what makes the indirection affordable, and it is exactly the ratio <code>block_size</code> controls.</p>
 
 <p>Appending is the append-only write promised above:</p>
 
@@ -1497,7 +1497,7 @@ flowchart TD
 
 <p>The paged path is more elaborate than vLLM's precisely because the table stays token-level: a prefill must fill the partial tail page of the prefix, then whole new pages, then a partial final page, which is three cases handled by a Triton kernel (<code>alloc_extend_kernel</code>, dispatched at <code>python/sglang/srt/mem_cache/allocator/paged.py:L197-L204</code>; the readable reference implementation is <code>alloc_extend_naive</code> at L44-L103). vLLM never needs this, because its block table <em>is</em> the page list &mdash; appending one block id covers all three cases.</p>
 
-<p>Neither choice is wrong. vLLM optimises index-tensor bandwidth and pays 1&ndash;2% of the pool in internal fragmentation; SGLang optimises fragmentation and prefix-sharing granularity and pays 16&times; the index memory plus per-request page-boundary logic when it does page. The fact that both projects independently defaulted to different ends of this axis is a good sign that the optimum depends on the workload.</p></div></section>
+<p>Neither choice is wrong. vLLM optimises index-tensor bandwidth and pays workload-dependent internal fragmentation (15/16 waste for an isolated one-token sequence in a 16-token block); SGLang optimises fragmentation and prefix-sharing granularity and pays 16&times; the index memory plus per-request page-boundary logic when it does page. The fact that both projects independently defaulted to different ends of this axis is a good sign that the optimum depends on the workload.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><p><strong>The startup error that reads like a memory error but is an over-reservation error.</strong> The engine refuses to start if it cannot hold <em>one</em> request at <code>max_model_len</code>:</p>
 
 <div class="code-file">
@@ -1515,7 +1515,7 @@ flowchart TD
             f"when initializing the engine. "</code></pre>
 </div>
 
-<p>Paging removed over-reservation at runtime, but this admission check reintroduces a single-request worst-case reservation at startup. Lowering <code>--max-model-len</code> to what your traffic actually uses is usually the right fix; raising <code>--gpu-memory-utilization</code> past 0.95 buys you an OOM later instead.</p>
+<p>Paging removes most runtime over-reservation, while startup validates the largest supported request. Set max_model_len and memory utilization from the actual workload and measured non-KV headroom. A utilization above 0.95 raises OOM risk but does not inevitably cause it; allocator, graph, workspace, and other-process peaks decide.</p>
 
 <p><strong>The pool exhaustion assertion.</strong> <code>get_new_blocks</code> raises <code>ValueError(f"Cannot get {num_blocks} free blocks from the pool")</code> (<code>vllm/v1/core/block_pool.py:L659</code>). Seeing this in production means the capacity check in <code>allocate_slots</code> and the pool disagreed &mdash; an accounting bug, not a capacity problem. Reach for it when debugging a new KV cache group type or a connector.</p>
 
@@ -1550,7 +1550,7 @@ flowchart TD
     <span class="src">shell</span>
     <span class="tag tag--shell">shell</span>
   </div>
-  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-model-len 32768 \
   --block-size 16 \
   --num-gpu-blocks-override 2048 \
@@ -1563,12 +1563,12 @@ flowchart TD
 <p>Three things to vary and predict before you run them:</p>
 
 <ol>
-  <li><code>--block-size 32</code> with the block count halved to 1024. Same total token capacity; watch whether steady-state throughput moves. Any change is kernel-side, not capacity-side.</li>
+  <li><code>--block-size 32</code> with the block count halved to 1024. Same total token capacity; watch whether steady-state throughput moves. Changes can come from kernels, allocator overhead, prefix-hit granularity, or internal fragmentation even at the same nominal token capacity.</li>
   <li>Drop <code>--no-enable-prefix-caching</code> and re-send the same prompt twice. The second request should allocate almost no new blocks &mdash; the pool's free-queue tail still holds the hashed blocks from the first (<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">§2.3</a> owns why they match).</li>
   <li>Set <code>--max-model-len 131072</code> with the same override and watch the startup check in <code>_check_enough_kv_cache_memory</code> fire with the exact message quoted above.</li>
 </ol>
 
-<p>The SGLang comparison is one flag: <code>python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --page-size 1</code> versus <code>--page-size 16</code>. The first uses <code>TokenToKVPoolAllocator</code>, the second <code>PagedTokenToKVPoolAllocator</code> &mdash; different code paths, same interface, and the selection is the branch quoted from <code>kv_cache_configurator.py</code> above.</p></div></section>
+<p>The SGLang comparison is one flag: <code>python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct --page-size 1</code> versus <code>--page-size 16</code>. The first uses <code>TokenToKVPoolAllocator</code>, the second <code>PagedTokenToKVPoolAllocator</code> &mdash; different code paths, same interface, and the selection is the branch quoted from <code>kv_cache_configurator.py</code> above.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><strong>Read and answer.</strong> Open <code>vllm/v1/core/block_pool.py</code> and find <code>get_usage</code>. Why does it subtract 1 from <code>num_gpu_blocks</code>? What would the reported usage be on a freshly started engine if it did not?</li>
   <li><strong>Derive.</strong> Llama-3-70B (L=80, h_kv=8, d_h=128) in bf16 on 4&times;H100 with TP=4. Per GPU, what is one <code>block_size=16</code> block worth in bytes? If 40 GiB per GPU is left for KV, how many blocks is that, and how many 8k-context sequences fit? Compare against the contiguous ceiling at <code>max_model_len=32768</code>.</li>
@@ -1604,7 +1604,7 @@ flowchart TD
 </ul></div></section>
 <div class="pager"><a href="02-01-kv-cache-sizing.html"><div class="pager__k">← Previous</div><div class="pager__t">The KV cache size formula</div></a><a class="pager__next" href="02-03-prefix-caching-hash.html"><div class="pager__k">Next →</div><div class="pager__t">Prefix caching by hash (vLLM)</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

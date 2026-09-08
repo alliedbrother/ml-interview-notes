@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Open problems — The Inference Engineering Book</title>
+<title>Open problems — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 13 · Comparison, frontier, and practice · 13-03</div>
 <h1>Open problems</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Every other chapter in this book explains a mechanism that works. This one is a map of the
 places where the mechanisms stop — read out of the same two trees, from the <code>TODO</code>s that are
@@ -639,8 +639,7 @@ fire the moment a single-machine abstraction meets a fleet.</p>
 </div></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You are running prefill–decode disaggregation (<a href="../01-the-core-loop/01-06-pd-disaggregation.html">§1.6</a>)
 across 32 prefill replicas and 32 decode replicas. A new vLLM build is ready. You do what you do with
-every other stateless service: canary it onto four prefill nodes and watch. Every decode worker that
-tries to pull KV from a canary node dies in its handshake thread:</p>
+every other stateless service: canary it onto four prefill nodes and watch. A decode worker pulling incompatible KV can fail the compatibility check. The exact failure scope depends on when it is detected; the later fallback path described below can recompute locally rather than kill the worker:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -697,13 +696,7 @@ given it is about to interpret remote memory as a KV tensor, it is. Here is the 
     }</code></pre>
 </div>
 
-<p><code>vllm_version</code> is a factor, so a disaggregated vLLM fleet at <code>a556f3f</code> has no
-rolling upgrade: the only two settings are <em>every node identical</em> and <em>unchecked</em>, and the
-error itself tells you to pick the second. Note what is deliberately <em>excluded</em> — the docstring
-above these lines (<code>vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py:L153-L156</code>)
-says <code>tensor_parallel_size</code>, <code>block_size</code> and <code>kv_cache_layout</code> are
-validated at runtime instead, "to support heterogeneous deployments". Some heterogeneity was designed for.
-Version skew was not.</p>
+<p><code>vllm_version</code> participates in the shown compatibility hash, so arbitrary cross-version KV transfers may be rejected. That does not make rolling deployment impossible: keep old-version prefill/decode pools paired, canary a new compatible pair, route new requests by version, drain the old pair, then retire it. Do not disable checks to infer tensor compatibility. The cited runtime validation of TP size, block size and layout is another gate, not proof that all heterogeneous pairs interoperate.</p>
 
 <p>That is the shape of every problem in this chapter. Not a missing feature — a boundary that the
 abstraction never modelled, discovered at the moment you cross it.</p></div></section>
@@ -799,7 +792,7 @@ remote rank:</p>
 <p>With homogeneous TP the mapping is one-to-one and the 2.5 GiB spreads over eight links. With
 $D_{TP} &gt; P_{TP}$ several decode ranks converge on one prefill rank and that link becomes the bottleneck.
 This is why "disaggregation costs 14% of prefill" and "1.7% of prefill" are both true of the same model —
-and why nobody's published ratio transfers to your cluster.</p></div></section>
+and why a published ratio requires matching topology and assumptions before transfer to your cluster.</p></div></section>
 <section class="sec" id="disaggregation-at-scale" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it: disaggregation at N replicas</h2></div><div class="sec__body"><p>The plumbing is mature and plural: 16 connectors registered in
 <code>vllm/distributed/kv_transfer/kv_connector/factory.py:L152-L241</code> — NIXL push and pull, Mooncake,
 MoRI-IO, LMCache, HF3FS, plus a composing <code>MultiConnector</code> — and five transports in
@@ -978,11 +971,7 @@ flowchart TD
 <p>The prefill scheduler cannot see this number. It enqueues completed prefills and discovers back-pressure
 only when transfers stop draining. Between the two sits a router choosing both replicas independently.</p>
 
-<p><b>No one knows how.</b> Joint P/D scheduling is a two-queue system where the second queue's service
-rate depends on the first queue's arrival pattern, the resources are non-fungible (prefill FLOPs cannot be
-traded for decode HBM), and the SLO is a pair (TTFT, TPOT) rather than a scalar. No published policy is
-optimal or even provably-not-terrible for that — and any such policy needs a fleet-wide view that a
-per-request, per-pair connector cannot supply.</p></div></section>
+<p><b>Research and engineering remain.</b> Joint P/D scheduling couples two resource pools, variable transfer time and paired TTFT/TPOT targets. This engine snapshot does not establish a universal optimal policy, but absence of a local implementation is not absence of useful research. <a href="https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin">DistServe</a> co-optimizes phase resources and parallelism under latency targets; <a href="https://www.microsoft.com/en-us/research/publication/splitwise-efficient-generative-llm-inference-using-phase-splitting/">Splitwise</a> studies phase-specific placement including heterogeneous clusters. Their assumptions and evaluated workloads define the scope, not a solution to every dynamic fleet objective.</p></div></section>
 <section class="sec" id="kv-as-distributed-system" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">The KV cache as a distributed system</h2></div><div class="sec__body"><p>Once a prefix cache outlives one process it is a distributed store, and SGLang's HiCache tier
 (<a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">§2.6</a>) has ten backends behind
 one interface. Look at the whole write side of that interface:</p>
@@ -1017,12 +1006,7 @@ one interface. Look at the whole write side of that interface:</p>
         pass</code></pre>
 </div>
 
-<p><code>get</code>, <code>set</code>, <code>exists</code>, <code>clear</code>. No per-key delete, no
-version, no compare-and-swap, no expiry on the object. That is not an oversight — it is the right design
-for a <em>content-addressed</em> store, where the key hashes everything that determines the value, so a
-stale entry is impossible by construction and a miss is always legal. Which makes this cache a rare thing
-in distributed systems: it can be pure AP, because losing a page costs latency and never correctness. The
-engineers noticed, and let the read-side existence cache lie:</p>
+<p>The minimal store API omits explicit per-key deletion, version negotiation and expiry. Content addressing makes reuse safe only when keys capture every semantic determinant and stored bytes are complete and valid. A miss can trigger recomputation; an incorrectly namespaced, torn or corrupted hit can return wrong output. Consequently legal misses alone do not prove that the system is purely AP under CAP, and the source excerpt does not establish that all required metadata is hashed.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1148,7 +1132,7 @@ and the other calls are no-ops, so the backend behaves as unbounded storage.</co
 <p>Point two nodes at one shared mount and you have two independent LRUs, each with its own byte accounting,
 each unlinking the other's hot pages. And read the last sentence: the default is <em>no bound at all</em>.</p>
 
-<p><b>This is the "no one knows how" of the chapter.</b> A globally optimal policy would rank pages by
+<p><b>This remains a workload-dependent policy research problem.</b> A globally optimal policy would rank pages by
 expected recompute cost saved per byte held, and recompute cost is not uniform: under
 $F_{\text{prefill}}(S)$ a cached 1M-token prefix is worth four orders of magnitude more than a 1k-token
 one, so byte-uniform LRU is provably the wrong shape. Worse, the readers are chosen by a cache-aware router
@@ -1237,23 +1221,14 @@ a constant baked in near the bottom.</p>
         major, minor = torch.cuda.get_device_capability(device_id)</code></pre>
 </div>
 
-<p>Counting call sites at the pinned SHAs: <code>current_platform.get_device_capability()</code> is called
-with no device argument in 39 places in vLLM, SGLang's helper in 57, and of vLLM's 62 calls to
-<code>has_device_capability</code> exactly one passes a <code>device_id</code>
-(<code>vllm/platforms/cuda.py:L765</code>). Put an SM90 and an SM100 card in one node and backend selection
-is undefined behaviour dressed as a default argument.</p>
+<p>A no-argument device-capability query is a verification lead, not proof of undefined behavior. In a process with one correctly restricted visible GPU, local device zero can identify the intended rank device. In a multi-visible-device process, inspect binding and the helper's actual argument semantics. Validate every participating rank's hardware against the chosen kernels and collective contracts before declaring support or a bug.</p>
 
-<p><b>Engineering work remains</b> intra-node: thread <code>device_id</code> through backend selection and
-refuse to start when capabilities differ and the chosen backend cannot span them. Tedious, mechanical,
-uncontroversial, unwritten. <b>No one knows how</b> for the cross-generation fleet: A100s and H100s serving
-one model want different batch sizes, quantization and KV layouts per generation — which means forked
-prefix-cache keyspaces (§5) and a failing compat hash (§1). One logical service across two generations needs
-a cache-and-transfer format independent of the kernel that produced it, and nobody has proposed one.</p></div></section>
+<p><b>Engineering work remains</b> wherever device binding, backend eligibility or tensor-transfer contracts are incomplete. Separate mixed GPU generations within one collective group from independent heterogeneous replicas behind a router. <a href="https://www.microsoft.com/en-us/research/publication/splitwise-efficient-generative-llm-inference-using-phase-splitting/">Splitwise</a> already proposes phase-split homogeneous and heterogeneous clusters; it is incorrect to say nobody has proposed such a fleet. Serving one logical API does not require every pair to transfer raw KV: compatible subpools, explicit conversion or recomputation are alternatives.</p></div></section>
 <section class="sec" id="ultra-long-context" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Ultra-long context</h2></div><div class="sec__body"><p>Long context is three costs with three different exponents, and only one of them has an answer in the
-trees. Take Llama-3-70B at $S = 10^6$, all arithmetic:</p>
+trees. Extrapolate the Llama-3-70B shapes to $S = 10^6$ as hypothetical arithmetic, not a supported checkpoint launch:</p>
 
 <div class="kpis">
-  <div class="kpi kpi--hero"><div class="kpi__n">305 GiB</div><div class="kpi__l">KV for one 1M-token request, Llama-3-70B bf16 (derived)</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">305 GiB</div><div class="kpi__l">Hypothetical 1M-token Llama-3-70B-shape KV (not a supported-context claim)</div></div>
   <div class="kpi"><div class="kpi__n">65 GiB</div><div class="kpi__l">same request, DeepSeek-V3 MLA (derived)</div></div>
   <div class="kpi"><div class="kpi__n">1.31e18</div><div class="kpi__l">prefill attention FLOPs — 9.4× the projection term (derived)</div></div>
   <div class="kpi"><div class="kpi__n">62,500</div><div class="kpi__l">serial block hashes per request at block size 16</div></div>
@@ -1266,8 +1241,7 @@ budget (0.92 utilisation, less weights, less a 6.0&nbsp;GiB allowance) 70B of bf
 TP8, or 408&nbsp;GiB across the node, so one request would hold three quarters of an eight-card node. The
 prefill term is quadratic and worse: $2\,L\,h\,d_h\,S^2 = 1.31\times10^{18}$ FLOPs against
 $2PS = 1.4\times10^{17}$ for the projections. At the same 3.16 PFLOP/s assumption as §3, that is about
-460 seconds of TTFT, 90% of it attention. Nothing raises an error at 1M tokens; it just stops being
-economic, silently, somewhere in the hundreds of thousands.</p>
+460 seconds of TTFT, 90% of it attention. A real launch may reject this context length or exceed model, positional, memory or kernel limits. The arithmetic neither validates a million-token checkpoint nor establishes its quality.</p>
 
 <p>The one real answer in the trees is architectural sparsity. SGLang picks the dense/sparse crossover
 straight out of the checkpoint:</p>
@@ -1302,7 +1276,7 @@ straight out of the checkpoint:</p>
 $S \cdot \text{topk}$ — at $\text{topk} = 2048$, $S = 10^6$, a 488× cut in the attention term before the
 indexer's own cost. But look at the gate: <code>is_deepseek_dsa(hf_config)</code>. This is not a capability
 you enable; it is a property of models <em>trained</em> sparse. DeepSeek 3.2, GLM-5, LongCat and MiniMax-M3
-have entries in vLLM's backend enum; Llama-3-70B does not and never will. Today's answer to ultra-long
+have entries in vLLM's backend enum; the cited Llama-3-70B checkpoint does not advertise that sparse-attention architecture. Today's answer to ultra-long
 context is "use a different model".</p>
 
 <div class="callout callout--unverified">
@@ -1545,6 +1519,7 @@ with different suffixes — block <code>K</code>, on your disk. Repeat with an M
 <code>--goodput ttft:2000 tpot:50</code>, and compare headline throughput to goodput. That gap is what
 every published comparison omits; <a href="../10-benchmarking/10-03-honest-benchmarking.html">§10.3</a> has
 the discipline and <a href="../LABS.html">LABS</a> the runnable version.</p></div></section>
+<section class="sec" id="cache-and-rollout-contract"><div class="sec__h"><h2 class="sec__t">A checkable cache and rollout contract</h2></div><div class="sec__body"><p><b>Identity.</b> A reusable entry needs the model and weight revision, adapter state, exact token/position/mask semantics and relevant multimodal inputs; representation compatibility additionally needs dtype, layout, quantization scales and shard mapping. Tokenizer revision belongs in input provenance even when exact IDs are the key. Tenant authorization is separate from avoiding hash collisions.</p><p><b>Publication.</b> Publish a key only after a complete payload and metadata commit; verify a checksum and expected dimensions before making its slots visible to attention. A failed existence lookup can be a miss, but an unchecked partial hit cannot. Use leases or references for in-flight readers and defer reclamation until they finish.</p><p><b>Worked rollout.</b> Suppose old pools P0/D0 serve revision A and new P1/D1 serve B. Route a canary request only within P1/D1, bind its request ID and retries to B, and compare quality plus latency before increasing its traffic share. Stop admissions to P0, drain its transfers and D0 generations, then reclaim old registrations and cache namespaces. On a transfer timeout, cancel the abandoned leg, release its leases, and perform at most a bounded same-version retry or local recompute. A version mismatch must never be relabeled as a successful cache hit.</p><p>This is a proposed correctness protocol, not an executed implementation of either pinned runtime. Its negative tests are wrong-version keys, truncated payloads, duplicate completion, expired leases and failure between transfer and acknowledgement.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read and answer.</b> Open
   <code>vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py</code> at the
@@ -1612,19 +1587,15 @@ the discipline and <a href="../LABS.html">LABS</a> the runnable version.</p></di
   all because its cache is replicated. Any published transfer-overhead figure that omits the TP mapping is
   not portable to your cluster.</li>
 
-  <li><b>The distributed KV cache is legitimately AP — a miss is always legal — so consistency is not the
-  open problem. Placement and eviction are.</b> Value per byte varies by four orders of magnitude with
+  <li><b>Distributed KV needs semantic identity, integrity and publication guarantees as well as placement.</b> A legal miss does not prove a CAP classification or make stale/malformed hits harmless. Value per byte varies by four orders of magnitude with
   prefix length, and the router deciding who reads a page keeps changing the reuse distribution the evictor
   would need to estimate.</li>
 
-  <li><b>Heterogeneity fails at two layers for two reasons.</b> Within a node it is unwritten code —
-  <code>device_id</code> defaults to 0 in 96 call sites across the two trees. Across generations it is
-  unsolved design: a KV format independent of the kernel that produced it, which nobody has proposed.</li>
+  <li><b>Distinguish heterogeneous replicas from heterogeneous ranks.</b> A device-zero default alone does not prove invalid binding. Phase-split heterogeneous clusters have published proposals; cross-runtime tensor interchange still requires explicit compatible layouts and validation.</li>
 
   <li><b>Ultra-long context is answered today by architecture, not by engines.</b> Sparse attention in both
   trees is gated on the checkpoint — <code>is_deepseek_dsa(hf_config)</code>, not a flag. A dense model
-  simply pays the quadratic term: a 1M-token Llama-3-70B prefill is ~460 s of derived arithmetic, with no
-  error raised anywhere.</li>
+  simply pays the quadratic term: a hypothetical 1M-token extrapolation of Llama-3-70B shapes gives about 460 s under the stated ideal assumptions. Supported context, positional behavior and model quality require separate evidence.</li>
 
   <li><b>The least glamorous open problem is measurement, and it contaminates all the others.</b> vLLM's
   goodput is opt-in and uses mean TPOT, SGLang's harness has none, and the accuracy gate for disaggregation
@@ -1652,7 +1623,7 @@ the discipline and <a href="../LABS.html">LABS</a> the runnable version.</p></di
 </ul></div></section>
 <div class="pager"><a href="13-02-choosing-an-engine.html"><div class="pager__k">← Previous</div><div class="pager__t">Choosing an engine for a workload</div></a><a class="pager__next" href="13-04-what-to-build-next.html"><div class="pager__k">Next →</div><div class="pager__t">What to build next</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

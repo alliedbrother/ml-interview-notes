@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The scheduler: states, admission, preemption — The Inference Engineering Book</title>
+<title>The scheduler: states, admission, preemption — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 1 · The core serving loop · 01-04</div>
 <h1>The scheduler: states, admission, preemption</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>vllm/v1/core/sched/request_queue.py</code></li><li><code>vllm/v1/request.py</code></li><li><code>python/sglang/srt/managers/schedule_policy.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>vllm/v1/core/sched/request_queue.py</code></li><li><code>vllm/v1/request.py</code></li><li><code>python/sglang/srt/managers/schedule_policy.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Continuous batching only works because something decides, every single forward pass, which requests are in the batch and which are not. That something is the scheduler, and when it gets the decision wrong you do not get a crash — you get a server that silently does the same work three times.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Your Llama-3-8B server has been healthy for an hour. Then the p99 TTFT goes from 300 ms to 9 s, output tokens/s drops by 40%, and the log starts repeating one line:</p>
@@ -660,7 +660,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
             log_args.append(self.num_preemptions)</code></pre>
 </div>
 
-<p>Nothing has failed. Every request will still return a correct answer. What has happened is that the engine ran out of KV cache blocks for sequences it had already admitted, threw some of them out, and will now redo their prefill. The tokens you paid for once, you are paying for again. This chapter is about the machine that makes that call: what states a request can be in, what admission actually tests, who gets evicted, and what happens to the evicted sequence's KV.</p></div></section>
+<p>Preemption is an expected recovery path, not proof that every request will complete: overload, timeouts, cancellation, or worker errors can still fail requests. What has happened is that the engine ran out of KV cache blocks for sequences it had already admitted, threw some of them out, and will now redo their prefill. The tokens you paid for once, you are paying for again. This chapter is about the machine that makes that call: what states a request can be in, what admission actually tests, who gets evicted, and what happens to the evicted sequence's KV.</p></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A serving engine is a queueing system with one unusual property: <em>admission is reversible</em>. A request that has been running for 400 decode steps can be thrown back into the queue, and the only cost is the work already done. That single property is what separates an LLM scheduler from a thread scheduler. Everything else — queues, budgets, priorities — is standard. The reversibility is where the engineering is.</p>
 
 <p>vLLM makes the state machine explicit. Every request carries a <code>RequestStatus</code>, and the enum is short enough to read in full:</p>
@@ -696,7 +696,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
         return status &gt; RequestStatus.PREEMPTED</code></pre>
 </div>
 
-<p>Note the trick in <code>is_finished</code>: terminality is encoded in the <em>ordering</em> of the enum, not in a set membership test. Anything numerically greater than <code>PREEMPTED</code> is done. That is why the comment above <code>FINISHED_STOPPED</code> is load-bearing — inserting a new non-terminal state below that line would silently mark six terminal states as live.</p>
+<p>Note the trick in <code>is_finished</code>: terminality is encoded in the <em>ordering</em> of the enum, not in a set membership test. Anything numerically greater than <code>PREEMPTED</code> is done. That is why the comment above <code>FINISHED_STOPPED</code> is load-bearing — inserting a new non-terminal state below that line would silently classify that new non-terminal state as finished.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 — the vLLM v1 request state machine, and which queue holds each state.</b>
@@ -1079,7 +1079,7 @@ flowchart TD
                         break</code></pre>
 </div>
 
-<p>Under FCFS the victim is <code>self.running.pop()</code> — the <em>last</em> element of the running list, which is admission order, so the victim is the most recently admitted request. This is LIFO eviction, and it is the right choice for two reasons. It maximises the age of the surviving set (older requests are closer to finishing, so evicting them wastes more work), and it makes the eviction self-limiting: the request that just caused the pressure is the first to go.</p>
+<p>Under FCFS the victim is <code>self.running.pop()</code> — the <em>last</em> element of the running list, which is admission order, so the victim is the most recently admitted request. This is LIFO eviction, and it is the right choice for two reasons. It maximises the age of the surviving set (older requests may contain more accumulated work, although age does not establish remaining output length), and it makes the eviction self-limiting: the request that just caused the pressure is the first to go.</p>
 
 <p>The termination condition is the interesting line. <code>if preempted_req == request: break</code> — if the loop has eaten its way through the running list until the only remaining candidate is the request we were trying to serve, it stops. A single request whose next block cannot be allocated even with an empty pool is simply not scheduled this step; it is never left in an inconsistent state.</p>
 
@@ -1244,7 +1244,7 @@ flowchart TD
   </div>
 </div>
 
-<p>So the honest statement is: <b>recompute beats swap exactly when more than ~91% of the victim's KV survives in the prefix cache</b>, and vLLM's free-queue ordering is engineered to make that number close to 100%. Swap also has costs the arithmetic hides — a pinned host buffer sized as a fraction of the GPU pool, a swap-in that needs free GPU blocks (the very resource that was exhausted), and exclusive use of the PCIe link that weight loading and P/D transfer also want.</p>
+<p>Under this simplified linear-prefill/constant-transfer-bandwidth model, recompute beats round-trip swap when $(1-f)t_{\rm cold}&lt;2Sb_{\rm tok}/\beta_{\rm link}$. The approximately 91% threshold is illustrative, not a measured engine property. Here $f$ must describe a reusable contiguous prefix, not an arbitrary fraction of surviving blocks. Warm suffix attention still reads the prefix, and fixed overheads, queueing, and bandwidth contention alter the crossover.</p>
 
 <div class="callout callout--warn">
   <span class="callout__k">Finding</span>
@@ -1279,12 +1279,12 @@ flowchart TD
     release_kv_cache(req, tree_cache, is_insert=False)</code></pre>
 </div>
 
-<p>Swap survives <em>only</em> on a P/D decode node — a machine that by construction cannot run prefill, so $f$ is undefined and recompute is not an option at all. Everywhere else, retraction is pure recompute. That is the exception that proves the rule: swap is what you do when recompute is impossible, not when it is expensive.</p>
+<p>The quoted SGLang path supports host backup for a disaggregated decode worker whose deployed execution path cannot locally prefill. This is an implementation/deployment limitation, not a physical inability of that GPU to run prefill. Other offload paths and configurations should not be inferred from this call site alone.</p>
 
-<p>The last line of that quote is the sharpest single difference between the two engines. <code>release_kv_cache(req, tree_cache, is_insert=False)</code> means SGLang does <em>not</em> put the retracted request's KV into the radix tree — the comment in <code>retract_decode</code> explains why ("we need the space instantly"), and the <code>TODO</code> concedes it is a known gap. So where vLLM's victim resumes with $f \approx 0.99$, SGLang's resumes closer to $f = 0$ unless another live request happens to share its prefix. On the numbers above that is 372 ms versus 3.7 ms of redundant prefill per preemption. It is also why SGLang invests so much more machinery in <em>avoiding</em> retraction — which is the next section.</p></div></section>
+<p>The flag is_insert=False suppresses insertion of new request KV during this release. It does not erase an already indexed shared prefix or imply a cold resume. Both engines' resumable prefix lengths depend on ownership, eviction, and surviving ancestor blocks; the previously assumed 99%-versus-0% comparison is not established by the excerpts.</p></div></section>
 <section class="sec" id="starvation" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Starvation, thrash, and fairness</h2></div><div class="sec__body"><p>Two failure modes bracket every scheduler. A long request that is repeatedly evicted and never finishes; and a long request that never starts because short ones keep jumping ahead.</p>
 
-<p><b>Repeated eviction.</b> vLLM's defence is structural. The victim is the last-admitted request, so the oldest running request is never chosen under FCFS; the victim is prepended to the waiting queue so it is first back in; and no new request is admitted on a step where a preemption happened. Together these give a progress guarantee: the head of the running list can only be preempted after every request behind it has been. <code>request.num_preemptions</code> is incremented on every eviction and is exported per-request, so a rising value on one request ID is the signal that the guarantee is being stressed.</p>
+<p><b>Repeated eviction.</b> vLLM's defence is structural. The victim is the last-admitted request, so newer running requests are chosen before the oldest under FCFS; the victim is prepended to the waiting queue so it is first back in; and no new request is admitted on a step where a preemption happened. Together these provide an ordering property, not a general starvation-freedom guarantee under overload: the head of the running list can only be preempted after every request behind it has been. <code>request.num_preemptions</code> is incremented on every eviction and is exported per-request, so a rising value on one request ID is the signal that the guarantee is being stressed.</p>
 
 <p>SGLang's defence is a feedback controller instead. After every retraction it recomputes the conservatism factor from what actually happened, and decays it back on every step that did <em>not</em> retract:</p>
 
@@ -1339,7 +1339,7 @@ flowchart TD
 </div>
 
 <p>The abort carries HTTP 503 and the message <code>"Request waiting timeout reached."</code>. It is off by default. That is the honest tradeoff: a cache-aware policy buys throughput and gives up a starvation-freedom proof, so the mitigation is a timeout rather than an ordering invariant.</p></div></section>
-<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one preemption, end to end</h2></div><div class="sec__body"><p>Four requests A, B, C, D, each around 8,190 tokens, on the 20,480-block pool from §3. Nothing else is running; the pool is nearly full because a fifth request finished and its blocks are still cached.</p>
+<section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one preemption, end to end</h2></div><div class="sec__body"><p>Use an intentionally small illustrative pool with 2049 usable blocks, excluding any reserved null block. Four live requests each hold 512 blocks, leaving one allocatable block. This replaces the 20,480-block capacity example: four 8k requests would occupy only about 2048 blocks there, and finished cached blocks with zero references are reclaimable. For the following boundary-crossing trace, each request starts at exactly 8192 cached tokens; a new token needs a new block.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 4 — a preemption and the victim's resumption, step by step. Block counts are derived for Llama-3-8B at block_size 16.</b>
@@ -1457,17 +1457,17 @@ curl -s localhost:8000/metrics | grep -E 'num_preemptions|kv_cache_usage'</code>
 
 <details class="fold">
   <summary>Answer 2</summary>
-  <div class="fold__body"><p>Per-GPU $b_{tok} = 2 \cdot 80 \cdot (8/8) \cdot 128 \cdot 2 = 40{,}960$ B. Per-GPU prefill rate also rises roughly 8&times; relative to the per-GPU parameter count. The crossover $f^{*} = 1 - 2 b_{tok} R / B_{pcie}$ has $b_{tok}$ down 3.2&times; and $R$ (tokens/s the GPU sustains for the sharded model) up; the product moves less than either factor. The important structural point is that TP shards the KV across GPUs but each GPU still has its own PCIe link, so the swap side scales with the model while the PCIe side does not degrade — swap becomes relatively <em>more</em> attractive at high TP, which is one reason offload survives in the P/D decode path.</p></div>
+  <div class="fold__body"><p>Per-rank KV bytes are $2\cdot80\cdot(8/8)\cdot128\cdot2=40960$ bytes/token. The simplified crossover is $f^*=1-2b_{\rm tok}R/B_{\rm link}$. Assuming an explicitly illustrative achieved prefill rate R=22000 tokens/s and an independent 64 GB/s link gives f*=0.97184, about 97.2%; doubling R gives about 94.4%. Model geometry alone does not determine R or the threshold direction. Measure TP prefill throughput and link sharing before comparing with the 8B 91% scenario.</p></div>
 </details>
 
 <details class="fold">
   <summary>Answer 3</summary>
-  <div class="fold__body"><p>Under PRIORITY the victim is <code>max(self.running, key=lambda r: (r.priority, r.arrival_time))</code>, recomputed every time the allocator fails, so the same low-priority request is chosen again and again — it can be preempted unboundedly and will starve until the high-priority flood stops. Under FCFS the victim is <code>self.running.pop()</code>, so a request that has been running since before the flood is at a low index and is only reached after everything admitted after it has been evicted. FCFS gives a progress guarantee that PRIORITY deliberately trades away.</p></div>
+  <div class="fold__body"><p>Under PRIORITY the victim is <code>max(self.running, key=lambda r: (r.priority, r.arrival_time))</code>, recomputed every time the allocator fails, so the same low-priority request is chosen again and again — it can be preempted unboundedly and will starve until the high-priority flood stops. Under FCFS the victim is <code>self.running.pop()</code>, so a request that has been running since before the flood is at a low index and is only reached after everything admitted after it has been evicted. FCFS preserves this victim ordering, not an unconditional completion guarantee; sustained overload and resource feasibility still matter.</p></div>
 </details>
 
 <details class="fold">
   <summary>Answer 4</summary>
-  <div class="fold__body"><p>Retraction (<code>is_insert=False</code>, from <code>release_req</code> in <code>python/sglang/srt/managers/schedule_batch.py</code>): the tree contains nothing new — the victim's KV is discarded so the memory is immediately available, and a later resume re-prefills from scratch. Normal finish (<code>is_insert=True</code>): the finished request's full token sequence is inserted into the radix tree as an evictable path, so a future request sharing that prefix hits it.</p></div>
+  <div class="fold__body"><p>Retraction with is_insert=False inserts no new suffix. Existing canonical/shared prefix entries can survive, so a resume reuses the longest still-valid contiguous cached prefix and recomputes the rest. A normal finish with insertion enabled offers the finished path for reuse, subject to cache policy and eviction.</p></div>
 </details>
 
 <details class="fold">
@@ -1476,8 +1476,8 @@ curl -s localhost:8000/metrics | grep -E 'num_preemptions|kv_cache_usage'</code>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>Admission is four independent tests — block budget, token budget, sequence-slot budget, and watermark headroom — and which one binds changes with workload. Sizing <code>max_num_seqs</code> without computing the block budget for your context length is the single most common misconfiguration.</li>
-  <li>Preemption is reversible admission, and its cost is bounded by the prefix cache, not by PCIe. Recompute beats swap only above roughly 91% KV survival for Llama-3-8B on Gen5 x16 (derived); vLLM's tail-append of hashed blocks to the free queue is what keeps the real figure near 100%.</li>
-  <li>vLLM v1 has deleted swap entirely at <code>a556f3f</code>. SGLang keeps host offload for exactly one case — a P/D decode node, where recompute is structurally impossible — and uses pure recompute everywhere else.</li>
+  <li>Preemption is reversible admission, and its cost is bounded by the prefix cache, not by PCIe. Recompute beats swap only above roughly 91% KV survival for Llama-3-8B on Gen5 x16 (derived); vLLM's tail-append of hashed blocks to the free queue is intended to preserve reuse, without guaranteeing any particular hit fraction.</li>
+  <li>vLLM v1 has deleted swap entirely at <code>a556f3f</code>. SGLang keeps host offload for exactly one case — a P/D decode node, where the deployed decode-worker path does not support local recomputation — and uses pure recompute everywhere else.</li>
   <li>The two engines took opposite bets on queue ordering. vLLM sorts once at insert and keeps a starvation-freedom argument (LIFO victim, front-of-queue resume, no admission on a preempting step). SGLang re-sorts every pass by a cache-aware policy, gives up that argument, and buys it back with a feedback-controlled admission ratio and an optional waiting timeout.</li>
   <li>The victim-selection heuristics differ in a way that matters: vLLM picks the newest admission; SGLang picks the request with the fewest generated tokens and longest prompt. Under bursty arrivals with stalled old requests these select different victims, and only SGLang's choice is directly optimising work preserved.</li>
   <li>Every scheduling lever in vLLM lands in one file behind one abstract method. If batch composition, TTFT tails, or preemption counts look wrong, <code>schedule()</code> is the file to read — and <code>--scheduler-cls</code> means you can replace it without forking.</li>
@@ -1492,7 +1492,7 @@ curl -s localhost:8000/metrics | grep -E 'num_preemptions|kv_cache_usage'</code>
 </ul></div></section>
 <div class="pager"><a href="01-03-continuous-batching.html"><div class="pager__k">← Previous</div><div class="pager__t">Static, dynamic, and continuous batching</div></a><a class="pager__next" href="01-05-chunked-prefill.html"><div class="pager__k">Next →</div><div class="pager__t">Chunked prefill</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -19,7 +19,7 @@ flowchart TD
     PT["pretrained base model<br/>completes text;<br/>does not follow instructions"] --> SFT["SFT<br/>supervised fine-tuning on<br/>instruction-response pairs"]
     SFT --> A{"how do you have<br/>signal about quality?"}
     A -->|"human preference pairs"| RM["reward model<br/>Bradley-Terry on<br/>chosen vs rejected"]
-    A -->|"preference pairs, directly"| DPO["DPO<br/>closed-form; no reward model,<br/>no sampling loop"]
+    A -->|"preference pairs, directly"| DPO["DPO<br/>gradient-based preference loss;<br/>no separate reward model"]
     A -->|"a checkable answer"| GRPO["GRPO<br/>verifiable reward,<br/>group-relative advantage"]
     RM --> PPO["PPO<br/>maximise reward MINUS<br/>a KL penalty to the SFT policy"]
     PPO --> AL["aligned model"]
@@ -30,16 +30,18 @@ flowchart TD
 ### Supervised fine-tuning
 
 Train on (instruction, response) pairs with the standard next-token loss,
-**computing the loss on the response tokens only**. Including the prompt teaches
-the model to generate user turns.
+often **computing loss on response tokens only** to focus the learning signal on
+assistant behaviour. Full-sequence and prompt-weighted objectives are also valid
+choices; they spend some gradient budget modelling the input distribution.
+Assistant-only masking requires correct chat-template span boundaries.
 
 | Detail | Guidance |
 |---|---|
-| Data quality over quantity | 1,000 excellent examples beat 100,000 mediocre ones — the LIMA result |
+| Data quality and coverage | LIMA demonstrated a particular small curated-data recipe; no universal sample-count ranking follows |
 | Diversity | cover the task distribution you actually expect |
 | Format consistency | use the model's chat template; do not hand-write control tokens |
 | Learning rate | 1e-5 to 2e-5 full, 1e-4 to 3e-4 for LoRA |
-| Epochs | 2–3; more memorises |
+| Epochs | choose from held-out quality and overfitting checks, not a universal count |
 | Packing | concatenate short examples to fill the context — can double throughput |
 | Mask the prompt | loss on the response only |
 
@@ -62,7 +64,8 @@ more consistent at "which of these two is better" than at "rate this 1–10".
 
 $$\max_\pi\;\mathbb{E}_{y\sim\pi}\bigl[r_\phi(x,y)\bigr] - \beta\,D_{\mathrm{KL}}\bigl(\pi\,\Vert\,\pi_{\text{SFT}}\bigr)$$
 
-**The KL penalty is not optional.** Reward models are imperfect proxies, and an
+**KL regularisation is an important design choice, not mandatory in every RL
+algorithm.** Reward models are imperfect proxies, and an
 unconstrained optimiser finds their failure modes — repetitive phrasings,
 excessive hedging, characteristic filler that scores well and reads badly. This
 is Goodhart's law with a learned metric, and $\beta$ is the dial between
@@ -81,8 +84,14 @@ likelihood gives a supervised loss over preference pairs:
 
 $$L_{\text{DPO}} = -\mathbb{E}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\right)\right]$$
 
-**No reward model, no sampling, no RL machinery** — optimising the same objective
-with ordinary supervised learning. That is why it became the default.
+Standard offline DPO needs no separately trained reward model or on-policy
+sampling loop. The closed form belongs to the ideal unrestricted policy,
+$\pi^*(y\mid x)\propto\pi_{\rm ref}(y\mid x)\exp(r(x,y)/\beta)$, with
+$\beta>0$ and reference support. DPO still fits neural parameters iteratively.
+The connection uses the KL-regularised reward objective and Bradley-Terry
+preference model; finite data, limited policy capacity, and noisy preferences
+do not guarantee the same learned policy as PPO.
+[Original DPO derivation](https://arxiv.org/abs/2305.18290).
 
 Practical notes: learning rates are very small ($5\times10^{-7}$ to
 $1\times10^{-6}$); $\beta$ around 0.1; and over-training collapses output
@@ -92,19 +101,22 @@ current policy — which is its main quality limitation relative to online metho
 ### GRPO and verifiable rewards
 
 For tasks with a **checkable** answer — mathematics, code that must pass tests,
-formal proofs — replace the learned reward model with a verifier. This removes
-reward hacking almost entirely, because the verifier cannot be fooled by
-plausible-sounding text.
+formal proofs — a verifier can replace a learned reward model. This reduces
+some subjective scoring problems but does not remove reward hacking: incomplete
+unit tests, leaked answers, parser bugs, and exploitable execution environments
+can all reward incorrect behaviour. Run generated code in an isolated sandbox.
 
 Group relative policy optimisation samples $G$ completions per prompt and
 standardises the rewards within the group:
 
-$$\hat{A}_i = \frac{r_i - \mathrm{mean}(r_1,\dots,r_G)}{\mathrm{std}(r_1,\dots,r_G)}$$
+$$\hat{A}_i = \frac{r_i - \mathrm{mean}(r_1,\dots,r_G)}{\mathrm{std}(r_1,\dots,r_G)+\epsilon}$$
 
-The group mean **is** the baseline, so no value network is needed — halving
-memory and simplifying the implementation. This is the method behind the recent
-generation of reasoning models, and the broader lesson generalises: **RL works
-far better when the reward is verifiable than when it is learned.**
+The group mean supplies a baseline without a value network. Memory savings depend
+on the whole rollout/training system, not a fixed factor of two. GRPO can use
+learned rewards as well as verifiers. Equal-reward groups have zero centred
+advantage and provide no relative learning signal. Modern variants differ in
+reward scaling, clipping, token aggregation, and KL settings; record the exact
+[TRL GRPO configuration](https://huggingface.co/docs/trl/grpo_trainer).
 
 ### The method table
 
@@ -114,7 +126,7 @@ far better when the reward is verifiable than when it is learned.**
 | RLHF (PPO) | reward model + sampling | strongest control; complex, unstable |
 | **DPO** | preference pairs | simple and stable; off-policy |
 | IPO / KTO / ORPO | variants | KTO needs only binary good/bad labels |
-| **GRPO** | a verifiable reward | excellent where verification exists |
+| **GRPO** | sampled completion groups and reward scores | avoids a critic; quality depends on reward and rollout design |
 | Constitutional AI / RLAIF | a principle set, AI feedback | scales past human labelling |
 | Best-of-$n$ | reward model + inference compute | no training; pay at inference |
 
@@ -183,10 +195,10 @@ changes without measurement are superstition, and the field is full of it.
 |---|---|
 | Version control | prompts change behaviour as much as code |
 | An evaluation suite in CI | catch regressions from prompt or model changes |
-| Templating, not string concatenation | injection safety and maintainability |
+| Templating and typed arguments | maintainability and correct escaping; not a prompt-injection security boundary |
 | Track model version with prompt version | a prompt tuned on one model may fail on another |
 | A/B test prompt changes | intuition about prompts is unreliable |
-| Log inputs and outputs | you cannot debug what you did not record |
+| Privacy-aware traces | redact secrets, minimise raw text, restrict access and retention |
 
 ## Tool use and agents
 
@@ -216,7 +228,8 @@ flowchart LR
 
 - **Clear, minimal schemas.** Fewer parameters, unambiguous names, examples in
   the description.
-- **Constrained decoding** for the call itself, so parsing never fails.
+- **Constrained decoding** improves structural validity; still handle truncation,
+  unsupported schemas, refusal outputs, and semantically invalid arguments.
 - **Errors returned as results**, not as exceptions. The model can recover from
   "file not found"; it cannot recover from a crash.
 - **Idempotency and confirmation** for anything destructive.
@@ -243,12 +256,12 @@ budget, checkpointing, and human confirmation at high-consequence actions.
 | Non-determinism | batching and kernels vary results even at temperature 0 | do not assume reproducibility |
 | Overconfidence | fluent text regardless of certainty | calibration prompts, self-consistency as a confidence signal |
 
-**Prompt injection is the security issue that has no clean solution.** If a model
+**Prompt injection requires layered defences.** If a model
 processes untrusted text — a retrieved web page, a user-uploaded document, an
-email — that text can contain instructions the model may follow. There is no
-reliable way to make a language model distinguish "instructions from my
-principal" from "text I was asked to read", because both arrive as tokens in the
-same context.
+email — that text can contain instructions the model may follow. Shared token
+representation does not prove an impossibility theorem about distinguishing
+roles. Role training and filtering can reduce risk, but prompts alone should
+not enforce authorization or prevent consequential side effects.
 
 The workable defences are architectural: give the model the **least privilege**
 needed, require human confirmation for consequential actions, never let retrieved
@@ -275,16 +288,55 @@ positions is usable; a naive "rate this 1–10" judge is not.
 
 ## Self-check
 
-1. Why must SFT mask the prompt tokens from the loss?
+1. What does response-only SFT optimise, and when might full-sequence loss be chosen?
 2. What does DPO replace from the RLHF pipeline, and what objective is it
    equivalent to?
 3. Why does GRPO not need a value network?
 4. Explain chain of thought as compute allocation, and derive two practical rules
    from that framing.
 5. Why is chain-of-thought reasoning not a reliable explanation?
-6. Why is prompt injection structurally unsolvable at the model level, and what
-   are the architectural defences?
+6. Why is a model instruction not an authorization boundary, and what architectural
+   controls limit damage from prompt injection?
 7. Name three LLM-as-judge biases and the correction for each.
+
+### Worked preference and equal-reward checks
+
+For a preference pair define $z=\beta[(\log\pi_w-\log\pi_l)-
+(\log\pi_{{\rm ref},w}-\log\pi_{{\rm ref},l})]$. Then
+$L=\operatorname{softplus}(-z)$ and $\partial L/\partial z=\sigma(z)-1$.
+At $z=0$ the loss is $\log2$; increasing the chosen-minus-rejected margin reduces
+it. Sequence log probabilities are sums over response tokens with matching
+tokenisation and masks, not a mean unless a deliberate variant says otherwise.
+
+```python runnable
+import math
+import torch
+import torch.nn.functional as F
+
+torch.set_num_threads(1)
+torch.manual_seed(7)
+logp = torch.tensor([-3.0, -4.0], requires_grad=True)
+reference = torch.tensor([-3.5, -4.5])
+beta = 0.1
+z = beta * ((logp[0] - logp[1]) - (reference[0] - reference[1]))
+loss = F.softplus(-z)
+loss.backward()
+assert abs(loss.item() - math.log(2)) < 1e-6
+torch.testing.assert_close(logp.grad, torch.tensor([-0.05, 0.05]))
+rewards = torch.tensor([[1., 1., 1., 1.], [0., 0., 1., 1.]])
+adv = (rewards - rewards.mean(1, keepdim=True)) / (
+    rewards.std(1, correction=0, keepdim=True) + 1e-8)
+assert torch.isfinite(adv).all() and torch.count_nonzero(adv[0]) == 0
+torch.testing.assert_close(adv[1], torch.tensor([-1., -1., 1., 1.]))
+print("DPO gradient and zero-variance GRPO group verified")
+```
+
+**Operational answers.** A valid JSON tool request can still name another tenant's
+record. The executor must authenticate the caller, authorize the resource, check
+typed arguments, bound time and output size, and enforce idempotency outside the
+model. Treat returned documents as data. Retry only transient failures within a
+budget; do not retry authorization denial until it succeeds. Independently
+measure verifier false accepts and judge disagreement on high-consequence cases.
 
 ## Where to go next
 

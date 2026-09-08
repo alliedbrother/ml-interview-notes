@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RoPE, scaling, sliding window, attention sinks — The Inference Engineering Book</title>
+<title>RoPE, scaling, sliding window, attention sinks — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,13 +623,12 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-06</div>
 <h1>RoPE, scaling, sliding window, attention sinks</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/rotary_embedding/</code></li><li><code>python/sglang/srt/layers/rotary_embedding/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/rotary_embedding/</code></li><li><code>python/sglang/srt/layers/rotary_embedding/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">A transformer's attention is permutation-invariant: shuffle the keys and the output is
-unchanged. Everything a served model knows about word order arrives through one small tensor of
+<div class="prose"><p class="lead">For fixed queries, jointly permuting corresponding keys, values, and mask columns leaves attention output unchanged. Permuting only keys does not. Self-attention without positional signals is permutation-equivariant under a compatible mask; a causal mask itself encodes order. Everything a served model knows about word order arrives through one small tensor of
 integers that the scheduler hands the model runner each step. This chapter follows those integers
 into the rotation that encodes them, out into the KV cache where they become permanent, and finally
-into the block allocator — where a windowed model stops the cache from growing at all.</p></div>
+into the block allocator — where all-windowed layers can bound their active cache; hybrid full-attention layers still grow with context.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Two symptoms, both common, both silent.</p>
 
 <p>The first: you serve a model whose config says <code>max_position_embeddings: 8192</code> and launch
@@ -793,7 +792,7 @@ $i = 0, 1, \dots, r/2 - 1$. The frequency of pair $i$ is</p>
 </div>
 
 <p>Note what that is: a table of shape $[\texttt{max\_position\_embeddings},\, r]$ built once at model
-construction. RoPE at inference is not trigonometry, it is a gather. The rotation, writing
+construction. RoPE can reuse gathered precomputed trigonometric values, but still performs the rotation arithmetic. The rotation, writing
 $x^{(i)} = (x_{i}, x_{i+r/2})$ for the NeoX pairing,</p>
 
 <div class="math-display">$$\tilde{x}^{(i)}_m \;=\; \begin{pmatrix}\cos m\omega_i & -\sin m\omega_i \\[2pt] \sin m\omega_i & \cos m\omega_i\end{pmatrix} x^{(i)} \;=\; R(m\omega_i)\, x^{(i)}$$</div>
@@ -913,17 +912,14 @@ rotated <code>k</code> into the paged cache. No unrotated copy exists anywhere.<
 <p>The practical cost: insert a 40-token per-user preamble <em>before</em> a 20,000-token shared document
 and every document block becomes a miss, because each token shifted by 40 positions and its stored key
 is the wrong rotation. Move the preamble after the document and the whole document stays cacheable.
-Prompt <em>order</em> is a throughput decision. Storing pre-RoPE keys would fix this but move the
-rotation of the entire cached prefix into every decode step — turning a gather into a full pass over
+Prompt <em>order</em> is a throughput decision. Storing pre-RoPE keys would permit changing rotation coordinates, but would not make arbitrary substring reuse correct: earlier-layer hidden states and values also depend on preceding context. It may additionally move rotation work into decode — turning a gather into a full pass over
 the KV cache, exactly the traffic <a href="03-02-flashattention.html">§3.2</a> exists to avoid.</p></div></section>
 <section class="sec" id="context-extension" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Extending context: PI, NTK, YaRN</h2></div><div class="sec__body"><p>Why does a model trained at 8k degrade at 32k? Look at the slowest pair. At $b = 5\times10^5$,
 $r = 128$, pair $i = 63$ has wavelength $2\pi (5\times10^5)^{63/64} = 2.56\times10^6$ tokens. Over the
 entire 8192-token training window it rotates through $0.0032$ of a revolution — an arc of about 1.15°,
 and every weight reading that pair was fitted on that sliver. At position 32768 the arc is four times
 wider. Chen et al. (<a href="https://arxiv.org/abs/2306.15595">arXiv:2306.15595</a>) report that direct
-extrapolation blows up attention scores catastrophically, far worse than naive expectation. The fast
-pairs are fine — pair 0 completes 1300 revolutions in 8192 tokens. The problem is entirely at the slow
-end.</p>
+extrapolation blows up attention scores catastrophically, far worse than naive expectation. Fast pairs already span many rotations (pair 0 completes about 1300 in 8192 tokens), while slow pairs can leave their trained angular range. This motivates frequency-dependent extension, but does not prove all extrapolation error comes only from slow frequencies; learned multi-frequency interactions and attention statistics also matter.</p>
 
 <p>Four families of fix, all edits to $\omega_i$ or to the position axis.</p>
 
@@ -938,8 +934,8 @@ end.</p>
   <div class="ve-card">
     <span class="ve-card__k">NTK</span>
     <h4>NTK-aware scaling</h4>
-    <p>Leave positions alone; raise the base $b \mapsto b\cdot s$. Since $\omega_i = b^{-2i/r}$, that
-    barely moves $i=0$ and moves $i = r/2$ by nearly the full factor $s$ — interpolation spread across
+    <p>Leave positions alone; raise the base $b\mapsto b\,s^{r/(r-2)}$ for the standard fixed NTK-aware scaling rule with r&gt;2. Since $\omega_i = b^{-2i/r}$, that
+    leaves i=0 unchanged and divides the last pair's frequency (i=r/2-1) by exactly s — interpolation spread across
     the spectrum instead of applied flat.</p>
   </div>
   <div class="ve-card">
@@ -1151,8 +1147,8 @@ constants mean exactly what they say.</p>
 <p>The attention-temperature correction hides in the last two lines of
 <code>_compute_cos_sin_cache</code>. Both <code>cos</code> and <code>sin</code> are multiplied by
 $\mu = 0.1\ln s + 1$, so the rotation becomes $\mu R(m\omega_i)$ — applied to $q$ and $k$ from the same
-table, which multiplies every pre-softmax logit by $\mu^2$. At $s = 8$, $\mu = 1.2079$ and
-$\mu^2 = 1.459$: the softmax runs 46% colder, sharpening a distribution interpolation had flattened.
+table, which multiplies the rotary-subspace dot-product contribution by $\mu^2$. For full RoPE this scales the full dot product; with partial RoPE the unrotated tail is unchanged. At $s = 8$, $\mu = 1.2079$ and
+$\mu^2 = 1.459$: the full-RoPE effective temperature becomes 1/1.459=0.685 of its previous value, about 31.5% lower, while logit scale rises 45.9%, sharpening a distribution interpolation had flattened.
 YaRN reports this closes most of the remaining gap
 (<a href="https://arxiv.org/abs/2309.00071">arXiv:2309.00071</a>).</p>
 
@@ -1489,10 +1485,7 @@ because those tokens are informative, but because softmax must put its mass some
 tokens are visible to every subsequent query. They are a bias term the model learned to lean on; evict
 them and every softmax denominator changes at once.</p>
 
-<p>The fix is to pin them: keep the first few tokens' KV permanently and slide a window over everything
-else — StreamingLLM reports four sink tokens suffice. vLLM implements this as a block reservation
-mirroring the null block exactly: pop the sink blocks out of the free queue at construction so nothing
-can allocate them.</p>
+<p>StreamingLLM retains a small number of each request's initial KV entries plus a rolling recent window. The StaticSinkAttention excerpts below show reserved static sink blocks, but allocation and metadata alone do not establish that they hold each request's first-token KV. Their initialization, model semantics, and ownership must be verified before identifying them with StreamingLLM. Treat static sink blocks, request-specific retained tokens, and learned sink logits as distinct mechanisms.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1685,10 +1678,7 @@ print(type(plain).__name__, plain.cos_sin_cache.shape)'</code></pre>
 <p><code>mscale</code> should read 1.2079 for $s=8$ and the YaRN table's first dimension should be
 $4096 \times 8$. <em>I did not execute this — no GPU and no vLLM install in this environment.</em></p>
 
-<p><b>3. Watch a window free blocks.</b> Serve any sliding-window checkpoint with
-<code>--max-model-len</code> well above the window and confirm the free-block count stops falling once
-a sequence passes $W$ tokens; then flip <code>--disable-hybrid-kv-cache-manager</code> and watch it
-fall linearly instead.</p></div></section>
+<p><b>3. Watch a window free blocks.</b> For an all-sliding-window checkpoint, active attention KV can plateau after the window plus alignment/in-flight allowance, although prefix-cache retention changes free-pool observations. For hybrid models, full-attention layers continue growing. Record per-group occupancy and distinguish active, cached-evictable, and reserved blocks before interpreting the trace.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read and answer.</b> Open
   <code>vllm/model_executor/layers/rotary_embedding/linear_scaling_rope.py</code>. Its
@@ -1732,10 +1722,7 @@ fall linearly instead.</p></div></section>
     block-granular (token-exact: 1.5 GiB). (d) 26 sequences — at <em>any</em> context length, which is
     the point.</p>
 
-    <p><b>3.</b> Zero. Every document token in B sits 50 positions later than in A, so every block has a
-    different position, rotation, stored key, and hash (the block-hash chain folds in the parent hash,
-    so the first differing block poisons all descendants). B re-prefills all 2000 tokens. Move the
-    profile after the document and B reuses $\lfloor 2000/16 \rfloor = 125$ blocks.</p>
+    <p><b>3.</b> No ordinary chained-prefix hit survives the different prepended profile. Besides changed RoPE positions, the document's hidden states and values depend on the different preceding context; pre-RoPE storage alone cannot repair that. Moving the profile after an identical document restores a common prefix, with the engine's full-block and final-logit recomputation rules limiting the exact hit length.</p>
 
     <p><b>4.</b> Correctness is fine either way — the same blocks end up freed. Performance is not.
     <code>remove_skipped_blocks</code> runs before every chunk, so a forward scan would walk the entire
@@ -1751,19 +1738,18 @@ fall linearly instead.</p></div></section>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>RoPE at inference is a gather, not a computation: a $[\texttt{max\_position\_embeddings}, r]$
+  <li>RoPE uses gathered trigonometric coefficients plus rotation arithmetic: a $[\texttt{max\_position\_embeddings}, r]$
   cos/sin table built once at construction and indexed by a position tensor the scheduler derives from
   <code>num_computed_tokens</code>. That table is the only place the scaling factor lives, and it is
   frozen at startup.</li>
 
   <li>The KV cache stores post-rotation keys, which is why prefix caching is position-locked and prompt
-  ordering is a throughput decision. Storing pre-RoPE keys would trade the position lock for a full
-  re-rotation pass over the cache every decode step.</li>
+  ordering is a throughput decision. Pre-RoPE storage changes rotation bookkeeping but cannot remove dependence on the preceding token context.</li>
 
   <li>Every context-extension scheme is one edit to $\omega_i = b^{-2i/r}$ or to the position axis. PI
   divides positions, NTK multiplies the base, YaRN chooses per frequency band via
   <code>yarn_find_correction_range</code> and then multiplies the cos/sin table by
-  $\mu = 0.1\ln s + 1$ — scaling every logit by $\mu^2$, an attention-temperature correction hiding in
+  $\mu = 0.1\ln s + 1$ — scaling the rotated contribution by $\mu^2$ (the full dot product only when all dimensions rotate), an attention-temperature correction hiding in
   two lines of cache construction.</li>
 
   <li>A sliding window converts KV from $O(T)$ to $O(W)$ per sequence by substituting
@@ -1773,11 +1759,9 @@ fall linearly instead.</p></div></section>
 
   <li>Hybrid full/windowed models break the memory system's uniformity assumption. vLLM's fallback
   promotes windowed specs to full and logs a warning that costs, on a 3:1 pattern at 128k, a derived
-  3.66× in per-sequence KV. SGLang's answer is a second cache class with two LRU orders over one tree
-  and tombstoned internal nodes.</li>
+  3.66× in per-sequence KV. The legacy SWARadixCache illustrates two LRU orders and tombstones; the default live path uses UnifiedRadixCache components, as the radix chapter documents.</li>
 
-  <li>"Attention sink" names two unrelated things: StreamingLLM's pinned first-token KV, costing real
-  blocks popped from the free queue at construction, and a learned per-head scalar in the softmax
+  <li>"Attention sink" names two unrelated things: StreamingLLM's request-specific pinned first-token KV, costing real cache slots, and a learned per-head scalar in the softmax
   denominator, costing none. Only the first changes the allocator contract.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
@@ -1804,7 +1788,7 @@ fall linearly instead.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="03-05-mha-mqa-gqa-mla.html"><div class="pager__k">← Previous</div><div class="pager__t">MHA → MQA → GQA → MLA</div></a><a class="pager__next" href="../04-quantization/04-01-the-design-space.html"><div class="pager__k">Next →</div><div class="pager__t">The design space: PTQ/QAT, weight-only, W+A, KV</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -166,8 +166,10 @@ bank   [ 0.2741  0.4519  0.2741 ]
 grows  [ 0.2119  0.2119  0.5761 ]
 ```
 
-Each row sums to 1. Each token attends most to itself — unsurprising, since a
-vector is maximally similar to itself.
+Each row sums to 1. In this example each token attends most to itself, but raw
+dot products do not guarantee this: for `a=(1,0)` and `b=(2,0)`, `a·b=2>a·a=1`.
+Unit-normalized cosine similarity has the self-similarity property; unnormalized
+attention scores do not.
 
 **Step 4 — weighted sum `Y = W E`.** For `bank`:
 
@@ -215,7 +217,9 @@ the output is a weighted average, and a weighted average always lands inside the
 convex hull of its inputs.
 
 The playlist's phrase: **self-attention acts like gravity.** `money` pulls `bank`
-toward itself. And `bank` pulls `money` toward itself, symmetrically.
+toward itself. The reverse influence need not be equally strong: even when
+`E @ E.T` is symmetric, each softmax row has its own denominator, so the attention
+matrix generally is not symmetric.
 
 ```mermaid
 flowchart TD
@@ -247,8 +251,10 @@ W = softmax(S)     <- no parameters
 Y = W @ E          <- no parameters
 ```
 
-**Zero.** Nothing here can learn from data. And that is a real limitation, not a
-cosmetic one.
+**Zero new attention parameters.** If `E` comes from trainable embeddings or an
+upstream network, gradients still train that network through these operations.
+The limitation is that the attention rule has no independently learned query,
+key, or value projections, not that the whole system cannot learn.
 
 ### Why it matters: general vs task-specific context
 
@@ -257,10 +263,9 @@ The playlist's argument is the idiom example. Consider translating to Hindi:
 - *"piece of cake"* — literally a slice of cake; idiomatically "very easy"
 - *"break a leg"* — literally an injury; idiomatically "good luck"
 
-A parameter-free mechanism produces **general** contextual embeddings: `piece`
-mixed with `cake` yields something cake-flavoured. But your translation dataset
-pairs "piece of cake" with the Hindi for "very easy". Only a mechanism that
-learns *from that data* can produce embeddings suited to *that task*.
+A fixed rule over fixed embeddings cannot adapt to a translation dataset.
+Trainable embeddings can adapt even under that rule; separate Q/K/V projections
+give the attention mechanism additional, role-specific flexibility.
 
 > General contextual embeddings are useful. Task-specific contextual embeddings
 > are better. Getting them requires learnable parameters.
@@ -394,7 +399,7 @@ random terms and the spread grows. Empirically, with unit-Gaussian components:
 *(50,000 sampled pairs per row.)* The relationship is exactly linear:
 **Var(q·k) = d · Var(component product)**.
 
-The derivation: if each `q` and `k` component is independent with variance
+The derivation: if all `q` and `k` components are independent, zero-mean, with variance
 `σ²`, then each product term has variance `σ⁴`, and `d` independent terms sum to
 variance `d·σ⁴`. Variance grows linearly in dimension.
 
@@ -432,8 +437,10 @@ $$\mathrm{Var}(Y) = \frac{1}{c^2}\mathrm{Var}(X)$$
 We have `Var(scores) = d_k · σ⁴` and want it back to `σ⁴`. So we need
 `1/c² · d_k = 1`, giving `c = sqrt(d_k)`.
 
-That is the entire reason. Not a heuristic — the unique constant that makes score
-variance independent of head dimension.
+This motivates the square-root dependence on head width; any fixed multiple of
+`sqrt(d_k)` also removes this dependence under those assumptions. Learned Q/K
+from the same input can be correlated, so this is an initialization argument,
+not an exact variance law at every training step.
 
 | `d_k` | Var before scaling | Var after ÷`sqrt(d_k)` |
 |---|---|---|
@@ -530,9 +537,10 @@ def scaled_dot_product_attention(Q, K, V, mask=None):
     return F.softmax(scores, dim=-1) @ V
 ```
 
-In production, call `F.scaled_dot_product_attention(Q, K, V, is_causal=True)` —
-it dispatches to FlashAttention (module 11) and never materialises the `(T, T)`
-matrix.
+Prefer `F.scaled_dot_product_attention(Q, K, V)` with the mask required by the
+task. Use `is_causal=True` for square causal attention, not bidirectional
+attention or offset cached chunks. Backend eligibility depends on inputs and
+device; a Flash kernel is not guaranteed. See the [PyTorch 2.8 API contract](https://docs.pytorch.org/docs/2.8/generated/torch.nn.functional.scaled_dot_product_attention.html).
 
 ### Parameter and cost accounting
 
@@ -564,19 +572,65 @@ dictionary-lookup framing is the playlist's; it is standard.
 
 ---
 
+## Worked forward and backward verification
+
+For one row, stable softmax evaluates `exp(s-max(s))/sum(exp(s-max(s)))`.
+Subtracting the maximum changes neither probabilities nor the Jacobian
+`diag(p)-p p.T`, but avoids positive exponential overflow. If g is the gradient
+with respect to p, then `dL/ds=p*(g-sum(g*p))`. For `O=A V`, `dL/dV=A.T G` and
+`dL/dA=G V.T`; propagate through the row-softmax Jacobian, then
+`dL/dQ=dL/dS K/sqrt(d_k)` and `dL/dK=dL/dS.T Q/sqrt(d_k)`.
+
+This independent check carries projection matrices through W_O and compares
+gradients, not only forward values. Double precision makes it an oracle,
+not a kernel benchmark.
+
+```python transformer-check
+import torch
+import torch.nn.functional as F
+x = torch.tensor([[1., 0.], [0., 2.]], dtype=torch.float64)
+wq = torch.tensor([[1., 0.], [0., 0.5]], dtype=torch.float64, requires_grad=True)
+wk = torch.eye(2, dtype=torch.float64, requires_grad=True)
+wv = torch.tensor([[1., 2.], [3., 1.]], dtype=torch.float64, requires_grad=True)
+wo = torch.tensor([[1., -1.], [0.5, 1.]], dtype=torch.float64, requires_grad=True)
+q, k, v = x @ wq, x @ wk, x @ wv
+scores = q @ k.T / 2**0.5
+weights = (scores - scores.amax(-1, keepdim=True)).softmax(-1)
+manual = weights @ v @ wo
+reference = F.scaled_dot_product_attention(q, k, v) @ wo
+torch.testing.assert_close(manual, reference)
+gm = torch.autograd.grad(manual.square().sum(), (wq, wk, wv, wo), retain_graph=True)
+gr = torch.autograd.grad(reference.square().sum(), (wq, wk, wv, wo))
+for left, right in zip(gm, gr):
+    torch.testing.assert_close(left, right)
+e = torch.tensor([[1., 0.], [2., 0.]])
+assert (e @ e.T)[0, 1] > (e @ e.T)[0, 0]
+a = (e @ e.T).softmax(-1)
+assert not torch.allclose(a, a.T)
+print(manual.detach())
+```
+
+**Mask boundary:** a row containing only `-inf` has undefined ordinary softmax.
+Ensure each real query has an allowed key. Ignore or explicitly zero padded
+query outputs; do not treat a backend's special all-masked behavior as a portable
+definition. Assert Q/K feature widths and K/V token counts match, and the mask
+broadcasts to score shape. The convex-hull property concerns each head's pre-W_O
+weighted values; output projections and residuals need not stay in that hull.
+
 ## Key takeaways
 
 - Self-attention represents each token as a **weighted mixture of every token in
   the sequence**, with weights given by learned similarity.
 - The parameter-free version (`Y = softmax(EEᵀ)E`) already works and already
-  parallelises, but produces only *general* context — it cannot adapt to a task.
+  parallelises. Trainable input embeddings can adapt; the attention operation
+  itself has no separate learned projections in this version.
 - Each embedding plays three roles: it queries, it is queried (key), and it
   contributes content (value). Learning **separate projections** for the three
   roles is the entire contribution of `W_q`, `W_k`, `W_v`.
 - `Attention(Q,K,V) = softmax(QKᵀ/√d_k)V`.
-- `sqrt(d_k)` is not a heuristic: `Var(q·k) = d_k · Var(component)`, and
-  dividing by `sqrt(d_k)` is the unique constant making score variance
-  independent of dimension. Without it, softmax saturates and gradients vanish.
+- Under independent zero-mean components, `Var(q·k) = d_k · Var(q_i k_i)`.
+  Square-root scaling controls dimensional growth; correlations and learned
+  magnitudes still matter, and saturation is a risk rather than an inevitability.
 - Geometrically, attention pulls each token's vector toward the tokens it
   attends to. In the worked example, `cos(bank, money)` rose from 0.500 to 0.978.
 - It is called *self*-attention because it is computed **within one sequence**.

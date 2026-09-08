@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -254,7 +255,9 @@ def union_us(intervals: list[tuple[float, float]]) -> float:
     """Total time covered by at least one interval. Overlapping streams count once."""
     if not intervals:
         return 0.0
-    intervals.sort()
+    if any(not math.isfinite(s) or not math.isfinite(e) or e < s for s, e in intervals):
+        raise ValueError("Trace intervals must have finite, ordered endpoints")
+    intervals = sorted(intervals)
     total, cur_a, cur_b = 0.0, *intervals[0]
     for s, e in intervals[1:]:
         if s > cur_b:

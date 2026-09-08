@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Batch invariance and reproducible inference — The Inference Engineering Book</title>
+<title>Batch invariance and reproducible inference — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 10 · Benchmarking and performance engineering · 10-04</div>
 <h1>Batch invariance and reproducible inference</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/benchmark_batch_invariance.py</code></li><li><code>python/sglang/srt/batch_invariant_ops/</code></li><li><code>vllm/model_executor/layers/batch_invariant.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/benchmark_batch_invariance.py</code></li><li><code>python/sglang/srt/batch_invariant_ops/</code></li><li><code>vllm/model_executor/layers/batch_invariant.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">You send the same prompt twice at <code>temperature=0</code> and get two different
 completions. Nothing is random: the sampler took an argmax both times. The logits moved, because
@@ -785,7 +785,7 @@ Serially, $p_0 + p_1 = 3.7184176$, then $+p_2$ cancels almost every significant 
 $0.00041771$; adding $p_3$ gives <code>0x3a2e392e</code>. Pairwise, $p_2 + p_3 = -3.7177529$ is
 formed first, so the cancellation happens once instead of twice and the result is
 <code>0x3a2e4000</code> — 1746 units in the last place away. The exact sum is 0.00066451075; both
-answers miss it, in different directions.</p>
+answers exceed it, by different amounts; their errors have the same sign.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Provenance</span>
@@ -1019,15 +1019,14 @@ be combined with --enable-deterministic-inference"</code>
 <p>CUDA graphs make this discontinuous. Replay pads the batch up to the nearest captured bucket
 (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html#first-principles">&sect;8.1</a>),
 and vLLM's ladder is <code>[1, 2, 4, 8, 16, 24, …]</code>. Batches of 9 and 13 both replay the
-batch-16 graph, run identical launch geometry, and agree bitwise; a batch of 17 pads to 24 and
-does not. Batch-dependence is a step function with risers at the bucket boundaries, which is why
+batch-16 graph and share padded launch geometry; this alone does not guarantee bitwise agreement. A batch of 17 pads to 24 and can select another numerical path. Bucket boundaries can therefore produce discontinuities, which is why
 "it only reproduces at batch 17" is a real bug report and not a red herring.</p>
 
 <h3>4 &middot; Unsorted top-k in MoE routing</h3>
 
 <p>The subtlest one, because it is not a floating-point issue at all. Routing selects the top-$k$
 experts per token with <code>torch.topk</code>, and both engines pass <code>sorted=False</code> by
-default — the fast path, which makes no promise about which of two tied scores is returned.
+default. Neither <code>sorted=False</code> nor <code>sorted=True</code> guarantees stable tied indices in PyTorch; sorting orders returned values, not a deterministic secondary index key. See <a href="https://docs.pytorch.org/docs/stable/generated/torch.topk.html">the topk contract</a>. The quoted source comment below expresses implementation intent, not that API guarantee.
 Tied router logits can send a token to a different expert on a different run, which changes its
 arithmetic wholesale.
 <a href="../07-architectures/07-01-mixture-of-experts.html#routing">&sect;7.1</a> owns the
@@ -1405,15 +1404,12 @@ deterministic" out loud and half the ticket queue disappears.</p>
 
 <p>A version bump can change the attention backend, the CUTLASS config table, the graph bucket
 ladder, or the torch.compile fusion set — all of which move logits without moving weights. A
-0.3-point MMLU delta between two releases is evidence of nothing unless invariance was on for both
-and the batch schedule was identical. Record the SHA, backend, and flag alongside the score, per
+0.3-point MMLU delta needs controlled paired evaluation and uncertainty analysis. Bitwise invariance helps isolate numerical causes but is not a prerequisite for all valid statistical evidence. Record the SHA, backend, and flag alongside the score, per
 <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a>.</p>
 
 <h3>The regression that only reproduces at one batch size</h3>
 
-<p>Bucket padding makes the effect a step function: batches 9 through 16 replay one graph and
-agree, batch 17 jumps to the next bucket and does not. A bug that reproduces at 17 but not 16 is
-almost certainly a bucket riser, not a scheduling bug. Re-run with
+<p>Bucket padding can create a discontinuity: batches 9 through 16 may share a graph, while 17 selects another. Sharing a bucket is not sufficient for bitwise identity; scheduling, other operators, reduction order, sampling state, and backend eligibility also matter. Re-run with
 <code>--cuda-graph-max-bs-decode 32</code> (SGLang's determinism tests do exactly this,
 <code>python/sglang/test/test_deterministic_utils.py:L13-L18</code>) or with graphs off and see
 whether the discontinuity survives.</p>
@@ -1553,8 +1549,7 @@ TP=1 and TP=8, and the NCCL pinning only bites in the latter.</p></div></section
   <p><b>4.</b> vLLM's ladder is <code>[1, 2, 4] + range(8, 256, 8)</code>, so 13 and 16 both pad to
   the batch-16 graph and run byte-identical launch geometry; 17 pads to 24 and does not. With
   <code>--enforce-eager</code> there is no padding, so 13, 16 and 17 each run their true shape and
-  differences should appear between <em>every</em> pair, not just across the riser. That inversion
-  confirms you found a bucket effect rather than a scheduling one.</p>
+  differences may change, disappear, or persist. This ablation is evidence about a bucket effect, not a guarantee that every unequal shape differs or that scheduling is excluded.</p>
 
   <p><b>5.</b> Run a second engine process for evals at TP=1 with the flag on; production keeps
   its fast collectives. SGLang gates the NCCL pinning on TP&gt;1 explicitly, and it is inert at
@@ -1611,7 +1606,7 @@ TP=1 and TP=8, and the NCCL pinning only bites in the latter.</p></div></section
 </ul></div></section>
 <div class="pager"><a href="10-03-honest-benchmarking.html"><div class="pager__k">← Previous</div><div class="pager__t">Running a benchmark that is not a lie</div></a><a class="pager__next" href="10-05-profiling-and-capacity.html"><div class="pager__k">Next →</div><div class="pager__t">Profiling, roofline of a decode step, capacity planning</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -96,7 +96,8 @@ is pre-norm (module 06): the residual stream is never normalized in place.
 
 ## 16.3 The shape trace
 
-Real output, `B = 1`, `T = 6`, tracing through block 1 (an MoE block):
+Illustrative instrumented shape trace, `B = 1`, `T = 6`, through block 1 (MoE).
+The default script uses `(B,T)=(2,16)` and prints a shorter smoke-test trace:
 
 ```
 token ids                        (1, 6)
@@ -179,13 +180,16 @@ def forward(self, x, cos, sin, cache=None):
     if cache is not None:
         k, v = cache.update(k, v)
 
-    # 5. expand to match query heads — a view, not cached
+    # 5. explicit temporary copies to match query heads; not cached
     k = k.repeat_interleave(self.group_size, dim=1)
     v = v.repeat_interleave(self.group_size, dim=1)
 
     # 6. scaled dot-product with causal mask (modules 03, 08)
     #    dispatches to FlashAttention where available (module 11)
-    out = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))
+    past = k.shape[2] - T
+    allowed = (torch.arange(k.shape[2], device=x.device)[None, :]
+               <= past + torch.arange(T, device=x.device)[:, None])
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
 
     # 7. concat heads and project (module 04)
     out = out.transpose(1, 2).reshape(B, T, self.H * self.d_head)
@@ -200,8 +204,9 @@ def forward(self, x, cos, sin, cache=None):
   content retrieved (module 05).
 - Cache **before** expansion. Caching the expanded tensors would discard the
   entire GQA benefit — a genuine and common bug.
-- `is_causal=(T > 1)`. During single-token decode there is one query attending to
-  the whole cache; a causal mask over a 1×N score row would be wrong.
+- Query `i` sees keys through `past+i`. This offset matters for cached chunks
+  containing several new tokens; a square-prefill shortcut is insufficient.
+  A valid single-token append can see every key currently in its cache.
 
 ## 16.5 MoE, step by step
 
@@ -211,8 +216,7 @@ def forward(self, x):
     flat = x.reshape(-1, D)                       # (B*T, D) — per-token routing
 
     logits = self.gate(flat)                      # (N, n_experts)
-    topk_logits, topk_idx = logits.topk(self.top_k, dim=-1)
-    topk_w = F.softmax(topk_logits, dim=-1)       # over SELECTED experts only
+    topk_w, topk_idx = F.softmax(logits, dim=-1).topk(self.top_k, dim=-1)
 
     out = torch.zeros_like(flat)
     for e, expert in enumerate(self.experts):
@@ -277,9 +281,10 @@ experts (module 12) that the arithmetic makes obvious.
 logits, router_logits = model(ids)
 
 # next-token objective (module 13) — the one-position shift
+optimizer.zero_grad(set_to_none=True)
 ce = F.cross_entropy(
     logits[:, :-1].reshape(-1, V),      # predictions at 0..T-2
-    targets[:, 1:].reshape(-1),         # targets are the NEXT tokens
+    ids[:, 1:].reshape(-1),             # actual next tokens from the input document
 )
 
 # load-balancing, one term per MoE layer (module 12)
@@ -288,29 +293,45 @@ aux = sum(load_balancing_loss(rl, rl.topk(k, -1).indices, n_experts)
 
 (ce + aux).backward()
 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()
 ```
 
 Measured:
 
 ```
-cross-entropy 6.8354   (expected approx ln(V) = 6.9078 at init)
-aux loss      0.0683
-grad-norm     8.833
+cross-entropy 7.0136   (expected approx ln(V) = 6.9078 at init)
+aux loss      0.0342
+grad-norm     7.987
 ```
 
 **The cross-entropy check is the single most valuable sanity test you can run.**
 At initialization a language model should be uniformly uncertain over `V` tokens,
-giving loss `≈ ln(V)`. Here `ln(1000) = 6.908` and we measured `6.835`. Close.
+giving loss near `ln(V)` under small-logit initialization. Here the CPU
+PyTorch 2.8 run gives `7.014` versus `ln(1000)=6.908`; these are diagnostics,
+not exact cross-platform output requirements.
 
 If your initial loss is 200 rather than 7, your initialization is broken — which
 is exactly what happened in the first version of this file before proper weight
-init was added. If it is near 0, you have a data leak: check your causal mask.
+init was added. Near-zero loss on diverse untrained targets warrants checking
+the causal mask and target shift; it is not proof of leakage on trivial data.
 
 ## 16.8 Generation with the KV cache
 
 ```python
 @torch.no_grad()
 def generate(self, prompt_ids, max_new_tokens=20, temperature=0.8):
+    import math
+    if not isinstance(max_new_tokens, int) or max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be a nonnegative integer")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("invalid temperature")
+    if prompt_ids.ndim != 2 or min(prompt_ids.shape) <= 0:
+        raise ValueError("nonempty unpadded (batch, tokens) prompts required")
+    if prompt_ids.shape[1] + max_new_tokens > self.cfg.max_seq_len:
+        raise ValueError("requested output exceeds context window")
+    if max_new_tokens == 0:
+        return prompt_ids.clone()
+    self.eval()
     caches = [KVCache() for _ in self.blocks]
 
     # --- PREFILL: whole prompt, one pass, causal ---
@@ -352,7 +373,8 @@ single input token is at position `prompt_len + 2`, not position 0. Forgetting
 this offset is a common and very confusing bug: generation looks plausible for a
 few tokens and then degrades.
 
-**`is_causal=(T > 1)`** — at `T = 1` there is nothing to mask.
+**Offset-aware masking** permits keys through `past+i`; at `T=1`, an append-only
+cache contains no future keys. Other one-query layouts can still need masking.
 
 ### Verifying the cache is correct
 
@@ -422,6 +444,43 @@ modern block end to end with real shapes. That is what
 
 ---
 
+## Integration exercise: overfit, restore and reject invalid inputs
+
+Run [train_tiny_decoder.py](./code/train_tiny_decoder.py) from the repository root:
+
+```sh
+python content/courses/transformers/code/train_tiny_decoder.py
+python site/test_transformer_corrections.py
+```
+
+The first script trains this actual Transformer on two short synthetic documents.
+The same token 5 must predict token 3 or 4 depending on its earlier context.
+Inputs and labels come from one shifted sequence, unlike an independent-random-
+target gradient smoke test. It checks falling **training** loss, context-dependent
+continuation, an in-memory checkpoint, and equality after the next restored
+optimizer update. It makes no held-out quality claim. The ambiguous first
+continuation after the shared BOS prevents a deterministic zero-loss solution
+on every position; not every remaining error is a bug.
+
+The regression suite checks every position under full prefill, token-by-token
+decode and multiple cached chunk partitions, for batch sizes one/two and both
+dense and MoE modes. It also checks top-1 router gradients, balanced slot loss,
+zero-generation budgets, context overflow, empty prompts, cache offsets and EOS.
+The teaching implementation supports **unpadded equal-length batches**; it does
+not silently interpret any vocabulary ID as padding. A serving-grade padded
+batch requires per-request positions, valid-key masks and cache lengths.
+
+**Failure-injection exercise and answers:** resetting RoPE offsets breaks cached
+equivalence; upper-left rectangular causal masking hides valid prefix keys;
+selected-only top-1 softmax removes task router gradients; unshifted labels turn
+next-token learning into input reconstruction. A one-step random loss check
+detects none of these reliably, which is why the contracts are tested separately.
+
+The miniature model is pedagogical, not an exact DeepSeek replica: it uses GQA
+rather than MLA, full-softmax routing rather than DeepSeek's routing recipe,
+and omits training infrastructure, MTP and production dispatch kernels. The
+explicit expansion and dense offset mask favor clarity over fused-kernel speed.
+
 ## Key takeaways
 
 - The residual stream is `(B, T, d_model)` at **every** checkpoint. Everything
@@ -433,17 +492,17 @@ modern block end to end with real shapes. That is what
   attend. RoPE applies to Q and K only.
 - Router logits are `(B·T, n_experts)` — routing is **per token**, and the flatten
   makes that explicit.
-- Router collapse is observable at random initialization: 6 of 12 slots to one
-  expert, four experts unused. That is what load-balancing loss prevents.
+- A tiny initialization batch can have uneven routing by chance; persistent
+  concentration across training is the collapse diagnostic.
 - Even in a toy model, routed experts are **59.5%** of parameters.
 - High sparsity requires **many** experts: 8-experts-top-2 gives 55% active;
   DeepSeek's 256-top-9 gives 5.5%.
-- **Initial cross-entropy should be `≈ ln(V)`.** Measured 6.835 against
-  `ln(1000) = 6.908`. Far higher means broken init; near zero means a data leak.
+- **Initial cross-entropy near `ln(V)`** is a useful small-logit baseline, not
+  a theorem. Investigate unexpected values using logits, targets and masks.
 - Generation: prefill once, sample from **the last position only**, then decode one
   token per pass with the correct **`pos_offset`** for RoPE.
-- **Always test cached against uncached logits.** Measured agreement here:
-  `6.85e-07`. A cache bug degrades quality silently instead of crashing.
+- **Test cached against uncached logits at every position**, including multi-token
+  cached chunks. Small floating-point differences are expected; use tolerances.
 - The gap from this model to DeepSeek V3 is hyperparameters plus MLA — not
   structure.
 

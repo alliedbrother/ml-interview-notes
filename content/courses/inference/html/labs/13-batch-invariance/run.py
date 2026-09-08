@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import struct
 import sys
 import time
@@ -185,14 +186,22 @@ def send_batch(a: argparse.Namespace, url: str, n: int) -> list[tuple[list[int],
 
 
 def ulp_gap(a_: float, b: float) -> int:
-    """Distance in float64 units in the last place. 0 means bitwise identical."""
-    ia = struct.unpack("<q", struct.pack("<d", a_))[0]
-    ib = struct.unpack("<q", struct.pack("<d", b))[0]
-    if ia < 0:
-        ia = (1 << 63) - ia
-    if ib < 0:
-        ib = (1 << 63) - ib
-    return abs(ia - ib)
+    """Ordered binary64 distance; signed zeros compare equal, NaNs are invalid.
+
+    JSON logprobs are not necessarily the original float32 tensor values.
+    This measures the supplied binary64 numbers, not upstream logit ULPs.
+    """
+    if math.isnan(a_) or math.isnan(b):
+        raise ValueError("NaN has no ordered ULP distance")
+    if a_ == b:
+        return 0
+    sign = 1 << 63
+
+    def ordered(value):
+        bits = struct.unpack("<Q", struct.pack("<d", value))[0]
+        return sign - (bits & (sign - 1)) if bits & sign else sign + bits
+
+    return abs(ordered(a_) - ordered(b))
 
 
 def mode_sweep(a: argparse.Namespace) -> int:

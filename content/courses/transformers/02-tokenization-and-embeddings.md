@@ -88,7 +88,7 @@ Before embedding anything you must decide what a "token" is. Three options:
 |---|---|---|---|
 | Characters | ~100 (tiny) | very long | impossible |
 | Words | 100k–1M (huge) | short | constant problem |
-| **Subwords** | 30k–260k | moderate | impossible by construction |
+| **Subwords** | 30k–260k | moderate | depends on alphabet coverage/fallback |
 
 Word-level tokenization — what the playlist uses throughout for clarity — has a
 hard failure: any word not in your vocabulary becomes `<UNK>` and its meaning is
@@ -99,7 +99,9 @@ into known pieces.
 
 ### Byte Pair Encoding (BPE)
 
-BPE starts from bytes and repeatedly merges the most frequent adjacent pair.
+BPE repeatedly merges the most frequent adjacent pair of initial symbols.
+Those symbols may be characters or bytes. **Byte-level BPE** starts with a
+complete byte alphabet; character BPE without fallback can still encounter OOV.
 
 **Training:**
 
@@ -110,7 +112,8 @@ BPE starts from bytes and repeatedly merges the most frequent adjacent pair.
 4. Repeat until you reach the target vocabulary size.
 ```
 
-Worked example on the corpus `low low low lower lowest`:
+Illustrative merge vocabulary on `low low low lower lowest` (not a complete
+frequency-ordered training run: after `low`, `low _` would beat `e r`):
 
 ```
 start        l o w _ l o w _ l o w _ l o w e r _ l o w e s t
@@ -126,8 +129,9 @@ Final vocabulary contains `low`, `er`, `e`, `s`, `t`. Now `lower` tokenizes as
 `low` + `er` — two known pieces, never `<UNK>`. And `slower`, never seen in
 training, becomes `s` + `low` + `er`. Graceful.
 
-Because BPE bottoms out at bytes, **there is no such thing as an out-of-vocabulary
-input**. Worst case, a string tokenizes into individual bytes.
+With a complete byte alphabet or byte fallback, ordinary input text can fall
+back to bytes instead of `<UNK>`. This is not guaranteed by BPE alone; special-
+token handling and normalization are separate parts of the tokenizer contract.
 
 ```mermaid
 flowchart TD
@@ -143,7 +147,7 @@ flowchart TD
 |---|---|---|
 | **BPE** | GPT-2, GPT-4, Llama, Mistral | merge by raw frequency |
 | **WordPiece** | BERT | merge by likelihood gain, not raw count |
-| **Unigram / SentencePiece** | T5, Gemma, many multilingual models | start large, *prune* tokens that cost least |
+| **Unigram** | T5, many SentencePiece tokenizers | start large, *prune* tokens that cost least |
 | **Byte-level BPE** | GPT-2 onward | operates on bytes, so any Unicode works |
 
 ### Vocabulary size is an architectural decision
@@ -193,8 +197,9 @@ Two details that matter in practice:
 
 This is the hinge of the whole course.
 
-An embedding is trained once and then reused everywhere. `bank` has **one**
-vector, and that same vector is used in:
+At a fixed checkpoint, the input embedding for a token ID is context-independent.
+Its parameters can still change every training step. `bank` has **one** lookup
+vector at that checkpoint, and that same vector is used in:
 
 - "I deposited money at the **bank**"
 - "We sat on the river **bank**"
@@ -249,7 +254,7 @@ flowchart TD
 | Produced by | word2vec, GloVe, `nn.Embedding` | self-attention |
 | Depends on | the word only | the word **and** every other token present |
 | Same word, two sentences | identical vector | different vectors |
-| Computed | once, at training time | every forward pass |
+| Computed | row lookup every forward; table updated during training | contextual computation every forward |
 
 **Self-attention is a mechanism that takes static embeddings as input and
 produces contextual embeddings as output.** That sentence is the entire content
@@ -288,14 +293,54 @@ static/contextual distinction because it names the problem self-attention solves
 
 ---
 
+## Worked tokenizer and embedding contracts
+
+A tokenizer is a pipeline: normalization, pre-tokenization, vocabulary-model
+segmentation, special-token post-processing, and decoding. SentencePiece supports
+both BPE and Unigram; it is not another name for Unigram. Normalization may lose
+case or Unicode distinctions, so a round-trip test must respect its documented
+normalization contract. Byte coverage does not make normalization reversible.
+
+Checkpoint compatibility includes exact ID ordering, merge/model file,
+special-token IDs and chat template. Equal vocabulary size is insufficient:
+row 42 can represent a different token. Test leading spaces, repeated whitespace,
+combining characters, UTF-8 bytes, empty input, BOS/EOS/PAD insertion and literal
+special-token-looking text. Untrusted text must not accidentally inject
+privileged control tokens through a tokenizer's special-token option.
+
+For token IDs `i_t`, lookup is `X_t=E[i_t,:]`. If upstream row gradient is `g_t`,
+then `dL/dE[j,:]=sum_(t:i_t=j) g_t`. Repeated IDs accumulate. A tied output head
+also uses E in `logits=H E.T`; its generally dense output gradient adds to this
+lookup gradient. Tying saves a table, not all gradient computation.
+
+```python transformer-check
+import torch
+torch.manual_seed(2)
+embedding = torch.nn.Embedding(5, 3)
+ids = torch.tensor([1, 1, 4])
+embedding(ids).sum().backward()
+torch.testing.assert_close(embedding.weight.grad[1], torch.full((3,), 2.0))
+torch.testing.assert_close(embedding.weight.grad[4], torch.ones(3))
+assert embedding.weight.grad[0].count_nonzero() == 0
+text = " leading space; café; e\u0301; \U0001f642"
+assert bytes(text.encode("utf-8")).decode("utf-8") == text
+print("Repeated token gradients accumulate; UTF-8 bytes round-trip.")
+```
+
+The byte check does not prove every tokenizer is lossless. **Exercise solution:**
+for vocabulary 50,000 and width 1024, tying saves 51,200,000 parameters, or
+102,400,000 raw bytes at two bytes per weight. Optimizer-state savings depend on
+the training recipe. Primary details: [SentencePiece](https://github.com/google/sentencepiece)
+and the [tokenizer pipeline](https://huggingface.co/docs/tokenizers/pipeline).
+
 ## Key takeaways
 
 - Vectorization is the first problem in NLP. The ladder runs one-hot → bag of
   words → TF-IDF → embeddings, each fixing a flaw in the last.
 - Embeddings capture semantic meaning: similar words get similar vectors. But
   individual dimensions are not interpretable — only the relational geometry is.
-- BPE tokenizes into subwords by iteratively merging frequent byte pairs. Because
-  it bottoms out at bytes, out-of-vocabulary input is impossible.
+- BPE merges frequent symbol pairs. Complete byte coverage or fallback removes
+  ordinary-text OOV; character-based BPE alone does not.
 - Vocabulary size is a real architectural trade: larger vocab → shorter
   sequences (cheaper quadratic attention) but bigger embedding and output layers.
 - An embedding layer is a learned lookup table of shape `(V, d_model)`.

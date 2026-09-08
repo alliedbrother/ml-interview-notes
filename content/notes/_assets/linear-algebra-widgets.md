@@ -13,8 +13,8 @@ independent — drop any one of them and the rest still work.
 ```html
 <figure class="widget">
   <div class="widget__k">Figure 01 · Matrix operations</div>
-  <h4 class="widget__t">Scale it, flip it, put it back</h4>
-  <p class="widget__hint">Four fish, three features each — one row per fish. Hover any cell to light up the row and the column it belongs to. Then multiply the whole grid by a scalar, or transpose it and watch \(4 \times 3\) become \(3 \times 4\).</p>
+  <h4 class="widget__t">A dataset is a rectangular array</h4>
+  <p class="widget__hint">Four observations and three measured features form \(X \in \mathbb{R}^{4\times3}\). Scalar multiplication changes every entry. Transposition swaps the observation and feature axes; it does not create new measurements.</p>
   <div class="widget__bar">
     <div class="widget__group">
       <label class="widget__lbl" for="scalar-input">Scalar</label>
@@ -27,7 +27,7 @@ independent — drop any one of them and the rest still work.
     <button class="widget__btn" type="button" id="reset-matrix-btn">Reset</button>
   </div>
   <div class="widget__stage widget__stage--matrix" id="interactive-matrix"></div>
-  <figcaption class="widget__cap">Each row is one fish: [ weight, length, colour ]</figcaption>
+  <figcaption class="widget__cap">Rows are observations; columns are features. Applying a scalar twice compounds the scaling. Transposing twice returns the current matrix.</figcaption>
 </figure>
 ```
 
@@ -37,8 +37,8 @@ independent — drop any one of them and the rest still work.
 ```html
 <figure class="widget">
   <div class="widget__k">Figure 02 · Dot product</div>
-  <h4 class="widget__t">The similarity meter</h4>
-  <p class="widget__hint">Drag either arrow tip, or type the numbers directly. The amber wedge is the angle \(\theta\) between the two vectors — the whole reason the dot product measures similarity.</p>
+  <h4 class="widget__t">Magnitude, angle, and alignment</h4>
+  <p class="widget__hint">The dot product combines lengths and alignment. Cosine similarity removes the lengths, but is undefined when either vector is zero. The amber wedge marks the smaller angle, using equal scales on both axes.</p>
   <div class="widget__eq">\[a \cdot b = \|a\|\,\|b\|\cos(\theta)\]</div>
   <div class="widget__split">
     <div class="widget__stage" id="dot-product-viz"></div>
@@ -75,8 +75,8 @@ independent — drop any one of them and the rest still work.
 ```html
 <figure class="widget">
   <div class="widget__k">Figure 03 · Linear classifier</div>
-  <h4 class="widget__t">Interactive vibe check</h4>
-  <p class="widget__hint">At a trendy coffee shop, can you separate the <strong>Artisanal Hipsters (🥸)</strong> from the <strong>Silicon Valley Techies (🚀)</strong>? <strong>Your mission:</strong> drag the dot to swing the line and find the optimal "Vibe" separator. Hover a customer for their coordinates.</p>
+  <h4 class="widget__t">A normal vector defines a decision boundary</h4>
+  <p class="widget__hint">Circles have label \(-1\); triangles have label \(+1\). This classifier predicts \(+1\) when \(w^T x+b\geq0\). Its unit normal is \(w=[\cos\theta,\sin\theta]^T\). The centered intercept \(c\) gives \(w^T(x-[5,5]^T)+c=0\), so \(b=c-5w_1-5w_2\). The angle changes orientation; the intercept translates the boundary.</p>
   <div class="widget__stage" id="interactive-classifier"></div>
   <div class="widget__legend">
     <span><i class="widget__key widget__key--line" aria-hidden="true"></i>Decision boundary \(\vec{w} \cdot \vec{x} + b = 0\)</span>
@@ -90,12 +90,12 @@ independent — drop any one of them and the rest still work.
 ```html
 <figure class="widget">
   <div class="widget__k">Figure 04 · Eigenvectors</div>
-  <h4 class="widget__t">The directions the data actually cares about</h4>
-  <p class="widget__hint">A tilted cloud of 150 points with its two principal components drawn on top. Each arrow is an eigenvector of the covariance matrix; its length is proportional to the variance — the eigenvalue \(\lambda\) — captured along it. Keep the long one, drop the short one, and you have gone from 2D to 1D while losing almost nothing.</p>
+  <h4 class="widget__t">Principal directions of a centered sample</h4>
+  <p class="widget__hint">The covariance matrix is computed from these 150 centered points using the \(n-1\) denominator. Its eigenvectors define the two principal directions. Each ray has length \(2\sqrt{\lambda_i}\): two sample standard deviations, not two variances. The PC1 variance fraction quantifies what a one-dimensional projection retains.</p>
   <div class="widget__stage" id="pca-visualization"></div>
   <div class="widget__legend">
     <span><i class="widget__key widget__key--pc1" aria-hidden="true"></i>PC1 · most variance</span>
-    <span><i class="widget__key widget__key--pc2" aria-hidden="true"></i>PC2 · the leftovers</span>
+    <span><i class="widget__key widget__key--pc2" aria-hidden="true"></i>PC2 · remaining orthogonal variance</span>
   </div>
 </figure>
 ```
@@ -106,9 +106,9 @@ independent — drop any one of them and the rest still work.
 ```html
 <figure class="widget">
   <div class="widget__k">Figure 05 · Singular value decomposition</div>
-  <h4 class="widget__t">One matrix, three jobs</h4>
-  <p class="widget__hint">Any matrix \(A\) splits into a rotation, a stretch, and another rotation. The shaded squares down the diagonal of \(\Sigma\) are the singular values, drawn fading because they always arrive in descending order.</p>
+  <h4 class="widget__t">The dimensions of a compact SVD</h4>
+  <p class="widget__hint">For a nonzero real matrix of rank \(r\), \(A=U_r\Sigma_rV_r^T\). The columns of \(U_r\) and \(V_r\) are orthonormal; they need not form square matrices. In the full SVD, the square orthogonal factors are rotations or reflections, while the rectangular diagonal factor scales and may discard directions.</p>
   <div class="widget__stage widget__stage--svd" id="svd-visualization"></div>
-  <figcaption class="widget__cap">Keep the first few σ and throw the rest away — that is a low-rank approximation</figcaption>
+  <figcaption class="widget__cap">The blocks show factor dimensions, not numerical entries. Keeping the first k singular triplets gives a best rank-at-most-k approximation in the spectral and Frobenius norms.</figcaption>
 </figure>
 ```

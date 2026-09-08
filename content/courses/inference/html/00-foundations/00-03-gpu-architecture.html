@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GPU architecture for inference engineers — The Inference Engineering Book</title>
+<title>GPU architecture for inference engineers — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 0 · Foundations · 00-03</div>
 <h1>GPU architecture for inference engineers</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>csrc/libtorch_stable/attention/merge_attn_states.cu</code></li><li><code>csrc/cuda_compat.h</code></li><li><code>csrc/cuda_utils.h</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>csrc/libtorch_stable/attention/merge_attn_states.cu</code></li><li><code>csrc/cuda_compat.h</code></li><li><code>csrc/cuda_utils.h</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">One line in vLLM's RMSNorm launcher reads <code>dim3 grid(num_tokens);</code>. At decode with
 batch 1 that is a grid of exactly one thread block, which lands on exactly one of an H100's 132
@@ -706,7 +706,7 @@ flowchart TD
       <thead><tr><th>Level</th><th>Capacity</th><th class="num">Latency (clocks)</th><th>Bandwidth</th><th>Scope</th></tr></thead>
       <tbody>
         <tr><td>Registers</td><td>256 KB / SM (65,536 &times; 32-bit); 33 MB / GPU</td><td class="num">~1</td><td>operand-rate</td><td>one thread</td></tr>
-        <tr><td>Shared memory / L1</td><td>256 KB / SM combined; up to 228 KB as SMEM</td><td class="num">29.0 (shared), 40.7 (L1)</td><td>127.9 B/clk/SM</td><td>one thread block</td></tr>
+        <tr><td>Shared memory / L1</td><td>256 KB / SM combined; up to 228 KB as SMEM</td><td class="num">29.0 (shared), 40.7 (L1)</td><td>127.9 B/clk/SM</td><td>shared memory: block; L1: SM</td></tr>
         <tr><td>L2</td><td>50 MB, device-wide</td><td class="num">263.0</td><td>3,942&ndash;4,472 B/clk</td><td>whole GPU</td></tr>
         <tr><td>HBM3</td><td>80 GB</td><td class="num">478.8</td><td>3.35 TB/s</td><td>whole GPU</td></tr>
       </tbody>
@@ -839,8 +839,7 @@ one instruction together, and vLLM hardcodes the constant:</p>
 <p>The H100 whitepaper's compute-capability table lists Threads/Warp = 32 for Volta, Ampere and Hopper
 alike. The <code>#else</code> matters because the branch above it returns 64 on AMD gfx9.</p>
 
-<p>Because a warp shares an instruction pointer, its 32 lanes can exchange registers directly without
-touching shared memory. That is a <b>warp shuffle</b>; vLLM wraps it as
+<p>Warp shuffle instructions let participating lanes exchange registers without shared memory. Volta and later support independent thread scheduling: lanes can diverge and carry per-thread execution state, so use the correct active-lane mask and synchronization contract. That is a <b>warp shuffle</b>; vLLM wraps it as
 <code>VLLM_SHFL_XOR_SYNC</code> at <code>csrc/cuda_compat.h:L46-L55</code> (expanding to
 <code>__shfl_xor_sync</code> on CUDA, <code>__shfl_xor</code> on ROCm) and uses it to finish a
 $q \cdot k$ dot product in $\log_2$ steps with no memory traffic:</p>
@@ -867,8 +866,7 @@ reduction. Any halving loop over <code>__shfl_xor_sync</code> is doing this.</p>
 
 <p>An HBM load costs about 479 clocks, and nothing hides that except <em>other work</em>. Each SM
 holds up to 64 resident warps (2048 threads); its schedulers pick, every cycle, any warp whose next
-instruction has its operands ready. With 64 warps resident a memory stall is invisible; with 4, the
-SM idles. <b>Occupancy</b> is that ratio — resident warps over 64 on Hopper — capped by whichever
+instruction has its operands ready. More resident warps can provide independent ready work, but even 64 warps can all wait on dependencies. Four warps may suffice for a well-pipelined workload; neither number guarantees utilization. <b>Occupancy</b> is that ratio — resident warps over 64 on Hopper — capped by whichever
 resource runs out first: 65,536 registers per SM, 228 KB of shared memory per SM, 32 blocks per SM,
 or too few blocks in the grid.</p>
 
@@ -903,7 +901,7 @@ occupied</b>, 25% occupancy on the one that is. Not a bug — it is what "normal
 numbers" looks like on a 132-SM GPU, and it is why
 <a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a> works so hard to make the batch
 bigger.</p></div></section>
-<section class="sec" id="tensor-cores-and-launch" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Tensor cores and the cost of a launch</h2></div><div class="sec__body"><h3>Tensor cores want a rectangle, decode gives them a line</h3>
+<section class="sec" id="tensor-cores-and-launch" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Tensor cores and the cost of a launch</h2></div><div class="sec__body"><h3>A concrete coalescing and occupancy calculation</h3><p>For 32 lanes reading adjacent float32 elements at aligned addresses <code>base + 4*lane</code>, the warp requests 128 contiguous bytes, covering four 32-byte sectors. A stride of 32 elements requests 32 separated sectors, or 1024 transferred sector bytes for the same 128 useful bytes, before cache reuse. Alignment and architecture-specific caching still matter.</p><p>Suppose a block has 256 threads, 64 registers per thread, and 64 KiB shared memory. Ignoring allocation granularity, registers allow floor(65536/(256*64))=4 blocks; 228 KiB shared memory allows floor(228/64)=3; the 2048-thread limit allows 8. Shared memory therefore caps residency at 3 blocks, 24 warps, or 37.5% theoretical occupancy. A grid with one block per SM reduces the realized limit further. Verify actual allocation with compiler output and Nsight Compute rather than treating this simplified arithmetic as a measurement.</p><h3>Tensor cores want a rectangle, decode gives them a line</h3>
 
 <p>An H100 SXM5 has 132 SMs, 128 FP32 CUDA cores per SM (16,896 total), and four fourth-generation
 tensor cores per SM (528 total). The whitepaper's preliminary table puts peak dense BF16 tensor
@@ -944,13 +942,10 @@ $16 \times 8$ outputs accumulated over a K of 16. In a linear layer, M is <em>to
   <div class="kpi"><div class="kpi__n">~15&times;</div><div class="kpi__l">tensor vs non-tensor FP32 peak on H100</div></div>
 </div>
 
-<p>At decode with batch 1, M=1: fifteen of sixteen A-fragment rows are padding, so the best achievable
-fraction of tensor-core peak is 6.25%. Hopper's newer warp-group instruction is worse — the Hopper
+<p>For the illustrated mapping with M=1 and one token per row, fifteen of sixteen A-fragment rows are padding: only 6.25% of the row slots carry useful data. This is a utilization calculation for that mapping, not a universal limit on every decode kernel. Hopper's illustrated warp-group shape has M=64 — the Hopper
 microbenchmark study shows <code>wgmma</code> compiling to SASS shapes like
 <code>HGMMA.64x256x16</code>, an M of 64, wasting 63 rows of 64. And 6.25% of 989 dense BF16 TFLOPS is
-about 62 TFLOPS, roughly the non-tensor FP32 rate: <b>at batch 1 the tensor cores buy you essentially
-nothing</b>. That is why decode kernels are written as bandwidth-bound GEMVs on CUDA cores rather
-than padded GEMMs — vLLM says so out loud in a tile-selection heuristic:</p>
+about 62 TFLOPS, roughly the non-tensor FP32 rate: <b>this padded mapping may offer little arithmetic advantage at batch 1</b>. Many decode shapes are bandwidth-limited, but libraries may still select tensor-core, quantized GEMM, or CUDA-core GEMV paths. The following AMD-specific heuristic illustrates a bandwidth-oriented tiling choice; it does not establish NVIDIA kernel selection:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1169,8 +1164,7 @@ head_size 128.</p>
   <code>LAUNCH_MERGE_ATTN_STATES</code> macro
   (<code>csrc/libtorch_stable/attention/merge_attn_states.cu:L221-L237</code>) enqueues 128 blocks of
   128 threads, 0 bytes of dynamic shared memory, on the current stream.</li>
-  <li>The hardware distributes 128 blocks over 132 SMs: one block each, four SMs with nothing to do.
-  Each block is 128 threads = <b>4 warps</b>, so occupancy is 4/64 = <b>6.25%</b>.</li>
+  <li>The grid can occupy at most 128 SMs simultaneously, without a promised one-block-per-SM placement. Each block has <b>4 warps</b>; an SM holding exactly one block would have <b>6.25%</b> occupancy.</li>
   <li>Thread 5 of block 0: <code>global_idx = 5</code>, <code>token_head_idx = 5/16 = 0</code>,
   <code>pack_idx = 5 % 16 = 5</code>, so <code>token_idx = 0</code>, <code>head_idx = 0</code>. It
   loads one <code>uint4</code> from <code>prefix_output</code> and one from
@@ -1208,11 +1202,11 @@ flowchart TD
 </div>
 
 <p>The last box is the punchline. This kernel moves 0.79 MB, so it has about <b>0.24 &micro;s</b> of
-unavoidable HBM time (arithmetic: 786,432 bytes at 3.35 TB/s), while the launch costs at least a
+ideal compulsory-traffic HBM time (arithmetic: 786,432 bytes at 3.35 TB/s), while the launch costs at least a
 microsecond of CPU-side driver work and possibly seven. <b>The launch is several times more expensive
 than the work.</b> Repeat that across the ~400 launches in a decode step and you have derived why
 CUDA graphs are not an optimisation but a requirement.</p></div></section>
-<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h4>Shared memory over 48 KB fails silently until you opt in</h4>
+<section class="sec" id="pitfalls" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h4>Shared memory above the default limit requires opt-in</h4>
 <p>CUDA gives a kernel 48 KB of dynamic shared memory by default even though Hopper allows 228 KB.
 Ask for more without opting in and the launch fails with <code>cudaErrorInvalidValue</code> —
 "invalid argument" — usually reported at some unrelated later synchronisation point. The opt-in is a
@@ -1275,8 +1269,7 @@ Figure 1 is queryable:</p>
 slightly across PyTorch versions, which is why the command prints the whole object.</p>
 
 <p><b>2. Count the kernels in one decode step.</b> Run a short generation under the PyTorch profiler
-with <code>--enforce-eager</code>, then group by kernel name and count. The number of distinct CUDA
-kernels per output token is the number this chapter has been reasoning about — and it is the number
+with <code>--enforce-eager</code>, then group by kernel name and count. The number of CUDA kernel invocations per decode iteration (not distinct names) is the number this chapter has been reasoning about — and it is the number
 CUDA graphs collapses to one replay.</p>
 
 <div class="code-file">
@@ -1354,8 +1347,7 @@ line of its index arithmetic and you can read
     <p><b>5.</b> Correct: (a) a large shared-memory tile and high register count keep the working set
     on chip, capping resident blocks — the FlashAttention pattern; (b) the grid is too small, since
     decode parallelism is roughly batch &times; KV heads, which at batch 8 with 8 KV heads is 64
-    blocks on 132 SMs. A real bug: register spilling, which lowers occupancy <em>and</em> adds
-    local-memory traffic. Tell them apart with achieved DRAM throughput and local-memory load/store
+    blocks on 132 SMs. A possible performance problem is register spilling, which adds local-memory traffic but can result from a register cap intended to raise occupancy. Tell them apart with achieved DRAM throughput and local-memory load/store
     counts, not occupancy — spilling shows local-memory traffic that should be zero. Case (b) is what
     split-K decode attention exists to fix
     (<a href="../03-attention-kernels/03-03-decode-attention.html">§3.3</a>).</p>
@@ -1367,8 +1359,7 @@ line of its index arithmetic and you can read
   Llama-3-8B's 4 KiB of KV per token per layer puts 57 tokens of one layer in an SM's scratchpad,
   while a naive 8k score matrix is 268 MB per head — five L2s.</li>
   <li>Tensor cores execute a fixed rectangle: M=16 for <code>mma</code>, M=64 for Hopper's
-  <code>wgmma</code>, and M is tokens. At batch 1 a decode GEMV reaches at most 1/16 of tensor-core
-  peak, roughly the plain FP32 rate — so decode is written as a bandwidth problem and prefill as an
+  <code>wgmma</code>, and M is tokens. For the illustrated one-token-per-row M=16 mapping, only 1/16 of rows are useful at batch 1; this is not a universal hardware throughput ceiling — so decode is written as a bandwidth problem and prefill as an
   arithmetic one. One model, two computers.</li>
   <li>Occupancy is resident warps over 64: a diagnostic, not a target. Its two causes at decode — a
   deliberately large on-chip working set, and not enough parallel work — call for opposite
@@ -1415,7 +1406,7 @@ line of its index arithmetic and you can read
 </ul></div></section>
 <div class="pager"><a href="00-02-decode-loop-and-kv-cache.html"><div class="pager__k">← Previous</div><div class="pager__t">The decode loop and why the KV cache exists</div></a><a class="pager__next" href="00-04-roofline-and-arithmetic-intensity.html"><div class="pager__k">Next →</div><div class="pager__t">Arithmetic intensity and the roofline</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

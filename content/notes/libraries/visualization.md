@@ -110,7 +110,7 @@ sns.heatmap(df[num_cols].corr(), annot=True, fmt=".2f",
 
 | Level | Functions | Returns |
 |---|---|---|
-| Figure-level | `relplot`, `displot`, `catplot`, `lmplot`, `pairplot` | a `FacetGrid` — owns the whole figure |
+| Figure-level | `relplot`, `displot`, `catplot`, `lmplot`, `pairplot` | owns a figure: usually FacetGrid; `pairplot` returns PairGrid |
 | Axes-level | `lineplot`, `scatterplot`, `histplot`, `boxplot`, `heatmap` | draws into an `Axes` you pass |
 
 Mixing them up is the usual Seaborn frustration: figure-level functions **cannot**
@@ -134,7 +134,7 @@ which is almost always what you meant.
 | Part-to-whole over time | stacked area | hard to read anything but the bottom band |
 | Many pairwise relations | pair plot, correlation heatmap | $O(d^2)$ panels; sample the features |
 | Uncertainty | error bars, CI bands, raw points | bar charts with error bars hide the distribution |
-| High-dimensional structure | PCA / UMAP scatter | distances between clusters are not meaningful |
+| High-dimensional structure | PCA / UMAP scatter | PCA distances are projected distances; nonlinear embeddings can distort global geometry |
 | Ranking with uncertainty | dot plot with intervals | leaderboards without intervals mislead |
 
 **The ECDF is under-used.** Unlike a histogram it has no bin-width parameter,
@@ -162,21 +162,24 @@ LearningCurveDisplay.from_estimator(model, X, y, cv=5, n_jobs=-1,
 | Both curves plateau at a poor score | **high bias** (underfitting) | bigger model, better features, less regularisation |
 | Large persistent gap, train near perfect | **high variance** (overfitting) | more data, regularisation, augmentation, simpler model |
 | Validation still improving at max $n$ | data-limited | collect more data — this is the one that justifies the spend |
-| Validation curve rising late in training | overfitting in time | early stopping |
+| No improvement across training sizes | investigate features, optimization and target noise | this plot does not show late-epoch dynamics |
 
-That third row is the reason to plot learning curves at all: it is the only
-principled way to answer "would more data help?" before buying it.
+`LearningCurveDisplay` varies training sample count, not epoch. An improving
+validation score at larger sample counts is evidence for testing more data, not
+a guaranteed return on collection cost.
 
 ### Training curves — is it converging?
 
-Plot training and validation loss on a **log y-axis** against steps, not epochs.
-Log scale reveals whether loss is still decreasing when the linear plot has
-flattened, and steps let you compare runs with different batch sizes.
+Plot loss against an explicitly stated resource: updates, examples/tokens, epochs,
+or elapsed time. Equal steps do not imply equal examples or compute with different
+batch sizes. Log axes require positive values; use a linear or appropriate signed
+scale otherwise. Increasing validation loss during continued fitting may indicate
+overfitting; increasing validation accuracy instead indicates improvement.
 
 Also plot: learning rate (confirms the schedule fired), gradient norm (spikes
 precede divergence), and per-layer parameter-update ratio
-$\|\Delta w\|/\|w\|$ (should sit around $10^{-3}$; orders of magnitude off means
-the learning rate is wrong).
+$\|\Delta w\|/\|w\|$, interpreted by layer, optimizer, parameterization, and
+training phase rather than a universal $10^{-3}$ threshold.
 
 ### Confusion matrix — normalised, always
 
@@ -191,7 +194,8 @@ ConfusionMatrixDisplay.from_estimator(model, X_test, y_test,
 dominant class visually swamps everything and a rare class's total failure is
 invisible. For many classes, sort the classes by frequency and look for
 off-diagonal blocks — they reveal systematically confusable groups, which is a
-label-taxonomy problem, not a model problem.
+possible taxonomy, representation, model, or annotation problems. Inspect actual
+errors before choosing a cause; show raw counts alongside normalized rates.
 
 ### ROC and precision–recall
 
@@ -215,14 +219,18 @@ CalibrationDisplay.from_estimator(model, X_test, y_test, n_bins=15, strategy="qu
 ```
 
 Plot predicted probability against observed frequency. A perfectly calibrated
-model sits on the diagonal. Below it means overconfident; above means
-underconfident. Use `strategy="quantile"` so each bin has equal count —
+model sits on the diagonal in population. Below means overprediction of the
+positive-class probability; above means underprediction. This is not universally
+predicted-class overconfidence: predicted positive probability 0.1 with observed
+frequency 0.05 underestimates confidence in the predicted negative class.
+Use `strategy="quantile"` to target comparable bin counts —
 uniform-width bins on a skewed score distribution produce meaningless endpoints
 with two samples in them.
 
 Add a histogram of predicted probabilities underneath: a model whose
-probabilities all cluster near the base rate is calibrated but useless, and the
-reliability diagram alone will not show you that.
+probabilities cluster near the base rate need not be calibrated. A truly constant
+prevalence predictor can be calibrated but nondiscriminative, which is why both
+calibration and ranking matter.
 
 ### Residual analysis for regression
 
@@ -236,10 +244,10 @@ axes[2].plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], "k--")
 axes[2].set(xlabel="actual", ylabel="predicted", title="Predicted vs actual")
 ```
 
-Read it as: **curvature** in panel 1 means missing non-linearity; a **funnel**
-means heteroscedasticity (consider a log target or a different loss); fat tails
-in the Q-Q plot mean outliers or the wrong noise model; **compression toward the
-mean** in panel 3 is the signature of an underfit or over-regularised model.
+Treat curvature, funnels, heavy tails and prediction compression as diagnostic
+clues, not unique diagnoses. Check subgroup mixtures, label errors, target
+transformations, model misspecification and expected regression-to-the-mean before
+changing the loss or regularizer.
 
 ### Embedding visualisation
 
@@ -253,7 +261,7 @@ sns.scatterplot(x=emb[:, 0], y=emb[:, 1], hue=labels, s=6, alpha=0.6,
 
 **Read these plots with real caution.** In both t-SNE and UMAP:
 
-- Cluster **sizes** are meaningless — the algorithms equalise density.
+- Cluster sizes and densities can be substantially distorted.
 - Distances **between** clusters are largely meaningless.
 - Apparent clusters can appear in pure noise, especially with small perplexity or
   `n_neighbors`.
@@ -268,11 +276,17 @@ interpretable.
 ### Drift monitoring
 
 ```python
+from scipy import stats
 fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 for ax, col in zip(axes, watch_cols):
-    sns.kdeplot(train[col], ax=ax, label="train", fill=True, alpha=0.3)
-    sns.kdeplot(live[col],  ax=ax, label="live",  fill=True, alpha=0.3)
-    ks = stats.ks_2samp(train[col], live[col])
+    reference = train[col].dropna()
+    current = live[col].dropna()
+    if min(len(reference), len(current)) < 2:
+        ax.set_title(f"{col}: insufficient nonmissing observations")
+        continue
+    sns.ecdfplot(reference, ax=ax, label="train")
+    sns.ecdfplot(current, ax=ax, label="live")
+    ks = stats.ks_2samp(reference, current)
     ax.set_title(f"{col}  KS={ks.statistic:.3f}  p={ks.pvalue:.1e}")
 ```
 
@@ -359,8 +373,23 @@ adds weight and no information.
 ## A reusable diagnostic panel
 
 ```python
-def evaluate(model, X, y, name=""):
-    p = model.predict_proba(X)[:, 1]
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (RocCurveDisplay, PrecisionRecallDisplay,
+    ConfusionMatrixDisplay, f1_score, precision_score, recall_score)
+from sklearn.calibration import CalibrationDisplay
+
+def evaluate(model, X, y, name="", positive_label=1, threshold=0.5):
+    classes = np.asarray(model.classes_)
+    if len(classes) != 2 or positive_label not in classes:
+        raise ValueError("This panel requires two classes and an explicit positive label")
+    y = (np.asarray(y) == positive_label).astype(int)
+    if len(np.unique(y)) != 2:
+        raise ValueError("ROC AUC requires both labels in the evaluated cohort")
+    p = model.predict_proba(X)[:, np.flatnonzero(classes == positive_label).item()]
+    if not np.isfinite(p).all():
+        raise ValueError("nonfinite probabilities")
     fig, ax = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
     RocCurveDisplay.from_predictions(y, p, ax=ax[0, 0])
     ax[0, 0].plot([0, 1], [0, 1], "k--", lw=1)
@@ -368,7 +397,7 @@ def evaluate(model, X, y, name=""):
     ax[0, 1].axhline(y.mean(), ls="--", c="k", lw=1)
     CalibrationDisplay.from_predictions(y, p, n_bins=15, strategy="quantile", ax=ax[0, 2])
     sns.histplot(x=p, hue=y, bins=50, stat="density", common_norm=False, ax=ax[1, 0])
-    ConfusionMatrixDisplay.from_predictions(y, p > 0.5, normalize="true", ax=ax[1, 1])
+    ConfusionMatrixDisplay.from_predictions(y, p >= threshold, normalize="true", ax=ax[1, 1])
     thr = np.linspace(0.01, 0.99, 99)
     ax[1, 2].plot(thr, [f1_score(y, p > t) for t in thr], label="F1")
     ax[1, 2].plot(thr, [precision_score(y, p > t, zero_division=0) for t in thr], label="precision")
@@ -380,9 +409,55 @@ def evaluate(model, X, y, name=""):
 
 Six panels, one call, and it answers: does it rank well, does it work at the
 operating point, are the probabilities meaningful, are the classes separable,
-what does it confuse, and where should the threshold go.
+what does it confuse, and how sensitive are metrics to the threshold. Choose the
+threshold on development data before final test evaluation; the test panel is
+not permission to tune against the test labels. Missingness rates should be
+plotted separately when nonmissing values are used for drift curves.
 
 ## Self-check
+
+### Runnable noninteractive figure check
+
+This creates an actual calibration counterexample in memory using Agg and closes
+the figure. Standard deviation describes variation, standard error estimates
+uncertainty in an average under assumptions, a confidence interval targets a
+population quantity, and a prediction interval targets a future observation.
+Do not relabel one as another. Repeated users need grouped resampling rather
+than treating their rows as independent bootstrap units.
+
+```python runnable
+from io import BytesIO
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.calibration import calibration_curve
+y = np.array([1]*5 + [0]*95)
+p = np.full(100, .1)
+observed, predicted = calibration_curve(y, p, n_bins=5)
+assert np.isclose(observed[0], .05) and np.isclose(predicted[0], .1)
+assert 1-observed[0] > 1-predicted[0]
+with plt.rc_context({"font.size": 10}):
+    fig, ax = plt.subplots(figsize=(5, 4), constrained_layout=True)
+    ax.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    ax.scatter(predicted, observed, label="100 cases; 5 positives")
+    ax.set(xlabel="Predicted positive probability", ylabel="Observed positive fraction",
+           title="Positive overprediction, negative underconfidence", xlim=(0, 1), ylim=(0, 1))
+    ax.legend()
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=100)
+    assert len(buffer.getvalue()) > 5000
+    assert ax.get_xlabel() and ax.get_ylabel()
+    plt.close(fig)
+assert not plt.get_fignums()
+print("calibration interpretation, rendered PNG, labels and figure cleanup passed")
+```
+
+Seaborn line plots often aggregate repeated x values by an estimator and interval;
+use `units` and `estimator=None` when individual trajectories are the intended
+object. State the bootstrap unit, binning/bandwidth and hue normalization. Primary
+contracts: [LearningCurveDisplay](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.LearningCurveDisplay.html)
+and [PairGrid](https://seaborn.pydata.org/generated/seaborn.PairGrid.html).
 
 1. What does Anscombe's quartet demonstrate, and what habit does it justify?
 2. Why normalise a confusion matrix, and along which axis for per-class recall?

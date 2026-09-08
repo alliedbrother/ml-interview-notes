@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Data parallelism, attention-DP, expert parallelism — The Inference Engineering Book</title>
+<title>Data parallelism, attention-DP, expert parallelism — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,15 +623,13 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 5 · Parallelism and distributed inference · 05-03</div>
 <h1>Data parallelism, attention-DP, expert parallelism</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/coordinator.py</code></li><li><code>python/sglang/srt/layers/dp_attention.py</code></li><li><code>python/sglang/srt/eplb/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/coordinator.py</code></li><li><code>python/sglang/srt/layers/dp_attention.py</code></li><li><code>python/sglang/srt/eplb/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Tensor parallelism buys you nothing on an MLA model's KV cache and it buys you a narrower
 GEMM on a 256-expert MoE layer. The two parallelism axes that actually make frontier MoE models
 servable — data-parallel attention and expert parallelism — are the ones that replace collective
 reductions with routing.</p></div>
-<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You launch DeepSeek-V3 across eight GPUs the obvious way, <code>--tp 8</code>. The server
-comes up, then falls over at about 150 simultaneous 4k-token requests. Eight H100s holding fewer
-resident tokens than one GPU running Llama-3-70B at TP=1.</p>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Consider an MLA cache-sizing thought experiment with eight ranks and a fixed 40&nbsp;GiB KV pool on each rank. It is not a runnable eight-H100 DeepSeek-V3 deployment: approximately 671&nbsp;GB of FP8 weights alone exceeds eight 80&nbsp;GB GPUs, before scales, workspaces and KV. First isolate cache replication; then include the weight budget below.</p>
 
 <p><a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a> established why and
 verified it in both engines: MLA's KV cache is <em>replicated</em> across tensor-parallel ranks,
@@ -640,19 +638,18 @@ before the TP division; SGLang's MLA branch of <code>_compute_cell_size</code> t
 argument at all. The per-token cell is
 $L \cdot (r_{kv} + d_{\text{rope}}) \cdot b = 61 \times 576 \times 2 = 70{,}272$ bytes on
 <em>every</em> rank, so a 40&nbsp;GiB pool holds $42{,}949{,}672{,}960 / 70{,}272 = 611{,}192$
-tokens per rank — and all eight ranks hold the <em>same</em> 611,192. Adding GPUs adds zero KV
-capacity.</p>
+tokens per rank — and all eight ranks hold the <em>same</em> 611,192. At fixed per-rank pool size, adding TP ranks adds no distinct KV capacity. Weight sharding can still free memory and enlarge each pool.</p>
 
 <div class="kpis">
   <div class="kpi"><div class="kpi__n">611,192</div><div class="kpi__l">cluster tokens, MLA at TP=8 (derived)</div></div>
   <div class="kpi kpi--hero"><div class="kpi__n">4,889,536</div><div class="kpi__l">cluster tokens, MLA at DP=8 (derived)</div></div>
-  <div class="kpi"><div class="kpi__n">8&times;</div><div class="kpi__l">from changing one flag</div></div>
+  <div class="kpi"><div class="kpi__n">8&times;</div><div class="kpi__l">fixed-pool layout comparison</div></div>
 </div>
 
 <p>The second symptom is on the FLOP side. DeepSeek-V3's MoE layer has 256 routed experts of
 2,048 intermediate width; shard each eight ways with TP and every rank runs a
 $K = 7168 \to N = 512$ GEMM per expert — a shape that leaves most of a tensor core idle, repeated
-256 times, on <em>every</em> rank, for <em>every</em> token. Both symptoms have the same fix, and it
+over the experts receiving tokens in the current batch. A token uses its selected eight routed experts, not all 256; a sufficiently large, balanced batch may activate nearly all experts. Both symptoms have the same fix, and it
 is not a kernel: stop splitting the tensor, start splitting the <em>data</em> and the
 <em>experts</em>. <a href="../05-parallelism/05-01-tensor-parallelism.html">§5.1</a> owns TP,
 <a href="../05-parallelism/05-02-pipeline-parallelism.html">§5.2</a> PP,
@@ -695,7 +692,7 @@ flowchart TD
     Q --> DPA["DP ATTENTION + TP FFN<br/>attention DP-8, FFN TP-8<br/>KV: 8 private pools<br/>comm: all-gather + reduce-scatter"]
     Q --> EP["DP ATTENTION + EP FFN<br/>attention DP-8, 32 experts per rank<br/>KV: 8 private pools<br/>comm: all-to-all dispatch + combine"]
 
-    TP --> R1["MLA capacity flat in TP<br/>MoE GEMM narrow"]
+    TP --> R1["MLA capacity flat at fixed pool<br/>MoE GEMM narrow"]
     DP --> R2["8x weights per node<br/>prefix caches do not share"]
     DPA --> R3["8x KV capacity<br/>attention weights replicated"]
     EP --> R4["8x KV capacity<br/>wide grouped GEMM<br/>load imbalance appears"]
@@ -704,8 +701,7 @@ flowchart TD
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles</h2></div><div class="sec__body"><h3>Plain data parallelism</h3>
 
 <p>The baseline: $N$ replicas, each a complete engine with a complete copy of the weights and its
-own KV pool, behind a router. Throughput scales linearly in $N$ with no inter-replica
-communication. SGLang's data-parallel controller is exactly that router:</p>
+own KV pool, behind a router. Throughput can approach linear scaling in $N$ when load balances and the router, tokenizer and external dependencies do not bottleneck; model execution needs no inter-replica collectives. SGLang's data-parallel controller is exactly that router:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -735,8 +731,7 @@ prefixes, which is why cache-aware routing exists —
 <p>Attention is embarrassingly parallel over sequences: nothing in the computation for sequence $a$
 touches sequence $b$. So if rank 0 owns $\{a, b\}$ and rank 1 owns $\{c, d\}$, each rank holds only
 its own KV — and the eight copies of the MLA latent that TP forced on you become eight
-<em>different</em> caches instead of eight identical ones. The FFN is not: every token needs every
-weight. The layer therefore has two halves with incompatible data layouts. SGLang names them:</p>
+<em>different</em> caches instead of eight identical ones. A dense FFN needs its complete transformation per token; a routed MoE needs only the selected experts. If those required weights are sharded across ranks, communication must assemble the corresponding computation. The layer therefore has two halves with incompatible data layouts. SGLang names them:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -819,9 +814,9 @@ flowchart TD
     E --> F["dp_reduce_scatter_tensor<br/>[1024,7168] -> [128,7168]<br/>12.85 MB out per rank"]
 
     C -->|"a2a backend = deepep<br/>ScatterMode.SCATTERED"| G["no gather<br/>topk_ids [128, 8]"]
-    G --> H["DeepEP dispatch<br/>~672 rows fp8 = 4.97 MB<br/>to the ranks owning the experts"]
+    G --> H["DeepEP dispatch<br/>~593 remote rows fp8 = 4.38 MB<br/>to the ranks owning the experts"]
     H --> I["grouped GEMM<br/>32 local experts per rank<br/>1.41 GB fp8 weights streamed"]
-    I --> J["DeepEP combine<br/>~672 rows bf16 = 9.63 MB<br/>weighted sum back to owner rank"]
+    I --> J["DeepEP combine<br/>~593 remote rows bf16 = 8.50 MB<br/>weighted sum back to owner rank"]
 
     F --> K["residual add, next layer<br/>[128, 7168] on rank r"]
     J --> K
@@ -834,7 +829,7 @@ flowchart TD
 <a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a> did. Under TP=8 all eight
 ranks hold identical latents, so cluster <em>distinct</em> resident tokens is 611,192; under DP=8
 each pool holds different sequences, so the cluster holds
-$8 \times 611{,}192 = 4{,}889{,}536$. Eight times, from one flag.</p>
+$8 \times 611{,}192 = 4{,}889{,}536$. Eight times in this fixed-pool layout comparison, not a universal flag-level speedup.</p>
 
 <p>That flatters DP attention, because it hides the cost: with <code>attn_tp_size = 1</code> every
 rank keeps a <em>full</em> copy of the attention weights instead of an eighth. Do it again with
@@ -885,7 +880,7 @@ $\text{TP} \le h_{kv} = 8$ already shards the cache.</p>
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 — MLA cluster KV capacity, TP versus DP attention.</b>
     <em>Derived.</em> Left pair holds the KV pool fixed at 40&nbsp;GiB per GPU on 8 GPUs; right pair
-    accounts for weights on 16 GPUs. TP adds ranks without adding capacity.</p>
+    accounts for weights on 16 GPUs. At fixed pool size TP adds ranks without adding distinct capacity; actual pools can grow as weights shard.</p>
   <svg viewBox="0 0 900 300" width="100%" role="img" aria-labelledby="capTitle capDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="capTitle">Cluster KV capacity under TP versus DP attention for an MLA model</title>
     <desc id="capDesc">Four bars. At fixed 40 GiB pool on 8 GPUs, TP=8 holds 611 thousand distinct
@@ -937,7 +932,7 @@ $T_g = 1024$, $d = 7168$, bf16: $2 \times \tfrac{7}{8} \times 1024 \times 7168 \
 25.7$&nbsp;MB per layer per rank, or 1.49&nbsp;GB per rank per decode step over 58 MoE layers. At
 NVLink&nbsp;4's 900&nbsp;GB/s aggregate per H100 (450&nbsp;GB/s one direction, from the
 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 product page</a>) that is
-3.3&nbsp;ms of pure collective per generated token — which is why DP attention is almost always
+3.3&nbsp;ms of ideal transfer time per decode iteration producing 1,024 tokens (about 3.2&nbsp;&micro;s per output token when amortizing aggregate throughput, not per-request TPOT) — which is why DP attention is almost always
 paired with an all-to-all MoE that eliminates the gather entirely.</p></div></section>
 <section class="sec" id="expert-parallelism" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Expert parallelism and the all-to-all</h2></div><div class="sec__body"><p>Under EP, expert $e$ lives on exactly one rank (a few, once EPLB starts replicating); rank $r$
 holds $E/N$ of the $E$ experts and nothing else. The router picks $k$ experts per token at run time,
@@ -972,17 +967,17 @@ flowchart TD
     R1 --> Q
     R7 --> Q
 
-    Q --> A2A["ALL-TO-ALL DISPATCH<br/>each token to the E[distinct ranks] = 5.25 ranks it needs<br/>~672 rows out per rank = 4.97 MB<br/>irregular per-peer sizes, known only after routing"]
+    Q --> A2A["ALL-TO-ALL DISPATCH<br/>each token to the E[remote ranks] = 4.63 ranks it needs<br/>~593 remote rows per rank = 4.38 MB<br/>irregular per-peer sizes, known only after routing"]
 
     A2A --> G0["rank 0: experts 0..31<br/>recv ~1024 token-expert rows<br/>grouped GEMM, 32 groups"]
     A2A --> G1["rank 1: experts 32..63<br/>recv ~1024 rows"]
     A2A --> G7["rank 7: experts 224..255<br/>recv ~1024 rows"]
 
-    G0 --> C2A["ALL-TO-ALL COMBINE<br/>~672 rows back per rank, bf16 = 9.63 MB<br/>weighted sum by topk_weights at the owner"]
+    G0 --> C2A["ALL-TO-ALL COMBINE<br/>~593 remote rows per rank, bf16 = 8.50 MB<br/>weighted sum by topk_weights at the owner"]
     G1 --> C2A
     G7 --> C2A
 
-    C2A --> OUT["rank r output [128, 7168]<br/>total 14.6 MB moved per rank per layer"]
+    C2A --> OUT["rank r output [128, 7168]<br/>12.88 MB sent per rank per layer"]
   </script>
 </div>
 
@@ -992,11 +987,9 @@ flowchart TD
 rank</em>: two chosen experts on the same rank cost one crossing, not two. So per-rank dispatch
 volume is</p>
 
-<div class="math-display">$$V_{\text{dispatch}} = T_\ell \cdot \rho \cdot d \cdot b_{\text{disp}}, \qquad \rho \;=\; N\left(1 - \left(1 - \tfrac{1}{N}\right)^{k}\right)$$</div>
+<div class="math-display">$$V_{\text{dispatch}} = T_\ell \rho_{\text{remote}} d b_{\text{disp}},\qquad p_{\text{hit}}=1-\frac{\binom{E-E/N}{k}}{\binom{E}{k}},\quad \rho_{\text{all}}=Np_{\text{hit}},\quad \rho_{\text{remote}}=(N-1)p_{\text{hit}}.$$</div>
 
-<p>with $T_\ell$ the rank's local token count and $\rho$ the expected number of distinct
-destination ranks per token, assuming uniform routing — an optimistic assumption the next section
-demolishes. Combine is symmetric in rows but not bytes: dispatch is narrowed to fp8 while combine
+<p>Here $T_\ell$ is the local token count. Uniform selection of $k$ <em>distinct</em> experts from $E$ gives the hypergeometric probability above. Network traffic excludes the local rank. The simpler $N[1-(1-1/N)^k]$ is a with-replacement approximation counting all destinations, including local ones. Real grouped routing, skew and placement require empirical destination counts. We count bytes sent per rank; received bytes are a separate equal expectation under balance. Combine is symmetric in rows but not bytes: dispatch is narrowed to fp8 while combine
 returns model dtype. In normal mode SGLang narrows it itself with
 <code>sglang_per_token_group_quant_fp8(hidden_states, 128, ...)</code>
 (<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L527-L534</code>); in low-latency
@@ -1006,24 +999,24 @@ budgets <code>TOTAL_SEQ_LEN * (hidden_size + hidden_size) * topk</code> — two 
 guide</a>).</p>
 
 <div class="table-wrap">
-  <div class="table-wrap__cap">Derived — $\rho$, the expected distinct destination ranks per token, for top-8 routing. As EP widens, deduplication stops helping and dispatch volume approaches the naive $k\,T\,d\,b$.</div>
+  <div class="table-wrap__cap">Derived — $\rho_{\text{remote}}$, expected distinct remote destination ranks for uniform top-8 of 256 experts without replacement. As EP widens, deduplication stops helping and dispatch volume approaches the naive $k\,T\,d\,b$.</div>
   <div class="table-scroll">
     <table class="dt">
-      <thead><tr><th>EP size $N$</th><th>experts/rank</th><th>$\rho$</th><th>vs. naive $k=8$</th></tr></thead>
+      <thead><tr><th>EP size $N$</th><th>experts/rank</th><th>$\rho_{\text{remote}}$</th><th>vs. naive $k=8$</th></tr></thead>
       <tbody>
-        <tr><td class="num">8</td><td class="num">32</td><td class="num">5.25</td><td class="num">0.66&times;</td></tr>
-        <tr><td class="num">16</td><td class="num">16</td><td class="num">6.45</td><td class="num">0.81&times;</td></tr>
-        <tr><td class="num">32</td><td class="num">8</td><td class="num">7.18</td><td class="num">0.90&times;</td></tr>
-        <tr><td class="num">64</td><td class="num">4</td><td class="num">7.58</td><td class="num">0.95&times;</td></tr>
+        <tr><td class="num">8</td><td class="num">32</td><td class="num">4.63</td><td class="num">0.58&times;</td></tr>
+        <tr><td class="num">16</td><td class="num">16</td><td class="num">6.12</td><td class="num">0.76&times;</td></tr>
+        <tr><td class="num">32</td><td class="num">8</td><td class="num">7.04</td><td class="num">0.88&times;</td></tr>
+        <tr><td class="num">64</td><td class="num">4</td><td class="num">7.56</td><td class="num">0.95&times;</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
 <p>Contrast with TP. At $N=8$, $T_\ell = 128$, $d = 7168$: EP moves
-$128 \times 5.25 \times 7168 \times 1.031 = 4.97$&nbsp;MB out and 9.63&nbsp;MB back,
-<b>14.6&nbsp;MB per layer per rank</b>, against <b>25.7&nbsp;MB</b> for DP-gather-plus-TP-FFN. EP is
-1.8&times; cheaper in bytes. The all-to-all is <em>not</em> the expensive primitive by volume; it is
+$128 \times 4.63282 \times 7168 \times 1.03125 = 4.38$&nbsp;MB dispatched and 8.50&nbsp;MB combined,
+<b>12.88&nbsp;MB sent per layer per rank</b>, against <b>25.7&nbsp;MB</b> for DP-gather-plus-TP-FFN. EP is
+about 2.0&times; smaller in ideal sent bytes under these assumptions. The all-to-all is <em>not</em> the expensive primitive by volume; it is
 expensive because it is irregular (per-peer sizes are data-dependent, so the kernel cannot be
 shape-specialised), latency-sensitive (two round trips &times; 58 layers = 116 serialised
 collectives per decode step), and because at scale it crosses node boundaries where bandwidth drops
@@ -1033,11 +1026,10 @@ an order of magnitude.</p>
 
 <p>What actually decides EP size at decode is not communication but HBM reads. Each DeepSeek-V3
 expert is $3 \times 2048 \times 7168 = 44.04$&nbsp;MB in fp8; all 256 are 11.27&nbsp;GB <em>per
-layer</em>. At decode, every resident expert's weights are streamed once per step regardless of how
-many tokens hit it:</p>
+layer</em>. For a large balanced batch that activates all experts, each resident expert's weights may need to be streamed once per step. This is not a universal decode lower bound: kernels can skip experts with no assigned tokens, and cache reuse changes HBM traffic. Under independent uniform top-$k$ routing across $B$ tokens, the expected number of active experts is $E[1-(1-k/E)^B]$. The following is the all-experts-active traffic model:</p>
 
 <div class="table-wrap">
-  <div class="table-wrap__cap">Derived — floor on DeepSeek-V3 decode step time from streaming routed-expert weights alone, at H100's 3.35 TB/s HBM, 58 MoE layers. Ignores attention, dense layers, and all communication. Not measured.</div>
+  <div class="table-wrap__cap">Derived — all-experts-active weight-streaming time model for DeepSeek-V3, at H100's 3.35 TB/s HBM, 58 MoE layers. Ignores attention, dense layers, and all communication. Not measured.</div>
   <div class="table-scroll">
     <table class="dt">
       <thead><tr><th>EP size</th><th>experts/rank</th><th>fp8 bytes/layer/rank</th><th>stream time/layer</th><th>&times; 58 layers</th></tr></thead>
@@ -1051,12 +1043,9 @@ many tokens hit it:</p>
   </div>
 </div>
 
-<p>TP=8 reads the same 1.41&nbsp;GB per rank — it holds a slice of every expert rather than all of
+<p>In that all-experts-active model, TP=8 reads the same 1.41&nbsp;GB per rank — it holds a slice of every expert rather than all of
 a few — so its bandwidth floor matches EP=8. What differs is arithmetic intensity: 256 skinny
-$K{=}7168 \to N{=}512$ GEMMs against every token in the global batch, versus 32 fat ones against
-only the tokens routed here. And only EP reduces the per-rank expert footprint, which is
-simultaneously the HBM budget and the decode latency floor. That is why "wide EP" — 64, 128, 320
-ranks — is the shape of every serious frontier MoE deployment.</p></div></section>
+$K{=}7168 \to N{=}512$ expert GEMMs on the tokens routed to each expert, versus 32 wider local experts. Both TP and EP reduce resident expert-weight bytes per rank, approximately as $1/N$; EP changes ownership and GEMM shapes, not that capacity scaling law. Wide EP trades kernel efficiency and weight traffic against routing imbalance, topology and collective latency. The best deployment depends on batch size, routing and hardware.</p></div></section>
 <section class="sec" id="production" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>SGLang: one process world, modes per layer</h3>
 
 <p>SGLang runs one TP world and re-partitions it per layer. Whether a layer needs the DP gather
@@ -1232,7 +1221,7 @@ steps:</p>
 <div class="callout callout--note">
   <span class="callout__k">Why they differ</span>
   <p>SGLang partitions one TP world per layer, so DP attention is a tensor-layout concern
-  (<code>ScatterMode</code>) and the synchronisation is an in-process all-gather. vLLM keeps engines
+  (<code>ScatterMode</code>) and the synchronisation is a cross-process all-gather within the distributed TP group. vLLM keeps engines
   as independent processes, so DP attention is free — each engine trivially owns its own KV — and
   the cost moves to inter-process coordination: a coordinator, request waves, dummy batches.
   SGLang's design gives finer control over the boundary collectives; vLLM's gives process isolation
@@ -1499,7 +1488,7 @@ deepep</code>. Follow one decode token that landed on DP rank 3, through one spa
   (<code>python/sglang/srt/layers/moe/token_dispatcher/deepep.py:L766-L776</code>) — the fp8
   narrowing happens inside the DeepEP kernel here, while the normal-mode path does it explicitly
   with <code>sglang_per_token_group_quant_fp8</code>. Our token's
-  hidden vector is copied to each of the ~5.25 distinct ranks holding its eight experts. Every rank
+  hidden vector targets an expected 5.29 distinct ranks, of which 4.63 are remote, under uniform distinct-expert routing. Actual destination counts follow the router. Every rank
   contributes to the same collective — which is why step 2's idle batches were mandatory.</li>
 
   <li>On each destination rank, the received rows land in per-expert buckets
@@ -1560,8 +1549,7 @@ of the gate-up GEMM), 128 experts, $2 \times 768 \times 4/2 = 1536$ intermediate
 Applying the procedure: no PP; EP=8, giving 16 experts per rank at
 $3 \times 1536 \times 4096 = 18.9$&nbsp;MB each, so 302&nbsp;MB of expert weights per layer per
 rank. Qwen3 uses GQA with $h_{kv} = 4$, so step 3 says <em>attention TP, not DP</em> — but the a2a
-backends demand <code>ep_size == tp_size == 8</code>, which forces <code>dp_size = 8</code> and
-hence <code>attn_tp_size = 1</code>. So: either accept replicated attention weights (small here) to
+backends may demand <code>ep_size == tp_size == 8</code>. That equality alone does not imply <code>dp_size = 8</code>; additional backend and DP-attention validation determines legal combinations. So: either accept replicated attention weights (small here) to
 get the DeepEP path, or set <code>--moe-a2a-backend none</code> and keep <code>attn_tp = 8</code>
 with an all-gather/reduce-scatter MoE. A genuine fork with no universal answer — measure both.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="callout callout--warn">
@@ -1610,8 +1598,8 @@ with an all-gather/reduce-scatter MoE. A genuine fork with no universal answer �
   <code>python/sglang/srt/eplb/expert_location_updater.py:L489-L492</code>). If a rebalance hangs,
   <code>SGLANG_EPLB_P2P_BATCH_CHUNK_SIZE</code> is the knob.</p>
 </div></div></section>
-<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>The DeepSeek recipe from SGLang's own guide. Every flag is load-bearing; dropping any one
-changes the communication graph:</p>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
+<section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>This source-derived DeepSeek configuration is a hardware-dependent sketch, not an eight-H100 recipe. Budget the FP8 weights, replicated attention, 32 redundant experts per layer, scales, workspace and KV before launching. Eight 80&nbsp;GB H100s cannot fit the default checkpoint. Use a sufficiently provisioned topology, pinned compatible DeepEP/DeepGEMM builds and the <a href="../index.html#prereqs">environment preflight</a>. Run one configuration at a time and verify readiness; this GPU launch has not been executed locally.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1634,7 +1622,7 @@ changes the communication graph:</p>
 <ol>
   <li><b>The capacity claim.</b> Start with and without <code>--enable-dp-attention</code>, read
   the KV pool line the scheduler logs, and multiply by <code>dp_size</code> in the DP case. You
-  should recover the 8&times; from Figure 3.</li>
+  must compare actual logged pools rather than assume 8&times;; Figure 3's left pair deliberately fixes the pool size.</li>
   <li><b>Balancedness.</b> <code>--expert-distribution-recorder-mode stat</code> accumulates the
   per-expert counts that <code>compute_utilization_rate</code> turns into Figure 5's ratio; on vLLM,
   <code>--eplb-config.log_balancedness=true</code> prints it. Watch it either side of the rebalance
@@ -1657,18 +1645,18 @@ form is in <code>examples/features/data_parallel/data_parallel_offline.py:L4-L9<
   <p><code>sum_len = 4103</code>, <code>max_len = 4096</code>. The test is
   <code>sum_len * 2 &gt;= max_len * dp_size</code>: $8206 \ge 32768$ is false, so
   <code>SUM_LEN</code>. The all-reduce buffer is 4,103 rows; <code>MAX_LEN</code> would have
-  all-gathered $8 \times 4096 = 32{,}768$ rows — 8&times; the traffic to carry the same data.
+  all-gathered $8 \times 4096 = 32{,}768$ rows, about 8&times; the buffer size. Ring all-reduce sends $2(7/8)4103$ row-equivalents per rank, while ring all-gather sends $(7/8)32768$, so the modeled sent-traffic ratio is about 4&times;, not 8&times;.
   (There is an override above: if the pplx backend is active it forces <code>MAX_LEN</code>
   regardless, because pplx's a2a is a symmetric collective that deadlocks on unequal token
   counts.)</p></div></details></li>
 
-  <li>Using $\rho = N(1 - (1-1/N)^k)$, compute the per-rank dispatch and combine bytes for
+  <li>Using $\rho_{\text{remote}}=(N-1)[1-\binom{E-E/N}{k}/\binom{E}{k}]$, compute the per-rank dispatch and combine bytes for
   DeepSeek-V3 at EP=32, 64 tokens per rank, fp8 dispatch (1.031 B/element) and bf16 combine. Then
   say why running EP=32 across four nodes is much worse than the number suggests.
   <details class="fold"><summary>Answer</summary><div class="fold__body">
-  <p>$\rho = 32(1-(31/32)^8) = 7.18$; rows $= 64 \times 7.18 = 459$. Dispatch 3.39&nbsp;MB,
-  combine 6.58&nbsp;MB, total 9.97&nbsp;MB per layer per rank — 22&nbsp;&micro;s at NVLink 4's
-  450&nbsp;GB/s. But across four nodes most of those 7.18 destinations are remote, and
+  <p>$\rho_{\text{remote}}=7.0397$; remote rows $=64\times7.0397=450.54$. Dispatch 3.33&nbsp;MB,
+  combine 6.46&nbsp;MB, total 9.79&nbsp;MB sent per layer per rank — 22&nbsp;&micro;s at NVLink 4's
+  450&nbsp;GB/s. But across four nodes many of those 7.04 remote-rank destinations lie off node, and
   400&nbsp;Gb/s NDR InfiniBand is 50&nbsp;GB/s: 9&times; slower, ~200&nbsp;&micro;s per layer,
   ~11&nbsp;ms per decode step. The bytes did not change; the bandwidth did. This is why DeepEP
   forwards inter-node traffic over NVLink inside the destination node rather than sending a token
@@ -1680,10 +1668,7 @@ form is in <code>examples/features/data_parallel/data_parallel_offline.py:L4-L9<
   <a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">§3.5</a>'s GQA cell size.
   <details class="fold"><summary>Answer</summary><div class="fold__body">
   <p><code>attn_tp_size = 1</code>, so every rank keeps the full attention weights instead of an
-  eighth. Cluster KV capacity is <em>unchanged</em>: GQA at TP=8 already shards the cache eight ways
-  ($h_{kv}=8$), so the per-rank cell is already 40&nbsp;KiB. You paid weight memory for zero
-  capacity, plus a per-layer gather/scatter you did not have before. DP attention is an MLA fix, not
-  a general one.</p></div></details></li>
+  eighth. GQA at TP=8 has a 40&nbsp;KiB per-rank cell for each globally shared token. At attention TP=1 the cell grows to 320&nbsp;KiB, but eight private pools hold different sequences. With identical pool budgets, aggregate distinct-token capacity is unchanged: $P/40\,\text{KiB}=8P/320\,\text{KiB}$. Replicated attention weights can reduce each actual pool and therefore reduce capacity. DP attention's capacity benefit is especially relevant to replicated MLA caches, not guaranteed for GQA.</p></div></details></li>
 
   <li>Read <code>python/sglang/srt/eplb/eplb_algorithms/deepseek.py:L70-L82</code>. A layer has
   logical loads <code>[100, 50, 25, 25]</code> and 6 physical slots. Which experts get replicated,
@@ -1712,13 +1697,12 @@ form is in <code>examples/features/data_parallel/data_parallel_offline.py:L4-L9<
   <em>sequence</em> instead of by <em>head</em> turns eight identical caches into eight different
   ones — 10.3&times; more cluster-resident tokens for DeepSeek-V3 at 16 GPUs, even after paying
   10.7&nbsp;GB/rank for replicated attention weights (derived).</li>
-  <li>The all-to-all is cheaper in bytes than the alternative, not dearer: 14.6&nbsp;MB per layer per
+  <li>The all-to-all is cheaper in bytes than the alternative, not dearer: 12.88&nbsp;MB sent per layer per
   rank versus 25.7&nbsp;MB for gather-plus-TP-FFN at EP=8 (derived). What makes it hard is
   data-dependent per-peer sizes, two serialised round trips per layer, and an order-of-magnitude
   bandwidth cliff outside the NVLink domain.</li>
   <li>Wide EP is about HBM, not FLOPs. Per-rank routed-expert weights fall as
-  $11.27\,\text{GB}/N$ per layer and must be streamed every decode step regardless of batch — a
-  24.4&nbsp;ms floor at EP=8 against 3.05&nbsp;ms at EP=64 (derived).</li>
+  $11.27\,\text{GB}/N$ per layer. If all experts are active and weights stream once, the ideal traffic model gives 24.4&nbsp;ms at EP=8 against 3.05&nbsp;ms at EP=64. Sparse small batches need not read every expert; TP also shards resident weights.</li>
   <li>Under DP attention nothing is independent: both engines fabricate empty forward passes for
   idle ranks (<code>get_idle_batch()</code>, <code>execute_dummy_batch()</code>) because the FFN is a
   collective. Capacity planning that treats DP ranks as independent replicas will be wrong.</li>
@@ -1759,7 +1743,7 @@ form is in <code>examples/features/data_parallel/data_parallel_offline.py:L4-L9<
 </ul></div></section>
 <div class="pager"><a href="05-02-pipeline-parallelism.html"><div class="pager__k">← Previous</div><div class="pager__t">Pipeline parallelism and bubbles</div></a><a class="pager__next" href="05-04-collectives-and-topology.html"><div class="pager__k">Next →</div><div class="pager__t">Collectives, topology, custom all-reduce</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Worker orchestration and multi-node serving — The Inference Engineering Book</title>
+<title>Worker orchestration and multi-node serving — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 5 · Parallelism and distributed inference · 05-05</div>
 <h1>Worker orchestration and multi-node serving</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/executor/multiproc_executor.py</code></li><li><code>vllm/v1/executor/ray_executor.py</code></li><li><code>python/sglang/srt/managers/tp_worker.py</code></li><li><code>python/sglang/srt/managers/data_parallel_controller.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/executor/multiproc_executor.py</code></li><li><code>vllm/v1/executor/ray_executor.py</code></li><li><code>python/sglang/srt/managers/tp_worker.py</code></li><li><code>python/sglang/srt/managers/data_parallel_controller.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A tensor-parallel engine does not fail the way a single-GPU engine fails. When something goes wrong across ranks you rarely get a wrong answer or a stack trace — you get eight processes at 100% GPU utilisation, zero tokens per second, and a five-minute wait before anything is logged. Every design decision in this chapter exists to make that outcome rare.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Llama-3-70B on 8&times;H100 with TP=8. The server has been serving for two hours. Then throughput goes to zero. <code>nvidia-smi</code> shows all eight GPUs pinned at 100% SM utilisation and constant power draw. No exception has been raised. No request has returned. Five minutes later vLLM finally says something:</p>
@@ -678,9 +678,9 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <p>Both engines default this timeout to 300 s (<code>vllm/envs.py:L243</code>; <code>python/sglang/srt/server_args.py:L1261-L1265</code>). Both then kill the whole server. Neither can do better, because the GPUs are not hung — they are <em>waiting</em>. One rank entered an all-reduce that another rank never entered, and NCCL's spin-wait looks exactly like useful work.</p>
 
 <p>This chapter owns the process architecture that makes lockstep the default: how ranks get launched, who decides what they run, how the decision travels, and what happens when one dies. The parallelism strategies belong to <a href="../05-parallelism/05-01-tensor-parallelism.html">&sect;5.1</a>&ndash;<a href="../05-parallelism/05-04-collectives-and-topology.html">&sect;5.4</a>; admission logic belongs to <a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a>.</p></div></section>
-<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A collective is a barrier. <code>all_reduce</code> does not return on any rank until it has been called on every rank in the group. That gives distributed inference an unusual failure algebra: a disagreement between ranks about <em>what to run</em> does not produce a wrong answer, it produces a permanent stall. If rank 0 schedules a batch of 32 sequences and rank 1 schedules 31, the first all-reduce inside the first attention layer will have mismatched shapes — or, worse, matched shapes and mismatched semantics — and the job will either abort with a NCCL size mismatch or hang forever.</p>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A collective requires compatible participation, but is not a host-side barrier: asynchronous CUDA operations can return after enqueueing, before device completion. Completion and safe use of results depend on stream ordering or explicit synchronization. Disagreement can cause a hang, an error, or silently incorrect output when shapes agree but request identities differ. See <a href="https://docs.pytorch.org/docs/stable/distributed.html">PyTorch distributed operation semantics</a>. If rank 0 schedules a batch of 32 sequences and rank 1 schedules 31, the first all-reduce inside the first attention layer will have mismatched shapes — or, worse, matched shapes and mismatched semantics — and the job may abort, hang until a watchdog intervenes, or reduce unrelated activations without detecting the semantic error.</p>
 
-<p>So the whole architecture reduces to one requirement: <b>every rank must execute the same sequence of steps, with the same shapes, in the same order.</b> There are exactly two ways to guarantee that, and the two engines picked different ones.</p>
+<p>So the whole architecture reduces to one requirement: <b>every rank must execute the same sequence of steps, with the same shapes, in the same order.</b> Two useful architectural approaches are centralized plans and replicated scheduling; the engines emphasize different approaches.</p>
 
 <div class="cards cards--2">
   <div class="ve-card ve-card--hero"><span class="ve-card__k">Model A</span><h4>Broadcast the plan</h4><p>One process runs the scheduler. Each step it produces a plan object and broadcasts it to every worker. Workers do no scheduling at all; they deserialise a plan and execute it. One source of truth, trivially consistent — but the broadcast sits on the critical path of every step, and the plan object has to be serialisable.</p></div>
@@ -688,7 +688,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 </div>
 
 <div class="diagram-shell">
-  <p class="diagram-shell__cap"><b>Figure 1 — the two answers to the lockstep requirement.</b> Left: one scheduler, plan broadcast per step. Right: N schedulers, inputs broadcast per arrival.
+  <p class="diagram-shell__cap"><b>Figure 1 — the two answers to the lockstep requirement.</b> Left: one scheduler, plan broadcast per step. Right: N schedulers, inputs broadcast each receive-loop iteration, including empty input lists.
     <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
   <div class="mermaid-wrap">
     <div class="zoom-controls">
@@ -714,8 +714,8 @@ flowchart TD
         A4 --- A5
     end
     subgraph B["Model B - replicate the scheduler (SGLang)"]
-        B0["TokenizerManager"] -->|"tokenized requests<br/>on arrival only"| B1["Scheduler rank 0<br/>schedule + execute"]
-        B1 -->|"broadcast_pyobj<br/>gloo, on arrival only"| B2["Scheduler rank 1<br/>schedule + execute"]
+        B0["TokenizerManager"] -->|"tokenized requests<br/>when received"| B1["Scheduler rank 0<br/>schedule + execute"]
+        B1 -->|"broadcast_pyobj<br/>gloo, each receive loop"| B2["Scheduler rank 1<br/>schedule + execute"]
         B1 -->|"broadcast_pyobj"| B3["Scheduler rank 2<br/>schedule + execute"]
         B1 -->|"broadcast_pyobj"| B4["Scheduler rank 3<br/>schedule + execute"]
         B1 --- B5(["NCCL all-reduce barrier<br/>2 per layer x 80 layers"])
@@ -735,11 +735,11 @@ flowchart TD
 
 <div class="math-display">$$ t_{\text{step}} \geq \frac{16.4 \times 2^{30}\ \text{B}}{3.35 \times 10^{12}\ \text{B/s}} = 5.25\ \text{ms} $$</div>
 
-<p>which is 190 steps/s. So at the roofline this job crosses roughly $160 \times 190 \approx 30{,}000$ collective barriers per second per rank (arithmetic from the roofline formula in <a href="../FORMULAS.html">FORMULAS</a> plus published Llama-3-70B shapes; real systems land well below this, and <a href="../05-parallelism/05-04-collectives-and-topology.html">&sect;5.4</a> owns the all-reduce cost itself). Every one of those 30,000 barriers is a chance for two ranks to disagree, and a disagreement is not a bad token — it is the end of the server.</p>
+<p>which is 190 steps/s. So at the roofline this job crosses roughly $160 \times 190 \approx 30{,}000$ collective barriers per second per rank (arithmetic from the roofline formula in <a href="../FORMULAS.html">FORMULAS</a> plus published Llama-3-70B shapes; real systems land well below this, and <a href="../05-parallelism/05-04-collectives-and-topology.html">&sect;5.4</a> owns the all-reduce cost itself). Every one of those 30,000 barriers is a chance for two ranks to disagree, and a disagreement can stall the server or corrupt results, depending on whether the protocol detects it.</p>
 
 <p>That asymmetry is what justifies paying for a plan broadcast. The cost side is small: vLLM's broadcast is a write into a shared-memory ring buffer sized by <code>VLLM_MQ_MAX_CHUNK_BYTES_MB</code>, default 16 MB, with a ZMQ fallback for objects that do not fit (<code>vllm/envs.py:L242</code>, <code>vllm/envs.py:L1771-L1775</code>). One such write per step against a 5.25 ms floor is not where your throughput went.</p>
 
-<p>The benefit side is that the plan is <em>defined</em> to be identical on every rank, so no property of any kernel can make the ranks diverge. Model B does not have that guarantee, and SGLang says so, in a comment that is the most honest sentence in either codebase about the risk it is taking:</p>
+<p>The benefit side is that the plan is <em>defined</em> to be identical on every rank, but it does not make arbitrary rank-dependent kernels harmless: collective order, metadata interpretation and persistent worker state still have to agree. Model B does not have that guarantee, and SGLang says so, in a comment that is the most honest sentence in either codebase about the risk it is taking:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -873,7 +873,7 @@ flowchart TD
                     self.handle_output(output)</code></pre>
 </div>
 
-<p>A worker is a method dispatcher. It has no scheduler, no queue, no notion of a request. The tuple on the wire is <code>(method_name, args, kwargs, output_rank)</code>, enqueued once by the executor at <code>multiproc_executor.py:L420</code>, and the per-step call is just <code>collective_rpc("execute_model", args=(scheduler_output,), ...)</code>. Only one rank replies, chosen as the first TP rank of the last PP stage (<code>multiproc_executor.py:L541-L555</code>) — the others compute and stay silent, because their outputs are identical by construction.</p>
+<p>A worker is a method dispatcher. It has no admission scheduler, but it does have input queues and persistent model-runner request/KV state. The tuple on the wire is <code>(method_name, args, kwargs, output_rank)</code>, enqueued once by the executor at <code>multiproc_executor.py:L420</code>, and the per-step call is just <code>collective_rpc("execute_model", args=(scheduler_output,), ...)</code>. Only one rank replies, chosen as the first TP rank of the last PP stage (<code>multiproc_executor.py:L541-L555</code>) — the others compute and stay silent, because their outputs are identical by construction.</p>
 
 <p>The Ray backends differ only in how processes come into existence. <code class="c-vllm">RayExecutorV2</code> subclasses <code>MultiprocExecutor</code> — workers are Ray actors, control plane is the same message queue (<code>vllm/v1/executor/ray_executor_v2.py:L219-L231</code>). The legacy <code class="c-vllm">RayDistributedExecutor</code> instead compiles a Ray DAG whose input node is the <code>SchedulerOutput</code> and whose edges are PP stages (<code>vllm/v1/executor/ray_executor.py:L574-L590</code>). Either way the plan is still broadcast; only the transport changed.</p>
 
@@ -985,11 +985,11 @@ flowchart TD
       <thead><tr><th>Property</th><th>vLLM (mp / ray)</th><th>SGLang</th></tr></thead>
       <tbody>
         <tr><td>Who schedules</td><td>EngineCore process only</td><td>Every TP&times;PP rank</td></tr>
-        <tr><td>What crosses ranks per step</td><td><code>SchedulerOutput</code> via shm ring buffer</td><td>Nothing</td></tr>
+        <tr><td>What crosses ranks per step</td><td><code>SchedulerOutput</code> via shm ring buffer</td><td>Received-input list via gloo each receive-loop iteration, possibly empty; no centralized execution plan</td></tr>
         <tr><td>What crosses ranks on arrival</td><td>Nothing extra (already in the plan)</td><td>Tokenized requests via <code>broadcast_pyobj</code> (gloo)</td></tr>
         <tr><td>Worker owns</td><td>Model runner only</td><td>Scheduler, radix cache, KV pool, model runner</td></tr>
         <tr><td>Processes at TP=4</td><td>1 API + 1 EngineCore + 4 workers</td><td>1 TokenizerManager + 4 Schedulers + 1 Detokenizer</td></tr>
-        <tr><td>Nondeterministic kernel</td><td>Harmless to lockstep</td><td>Potential deadlock; see <code>SYNC_TOKEN_IDS_ACROSS_TP</code></td></tr>
+        <tr><td>Nondeterministic kernel</td><td>No independent admission decision, but execution and persistent state must still agree</td><td>Potential deadlock; see <code>SYNC_TOKEN_IDS_ACROSS_TP</code></td></tr>
         <tr><td>KV pool sizing consensus</td><td>Python <code>min()</code> in the controller</td><td><code>all_reduce(MIN)</code> across ranks</td></tr>
       </tbody>
     </table>
@@ -1070,7 +1070,7 @@ flowchart TD
 
 <p>All four workers wake in <code>worker_busy_loop</code>, resolve <code>execute_model</code> on their <code>Worker</code>, and enter the forward pass together. Only rank 0's response queue is read.</p>
 
-<p>SGLang, same step: all four <code>Scheduler</code> processes are already inside <code>event_loop_normal</code>. Each calls <code>recv_requests</code> → <code>broadcast_pyobj</code> (a barrier), then each independently calls <code>get_next_batch_to_run</code> and <code>run_batch</code>. There is no plan on the wire, and the four ranks meet for the first time in that step inside the model's first all-reduce.</p>
+<p>SGLang, same step: all four <code>Scheduler</code> processes are already inside <code>event_loop_normal</code>. Each calls <code>recv_requests</code> → <code>broadcast_pyobj</code> (a barrier), then each independently calls <code>get_next_batch_to_run</code> and <code>run_batch</code>. There is no centralized plan on the wire. The ranks have already participated in the input broadcast before reaching the first model all-reduce.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 — one decode step across ranks. Barriers marked B.</b> vLLM has one control barrier (the mq dequeue) plus 2L NCCL barriers; SGLang has one gloo barrier in recv_requests plus the same 2L NCCL barriers.
@@ -1432,6 +1432,7 @@ flowchart TD
 <h3>Non-NVIDIA backends</h3>
 
 <p>Both engines abstract the accelerator behind a platform object that supplies the distributed backend string: <code>nccl</code> for CUDA and ROCm, <code>xccl</code> for XPU, <code>gloo</code> for CPU (<code>vllm/platforms/cuda.py:L214</code>, <code>vllm/platforms/xpu.py:L111</code>, <code>vllm/platforms/cpu.py:L48</code>). SGLang resolves it through <code>get_default_distributed_backend</code> (<code>python/sglang/srt/distributed/parallel_state.py:L2157-L2164</code>) and keeps per-vendor code under <code>python/sglang/srt/hardware_backend/</code> — <code>npu</code> (Ascend), <code>xpu</code>, <code>musa</code>, <code>cpu</code>, <code>mlx</code> — with Ascend P/D transfer in <code>python/sglang/srt/disaggregation/ascend/</code>. Nothing above changes on these backends: same process tree, same broadcast, same barriers; only the collective library and the graph-capture mechanism swap out.</p></div></section>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
 <section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. See the process tree.</b> Start each engine at TP=2 and look at what actually exists. vLLM names its worker processes, and the names encode the ranks (<code>multiproc_executor.py:L1075-L1084</code>):</p>
 
 <div class="code-file">
@@ -1439,11 +1440,17 @@ flowchart TD
     <span class="src">shell</span>
     <span class="tag tag--shell">shell</span>
   </div>
-  <pre class="code-block code-block--wrap"><code>vllm serve meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 2 &amp;
-sleep 90 &amp;&amp; ps -eo pid,ppid,comm,args | grep -E "VLLM|EngineCore|Worker" | grep -v grep
+  <pre class="code-block code-block--wrap"><code># Terminal A: run one engine in the foreground.
+vllm serve meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 2
 
-python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct --tp 2 &amp;
-sleep 90 &amp;&amp; ps -eo pid,ppid,comm | grep sglang</code></pre>
+# Terminal B: wait for successful service readiness, then inspect.
+ps -eo pid,ppid,comm,args | grep -E "VLLM|EngineCore|Worker" | grep -v grep
+
+# Stop vLLM with Ctrl-C, confirm every worker exits and GPU memory is released.
+# Only then run SGLang in Terminal A; inspect from Terminal B after readiness.
+python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct --tp 2
+# Terminal B:
+ps -eo pid,ppid,comm,args | grep sglang</code></pre>
 </div>
 
 <p>vLLM shows one <code>EngineCore</code> plus two <code>Worker_TP*</code> processes; SGLang shows two <code>sglang::scheduler</code> processes plus a detokenizer. Count them &mdash; the count is the architecture.</p>
@@ -1472,7 +1479,7 @@ python -m sglang.launch_server ... --tp 2 --watchdog-timeout 30 --soft-watchdog-
 
 <p>The soft watchdog is the more useful: it dumps py-spy stacks for every scheduler process without killing anything, which is how you find out <em>which</em> rank is somewhere else.</p>
 
-<p><b>4. Break it on purpose.</b> On two nodes, set <code>--node-rank 1</code> on both and read what you get. Then point node 1's <code>--dist-init-addr</code> somewhere unreachable and time how long before anything is logged.</p></div></section>
+<p><b>4. Break it on purpose, only on an isolated disposable deployment.</b> Set a bounded external timeout, retain logs, and terminate all ranks after each test. Never run this against shared or production workers. On two nodes, set <code>--node-rank 1</code> on both and read what you get. Then point node 1's <code>--dist-init-addr</code> somewhere unreachable and time how long before anything is logged.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read this file and answer.</b> In <code>vllm/v1/executor/multiproc_executor.py</code>, <code>_init_executor</code> contains the comment "Ensure message queues are ready. Will deadlock if re-ordered." Find the matching comment in <code>WorkerProc.worker_main</code> and explain precisely which two operations must not be swapped, and what the deadlock looks like.</li>
   <li><b>Count the barriers.</b> For Llama-3-70B at TP=8, PP=2, compute the number of NCCL collectives on the critical path of one decode step, separating all-reduces from PP send/recv. State your assumption about how many all-reduces a transformer layer performs under TP.</li>
@@ -1483,7 +1490,7 @@ python -m sglang.launch_server ... --tp 2 --watchdog-timeout 30 --soft-watchdog-
 
 <details class="fold">
   <summary>Answer 1</summary>
-  <div class="fold__body"><p>In the executor, <code>rpc_broadcast_mq.wait_until_ready()</code> runs before the loop over <code>response_mq.wait_until_ready()</code>. In <code>worker_main</code> the worker must do the same: send READY, then <code>worker.rpc_broadcast_mq.wait_until_ready()</code>, then <code>worker.worker_response_mq.wait_until_ready()</code>. The handshakes are ZMQ XPUB subscription confirmations, and each side blocks until the other subscribes. If one side waits on the response queue while the other waits on the broadcast queue, neither ever subscribes to what the other is waiting for, and both block forever — before any model has been loaded, so there is nothing in the log but silence.</p></div>
+  <div class="fold__body"><p>In the executor, <code>rpc_broadcast_mq.wait_until_ready()</code> runs before the loop over <code>response_mq.wait_until_ready()</code>. In <code>worker_main</code> the worker must do the same: send READY, then <code>worker.rpc_broadcast_mq.wait_until_ready()</code>, then <code>worker.worker_response_mq.wait_until_ready()</code>. The handshakes are ZMQ XPUB subscription confirmations, and each side blocks until the other subscribes. If one side waits on the response queue while the other waits on the broadcast queue, neither ever subscribes to what the other is waiting for, and both block forever — before final executor readiness. Model loading may already have happened in worker initialization; distinguish process startup, model loading, queue readiness, and service readiness.</p></div>
 </details>
 
 <details class="fold">
@@ -1503,10 +1510,10 @@ python -m sglang.launch_server ... --tp 2 --watchdog-timeout 30 --soft-watchdog-
 
 <details class="fold">
   <summary>Answer 5</summary>
-  <div class="fold__body"><p>A delta would carry newly scheduled requests, finished request IDs, and appended block IDs — small next to a full batch description. The failure mode it introduces is state divergence over time: a full broadcast is idempotent and self-correcting, whereas a delta stream makes every worker's plan a function of every previous message. One dropped or reordered message, one worker restarted mid-stream, and the workers' views drift apart permanently with no mechanism to notice. You would need periodic full resyncs plus sequence numbers — at which point you have rebuilt a replication protocol to save 16 MB of shared-memory writes against a 5 ms step.</p></div>
+  <div class="fold__body"><p>A delta would carry newly scheduled requests, finished request IDs, and appended block IDs — small next to a full batch description. The failure mode it introduces is state divergence over time: an additional delta protocol increases dependence on synchronized prior state. The existing SchedulerOutput already contains incremental state, so a complete per-step message is not by itself an idempotent snapshot or automatic repair mechanism. One dropped or reordered message, one worker restarted mid-stream, and the workers' views drift apart permanently with no mechanism to notice. You would need periodic full resyncs plus sequence numbers — at which point you have rebuilt a replication protocol to save the measured serialized payload against a roughly 5 ms model floor. The 16 MB setting is queue chunk capacity, not the number of bytes written by every plan.</p></div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>Collectives are barriers, so cross-rank disagreement produces a hang, not a wrong answer. That single fact determines the entire process architecture: whatever is cheapest to keep identical across ranks is what gets shared.</li>
+  <li>Collectives require compatible participation and semantic agreement. Asynchronous enqueue is not completion; disagreement can hang, error, or produce incorrect output. That single fact determines the entire process architecture: whatever is cheapest to keep identical across ranks is what gets shared.</li>
   <li>vLLM broadcasts the plan; SGLang replicates the scheduler. vLLM's worker is a method dispatcher with no scheduling state; SGLang's rank is a complete engine that happens to be one of N. Every other difference in this chapter is a consequence.</li>
   <li>The comment in <code>abstract.py</code> beside <code>external_launcher</code> — "TODO: make v1 scheduling deterministic" — is the honest reason vLLM broadcasts. SGLang has made determinism a load-bearing assumption, and pays for it with <code>SYNC_TOKEN_IDS_ACROSS_TP</code> and an opt-in rank-consensus checker.</li>
   <li>Both engines reconcile per-rank memory profiling down to a global minimum before allocating KV, but in different places: vLLM with <code>min()</code> in the controller, SGLang with <code>all_reduce(MIN)</code>. Where the reconciliation lives tells you which model an engine is in.</li>
@@ -1523,7 +1530,7 @@ python -m sglang.launch_server ... --tp 2 --watchdog-timeout 30 --soft-watchdog-
 </ul></div></section>
 <div class="pager"><a href="05-04-collectives-and-topology.html"><div class="pager__k">← Previous</div><div class="pager__t">Collectives, topology, custom all-reduce</div></a><a class="pager__next" href="../06-decoding-algorithms/06-01-sampling-on-gpu.html"><div class="pager__k">Next →</div><div class="pager__t">Sampling on the GPU</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

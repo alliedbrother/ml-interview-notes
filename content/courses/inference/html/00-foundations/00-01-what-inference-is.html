@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Inference is not training — The Inference Engineering Book</title>
+<title>Inference is not training — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 0 · Foundations · 00-01</div>
 <h1>Inference is not training</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/entrypoints/llm.py</code></li><li><code>python/sglang/srt/entrypoints/engine.py</code></li><li><code>docs/design/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/entrypoints/llm.py</code></li><li><code>python/sglang/srt/entrypoints/engine.py</code></li><li><code>docs/design/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">You can fine-tune Llama-3-8B on one H100 and you can serve it on one H100, and almost
 nothing you learned doing the first transfers to the second. Training is a closed system you
@@ -631,7 +631,7 @@ control end to end; serving is an open queue you do not. This chapter is about w
 the backward pass disappears and a stranger starts sending you prompts.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>An engineer who has trained models moves onto a serving team. Their first instinct is the one
 training rewarded for years: <em>the GPU is idle, raise the batch size</em>. So they start vLLM with
-<code>--max-num-seqs 512</code> instead of the default, point a load generator at it, and watch
+<code>--max-num-seqs 512</code> instead of a previously explicit cap of 128, point a load generator at it, and watch
 <code>nvidia-smi</code> report 99% GPU utilisation. Throughput barely moves. Median time-to-first-token
 triples. The p99 goes somewhere embarrassing. And the periodic engine log line grows a field it did
 not carry before — <code>Preemptions: %d</code>, which vLLM appends only once that counter is
@@ -668,8 +668,7 @@ of one of them.</p>
 
 <div class="cards cards--2">
   <div class="ve-card ve-card--hero"><span class="ve-card__k">memory</span><h4>Gradients out, KV cache in</h4>
-  <p>Training holds weights, gradients, optimiser state and every saved activation. Inference holds
-  weights and a <a href="00-02-decode-loop-and-kv-cache.html">KV cache</a> &mdash; the stored keys and
+  <p>Training holds weights, gradients, optimiser state and every saved activation. Inference also needs temporary activations and workspaces; its large persistent allocations include weights and a <a href="00-02-decode-loop-and-kv-cache.html">KV cache</a> &mdash; the stored keys and
   values of every token already processed, derived properly in
   <a href="00-02-decode-loop-and-kv-cache.html">&sect;0.2</a>. The optimiser state is gone; the cache
   that replaces it is <em>proportional to live tokens</em>, so it grows and shrinks under you at
@@ -684,7 +683,7 @@ of one of them.</p>
   <div class="ve-card"><span class="ve-card__k">batch</span><h4>Fixed batch out, per-iteration batch in</h4>
   <p>Under continuous batching the set of sequences in the forward pass is rebuilt on <em>every
   iteration</em>. Requests join at token 0 and leave at their stop token without waiting for
-  neighbours. You never choose the batch; the scheduler does, from a queue you did not write.</p></div>
+  neighbours. You choose admission, slot and token-budget limits; within those limits the scheduler chooses the iteration batch, from a queue you did not write.</p></div>
 </div>
 
 <div class="diagram-shell">
@@ -736,7 +735,7 @@ gradient, and 12 for the fp32 master copy plus the two Adam moments — the acco
 <a href="https://arxiv.org/abs/1910.02054">ZeRO paper</a> (Rajbhandari et al., 2019, §3). That is
 $8.03\times10^9 \times 16 = 128$ GB <span class="pill pill--draft">derived</span> before a single
 activation is saved. This is why fine-tuning 8B on one 80 GB card means LoRA, ZeRO offload, or
-gradient checkpointing — the model does not fit as a training problem.</p>
+state/optimizer sharding or offload. Gradient checkpointing reduces saved activations, not the 128 GB of parameter/optimizer state, so checkpointing alone cannot make this full-training state fit.</p>
 
 <h3>Inference memory</h3>
 
@@ -812,11 +811,8 @@ $52.32$ GiB of KV pool, or</p>
 rarely what a server runs: <code>EngineArgs.get_batch_defaults</code>
 (<code>vllm/engine/arg_utils.py:L2580-L2671</code>) resolves <code>max_num_seqs</code> to
 <b>1,024</b> on any device with at least 70 GiB that is not an A100, which includes the H100 we are
-budgeting. Either way the KV pool binds at 52 at 8k context, far below both numbers — which is
-exactly why raising <code>--max-num-seqs</code> to 512 in §1 did nothing except manufacture
-preemptions. <b>The batch-size ceiling at inference is a
-memory ceiling, and it moves with context length.</b> Double the average prompt and you halve the
-concurrency, with no code change and no config change.</p>
+budgeting. Either way the KV pool binds at 52 at 8k context, far below both numbers — so raising an explicitly configured 128 cap to 512 in §1 cannot remove this KV constraint. The H100 resolved default is already 1,024; 512 is not an increase from that default. <b>The batch-size ceiling at inference is a
+memory ceiling, and it moves with context length.</b> Doubling total resident context approximately halves the raw token-budget concurrency, holding the pool and other constraints fixed. Prompt plus generated/reserved tokens, not prompt length alone, determines that budget.</p>
 
 <h3>Why the compute intuition also fails</h3>
 
@@ -1016,8 +1012,7 @@ tree by calling the <code>Engine</code> classmethod directly:</p>
   <p>vLLM keeps a synchronous, dependency-light offline path: no event loop, no ZMQ hop when
   <code>VLLM_ENABLE_V1_MULTIPROCESSING</code> is off, so <code>LLM(...)</code> works inside a notebook
   or a test with a stack trace you can read. The cost is two code paths that must be kept in sync.
-  SGLang collapses them: offline gets the server's exact scheduler, cache and process layout, so an
-  offline measurement transfers to production — at the cost of always paying for subprocesses and IPC
+  SGLang collapses them: offline gets the server's exact scheduler, cache and process layout, so the core scheduler/cache path is shared, while HTTP parsing, networking, arrival patterns and cancellation can still change online performance — at the cost of always paying for subprocesses and IPC
   even to generate one string. Neither is wrong; they optimise different first experiences.</p>
 </div>
 
@@ -1113,7 +1108,7 @@ counterpart to <code>gpu_memory_utilization</code> and is owned in full by
 <p>Note the asymmetry. The client controls per-request semantics; the operator controls only
 aggregate resource policy. That gap — clients choosing shapes, operators choosing budgets — is what
 the scheduler exists to arbitrate (<a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a>).</p></div></section>
-<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one prompt, two doors</h2></div><div class="sec__body"><p><b>Offline, vLLM.</b> <code>LLM.generate(prompts, sampling_params)</code>
+<section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one prompt, two doors</h2></div><div class="sec__body"><p><b>A timestamped lifecycle.</b> An illustrative request arrives at 0 ms, leaves the queue at 40 ms, completes prefill and samples its first output at 65 ms, delivers it at 68 ms, and is cancelled at 90 ms. Queue delay, compute and delivery contribute separately to TTFT; cancellation must release live references while respecting in-flight work. See <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">the latency definitions</a> and <a href="../01-the-core-loop/01-04-the-scheduler.html">scheduler lifecycle</a>. Increasing concurrency can improve raw throughput yet lower goodput when extra requests cross their latency bounds.</p><p><b>Offline, vLLM.</b> <code>LLM.generate(prompts, sampling_params)</code>
 (<code>vllm/entrypoints/llm.py:L418-L480</code>) validates that the runner type is
 <code>"generate"</code>, fills in default sampling params, and calls <code>_run_completion</code>
 (<code>vllm/entrypoints/offline_utils.py:L326-L349</code>). That adds all prompts via
@@ -1146,8 +1141,8 @@ handler catches it explicitly rather than logging a 400. The full hop-by-hop tra
 
 <div class="callout callout--warn">
   <span class="callout__k">Out of memory</span>
-  <p>Training OOM is a crash at a fixed point in the step. Inference OOM is a <em>scheduling event</em>
-  that happens mid-decode and is recovered from silently. SGLang calls it retraction and gives it a
+  <p>Training OOM is a crash at a fixed point in the step. KV-allocation exhaustion can be a <em>scheduling event</em>
+  that can trigger controlled preemption mid-decode. An actual CUDA allocation OOM is different and may fail a worker or server. SGLang calls it retraction and gives it a
   policy flag:</p>
 </div>
 
@@ -1238,7 +1233,7 @@ spine of Part 11.</p></div></section>
   <li><b>Arithmetic.</b> Llama-3-70B has $L = 80$, $h_{kv} = 8$, $d_h = 128$, $P = 70.6\times10^9$.
   In bf16 on 4× H100 80 GB with tensor parallelism and <code>gpu_memory_utilization=0.92</code>, how
   many tokens fit in the aggregate KV pool, and how many concurrent 8k sequences is that? Assume the
-  same ~4 GB per GPU of non-KV overhead as in §3.</li>
+  same illustrative 6 GiB per GPU of non-KV overhead as in §3.</li>
 
   <li><b>Predict, then verify.</b> You serve 8B with <code>--max-num-seqs 512</code> on one H100 and
   the offered load is 300 concurrent requests averaging 8k context. Predict what the scheduler does.
@@ -1254,12 +1249,7 @@ spine of Part 11.</p></div></section>
 <details class="fold">
   <summary>Answers</summary>
   <div class="fold__body">
-    <p><b>1.</b> Under continuous batching a request leaves the running set the moment it emits EOS or
-    a stop string, so completion order is generation-length order, not submission order — the comment
-    at L623-L625 says exactly this. The sort would become unnecessary only if the engine ran a strict
-    static batch: admit N requests, run every one to the same fixed length, return together. That is
-    the batching regime <a href="../01-the-core-loop/01-03-continuous-batching.html">§1.3</a> shows
-    the engines abandoned, because it wastes the slots of every early-finishing sequence.</p>
+    <p><b>1.</b> Completion order can differ from submission order because requests have different arrival, prefill, scheduling and output lengths. The final sort restores the caller's order. Writing each result into its submission-index slot removes the sort without abandoning continuous batching; a static batch is not required.</p>
 
     <p><b>2.</b> Per-token KV is $2 \cdot 80 \cdot 8 \cdot 128 \cdot 2 = 327{,}680$ bytes = 320 KiB,
     the same across the TP group since each rank holds a shard. Staying on §3's GiB basis: weights
@@ -1270,15 +1260,15 @@ spine of Part 11.</p></div></section>
     has 2.5× the layers but the same $h_{kv} \cdot d_h$, and the extra GPUs bring extra HBM. That
     near-coincidence disappears for MHA models.</p>
 
-    <p><b>3.</b> The KV pool holds ~49 sequences at 8k, so the scheduler admits roughly that many and
+    <p><b>3.</b> The illustrative KV pool holds ~52 sequences at 8k, so the scheduler admits roughly that many and
     the rest wait; requests already running get preempted whenever a newly admitted prefill needs
     blocks. The branch is <code>vllm/v1/core/sched/scheduler.py:L648-L695</code> — when
     <code>new_blocks is None</code> the scheduler pops from <code>self.running</code> and calls
     <code>_preempt_request</code>. <code>--max-num-seqs 512</code> never binds; it is not the
     constraint.</p>
 
-    <p><b>4.</b> SGLang cannot drift between offline and online semantics — sampling, caching and
-    scheduling behaviour measured offline is what production runs, because
+    <p><b>4.</b> Sharing the core coroutine removes one source of offline/online implementation drift — sampling, caching and
+    scheduling logic is shared, but transport, arrival timing and request validation still need online tests, because
     <code>python/sglang/srt/entrypoints/http_server.py:L2797</code> boots the identical process tree
     via <code>Engine._launch_subprocesses</code>. The cost is that even a one-line script pays for
     subprocess launch and ZMQ IPC. vLLM's <code>LLMEngine</code>
@@ -1292,13 +1282,13 @@ spine of Part 11.</p></div></section>
   vacated memory is not slack — it is a KV cache whose size is set by your users' context lengths,
   not by you.</li>
   <li>Batch size at inference is an <em>output</em> of the memory budget, not an input. On one 80 GB
-  H100, Llama-3-8B in bf16 tops out near 52 concurrent 8k sequences, so <code>max_num_seqs</code>
+  H100, Llama-3-8B in bf16 tops out near 52 concurrent 8k sequences, so a larger <code>max_num_seqs</code>
   &mdash; whether the declared fallback of 128 or the 1,024 an H100 server actually resolves to
   &mdash; never becomes the binding constraint at that context length.</li>
-  <li>Prefill and decode land on opposite sides of the H100 roofline — roughly 8,200 versus 49
+  <li>Prefill and decode land on opposite sides of the H100 roofline — roughly 8,200 versus 52
   FLOP/byte for 8B. Any optimisation you evaluate must be tagged with which of the two it helps;
   most help exactly one.</li>
-  <li>Running out of KV cache is not a crash, it is preemption or retraction, and it costs you
+  <li>Expected allocator exhaustion can trigger preemption or retraction; a CUDA OOM can still crash a worker, and it costs you
   throughput and tail latency simultaneously. Both engines make it a tunable policy
   (<code>retraction_policy</code>, the scheduler's preemption branch) rather than an error.</li>
   <li>Every request carries per-request state — seeds, stop strings, grammars, token budgets — that
@@ -1341,7 +1331,7 @@ spine of Part 11.</p></div></section>
 </div></div></section>
 <div class="pager"><a href="../README.html"><div class="pager__k">← Previous</div><div class="pager__t">Front door</div></a><a class="pager__next" href="00-02-decode-loop-and-kv-cache.html"><div class="pager__k">Next →</div><div class="pager__t">The decode loop and why the KV cache exists</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -49,9 +49,10 @@ them, keep the best $B$ again.
 
 $$\text{score}(\mathbf{y}) = \frac{\log P(\mathbf{y}\mid\mathbf{x})}{\mathrm{lp}(|\mathbf{y}|)}, \qquad \mathrm{lp}(t) = \left(\frac{5+t}{6}\right)^{\alpha}$$
 
-**Length normalisation is mandatory.** Log-probabilities are negative and
-accumulate, so without normalisation beam search systematically prefers short
-sequences and will emit EOS early.
+Length normalization changes the search objective and can counter unwanted short
+outputs. It is not mandatory for every probabilistic task: raw sequence probability
+already includes EOS and may be the intended objective. Manage finished hypotheses,
+length penalties and stopping bounds consistently rather than extending EOS paths.
 
 | Good for | Bad for |
 |---|---|
@@ -59,8 +60,9 @@ sequences and will emit EOS early.
 | Summarisation | dialogue |
 | Constrained tasks with a "correct" answer | creative writing |
 
-**The beam search curse**: beyond a beam of about 5, translation quality
-*decreases* even though the sequences found have higher probability. The model's
+**The beam search curse**: in some experiments larger beams reduce translation
+quality despite finding higher-probability sequences; there is no universal beam-five
+threshold. The model's
 probability and the human notion of quality diverge — high-probability sequences
 are generic, short, and often degenerate. This is one of the clearest examples in
 NLP of an objective that is not the goal.
@@ -100,7 +102,8 @@ flat, and $k = 50$ cuts off legitimate options.
 
 Keep the smallest set of tokens whose cumulative probability exceeds $p$.
 
-$$V_{(p)} = \min\left\{V' \subseteq V : \sum_{x\in V'}P(x) \ge p\right\}$$
+Sort probabilities $p_{(1)}\ge p_{(2)}\ge\cdots$ and keep the shortest prefix
+$1{:}k$ with $\sum_{i=1}^k p_{(i)}\ge p$. Specify deterministic tie handling.
 
 **The nucleus adapts to the distribution's shape**: sharp distributions keep 1–2
 tokens, flat ones keep hundreds. This is the fix for top-$k$'s fixed cutoff, and
@@ -115,8 +118,10 @@ Keep tokens with probability at least $p_{\min}\times p_{\max}$ — a threshold
 Its advantage is robustness at high temperature. Top-$p$ computes the nucleus
 *after* temperature has flattened the distribution, so at $T = 2$ the nucleus
 sweeps in tail tokens. Min-$p$ anchors to the top token, so the relative
-filtering survives temperature scaling. Typical $p_{\min} = 0.05$–0.1, and it
-allows much higher temperatures for creative work without incoherence.
+threshold is relative, but still temperature dependent:
+$p_i/p_{max}=\exp((z_i-z_{max})/T)$. Increasing temperature admits more tokens
+for fixed min-p. Values around .05-.1 are starting experiments, not guarantees
+of coherent high-temperature output.
 
 ### Others worth knowing
 
@@ -141,7 +146,8 @@ allows much higher temperatures for creative work without incoherence.
 | Contrastive search | moderate | very good | yes | long-form, repetition-prone models |
 
 A practical default for an assistant: `temperature=0.7, top_p=0.9`. For factual
-extraction: `temperature=0` (greedy). For creative writing:
+extraction in Transformers: `do_sample=False` (greedy), not a universal
+`temperature=0` API. For creative writing:
 `temperature=1.0–1.2, min_p=0.05`.
 
 ## Repetition control
@@ -152,7 +158,7 @@ decoding. Sampling largely fixes it; when it does not, these help:
 
 | Control | Mechanism | Caution |
 |---|---|---|
-| `repetition_penalty` | divide logits of already-generated tokens by $\theta > 1$ | 1.05–1.15; higher damages fluency and blocks legitimate repeats |
+| `repetition_penalty` | repeated negative logits multiply by $\theta>1$; nonnegative logits divide by it | sign-aware: both cases lower the repeated token's score |
 | `no_repeat_ngram_size` | hard ban on repeating any $n$-gram | breaks names, quotes, and code; use sparingly |
 | `frequency_penalty` | subtract $\alpha\times$count from logits | proportional, gentler |
 | `presence_penalty` | subtract a fixed amount for any prior appearance | encourages topic shift |
@@ -169,7 +175,9 @@ prompt and hope. Constrain the sampler.
 
 **The mechanism**: maintain a state machine (a compiled grammar or JSON schema)
 and mask the logits of every token that cannot legally continue. Sampling then
-*cannot* produce invalid output.
+preserves legal prefixes under the supported constraint implementation. A token
+limit, timeout, refusal, or unsupported schema feature can still prevent a complete
+valid document; completion and semantic validation remain necessary.
 
 | Tool | Approach |
 |---|---|
@@ -181,8 +189,8 @@ and mask the logits of every token that cannot legally continue. Sampling then
 
 | Advantage | Cost |
 |---|---|
-| **Guaranteed** valid output — no parse failures | mask computation adds overhead |
-| No retry loops | can degrade quality if the schema fights the model's natural output |
+| Supported syntactic constraints enforced during decoding | mask computation adds overhead; incomplete output still fails parsing |
+| Fewer syntax-repair retries | semantic errors and interruptions still need handling |
 | Enables reliable tool calling | grammar compilation is not free |
 
 The quality caveat is real: forcing a schema the model finds unnatural can push
@@ -192,18 +200,18 @@ model can think before committing.
 
 ## Speed
 
-Generation is **memory-bandwidth bound**, not compute bound: producing one token
-reads the entire weight matrix and performs very little arithmetic per byte. This
-determines every optimisation.
+Small-batch decoding is often memory-bandwidth limited. Large batches, prefill,
+long-context attention and different architectures can be compute- or
+communication-limited. Profile the actual workload before choosing an optimization.
 
 | Technique | Gain |
 |---|---|
 | **KV caching** | avoids recomputing all previous keys and values — turns $O(n^2)$ into $O(n)$ per token. Non-negotiable. |
 | **Continuous batching** | admit new requests into a running batch as others finish; the single largest throughput win |
-| **PagedAttention** | block-based KV allocation; eliminates fragmentation |
+| **PagedAttention** | block-based KV allocation reduces fragmentation; partly filled blocks and metadata remain |
 | Prefix caching | reuse the KV cache for a shared system prompt across requests |
 | **Speculative decoding** | a small draft model proposes $k$ tokens; the large model verifies them in one pass |
-| Medusa / EAGLE | multiple prediction heads instead of a separate draft model |
+| Medusa / EAGLE | Medusa uses extra token heads; EAGLE-family methods use learned draft/feature prediction, not simply independent heads |
 | Quantisation (int8/int4) | fewer bytes to read — a direct latency win for decoding |
 | GQA / MQA | smaller KV cache |
 | Chunked prefill | interleave prefill and decode to smooth latency |
@@ -211,10 +219,11 @@ determines every optimisation.
 **Speculative decoding deserves the detail** because it is counter-intuitive: a
 small model generates $k$ candidate tokens, the large model scores all $k$
 positions in **one** forward pass, and a modified rejection-sampling rule accepts
-the longest correct prefix. The output distribution is **provably identical** to
-sampling from the large model alone. It is a pure latency win — 2–3× typical —
-paid for in extra compute that was idle anyway because decoding is
-bandwidth-bound.
+an accepted prefix using probabilities, not equality with independently sampled
+target tokens. Exact target-distribution preservation requires the correct
+acceptance/residual algorithm and matching sampling transformations. It is not
+a pure latency win: expensive drafting, low acceptance or already saturated batches
+can make it slower. Distributional equivalence does not mean identical seeded strings.
 
 The metrics that matter for serving:
 
@@ -283,13 +292,54 @@ than the longest in the batch.
 
 ## Self-check
 
+### Runnable logit processing and incomplete-output checks
+
+The following five-logit example fixes the processing order: penalize repeated
+tokens, divide by temperature, normalize, then retain the shortest descending
+top-p prefix. Production libraries may combine processors in version-specific
+order, so inspect the resulting distribution rather than assuming commutativity.
+
+```python runnable
+import json
+import numpy as np
+from transformers import RepetitionPenaltyLogitsProcessor
+import torch
+torch.set_num_threads(1)
+logits = torch.tensor([[-2., -1., 0., 1., 2.]])
+seen = torch.tensor([[0, 4]])
+penalized = RepetitionPenaltyLogitsProcessor(1.2)(seen, logits.clone())
+assert penalized[0, 0] < logits[0, 0] and penalized[0, 4] < logits[0, 4]
+p = torch.softmax(penalized[0]/.8, -1).numpy()
+order = np.argsort(-p, kind="stable")
+k = int(np.searchsorted(np.cumsum(p[order]), .8, side="left"))+1
+kept = order[:k]
+assert p[kept].sum() >= .8 and (k == 1 or p[order[:k-1]].sum() < .8)
+min_p = p >= .1*p.max()
+assert min_p[p.argmax()]
+try:
+    json.loads('{"answer": "unfinished')
+except json.JSONDecodeError:
+    pass
+else:
+    raise AssertionError("incomplete JSON unexpectedly accepted")
+print("penalized logits", penalized.tolist(), "nucleus", kept.tolist(), "min-p mask", min_p.tolist())
+```
+
+**What does exact speculation accept?** For draft token $x\sim q$, accept with
+$\min(1,p(x)/q(x))$; on rejection sample from normalized $(p-q)_+$. Summing the
+accepted and rejected branches recovers $p$ under the algorithm's assumptions.
+Measure acceptance and actual latency, not only draft length. **What does a grammar
+not prove?** An amount can be a syntactically valid number but violate a business
+rule; validate complete documents, schema constraints and semantic authorization
+separately. Primary references: [generation settings](https://huggingface.co/docs/transformers/main_classes/text_generation)
+and [logit processors](https://github.com/huggingface/transformers/blob/main/src/transformers/generation/logits_process.py).
+
 1. Why does beam search need length normalisation?
 2. Explain the beam search curse and what it says about the training objective.
 3. Give the failure mode of top-$k$ that top-$p$ fixes, with an example
    distribution.
-4. Why is min-$p$ more robust than top-$p$ at high temperature?
-5. Why does speculative decoding produce identical output to the large model
-   alone?
+4. How does min-p depend on temperature despite using a relative threshold?
+5. Under which assumptions does speculative sampling preserve the target distribution?
 6. When should you never use `no_repeat_ngram_size`?
 7. Why must padding be on the left for batched generation with a causal LM?
 
@@ -298,5 +348,5 @@ than the longest in the batch.
 - [Language Models](./language-models.md) — the distributions being sampled from.
 - [LLM Prompting & Alignment](./llm-prompting-and-alignment.md) — shaping what
   the distribution contains.
-- [The Inference Engineering Book](/courses/inference/) — KV caching, continuous
+- [The Inference Engineering Course](/courses/inference/) — KV caching, continuous
   batching, and speculative decoding in depth.

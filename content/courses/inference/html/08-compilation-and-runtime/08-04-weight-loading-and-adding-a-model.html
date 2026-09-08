@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Weight loading, sharded loaders, adding a model — The Inference Engineering Book</title>
+<title>Weight loading, sharded loaders, adding a model — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 8 · Compilation and runtime · 08-04</div>
 <h1>Weight loading, sharded loaders, adding a model</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/model_loader/</code></li><li><code>vllm/models/</code></li><li><code>python/sglang/srt/model_loader/</code></li><li><code>python/sglang/srt/models/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/model_loader/</code></li><li><code>vllm/models/</code></li><li><code>python/sglang/srt/model_loader/</code></li><li><code>python/sglang/srt/models/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A scale-up event fires. Kubernetes schedules a new 8×H100 pod. Ninety seconds later it is still not serving traffic, because 131 GiB of Llama-3-70B weights are still crawling off network storage. Nothing in this chapter makes a token faster — it makes the server <em>exist</em> faster, and it is the difference between an autoscaler that helps and one that makes your p99 worse.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Cold start is the one part of an inference engine where the GPU is idle by construction. The model runner is built, the KV cache is sized, the CUDA graphs are ready to capture — and none of it matters until bytes from a checkpoint are sitting in the right memory of the right device. Llama-3-8B is 16.06 GB of bf16 weights; Llama-3-70B is 131 GiB (141.1 GB). Those bytes must cross whatever medium the checkpoint lives on, and storage is the slowest link in the serving stack — three orders of magnitude below the 3.35 TB/s of HBM those weights sit in once they arrive. Note that this chapter's figure is the <em>resident</em> checkpoint, every parameter of it, because every parameter has to be read off disk and placed. It is not the figure that sets the decode floor: a decode step <em>streams</em> only 7.50 B of Llama-3-8B's 8.03 B parameters, because the embedding table is gathered rather than multiplied, which is why <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a> divides 15.01 GB rather than 16.06 GB by the bandwidth and gets 4.48 ms. Do not carry one number into the other's derivation.</p>
@@ -653,7 +653,10 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
   <p>If a replica takes 60 s to become ready, an autoscaler that reacts to a traffic spike delivers capacity a minute after the spike started — by which time the queue has already blown the SLO. Cold start is an input to your scaling policy, not an implementation detail. Routing and autoscaling are covered in <a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a>; this chapter is where the number in that policy comes from.</p>
 </div>
 
-<p>There is a second multiplier that surprises people. Under tensor parallelism every rank runs the <em>same</em> weight-loading loop over the <em>same</em> checkpoint files and throws away the 7/8 of each tensor that does not belong to it. At TP=8 the logical read volume is $8 \times 141.1 = 1{,}129$ GB. Whether that becomes 1,129 GB of physical I/O or 141 GB depends entirely on whether the host page cache can hold the checkpoint. On a node with 2 TB of RAM it can; on a memory-constrained container it cannot, and your 20-second load becomes a 161-second load.</p></div></section>
+<p>Tensor-parallel ranks may iterate the same source tensors, but constructing mmap views
+and narrowing them does not imply physically reading every byte. Actual I/O depends on touched
+slices, readahead, layout, prefetch policy and cache state. Eight full physical scans are a
+possible unfavorable case, not a universal consequence of TP=8. Measure OS/storage counters.</p></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>The pipeline is short and every stage is a place to lose time. A checkpoint is a set of <code>*.safetensors</code> files plus an index JSON mapping tensor name to file. The loader opens each file, reads its header, and yields <code>(name, tensor)</code> pairs. The model's <code>load_weights</code> method translates each checkpoint name into an engine parameter name — possibly folding several checkpoint tensors into one fused parameter — and hands the tensor to that parameter's <code>weight_loader</code> callback. The callback narrows the tensor to this rank's slice and copies it into the already-allocated device parameter.</p>
 
 <div class="diagram-shell">
@@ -686,7 +689,12 @@ flowchart TD
 <p>Two things in that diagram do the real work. The <em>header lookup</em> is why safetensors won; the <em>name mapping</em> is why adding a model is hard.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: format and names</h2></div><div class="sec__body"><h3>Why safetensors</h3>
 
-<p>A PyTorch <code>.bin</code> checkpoint is a zip of pickled objects. Unpickling executes arbitrary bytecode, which means loading a checkpoint from the internet is remote code execution by design, and it means you cannot know a tensor's offset without walking the pickle stream. Safetensors replaces this with the dullest possible container: an 8-byte little-endian header length, a UTF-8 JSON header mapping each tensor name to <code>{dtype, shape, data_offsets}</code>, then a contiguous blob of raw tensor bytes. No code runs. Any tensor's bytes can be located with one seek. And because the payload is raw and aligned, the file can be <code>mmap</code>ed and tensors constructed as views into the mapping rather than copies.</p>
+<p>Unrestricted pickle loading can execute attacker-controlled code. Modern PyTorch's
+restricted <code>weights_only</code> behavior depends on version and arguments; inspect the
+actual loader and never treat arbitrary checkpoint/code downloads as trusted.
+Safetensors uses an 8-byte little-endian header length, a JSON tensor-offset header and raw
+payload, avoiding executable pickle payloads and allowing mapped/partial access.
+This does not remove risks from model code, malformed resources or compromised dependencies.</p>
 
 <p>vLLM's default path is exactly that — <code>safe_open</code> plus <code>get_tensor</code>, one tensor at a time, never holding more than one file's worth of state:</p>
 
@@ -724,7 +732,9 @@ flowchart TD
             _drop_file_cache_after_load(st_file)</code></pre>
 </div>
 
-<p>That <code>disable_mmap</code> branch is not cosmetic. Memory-mapping a file on NFS or Lustre turns a sequential 141 GB read into a storm of page faults, each of which is a network round trip. vLLM encodes the same knowledge as a filesystem sniff and an auto-prefetch decision:</p>
+<p>Network filesystems can make fault-driven loading inefficient, but one page fault is not
+necessarily one network round trip: caches, readahead and aggregation intervene. The following
+filesystem heuristic selects a strategy; compare actual I/O and memory peaks before tuning:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -926,7 +936,10 @@ flowchart TD
                     logger.warning(f"Parameter {name} not found in params_dict")</code></pre>
 </div>
 
-<p><strong>The divergence that matters is the last line.</strong> An unmapped checkpoint tensor in SGLang's legacy path produces a <code>logger.warning</code> and the run continues with that parameter holding whatever it was initialised to. vLLM raises:</p>
+<p>An unexpected <em>source</em> tensor and an uninitialized <em>destination</em> parameter
+are different errors. SGLang's quoted warning concerns a source name absent from its parameter
+map; that source may be intentionally unused. vLLM's following check instead finds expected
+destination parameters that were never marked loaded:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -941,11 +954,16 @@ flowchart TD
                 )</code></pre>
 </div>
 
-<p>Neither choice is obviously right. vLLM's strictness turns silent-garbage bugs into a startup crash, but it also means one unexpected tensor refuses the whole load — which is why the check is gated on <code>model_config.quantization is None and loaded_weights is not None</code>. SGLang's leniency lets a partially-supported checkpoint boot: useful during a port, dangerous in production. If you run SGLang, read the startup warnings; they are load-bearing.</p>
+<p>A missing destination can have no incoming tensor to trigger an unexpected-source warning.
+Maintain separate expected, loaded, ignored and unexpected name sets, with intentional
+exceptions documented. The quoted strict check is gated by quantization and returned-name
+availability; other shape, format and loader-specific checks can still run.</p>
 
 <h3>The per-rank slice</h3>
 
-<p>Every path converges on a <code>weight_loader</code> callback attached to the parameter. The simplest one is the row-parallel case — one checkpoint tensor, sliced on dim 0:</p>
+<p>Every path converges on a parameter's loader callback. This helper slices dimension zero;
+do not infer a universal row-parallel rule from its name. With stored weights [out,in],
+ordinary column-parallel output sharding uses dim 0 and row-parallel input sharding dim 1:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1046,12 +1064,15 @@ flowchart TD
 <li><code>QKVParallelLinear.load_weights</code> reads <code>shard_id</code> back off the tensor and calls <code>param.weight_loader(param, loaded_weight, "k")</code>.</li>
 <li><code>QKVParallelLinear.weight_loader</code> computes, for rank 3 with <code>num_heads=8</code>, <code>num_kv_heads=1</code>, <code>head_size=128</code>: <code>shard_offset = 8*128 = 1024</code>, <code>shard_size = 1*128 = 128</code>. Since <code>num_kv_head_replicas == 1</code>, <code>shard_rank = 3</code> and <code>start_idx = 3*128 = 384</code>.</li>
 <li>Two narrows: <code>param_data.narrow(0, 1024, 128)</code> selects rows 1024–1151 of the fused parameter; <code>loaded_weight.narrow(0, 384, 128)</code> selects rows 384–511 of the checkpoint tensor.</li>
-<li><code>param_data.copy_(loaded_weight)</code> — 128 &times; 8192 &times; 2 = 2.10 MB crosses PCIe. The other 14.68 MB of that checkpoint tensor is never touched by rank 3, though it <em>was</em> read from disk.</li>
+<li><code>param_data.copy_(loaded_weight)</code> copies 128*8192*2 = 2.10 MB to this GPU.
+The rest of the mapped tensor need not have been faulted from disk by this rank.</li>
 <li>Back in <code>BaseModelLoader.load_model</code>: <code>process_weights_after_loading</code> runs per-module post-processing (weight repacking for Marlin, FP8 scale folding — see <a href="../04-quantization/04-03-formats-and-kernels.html">§4.3</a>), then <code>model.eval()</code>.</li>
 <li><code>track_weights_loading</code> diffs <code>named_parameters()</code> against the returned set and raises if anything is missing.</li>
 </ol>
 
-<p>Step 12 is where the TP read amplification lives. Rank 3 read 16.78 MB off disk to keep 2.10 MB. Multiply across the checkpoint and you get the 8&times; factor from §8.4.1 — and the reason <code>sharded_state</code> and <code>presharded</code> exist, since they let each rank read only what it will keep.</p></div></section>
+<p>The two slices establish the rank's copied bytes, not its physical storage reads.
+Pre-sharded artifacts can simplify access and avoid some redundant reads/repacking, but
+their benefit must be measured with the actual iterator, storage path and cache state.</p></div></section>
 <section class="sec" id="adding-a-model" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Adding a model, end to end</h2></div><div class="sec__body"><p>Everything above was preparation for this. Adding a model is six concrete artifacts. Read <code>vllm/model_executor/models/llama.py</code> — all 549 lines — before you write any of them; it is the reference implementation the other 285 model files under <code>vllm/model_executor/models/</code> imitate.</p>
 
 <div class="cards cards--3">
@@ -1200,7 +1221,9 @@ This enables a unit test that loads dummy weights to ensure that the model can b
     ),</code></pre>
 </div>
 
-<p>The optional-but-expected tests live under <code>tests/models/language/</code>: <code>check_outputs_equal</code> for exact text agreement with HF Transformers, or <code>check_logprobs_close</code> when sampling makes exact agreement unrealistic. Write the logprobs one. It is the only thing that catches a transposed fused offset.</p></div></section>
+<p>Test both end-to-end logits and local mapping contracts. Direct tensor-slice equality,
+recognizable synthetic Q/K/V values and layerwise parity catch wrong fused offsets before
+generation. Text/logprob agreement is important but not the only detection method.</p></div></section>
 <section class="sec" id="fast-load" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Making cold start smaller</h2></div><div class="sec__body"><div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 — cold-start timeline for Llama-3-70B, TP=8, one node.</b> Weight-load segments are derived from the link-rate table in §8.4.1. Compile and capture segments are owned by <a href="../08-compilation-and-runtime/08-02-torch-compile.html">§8.2</a> and <a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a> and are not derived here.
     <span class="hint">Ctrl/Cmd + wheel to zoom &middot; drag to pan &middot; double-click to fit</span></p>
@@ -1373,7 +1396,10 @@ Each GPU runs one daemon process for its TP rank. The daemon:
 </code></pre>
 </div>
 
-<p>On the engine side, <code>update_weights_from_tensor</code> unwraps the IPC tensors and calls <code>self.get_model().load_weights(named_tensors)</code> — the same <code>load_weights</code> you wrote when you added the model, fed from GPU memory instead of a file. That is the payoff for keeping it a pure function of an iterator: cold start, hot reload, and RL weight sync all reuse it unmodified. A <code>flattened_bucket</code> format concatenates many small tensors into one buffer to amortise per-tensor overhead (<code>python/sglang/srt/weight_sync/tensor_bucket.py:L19-L26</code>), and a <code>checkpoint_engine</code> integration for the external Moonshot parameter server (<code>python/sglang/srt/checkpoint_engine/update.py:L1-L11</code>).</p>
+<p>The iterator interface is reusable across disk, IPC and trainer-produced tensors, but
+<code>load_weights</code> is a state-mutating operation, not a pure function. Bucketed transfers
+amortize overhead; they do not make a multi-parameter/rank update atomic. Safe publication
+requires a transaction protocol described below.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">vLLM equivalent</span>
@@ -1443,6 +1469,29 @@ Each GPU runs one daemon process for its TP rank. The daemon:
 <h3>Pre-sharded checkpoints and stale configs</h3>
 
 <p><code>sharded_state</code> and <code>presharded</code> dumps encode a parallelism and quantization configuration. Loading one under a different TP size gives <code>"Could not find checkpoint files '...', only pre-sharded checkpoints are currently supported!"</code> if the rank pattern misses, or <code>"Missing keys {...} in loaded state!"</code> if the file set is incomplete. Both are from <code>vllm/model_executor/model_loader/sharded_state_loader.py:L130-L133, L161-L162</code>. Treat a pre-sharded dump as a build artifact keyed by config, not as a checkpoint.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Recognizable shards and transactional publication</h2></div><div class="sec__body">
+<p>Before a model-scale logit test, reconstruct recognizable column/row shards and compare their forward results. For live updates: stop admission or version requests; synchronize all ranks; stage and verify complete tensors/config; preserve captured addresses or recapture; invalidate old-model KV/prefix state; atomically publish a version; then resume. Keep a validated old version or full rollback plan. Retrying a partially failed in-place loader is not proof of atomic rollback. Record model/tokenizer revisions, hashes, shard index, quantization scales and parallel layout in the artifact manifest.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+w = np.arange(32, dtype=float).reshape(8, 4)
+x = np.array([[1., 2., 3., 4.], [-1., 0., 1., 2.]])
+for tp in (1, 2):
+    columns = np.split(w, tp, axis=0)
+    column_output = np.concatenate([x @ shard.T for shard in columns], axis=1)
+    np.testing.assert_allclose(column_output, x @ w.T)
+    rows = np.split(w, tp, axis=1)
+    local_x = np.split(x, tp, axis=1)
+    row_output = sum(value @ shard.T for value, shard in zip(local_x, rows))
+    np.testing.assert_allclose(row_output, x @ w.T)
+q, k, v = [np.full((2, 4), fill) for fill in (1., 2., 3.)]
+fused = np.concatenate([q, k, v], axis=0)
+np.testing.assert_array_equal(fused[2:4], k)
+wrong = np.concatenate([q, v, k], axis=0)
+assert wrong.shape == fused.shape
+assert not np.array_equal(wrong[2:4], k)
+print("TP reconstruction passes; same-shape QKV swap is detected.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>All of these run on a single GPU with a small model; substitute a larger one if you have the hardware.</p>
 
 <div class="code-file">
@@ -1450,19 +1499,43 @@ Each GPU runs one daemon process for its TP rank. The daemon:
     <span class="src">Measure the load-time floor without a GPU</span>
     <span class="tag tag--shell">shell</span>
   </div>
-  <pre class="code-block code-block--wrap"><code># Total checkpoint bytes and the per-tensor header, straight from safetensors.
-python - &lt;&lt;'PY'
-import json, glob, os, struct
-files = sorted(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/*/*.safetensors")))
-total = sum(os.path.getsize(f) for f in files)
-with open(files[0], "rb") as fh:
-    n = struct.unpack("&lt;Q", fh.read(8))[0]
-    hdr = json.loads(fh.read(n))
-print(f"{len(files)} files, {total/1e9:.2f} GB, header {n} bytes, {len(hdr)-1} tensors")
-for k in list(hdr)[:4]:
-    if k != "__metadata__":
-        print(" ", k, hdr[k])
-print(f"floor at 7 GB/s: {total/7e9:.2f} s   at 1.25 GB/s: {total/1.25e9:.2f} s")
+  <pre class="code-block code-block--wrap"><code># Select ONE local snapshot revision, never aggregate all cached revisions.
+python - /path/to/snapshots/EXACT_COMMIT &lt;&lt;'PY'
+import json
+import struct
+import sys
+from pathlib import Path
+root = Path(sys.argv[1]).resolve(strict=True)
+index = root / "model.safetensors.index.json"
+if index.exists():
+    names = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+    files = [root / name for name in names]
+else:
+    files = sorted(root.glob("*.safetensors"))
+if not files or any(not path.is_file() for path in files):
+    raise SystemExit("Missing checkpoint shards in selected revision")
+if any(not path.resolve().is_relative_to(root) for path in files):
+    # HF snapshots often symlink to their local blob store; inspect only trusted snapshots.
+    print("Note: external/symlinked shard paths; verify the trusted snapshot manifest")
+total = sum(path.stat().st_size for path in files)
+tensor_count = 0
+seen = set()
+for path in files:
+    with path.open("rb") as fh:
+        prefix = fh.read(8)
+        if len(prefix) != 8:
+            raise ValueError("Truncated safetensors header")
+        size = struct.unpack("&lt;Q", prefix)[0]
+        if size &gt; min(path.stat().st_size - 8, 100_000_000):
+            raise ValueError("Invalid or oversized header")
+        header = json.loads(fh.read(size))
+    tensors = {k: v for k, v in header.items() if k != "__metadata__"}
+    if seen.intersection(tensors):
+        raise ValueError("Duplicate tensor names across selected shards")
+    seen.update(tensors)
+    tensor_count += len(tensors)
+print(len(files), "files;", tensor_count, "tensors;", total, "file bytes")
+print("Ideal streaming seconds at 7 GB/s:", total / 7e9)
 PY</code></pre>
 </div>
 
@@ -1474,8 +1547,8 @@ PY</code></pre>
   <pre class="code-block code-block--wrap"><code># vLLM logs "Loading weights took %.2f seconds" from DefaultModelLoader.load_weights.
 vllm serve meta-llama/Llama-3.2-1B-Instruct 2&gt;&amp;1 | grep -E "Loading weights took|Filesystem type"
 
-# Subtract weights entirely: --load-format dummy skips all disk I/O.
-# The difference between these two runs IS your weight-load cost.
+# Run sequentially. Dummy vs real loading changes initialization and post-processing too.
+# Their startup delta is not an exact isolated storage-time measurement.
 vllm serve meta-llama/Llama-3.2-1B-Instruct --load-format dummy 2&gt;&amp;1 | grep "Loading weights took"
 
 # Force the network-FS strategy on local disk and watch it get slower.
@@ -1512,25 +1585,47 @@ SGLANG_ENABLE_WEIGHT_LOADER_V2=1 python -m sglang.launch_server --model-path met
 <li><p><strong>Read and answer.</strong> Open <code>vllm/model_executor/models/utils.py</code> and read <code>AutoWeightsLoader._load_module</code> (L345–L416). A weight arrives named <code>model.layers.7.mlp.gate_up_proj.weight</code> and <code>model.layers.7.mlp</code> is a <code>LlamaMLP</code>, which does <em>not</em> define <code>load_weights</code>. Which branch handles it, and where does the shard id survive to?</p>
 <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>_load_module</code> checks <code>module_load_weights = getattr(module, "load_weights", None)</code> and finds nothing on <code>LlamaMLP</code>, so it falls through to <code>_groupby_prefix</code>. The prefix <code>gate_up_proj</code> is in <code>child_modules</code>, so it recurses into <code>MergedColumnParallelLinear</code> — which <em>does</em> define <code>load_weights</code> (inherited via <code>ColumnParallelLinear</code>, L945). There, <code>getattr(loaded_weight, "shard_id", None)</code> retrieves the <code>0</code> or <code>1</code> that <code>WeightsMapper.apply</code> stapled to the tensor object at L146. The shard id rides on the tensor, not the name, precisely so the tree walk can stay name-agnostic.</p></div></details></li>
 
-<li><p><strong>Arithmetic.</strong> DeepSeek-V3-style MoE models store expert weights as one stacked tensor per layer. vLLM's default loader can skip non-local experts before reading them (<code>DefaultModelLoader._init_ep_weight_filter</code>, L351–L412). For a 256-expert model at EP=8, what fraction of expert bytes does each rank read with the filter on versus off, and why does the code disable the filter when <code>enable_eplb</code> is set?</p>
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>With the filter on, each rank reads $256/8 = 32$ experts — 1/8 of the expert bytes. With it off, each rank reads all 256 and discards 7/8, exactly the amplification from §8.4.1. The code short-circuits when <code>enable_eplb</code> is true because expert-parallel load balancing creates redundant physical expert slots that may map to logical experts belonging to other ranks in the default partition; the weight loader needs to see <em>all</em> logical expert weights to populate them. The comment at L370–L375 says so directly.</p></div></details></li>
+<li><p><strong>Arithmetic.</strong> Compare individually named experts with one stacked
+expert tensor. What must a loader do to read only 32 of 256 experts at EP=8?</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>A name filter can
+skip separately named nonlocal experts, giving 1/8 logical payload under a fixed partition.
+A stacked tensor needs slicing/partial access within the payload; filtering its name alone
+cannot select experts. Physical I/O can include readahead and cache effects. EPLB may assign
+additional/nonlocal logical experts, so a fixed default-partition filter is insufficient.</p></div></details></li>
 
-<li><p><strong>Predict, then verify.</strong> You port a model whose checkpoint stores attention output projection as <code>attn.out_proj.weight</code> with shape <code>[d, d]</code>, and you wire it to a <code>ColumnParallelLinear</code> instead of a <code>RowParallelLinear</code>. Shapes are square, so nothing asserts. Predict the symptom at TP=1 and at TP=4, then check your reasoning against <code>row_parallel_weight_loader</code> and <code>ColumnParallelLinear.weight_loader</code>.</p>
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>At TP=1 nothing is sliced and no all-reduce is needed, so the model is <em>correct</em> — which is what makes the bug expensive. At TP=4 the column-parallel loader slices dim 0 (output rows) while the correct split is dim 1 (input columns, matching the sharded heads feeding it). Each rank multiplies its local head outputs by the wrong quarter of the matrix, and <code>ColumnParallelLinear</code> never all-reduces, so the four partials are not summed either. Fluent nonsense — exactly the "TP=1 correct, TP&gt;1 wrong" signature from step 1 of the bisection.</p></div></details></li>
+<li><p><strong>Predict, then verify.</strong> A square attention output weight [d,d] is wired
+to ColumnParallelLinear instead of RowParallelLinear. Work the local TP=1 and TP=4 shapes.</p>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>TP=1 may hide the
+error. At TP=4, local attention output has width d/4. Correct row-parallel weights are
+[d,d/4], producing partial width-d outputs followed by reduction. Column-parallel weights
+are [d/4,d] and normally expect width d; local width d/4 can fail the GEMM immediately.
+With extra gathers it may fail later or compute a different function. A square global
+checkpoint does not guarantee shape-compatible silent corruption.</p></div></details></li>
 
 <li><p><strong>Read and compare.</strong> SGLang's <code>LlamaAttention</code> defines its own <code>load_weights</code> (L266–L281) that calls <code>STANDARD_QKV_MAPPING.try_load</code>, and <code>LlamaForCausalLM._legacy_load_weights</code> has the flat table. Both are live at this SHA. Under what condition does each run, and what would you check before enabling the v2 path in production?</p>
 <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>LlamaForCausalLM.load_weights</code> (L663) branches on <code>envs.SGLANG_ENABLE_WEIGHT_LOADER_V2</code>. Unset, the flat legacy loop runs and the per-module <code>load_weights</code> methods are dead code. Set, <code>_load_weights_v2</code> builds an <code>AutoWeightsLoader</code> that walks the tree and delegates to them. Before flipping it: v2 returns a <code>set[str]</code> of loaded names and handles tied embeddings explicitly (L769–L777), while the legacy path returns nothing and only warns on unmapped names. Diff the two loaded-name sets for your exact checkpoint — especially a quantized one. The legacy path's silence is why you must do that diff by hand.</p></div></details></li>
 
 <li><p><strong>Design.</strong> Your fleet autoscales 70B replicas from a shared NFS mount over 25 GbE. Cold start is 45 s of weight load (derived, §8.4.1) plus everything else. You have 2 TB of host RAM per node and can run one extra process per GPU. Rank the available fixes by expected gain per unit of operational complexity.</p>
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>(1) <code>--safetensors-load-strategy prefetch</code> or <code>eager</code> — one flag, turns NFS page faults into sequential streaming, and 131 GiB fits in 2 TB; the free win. (2) <code>sharded_state</code>/<code>presharded</code> — kills the read amplification and, in SGLang, the re-quantization; costs a build step and a config-keyed artifact per (TP, PP, quant) tuple. (3) A local NVMe cache tier populated out of band, lifting the ceiling from 3.125 to 7 GB/s. (4) SGLang's standalone weight-cache daemon in <code>client</code> mode — near-zero restart cost, but it permanently holds 17.6 GB of each GPU, straight out of your KV cache budget. Fix 4 is the biggest gain and the biggest cost: worth it only if you restart often (crash recovery, rolling deploys) rather than scale often.</p></div></details></li>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>Compare measured
+prefetch/eager loading, compatible pre-sharded artifacts, a local storage cache and an IPC
+weight daemon. An IPC client maps the daemon's device allocation instead of necessarily
+creating a second full copy: the 17.6 GB is not automatically additional to serving weights.
+Idle retention, process contexts, unsupported copies and reload overlap are incremental costs.
+Choose from cold/warm startup, peak memory, compatibility and restart frequency.</p></div></details></li>
 </ol></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-<li>The host-to-device copy is never the bottleneck. For Llama-3-70B at TP=8, PCIe Gen5 moves each rank's 17.64 GB shard in a derived 0.28 s while getting 141.1 GB off NVMe takes a derived 20.2 s — a 72&times; gap. Optimise storage, not the copy.</li>
-<li>Under TP every rank reads the whole checkpoint and keeps $1/N$ of it. Whether that costs you 1&times; or 8&times; the disk traffic is decided entirely by page-cache headroom, which is why <code>sharded_state</code> and <code>presharded</code> exist and why they are keyed to an exact parallelism and quantization tuple.</li>
-<li>Safetensors won on three properties in this order: no code execution, a JSON header that gives every tensor an O(1) offset lookup, and a raw payload that can be mapped rather than copied. Everything the loaders do — prefetch heuristics, GPUDirect, streaming — is built on the third.</li>
-<li>The fused parameter is where ports break. A <code>gate</code>/<code>up</code> swap or a transposed <code>k</code>/<code>v</code> offset has identical shapes on both sides, passes every assertion, and produces fluent nonsense. Only a layer-by-layer diff against HF catches it, and only at TP&gt;1 does the KV-head replication arithmetic get exercised.</li>
-<li>vLLM raises on an unfilled parameter; SGLang's legacy path logs a warning and continues. The strictness that protects a bf16 load is also what a quantized checkpoint would legitimately trip, which is why vLLM disables the check under quantization — so under quantization both engines are equally silent.</li>
-<li>Keeping <code>load_weights</code> a pure function of a <code>(name, tensor)</code> iterator is what makes SGLang's live weight update possible at all: the same method serves cold start from disk, CUDA-IPC hot reload from a weight-cache daemon, and RL weight sync from a trainer's GPU memory, with no change to the model file.</li>
+<li>Storage can dominate cold loading, but H2D may dominate with warm host data, fast storage,
+shared PCIe/NUMA links or many ranks. Measure the actual pipeline, not only nominal link rates.</li>
+<li>Mapped logical tensors are not physical I/O. Record touched slices, readahead and cache
+state before claiming TP read amplification. Validate pre-sharded artifact compatibility.</li>
+<li>Safetensors avoids executable pickle payloads and enables indexed tensor access. Model
+code, resource limits and artifact provenance remain separate trust boundaries.</li>
+<li>Mapping correctness needs recognizable tensor slices, complete expected/loaded name sets
+and forward parity. Fused-offset errors can be silent; parallel-axis errors can fail loudly.</li>
+<li>Quantization can relax a generic missing-parameter check without removing all validation.
+Unexpected sources and missing destinations require separate diagnostics.</li>
+<li>The iterator-based loader mutates model state. Reusing it for live updates requires atomic
+version publication, synchronization and cache invalidation, not a claim of purity.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
 <li><a href="https://github.com/huggingface/safetensors">huggingface/safetensors</a> — the format specification, including the exact header layout and the security rationale versus pickle.</li>
@@ -1544,7 +1639,7 @@ SGLANG_ENABLE_WEIGHT_LOADER_V2=1 python -m sglang.launch_server --model-path met
 </ul></div></section>
 <div class="pager"><a href="08-03-triton-and-cutlass.html"><div class="pager__k">← Previous</div><div class="pager__t">Writing a Triton kernel; CUTLASS at a glance</div></a><a class="pager__next" href="../09-serving-system/09-01-openai-api-surface.html"><div class="pager__k">Next →</div><div class="pager__t">The OpenAI-compatible API surface</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1558,6 +1653,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#adding-a-model">Adding a model, end to end</a>
 <a href="#fast-load">Making cold start smaller</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

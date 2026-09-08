@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FlashInfer and the attention-backend abstraction — The Inference Engineering Book</title>
+<title>FlashInfer and the attention-backend abstraction — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,14 +623,13 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-04</div>
 <h1>FlashInfer and the attention-backend abstraction</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backend.py</code></li><li><code>vllm/v1/attention/selector.py</code></li><li><code>vllm/v1/attention/backends/flashinfer.py</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backend.py</code></li><li><code>vllm/v1/attention/selector.py</code></li><li><code>vllm/v1/attention/backends/flashinfer.py</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">At SHA <code>a556f3f</code>, vLLM contains no PagedAttention CUDA kernel. Commit <code>d715b3aa1e</code>
 (<a href="https://github.com/vllm-project/vllm/pull/47361">PR #47361</a>, "Delete PagedAttention") removed it, and
 <code>csrc/attention/</code> now holds six headers and no <code>.cu</code> at all. vLLM still owns attention
 kernels — they are Triton, under <code>vllm/v1/attention/ops/</code>, and
-<a href="03-03-decode-attention.html">§3.3</a> reads one line by line &mdash; but it owns no compiled CUDA one, so
-every fast path on an NVIDIA GPU lands in a library the project does not maintain. What remains — and what this
+<a href="03-03-decode-attention.html">§3.3</a> reads one line by line &mdash; and also maintains compiled CUDA helpers such as merge_attn_states. Removing the historical PagedAttention kernel does not mean all attention-related CUDA code disappeared or every Triton path is slow. What remains — and what this
 chapter is about — is the interface those foreign kernels have to satisfy, and the startup logic that decides which
 one you actually get.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is the entire attention kernel source tree in vLLM at this SHA:</p>
@@ -984,8 +983,7 @@ enum carries. They are selected by model architecture rather than by capability,
 <div class="table-wrap">
   <div class="table-wrap__cap">The <b>18 non-MLA members</b> of <code>AttentionBackendEnum</code> at
   <code>a556f3f</code> (<code>CUSTOM</code> counted, not shown), grouped by target rather than listed
-  in enum order &mdash; so a row may name more than one member. Only the first six rows are reachable
-  on CUDA; the ROCm and CPU rows are here for completeness, and <code>CPU_MLA</code> / <code>AMX_MLA</code>
+  in enum order &mdash; so a row may name more than one member. The first six rows and applicable later DiffKV/model-specific rows can be reachable on CUDA; the ROCm and CPU rows are here for completeness, and <code>CPU_MLA</code> / <code>AMX_MLA</code>
   ride along with <code>CPU_ATTN</code> because they share a platform, not because they are non-MLA.
   Capabilities read from each backend class, not measured. The other <b>19</b> members are MLA variants,
   owned by <a href="../07-architectures/07-02-mla-in-depth.html">§7.2</a>.</div>
@@ -1037,7 +1035,7 @@ exists at this SHA that the earlier chapters do not cover:</p>
 <p>Four more passes follow (<code>fa_utils.py:L100-L175</code>): a config override from
 <code>attention_config.flash_attn_version</code>; a hard demotion of FA3 → FA4 on Blackwell
 (<code>"Cannot use FA version 3 on Blackwell platform, defaulting to FA version 4 if supported, otherwise FA2."</code>,
-<code>:L113-L118</code>); demotions to FA2 for ALiBi and for <code>VLLM_BATCH_INVARIANT</code>; and — going the other way
+<code>:L113-L118</code>); version-specific demotions for ALiBi and batch-invariant mode; do not assume the latter universally demotes FA3; and — going the other way
 — an <em>upgrade</em> FA3 → FA4 on SM90 when FA3 cannot handle the shape, with reasons
 <code>f"FA3 does not support head_size={head_size} on SM90"</code>, <code>"Diff-KV with sinks"</code>, and
 <code>"Per-sequence causal (dynamic_causal) requires FA4"</code> (<code>:L132-L159</code>). One backend name, six
@@ -1507,9 +1505,7 @@ monkey-patched <code>fast_prefill_plan</code> is explicit about the last step �
     is identical to plan()'s.</code></pre>
 </div>
 
-<p>That is the cost of <code>plan()</code> stated plainly: a blocking device-to-host copy that drains the GPU queue.
-Paying it once per step is a rounding error. Paying it 80 times per step would serialise the entire model against the
-CPU.</p>
+<p>The quoted EAGLE path performs a blocking device-to-host copy during planning. Other paths, including specialized trtllm decode, have different metadata work and may avoid plan(). Even one synchronization per short step can be material; measure it separately rather than calling it a rounding error.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 4 &mdash; FlashInfer's plan/run split and the per-batch kernel dispatch inside it.</b>
@@ -1566,8 +1562,7 @@ flowchart TD
   <p>vLLM plans the cascade wrapper but never reaches it at this SHA:
   <code>FlashInferMetadataBuilder.use_cascade_attention</code> returns a hard <code>False</code> with the comment
   <code># TODO: Cascade attention doesn't work, disable it for now</code>
-  (<code>vllm/v1/attention/backends/flashinfer.py:L1742-L1751</code>). The shared-prefix code path is dead. SGLang gets
-  the same win through RadixAttention instead (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>).</p>
+  (<code>vllm/v1/attention/backends/flashinfer.py:L1742-L1751</code>). The shared-prefix code path is dead. RadixAttention reuses prefix computation and stored KV, but does not by itself establish the same cross-query HBM-read reuse as cascade attention (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">§2.4</a>).</p>
 </div>
 
 <h3>The dispatch inside FLASHINFER</h3>
@@ -1662,13 +1657,8 @@ compilation forward into a warmup phase so it is not paid on the first request:<
 <p>That log line is the number to look at; it is printed on every start. On top of it,
 <code>flashinfer_autotune(runner)</code> (<code>:L252</code>, gated by
 <code>kernel_config.enable_flashinfer_autotune</code>, default on for SM90/SM100 profiles) benchmarks kernel variants and
-writes a cache directory set by <code>VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR</code>. A cold container pays both; a warm one
-pays neither.</p></div></section>
-<section class="sec" id="cuda-graphs" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Why CUDA graphs constrain the whole design</h2></div><div class="sec__body"><p>A captured CUDA graph replays kernel launches with their arguments <em>frozen</em>, pointers included. If
-<code>build()</code> allocates a fresh <code>paged_kv_indptr</code> each step, the graph captured on step $N$ replays on
-step $N{+}1$ reading step $N$'s freed buffer. So every metadata field a captured kernel touches must live in a
-preallocated buffer that is written in place. This is not an optimisation; it is a correctness constraint that shapes
-the builders.</p>
+writes a cache directory set by <code>VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR</code>. Cached artifacts can avoid repeated compilation or tuning, but a new process still allocates buffers, initializes contexts, plans metadata, and warms or captures selected shapes.</p></div></section>
+<section class="sec" id="cuda-graphs" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Why CUDA graphs constrain the whole design</h2></div><div class="sec__body"><p>A captured CUDA graph retains recorded launch arguments and buffer addresses. Metadata buffers touched by replay must have stable storage and updated contents. Replacing a buffer without recapture or supported graph updates can leave stale addresses; the outcome may be wrong values or a memory-access failure. Compilation caches do not replace per-process allocation, planning, and warmup.</p>
 
 <p>vLLM declares each builder's tolerance as a four-level enum:</p>
 
@@ -1822,7 +1812,8 @@ context, page size 16, bf16 KV.</p>
   <pre class="code-block code-block--wrap"><code># 1. See every backend name the enum knows, with no GPU:
 python -c "from vllm.v1.attention.backends.registry import AttentionBackendEnum as B; print(len(list(B)), [b.name for b in B])"
 
-# 2. Trigger the error path deliberately and read the reason list:
+# 2. On a NON-SM90 device, HPC_ATTN can trigger a capability error.
+# On SM90 this is not an impossible choice; inspect actual supported constraints:
 vllm serve meta-llama/Llama-3.1-8B-Instruct --attention-backend HPC_ATTN
 #    -> ValueError: Selected backend AttentionBackendEnum.HPC_ATTN is not valid
 #       for this configuration. Reason: ['compute capability not supported', ...]
@@ -1833,7 +1824,9 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct 2&gt;&amp;1 | grep -E "attention bac
 
 # 4. Cross the trtllm decode threshold and diff the logs:
 vllm bench latency --model meta-llama/Llama-3.1-8B-Instruct --attention-backend FLASHINFER \
-  --batch-size 64 --input-len 1024 --output-len 8 2&gt;&amp;1 | grep -i trtllm
+  --batch-size 256 --input-len 1024 --output-len 8 2&gt;&amp;1 | grep -i trtllm
+vllm bench latency --model meta-llama/Llama-3.1-8B-Instruct --attention-backend FLASHINFER \
+  --batch-size 257 --input-len 1024 --output-len 8 2&gt;&amp;1 | grep -i trtllm
 
 # 5. SGLang: print the resolved pair rather than guessing.
 python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct 2&gt;&amp;1 \
@@ -1898,14 +1891,13 @@ validation, in priority order — the fastest way to learn what your configurati
     <code>build()</code> — exactly the <code>CpuGpuBuffer</code> pattern of
     <code>FlashInferMetadataBuilder._make_buffer</code>. Allocating fresh in <code>build()</code> gives a new device
     address every step; the captured graph keeps launching with the address recorded at capture time, so after the first
-    replay you read a freed or reused allocation. The failure is silent numerical corruption, not a crash.</p>
+    replay you read a freed or reused allocation. The failure can be stale/corrupted output, an illegal memory access, or a runtime error.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>vLLM has no <em>compiled CUDA</em> attention kernel of its own at <code>a556f3f</code> —
+  <li>The historical PagedAttention CUDA kernel was removed, but vLLM still owns compiled CUDA attention helpers at <code>a556f3f</code> —
   <code>csrc/attention/</code> is six headers and no <code>.cu</code>. What it still writes is Triton, under
-  <code>vllm/v1/attention/ops/</code> (<a href="03-03-decode-attention.html">§3.3</a>), and that is the portable
-  fallback rather than the fast path. So on every configuration that matters, the backend abstraction is not a
+  <code>vllm/v1/attention/ops/</code> (<a href="03-03-decode-attention.html">§3.3</a>), which can serve portable and performance-sensitive paths. So on every configuration that matters, the backend abstraction is not a
   convenience layer over a house kernel; it is the only thing between the scheduler and someone else's
   <code>.so</code>.</li>
 
@@ -1939,8 +1931,7 @@ validation, in priority order — the fastest way to learn what your configurati
 
   <li>Both engines solve "one model, two kernels", along different axes: SGLang splits by phase
   (<code>--prefill-attention-backend</code> / <code>--decode-attention-backend</code> → <code>HybridAttnBackend</code>),
-  vLLM splits by KV-cache group kind (<code>backend_per_kind</code>). Neither can do the other's split without
-  restructuring.</li>
+  vLLM splits by KV-cache group kind (<code>backend_per_kind</code>). These are exposed configuration axes, not mutually exclusive capabilities: for example, a vLLM backend can already dispatch different prefill and decode subkernels.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
   <li><a href="https://github.com/vllm-project/vllm/pull/47361">vLLM PR #47361 — "Delete PagedAttention"</a>, commit
@@ -1969,7 +1960,7 @@ validation, in priority order — the fastest way to learn what your configurati
 </ul></div></section>
 <div class="pager"><a href="03-03-decode-attention.html"><div class="pager__k">← Previous</div><div class="pager__t">Decode attention: FlashDecoding, split-K, paged kernels</div></a><a class="pager__next" href="03-05-mha-mqa-gqa-mla.html"><div class="pager__k">Next →</div><div class="pager__t">MHA → MQA → GQA → MLA</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

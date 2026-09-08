@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Structured and constrained decoding — The Inference Engineering Book</title>
+<title>Structured and constrained decoding — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 6 · Decoding algorithms · 06-05</div>
 <h1>Structured and constrained decoding</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/structured_output/</code></li><li><code>python/sglang/srt/constrained/</code></li><li><code>python/sglang/srt/constrained/outlines_jump_forward.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/structured_output/</code></li><li><code>python/sglang/srt/constrained/</code></li><li><code>python/sglang/srt/constrained/outlines_jump_forward.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A model that is right 99.9% of the time is a model that emits one unparseable JSON object per thousand requests. At a million requests a day that is a thousand pages in your error budget, and no amount of prompt engineering closes it — because the failure is not a reasoning failure, it is a sampling failure. The fix is to make the bad token unsampleable.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You ask a model for a tool call. The schema is trivial:</p>
@@ -639,7 +639,9 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
  "required": ["name", "id"]}</code></pre>
 </div>
 
-<p>Your prompt says "respond with JSON matching this schema and nothing else". Nine hundred and ninety-nine times out of a thousand you get exactly that. The thousandth time you get a trailing comma, or <code>"id": "42"</code>, or a fenced code block, or the model decides it is being helpful and prefixes <code>Sure! Here is the JSON:</code>. Your parser raises, your agent loop retries, your p99 latency doubles for that request, and your bill goes up.</p>
+<p>Prompt-only formatting can fail through a trailing comma, a quoted integer, or extra prose.
+A retry increases that request's latency and can worsen the population's tail latency. A single
+request has a latency, not a p99; the illustrative failure rate is not an empirical guarantee.</p>
 
 <p>This cannot be prompted away, for a structural reason. Sampling draws from a distribution over all <b>128,256</b> Llama-3 tokens at every step, and no prompt assigns zero probability to any of them. A logit of $-\infty$ does. That is constrained decoding: at every step, compute the set of tokens the grammar permits next and drive every other logit to negative infinity before the sampler sees it.</p>
 
@@ -657,9 +659,13 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 </div></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of it as a second, non-differentiable model running alongside the first. The network proposes a distribution; an automaton vetoes. The automaton has no opinion about which legal token is best — the sampler picks among the survivors with its usual temperature, top-p and penalties (<a href="06-01-sampling-on-gpu.html">§6.1</a>).</p>
 
-<p>The veto is a <b>bitmask</b>: one bit per vocabulary entry, 1 meaning allowed. For 128,256 entries that is <code>ceil(128256/32) = 4008</code> 32-bit words — <b>16,032 bytes</b>, or 15.66 KiB, per request per step. It is a per-row sampling parameter in exactly the sense <a href="06-01-sampling-on-gpu.html">§6.1</a> describes, and the worst kind: no two rows can share one, because no two requests are in the same automaton state.</p>
-
-<p>The automaton is a finite-state machine when the constraint is a regex (a JSON Schema lowers to one), or a pushdown automaton for a context-free grammar with recursion — unbounded object nesting genuinely needs the stack. Either way the interface is the same three operations:</p>
+<p>The veto is a <b>bitmask</b>: one bit per vocabulary entry. For 128,256 entries, 4,008
+32-bit words occupy 16,032 bytes per row. Requests with identical grammar/tokenizer state may
+share a mask, but arbitrary heterogeneous requests require distinct mutable matcher states.</p>
+<p>A regular expression in a supported regular subset can use a finite-state automaton.
+JSON Schema is not universally finite-state: recursive schemas and unbounded JSON nesting
+require stack-like state; other validation keywords may not be enforced by the decoder.
+Backends compile the supported subset to an appropriate recognizer. The interface is:</p>
 
 <div class="cards cards--3">
   <div class="ve-card"><span class="ve-card__k">advance</span><h4>accept_token(t)</h4><p>Feed the token the sampler actually chose; the automaton moves to a new state. Host-side, per request.</p></div>
@@ -718,7 +724,10 @@ flowchart TD
   <div class="kpi"><div class="kpi__n">1.60 GB</div><div class="kpi__l">fully materialised at |Q| = 100,000 (derived)</div></div>
 </div>
 
-<p>A thousand states is a small schema; a string field with a nontrivial <code>pattern</code> or a wide enum blows past it, and 1.6 GB of host RAM per schema is not a viable cache. So no production backend precomputes the table: rows are computed lazily at the state you are actually in, and what gets cached is the compiled automaton, keyed by the grammar spec. vLLM gives xgrammar an explicit byte budget for it:</p>
+<p>Fully materializing every possible state can be prohibitive. Production backends mix
+precomputation, shared caches and runtime checking: <a href="https://arxiv.org/abs/2411.15100">XGrammar</a> precomputes context-independent
+token decisions while handling context-dependent stack state at runtime. A compiled-grammar
+cache is not evidence that no masks or mask fragments are cached. vLLM sets a cache budget:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -737,9 +746,9 @@ flowchart TD
 
 <h3>The per-step cost, priced against the decode budget</h3>
 
-<p>Once compiled, the steady-state cost per decode step is three items. Two of them are cheap enough to ignore and one is not.</p>
-
-<p><b>Mask application on device.</b> The kernel reads the packed mask and the logits, and stores $-\infty$ where the bit is clear. SGLang's Triton implementation is a straight adaptation of xgrammar's:</p>
+<p>Measure three components separately; their relative cost depends on shape, backend and overlap.</p>
+<p><b>Mask application on device.</b> The shown kernel reads the packed mask and writes
+negative infinity to forbidden logits. It does not load the old logit values:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -760,7 +769,10 @@ flowchart TD
         )</code></pre>
 </div>
 
-<p>It is pure bandwidth. One row of fp32 logits is $128{,}256 \times 4 = 513.0$ KB; read plus worst-case write is 1.026 MB, plus 16 KB of mask. On H100 SXM at 3.35 TB/s that is <b>0.31 µs</b> at batch 1, against a 4.48 ms decode floor — 0.007%. At batch 256 it is 256 times as many bytes, <b>79 µs</b>, or roughly 1.8% of a decode step. Real, but not where you should be looking.</p>
+<p>A worst-case logical payload is 513,024 bytes of logit stores plus 16,032 bytes of mask
+per row, or 529,056 bytes. At peak 3.35 TB/s the ideal payload lower bound is 0.158 microseconds
+per row (40.4 microseconds for 256 rows), not a measured kernel time. Masked stores, transaction
+granularity, cache/write policies, launch latency and achieved bandwidth determine real traffic.</p>
 
 <p><b>Host-to-device transfer.</b> 16,032 bytes per row, so 4.10 MB every step at batch 256 — <b>64 µs</b> over PCIe Gen5 x16 at its nominal 64 GB/s. Both engines pin the buffer so the copy can genuinely be <code>non_blocking</code>; SGLang says so at the allocation site:</p>
 
@@ -782,7 +794,10 @@ flowchart TD
 </div>
 
 <p><b>Mask computation and automaton advance.</b> This is single-threaded host work, per request, and it is where the real cost lives.</p></div></section>
-<section class="sec" id="where-the-cost-lands" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Where the cost lands: the CPU, not the GPU</h2></div><div class="sec__body"><p>Both <code>accept_token</code> and <code>fill_bitmask</code> run on the host, inside the step loop, once per request. There is no batched kernel for "advance 256 different automata through 256 different tokens" — each is a different pointer chase through a different compiled grammar. So this batches <em>terribly</em>: doubling the batch doubles the host time while GPU time per request stays flat.</p>
+<section class="sec" id="where-the-cost-lands" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Where the cost lands: the CPU, not the GPU</h2></div><div class="sec__body"><p>The quoted paths advance matchers on the host. Serial work can scale with request count;
+independent requests can also be threaded or otherwise batched by the implementation. Neither
+GPU batch time nor amortized per-request GPU time is guaranteed flat when batch size doubles.
+Compare the exposed host critical path with device work after accounting for overlap.</p>
 
 <p>vLLM's answer is twofold. First, hide the work behind the forward pass: dispatch the model asynchronously, compute the bitmask <em>while the GPU is busy</em>, apply it in a separate sampling call:</p>
 
@@ -821,7 +836,9 @@ flowchart TD
             self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)</code></pre>
 </div>
 
-<p>Above 128 concurrent structured requests, and only with speculative decoding off, the fill is chunked 16 rows at a time onto up to 8 workers, and the loop blocks on every <code>promise.result()</code> (<code>vllm/v1/structured_output/__init__.py:L252-L279</code>). Those two constants are the design's honest confession: 128 is where somebody measured serial filling becoming a problem, and 8 caps how much of the host they were willing to spend on it.</p>
+<p>The quoted path chunks filling into groups of 16 above its threshold, with speculation
+disabled, and waits for futures. The constants establish a policy, not its measured provenance
+or optimality. Benchmark the CPU count, grammar mix and scheduler before retuning.</p>
 
 <p>SGLang hides the same cost differently. Its mask is built inside the worker, immediately before sampling:</p>
 
@@ -911,7 +928,7 @@ flowchart TD
     end
     subgraph GPU["device"]
       F["model forward<br/>batch x 32 layers"] --> G["logits: batch x 128256 fp32"]
-      G --> H["xgr.apply_token_bitmask_inplace<br/>set masked logits to -inf<br/>0.31 us at batch 1, 79 us at batch 256"]
+      G --> H["xgr.apply_token_bitmask_inplace<br/>set forbidden logits to -inf<br/>measure stores, mask reads and launch cost"]
       H --> I["sampler: temperature, top-p, top-k"]
     end
     B -.->|"launch"| F
@@ -969,7 +986,11 @@ flowchart TD
 <p>Choices are <code>["xgrammar", "outlines", "llguidance", "none"]</code> (<code>server_args.py:L245</code>) plus anything registered via <code>register_grammar_backend</code>. vLLM defaults to <code>"auto"</code> (<code>vllm/config/structured_outputs.py:L21</code>), which is a per-request fallback chain, not a fixed choice: validate under xgrammar; on failure fall back to guidance; if the tokenizer is a non-tekken Mistral or the schema uses <code>patternProperties</code>, fall back to outlines instead (<code>vllm/sampling_params.py:L1156-L1193</code>). Switching engines per request is a real operational hazard — two schemas can take paths with different whitespace semantics — which is why the resolved backend is stamped into <code>_backend</code> and a later mismatch raises.</p>
 
 <p>The API surface over these knobs — <code>response_format</code>, <code>guided_json</code>, SGLang's <code>json_schema</code>/<code>regex</code>/<code>ebnf</code>/<code>structural_tag</code> — belongs to <a href="../09-serving-system/09-01-openai-api-surface.html">§9.1</a>. All of it funnels into the same six-way enum at <code>backend_types.py:L19-L25</code>.</p></div></section>
-<section class="sec" id="jump-forward" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Jump-forward decoding and the retokenisation hazard</h2></div><div class="sec__body"><p>Look at Figure 1 again between <code>S1</code> and <code>S5</code>. Once the model has emitted <code>{</code>, the schema forces <code>"id":</code> — five characters, one legal continuation each. Running an 8-billion-parameter forward pass five times to discover a string you already knew is pure waste. <b>Jump-forward decoding</b> (SGLang shipped it as the "compressed FSM") skips them: where the automaton has a unique continuation, emit the forced text directly, advance the state, and resume sampling only where the grammar branches.</p>
+<section class="sec" id="jump-forward" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Jump-forward decoding and the retokenisation hazard</h2></div><div class="sec__body"><p>After <code>{</code>, a restricted grammar may force the five characters
+<code>"id":</code>. Five characters are not necessarily five model tokens. Jump-forward emits a
+forced text run, retokenizes consistently, and updates/recomputes the model states needed for
+later branching. It avoids sampling decisions at forced positions, not all computation required
+to incorporate those tokens into the KV cache.</p>
 
 <p>Read this section as mechanism, not as a flag you can set. At the pinned SHAs <b>neither engine runs jump-forward on the request path</b>: SGLang removed the scheduler-side driver in #4032 and vLLM never landed one. The interface below still exists in SGLang's grammar backends, and the retokenisation hazard it exposes is the reason the feature is hard — which is why it is worth understanding even though nothing calls it. The status callout at the end of the section has the exact evidence.</p>
 
@@ -1232,7 +1253,11 @@ flowchart TD
 
 <h3>Adversarial regexes hang the worker</h3>
 
-<p>Regex-to-DFA conversion is exponential in the worst case, so a nested quantifier like <code>(a+)+b</code> is a denial-of-service vector against a shared server. vLLM's guard is a hard timeout:</p>
+<p>Compilation state explosion and catastrophic regex backtracking are different hazards.
+<code>(a+)+b</code> can be expensive for a backtracking matcher, but denotes the same simple
+regular language as <code>a+b</code>; it is not an exponential-DFA example. Some regex families
+do have exponential determinization growth. Bound pattern size, compilation time and memory,
+and isolate compilation workers; a timed-out future may still require cancellation/termination.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1274,7 +1299,10 @@ flowchart TD
         )</code></pre>
 </div>
 
-<p>Backreferences, lookarounds and Unicode word boundaries are all rejected by <code>_check_unsupported</code> (<code>backend_outlines.py:L285-L309</code>), because <code>regex-automata</code> cannot build a DFA for them.</p>
+<p>The cited backend rejects backreferences, lookarounds and Unicode word boundaries.
+Backreferences can express nonregular languages; bounded/contextual assertions and boundaries
+are not all inherently nonregular. Some rejections reflect the library's supported syntax or
+streaming-context contract rather than a mathematical impossibility of finite-state recognition.</p>
 
 <h3>Silently dropped schema constraints</h3>
 
@@ -1312,6 +1340,23 @@ flowchart TD
   <span class="callout__k">Also masked</span>
   <p>Diffusion language models are rejected outright: "Structured outputs are not yet supported for diffusion language models" (<code>vllm/sampling_params.py:L1034-L1039</code>), because a left-to-right FSM cannot constrain a model that denoises a whole canvas in parallel. Reasoning models get a whole subsystem instead — the grammar must not be applied during the thinking block, which is what <code>should_fill_bitmask</code> / <code>should_advance</code> and SGLang's <code>ReasonerGrammarBackend</code> exist for.</p>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Local masking is not conditioning on eventual validity</h2></div><div class="sec__body">
+<p>Suppose two first-token choices A and B are currently legal and equally likely. Only 0.1 of A's next-token probability reaches a valid ending, compared with 0.9 for B. Local masking leaves the first decision 50/50, then forces a valid ending. Sampling the original model conditioned on eventual validity would instead choose A with probability 0.1. This distinction does not undermine structural validity; it clarifies which distribution is sampled. Validate grammar acceptance, EOS/length completion, full schema semantics and task correctness separately. An empty legal set requires an explicit error/fallback policy, never an all-negative-infinity softmax.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+first = np.array([0.5, 0.5])
+valid_completion_mass = np.array([0.1, 0.9])
+locally_masked_first = first / first.sum()
+conditioned_on_validity = first * valid_completion_mass
+conditioned_on_validity /= conditioned_on_validity.sum()
+np.testing.assert_allclose(locally_masked_first, [0.5, 0.5])
+np.testing.assert_allclose(conditioned_on_validity, [0.1, 0.9])
+assert not np.allclose(locally_masked_first, conditioned_on_validity)
+allowed = np.array([False, False])
+assert not allowed.any()  # report a dead-end; do not call softmax
+print("Local masking and globally conditioned generation differ.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>vLLM ships a structured-output benchmark harness. It sweeps QPS with a configurable fraction of requests carrying a schema, which is exactly the knob that isolates grammar overhead from everything else:</p>
 
 <div class="code-file">
@@ -1346,12 +1391,20 @@ MODEL=meta-llama/Meta-Llama-3-8B-Instruct STRUCTURED_OUTPUT_RATIO=0 \
 
 <details class="fold">
   <summary>Answer — 1</summary>
-  <div class="fold__body"><p><code>len(structured_output_request_ids) &gt; self.fill_bitmask_parallel_threshold and max_num_spec_tokens == 0</code>. The parallel path fills one row per request with no FSM mutation. The speculative path walks the drafts calling <code>accept_tokens</code> between fills, then <code>grammar.rollback(state_advancements)</code> — that mutates matcher state, so threading it would corrupt the automaton. Serial is the only correct path when drafts are present.</p></div>
+  <div class="fold__body"><p>The condition requires the request threshold and zero speculative
+tokens. Within one request, draft acceptance, mask filling and rollback must remain ordered
+against its mutable matcher. Distinct request-owned matchers can be processed in parallel with
+proper ownership. The quoted implementation chooses serial speculative filling; that is not
+the only correct algorithm.</p></div>
 </details>
 
 <details class="fold">
   <summary>Answer — 2</summary>
-  <div class="fold__body"><p>Expect thousands of digit-only tokens (BPE merges multi-digit runs) against a few dozen starting with <code>{</code> — the exercise is to get the real counts; these are the order of magnitude to predict against, not measurements. Density does not affect cost — both masks are 16,032 bytes through the same kernel — but it does affect value: at <code>S0</code> the grammar is doing the work, at <code>S5</code> it is barely constraining anything. Overhead is paid uniformly; benefit is not.</p></div>
+  <div class="fold__body"><p>Count using the actual tokenizer and grammar state, including
+tokens crossing character boundaries. Even thousands of allowed tokens exclude most of a
+128,256-token vocabulary. Count density alone does not measure usefulness: the retained model
+probability mass matters. Mask buffer size is fixed, while masked-store work and matcher work
+can vary with state and density.</p></div>
 </details>
 
 <details class="fold">
@@ -1369,8 +1422,12 @@ MODEL=meta-llama/Meta-Llama-3-8B-Instruct STRUCTURED_OUTPUT_RATIO=0 \
   <div class="fold__body"><p><code>{"type": "string", "pattern": "[a-z]+", "maxLength": 8}</code>. vLLM catches this exact shape — the clause exists for it — so a pinned <code>xgrammar</code> backend rejects it and <code>auto</code> falls through to guidance. What it cannot catch is the general class: any keyword a backend lowers lossily. It is a hand-maintained deny list (<code>multipleOf</code>, <code>uniqueItems</code>, <code>contains</code>, unsupported string <code>format</code>s, <code>propertyNames</code>), not a proof of coverage.</p></div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>The bitmask is a per-row sampling parameter with the worst possible batching properties: 16,032 bytes per request per step at vocab 128,256, produced by a serial host-side walk through a different automaton for every row. The GPU side is 0.31 µs at batch 1 and 79 µs at batch 256; the host side is what both engines are designed around hiding.</li>
-  <li>Compiling over a <em>token</em> vocabulary rather than characters is the hard part, because one token spans several transitions. Materialising the full state→mask table costs $|Q| \times 16{,}032$ bytes — 1.6 GB at 100k states — so backends compute rows lazily and cache the compiled automaton instead.</li>
+  <li>A mask row is 16,032 bytes at vocab 128,256. The shown GPU kernel reads masks and stores
+  forbidden logits without loading their old values. Ideal payload time is not measured
+  kernel time; host work can be shared or parallelized when matcher ownership permits.</li>
+  <li>Tokens can cross several grammar transitions. A finite full-state table would cost
+  state count times mask bytes; backends combine precomputed decisions and runtime checking.
+  Recursive state is not a universal finite table.</li>
   <li>vLLM hides the fill by splitting <code>execute_model</code> from <code>sample_tokens</code>, sharding across up to 8 threads above 128 structured requests. SGLang uses a grammar barrier inside the worker — but for speculative algorithms lacking <code>supports_grammar_overlap()</code>, a grammar in the batch disables overlap scheduling entirely, which costs far more than the mask ever will.</li>
   <li>Jump-forward decoding is implemented at the backend level in SGLang and wired into neither engine's step loop at these SHAs (removed in #4032). The obstacle is the retokenisation boundary: forced text must be re-tokenised whole, the boundary token may fuse with what the KV cache already holds, and the historical code aborts the jump when it does.</li>
   <li>You get conformance to the <em>compiled</em> grammar, not to your schema — xgrammar silently drops <code>minLength</code>/<code>maxLength</code> beside <code>pattern</code> or <code>format</code>, and the guard against that is a hand-maintained deny list. Validate outputs downstream regardless.</li>
@@ -1386,7 +1443,7 @@ MODEL=meta-llama/Meta-Llama-3-8B-Instruct STRUCTURED_OUTPUT_RATIO=0 \
 </ul></div></section>
 <div class="pager"><a href="06-04-eagle-medusa-mtp.html"><div class="pager__k">← Previous</div><div class="pager__t">Medusa, EAGLE-1/2/3, MTP, and tree attention</div></a><a class="pager__next" href="06-06-speculative-decoding-zoo.html"><div class="pager__k">Next →</div><div class="pager__t">The speculative decoding zoo</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1401,6 +1458,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#spec-decode">Interaction with speculative decoding</a>
 <a href="#worked-trace">Worked trace: one vLLM request with a JSON schema</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

@@ -83,23 +83,29 @@ Git does not handle a 40 GB Parquet directory. The standard options:
 
 **Time travel is the feature that matters.** "Reproduce the model we shipped in
 March" requires reading the data as it was in March, not as it is now. Delta and
-Iceberg give you `VERSION AS OF` for free; without them, you need immutable
-snapshots.
+Iceberg support time-travel queries with format-specific syntax, but retention
+and vacuum policies can remove required history. Preserve snapshots explicitly;
+an old version identifier alone is not the data.
 
 ```python
 mlflow.register_model("runs:/<run_id>/model", "churn")
-client.transition_model_version_stage("churn", version=7, stage="Staging")
+client = mlflow.MlflowClient()
+client.set_registered_model_alias("churn", "candidate", "7")
+resolved = client.get_model_version_by_alias("churn", "candidate")
+immutable_uri = f"models:/churn/{resolved.version}"
 ```
 
-A registry gives each model a version, a stage (`Staging`/`Production`/
-`Archived`), lineage back to the run, and an audit trail of who promoted what.
-In a regulated setting, that audit trail is not optional.
+A registry provides immutable versions, mutable aliases/tags, and lineage.
+Legacy stage-transition APIs are deprecated in MLflow; resolve an alias to the
+actual version before loading/logging a deployed artifact. See the
+[registry workflow](https://mlflow.org/docs/latest/ml/model-registry/workflow/).
 
 ## Feature stores
 
 The problem a feature store solves is **train/serve skew**: the feature computed
 in a training SQL query and the feature computed in the serving Python are
-subtly different, and the model degrades in ways offline evaluation cannot see.
+subtly different. An ordinary offline score may miss this, but historical replay
+and offline-versus-served feature parity tests can expose the mismatch.
 
 | Store | Note |
 |---|---|
@@ -116,7 +122,8 @@ The two properties that define a feature store:
    features must be the values that were known *at that row's timestamp* — not
    the current values. This is an as-of join, and getting it wrong is the most
    damaging form of leakage in production ML, because it inflates offline metrics
-   and cannot be detected offline.
+   and can be detected offline through timestamp/availability assertions,
+   historical replay, feature parity checks and held-out backtests.
 
 If you build nothing else, build the point-in-time join correctly.
 
@@ -153,7 +160,9 @@ Feature retrieval is frequently the bottleneck, not the model. Optimising a
 
 Serve p99, not the mean. A mean of 40 ms with a p99 of 900 ms means 1% of users
 have a bad experience, and in a fan-out architecture where one request touches 20
-services, nearly every request hits somebody's p99.
+services, independent 1%-tail events imply probability
+$1-0.99^{20}\approx18.2\%$ of at least one tail event, not nearly every request.
+Correlation changes that probability.
 
 ### Serving frameworks
 
@@ -161,7 +170,7 @@ services, nearly every request hits somebody's p99.
 |---|---|
 | **FastAPI + uvicorn** | simple, Pythonic, fine for low QPS |
 | **NVIDIA Triton** | multi-framework, dynamic batching, model ensembles, GPU sharing |
-| **TorchServe** | PyTorch-native |
+| **TorchServe** | legacy PyTorch server; no planned updates or security patches |
 | **TF Serving** | TensorFlow-native, mature versioning and batching |
 | **BentoML** | packaging + serving + adaptive batching, good developer experience |
 | **Ray Serve** | composable pipelines, autoscaling, Python-native |
@@ -175,37 +184,85 @@ large throughput multiplier. For LLMs, **continuous batching** goes further,
 admitting new requests into a running batch as others finish rather than waiting
 for the whole batch to complete.
 
-```python
-from fastapi import FastAPI
-from pydantic import BaseModel
+### Runnable local serving contract
+
+This CPU fixture tests a probability API with FastAPI's in-process client. It does
+not start a network server, write artifacts, or contact a registry. A real loader
+must verify artifact integrity/trust and return an immutable version. A default
+MLflow sklearn pyfunc commonly calls `predict`, yielding labels; use an explicit
+probability wrapper or loaded estimator's `predict_proba` for a probability API.
+
+```python runnable
+from contextlib import asynccontextmanager
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
+from sklearn.linear_model import LogisticRegression
 
 class Request(BaseModel):
-    user_id: str
-    features: dict[str, float]
+    f0: float = Field(..., allow_inf_nan=False)
+    f1: float = Field(..., allow_inf_nan=False)
+    class Config:
+        extra = "forbid"
 
-app = FastAPI()
+def create_app(loader):
+    @asynccontextmanager
+    async def lifespan(app):
+        model, version = loader()
+        warm = model.predict_proba(np.zeros((1, 2)))
+        if warm.shape != (1, 2) or not np.isfinite(warm).all():
+            raise RuntimeError("warmup failed")
+        app.state.model, app.state.version = model, version
+        app.state.ready = True
+        try:
+            yield
+        finally:
+            app.state.ready = False
 
-@app.on_event("startup")
-def load():
-    app.state.model = mlflow.pyfunc.load_model("models:/churn/Production")
+    app = FastAPI(lifespan=lifespan)
+    app.state.ready = False
 
-@app.post("/predict")
-def predict(req: Request):
-    X = build_frame(req.features)          # same code path as training
-    p = float(app.state.model.predict(X)[0])
-    log_prediction(req.user_id, X, p)      # for monitoring and future labels
-    return {"score": p, "model_version": app.state.version}
+    @app.get("/health")
+    def health():
+        return {"ok": True}
 
-@app.get("/health")   # liveness
-def health(): return {"ok": True}
+    @app.get("/ready")
+    def ready():
+        if not app.state.ready:
+            raise HTTPException(503, "not ready")
+        return {"ok": True}
 
-@app.get("/ready")    # readiness — model actually loaded
-def ready(): return {"ok": hasattr(app.state, "model")}
+    @app.post("/predict")
+    def predict(request: Request):
+        if not app.state.ready:
+            raise HTTPException(503, "not ready")
+        positive = np.flatnonzero(app.state.model.classes_ == 1).item()
+        score = app.state.model.predict_proba([[request.f0, request.f1]])[0, positive]
+        return {"score": float(score), "model_version": app.state.version}
+    return app
+
+X = np.array([[-2., 0], [-1., 1], [1., -1], [2., 0]])
+model = LogisticRegression(random_state=0).fit(X, [0, 0, 1, 1])
+app = create_app(lambda: (model, "fixture-version-7"))
+assert TestClient(app).get("/ready").status_code == 503
+with TestClient(app) as client:
+    assert client.get("/ready").status_code == 200
+    result = client.post("/predict", json={"f1": 0., "f0": 2.}).json()
+    assert result["model_version"] == "fixture-version-7"
+    assert np.isclose(result["score"], model.predict_proba([[2., 0.]])[0, 1])
+    assert client.post("/predict", json={"f0": 1.}).status_code == 422
+    assert client.post("/predict", json={"f0": 1., "f1": 0., "secret": 3}).status_code == 422
+assert not app.state.ready
+print("readiness status, fixed schema, class probability and immutable version passed")
 ```
 
-**Log every prediction with its inputs and model version.** Without that, you
-cannot compute production metrics when labels arrive, cannot debug a complaint,
-and cannot detect drift. Sample if volume is high, but never log nothing.
+Log a minimized prediction identifier, immutable model/schema version and permitted
+diagnostics for delayed labels. Raw inputs may contain secrets or sensitive
+attributes: define redaction, retention, access controls and deletion instead of
+logging all inputs by default. Add authentication, authorization, request deadlines,
+bounded queues, overload responses and cancellation before network deployment.
+FastAPI recommends [lifespan management](https://fastapi.tiangolo.com/advanced/events/).
 
 ## Containerisation and orchestration
 
@@ -216,12 +273,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.11-slim
+WORKDIR /app
 COPY --from=build /install /usr/local
 COPY src/ /app/src/
 COPY model/ /app/model/
 ENV PYTHONUNBUFFERED=1 OMP_NUM_THREADS=1
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
 EXPOSE 8080
-HEALTHCHECK CMD curl -f http://localhost:8080/ready || exit 1
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/ready', timeout=2)"
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 
@@ -244,16 +304,17 @@ readiness probe so the first real request does not pay JIT compilation cost.
 
 | Strategy | Mechanism | Risk |
 |---|---|---|
-| **Shadow / dark launch** | new model scores live traffic, output discarded | zero user risk; no outcome data |
+| **Shadow / dark launch** | new model scores live traffic, output discarded | no direct decision effect; shared resources/logs still pose risk |
 | **Canary** | 1% → 5% → 25% → 100% with metric gates | limited blast radius |
 | **Blue/green** | two full environments, switch the router | instant rollback, double cost |
 | **A/B test** | randomised split with statistical analysis | the only way to measure business impact |
 | **Multi-armed bandit** | traffic shifts toward the better arm | faster, but confounded by non-stationarity |
 
 **Shadow mode first, always.** It catches schema mismatches, latency
-regressions, and unexpected input distributions with zero user exposure. It
-cannot tell you whether the new model is *better* — only an A/B test can — but it
-tells you whether it is *safe*.
+regressions, and unexpected input distributions. With later outcome labels it can
+compare predictive quality, but cannot directly identify the causal effect of
+taking different actions. Resource isolation and privacy controls still matter;
+shadow mode does not certify safety.
 
 Automate rollback on a metric gate. A deployment that requires a human to notice
 a problem at 3 a.m. is not a deployment strategy.
@@ -304,8 +365,10 @@ the actual. Conventional thresholds: $< 0.1$ stable, $0.1$–$0.25$ investigate,
 $> 0.25$ significant shift.
 
 A useful and under-used detector: **train a classifier to distinguish training
-data from production data.** If it achieves AUC well above 0.5, the distributions
-differ, and its feature importances tell you exactly which features moved.
+data from production data.** Evaluate its AUC on held-out, appropriately grouped
+or temporal rows; training AUC can reflect memorization. Importances suggest
+diagnostic features but do not uniquely identify marginal changes, especially
+with correlated features or changed interactions.
 
 **Prediction drift is your early-warning system**, because it needs no labels.
 If the mean predicted probability moves from 0.03 to 0.11 overnight, something
@@ -352,6 +415,10 @@ makes reproducibility harder; retraining from scratch is cleaner. Prefer from
 scratch unless training cost forbids it.
 
 ## CI/CD for ML
+
+The following is a workflow sketch: a runnable GitHub Actions job additionally
+needs `runs-on`, checkout, Python/dependency setup, credentials policy and the
+referenced repository commands/files. It has not been executed as CI here.
 
 ```yaml
 on: [pull_request]
@@ -426,8 +493,7 @@ easy to tune with a single confidence threshold.
 ## Self-check
 
 1. What is train/serve skew, and what property of a feature store prevents it?
-2. Explain point-in-time correctness and why violating it cannot be detected
-   offline.
+2. Explain point-in-time correctness and give two offline tests that detect violations.
 3. Your model's p50 latency is 30 ms and p99 is 800 ms. Why does the p99 matter
    more, and what would you check first?
 4. Name the four drift types and say which ones you can detect without labels.
@@ -442,5 +508,5 @@ easy to tune with a single confidence threshold.
   serving artefact.
 - [Hugging Face ecosystem](./huggingface.md) — the model side of an LLM
   deployment.
-- [The Inference Engineering Book](/courses/inference/) — the serving layer in
+- [The Inference Engineering Course](/courses/inference/) — the serving layer in
   depth.

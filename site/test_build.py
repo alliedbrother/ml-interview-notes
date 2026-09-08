@@ -38,6 +38,11 @@ def resolves(url: str) -> bool:
     return target.is_file() or (target / "index.html").is_file()
 
 
+def is_local_markdown_link(url: str) -> bool:
+    parsed = urlparse(url)
+    return not parsed.scheme and not parsed.netloc and parsed.path.endswith('.md')
+
+
 def main() -> int:
     if not OUT.is_dir():
         print("_site/ not found — run `python site/build.py` first", file=sys.stderr)
@@ -76,7 +81,7 @@ def main() -> int:
 
         # ---- no unrewritten markdown links escaped into the output
         for bad in set(re.findall(r'href="([^"]*\.md(?:#[^"]*)?)"', html_text)):
-            check(False, f"{rel_page}: unrewritten markdown link -> {bad}")
+            check(not is_local_markdown_link(bad), f"{rel_page}: unrewritten markdown link -> {bad}")
 
         # ---- generated pages link the shared stylesheet; prebuilt course pages
         #      carry their own CSS and are re-themed by the bridge instead

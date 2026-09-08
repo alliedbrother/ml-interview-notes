@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Naive attention and the online softmax — The Inference Engineering Book</title>
+<title>Naive attention and the online softmax — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-01</div>
 <h1>Naive attention and the online softmax</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/flash_attn.py</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/flash_attn.py</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Write attention the way the paper writes it and a single Llama-3-8B layer at 32k
 context asks the allocator for 64 GiB. The fix is not a smaller matrix — it is never building
@@ -876,11 +876,11 @@ overflows at</p>
   <div class="table-wrap__cap">Derived from IEEE-754 and bfloat16 ranges (the format ranges themselves are tabulated in <a href="../00-foundations/00-05-numerics.html">§0.5</a>)</div>
   <div class="table-scroll">
   <table class="dt">
-    <thead><tr><th>dtype</th><th class="num">max finite</th><th class="num">exp overflows above</th><th class="num">exp flushes to 0 below</th></tr></thead>
+    <thead><tr><th>dtype</th><th class="num">max finite</th><th class="num">exp overflows above</th><th class="num">exp rounds to 0 below (nearest-even, subnormals)</th></tr></thead>
     <tbody>
-      <tr><td>fp16</td><td class="num">65504</td><td class="num">11.09</td><td class="num">&minus;16.64</td></tr>
-      <tr><td>bf16</td><td class="num">3.39e38</td><td class="num">88.72</td><td class="num">&minus;92.19</td></tr>
-      <tr><td>fp32</td><td class="num">3.40e38</td><td class="num">88.72</td><td class="num">&minus;103.28</td></tr>
+      <tr><td>fp16</td><td class="num">65504</td><td class="num">11.09</td><td class="num">&minus;17.33</td></tr>
+      <tr><td>bf16</td><td class="num">3.39e38</td><td class="num">88.72</td><td class="num">&minus;92.88</td></tr>
+      <tr><td>fp32</td><td class="num">3.40e38</td><td class="num">88.72</td><td class="num">&minus;103.97</td></tr>
     </tbody>
   </table>
   </div>
@@ -893,8 +893,7 @@ $\approx \sqrt{2\ln N} - \tfrac{\ln\ln N + \ln 4\pi}{2\sqrt{2\ln N}} = 3.7$ — 
 margin. That is exactly why the naive form is dangerous rather than obviously broken: it works on
 every toy tensor you test it with. Trained models are not $\mathcal{N}(0,1)$ (the callout below is
 the architectural admission of it), and the failure when it comes is not gradual. Once one entry is
-$+\infty$, the denominator is $+\infty$, and every output in the row is
-$\infty/\infty = \mathrm{NaN}$ — the entire row, not just the offending element. And upcasting is
+$+\infty$, the denominator is $+\infty$, overflowed entries yield $\infty/\infty=\mathrm{NaN}$ while finite exponentials divided by the infinite denominator yield zero. Later weighted reductions can propagate those NaNs throughout the output. And upcasting is
 no defence: $e^{100} = 2.688\times10^{43}$ overflows <em>fp32</em> too.</p>
 
 <div class="callout callout--warn">
@@ -914,12 +913,7 @@ no defence: $e^{100} = 2.688\times10^{43}$ overflows <em>fp32</em> too.</p>
 
 <div class="math-display">$$\frac{e^{x_j - c}}{\sum_k e^{x_k - c}} = \frac{e^{-c} e^{x_j}}{e^{-c}\sum_k e^{x_k}} = \frac{e^{x_j}}{\sum_k e^{x_k}}.$$</div>
 
-<p>Softmax is invariant to a common shift — <em>any</em> shift, exactly, in real arithmetic.
-Choose $c = m := \max_k x_k$ and every exponent becomes $\le 0$, so every term lands in
-$(0, 1]$ and overflow is structurally impossible. Underflow is still possible but harmless: a
-term with $x_j - m < -16.6$ rounds to zero in fp16, and its true weight was below $6\times10^{-8}$.
-<strong>Overflow destroys a row; underflow discards a term that was already negligible.</strong>
-That asymmetry is why the maximum is the shift everyone picks.</p>
+<p>For finite logits, subtracting their maximum makes exponent arguments nonpositive and prevents exp overflow. Under nearest-even with subnormals, fp16 rounds exp(z) to zero below z=log(2^-25), approximately -17.33; flush-to-zero hardware can differ. Tiny terms are often negligible but many such terms or large associated values can make their aggregate relevant. Check the reduction's error budget rather than declaring every underflow harmless.</p>
 
 <p>The price is passes over the data:</p>
 
@@ -989,13 +983,7 @@ fact the entire construction rests on, $e^{a-b}\,e^{b-c} = e^{a-c}$:</p>
 <p>The blocks $B_j$ partition $\{1,\dots,N\}$, so $X_{j-1}$ and $B_j$ are disjoint and the two
 sums concatenate without double counting. $\square$</p>
 
-<p><strong>Corollary.</strong> At $j = n$, $X_n = \{1,\dots,N\}$, so $m^{(n)} = m$ and
-$\ell^{(n)} = \sum_k e^{x_k - m} = \ell$. Substituting into $y_j = e^{x_j - m^{(n)}}/\ell^{(n)}$
-gives exactly the safe-softmax output, which §(2) already showed equals the naive definition.
-The online softmax is <em>not an approximation</em>. In exact arithmetic it is bit-for-bit the
-same function; in floating point it differs only by rounding, and — because every intermediate
-is bounded in $(0, 1]$ and every rescale shrinks — it is at least as well conditioned as the
-three-pass version.</p>
+<p><strong>Corollary.</strong> At the final tile the state is the maximum, shifted exponential sum, and shifted weighted-value sum over all processed entries, so normalization yields the same attention function in exact arithmetic. Floating-point results can differ with tiling and reduction order. Conditioning belongs to the mathematical problem; algorithmic stability is separate. Individual exponentials lie in [0,1], but ell can grow to the number of keys and the weighted output accumulator need not be bounded by 1.</p>
 
 <h3>Verify it on numbers</h3>
 
@@ -1210,9 +1198,7 @@ differently in fp16.</p>
     in fp32's 24. The accumulator is fp32 even when $Q$, $K$, $V$ and the stored output are
     bf16.</p></div>
   <div class="ve-card ve-card--recessed"><span class="ve-card__k">alpha</span><h4>Safe by construction</h4>
-    <p>$\alpha \in (0,1]$ always. It cannot overflow. It <em>can</em> underflow to zero — when
-    it does, the state it was scaling was genuinely negligible, so flushing to zero is the
-    correct answer, not a bug. This is the one place narrow precision is defensible.</p></div>
+    <p>For finite maxima, alpha is in (0,1] and cannot overflow. Underflowing alpha can still matter: alpha*ell or alpha*O may be representable and significant when ell or O is large, even if alpha alone rounds to zero in a narrow dtype. Keep the rescale and reduction state sufficiently wide and test late extreme maxima; flushing is not unconditionally correct.</p></div>
 </div></div></section>
 <section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>You will not find the recurrence written out as a recurrence in either engine, because inside
 FlashAttention it is compiled into a CUTLASS mainloop that
@@ -1294,7 +1280,7 @@ verbatim:</p>
 
 <p>Map it onto the equations. <code>max_lse</code> (set at
 <code>csrc/libtorch_stable/attention/merge_attn_states.cu:L106</code> as
-<code>fmaxf(p_lse, s_lse)</code>) is $M$. The two <code>expf</code> results are
+<code>fmaxf(p_lse, s_lse)</code>) is M=max(LSE_A,LSE_B), not generally the maximum raw logit m. The two <code>expf</code> results are
 $e^{\mathrm{LSE}_A - M}$ and $e^{\mathrm{LSE}_B - M}$ — the rescaling factors $\alpha$, in their
 symmetric form where neither side is privileged. <code>out_se</code> is the merged $\ell$
 relative to $M$; <code>p_scale</code> and <code>s_scale</code> are the normalised mixing
@@ -1632,10 +1618,12 @@ for j in range(0, N, BC):
     p = np.exp(xb - m_new)
     l = a * l + p.sum()
     O = a * O + p @ vb
+    m = m_new
 online = O / l
 
 ref = (np.exp(x - x.max()) / np.exp(x - x.max()).sum()) @ v   # safe 3-pass
-print(np.max(np.abs(online - ref)))      # ~1e-16: rounding only</code></pre>
+np.testing.assert_allclose(online, ref, rtol=1e-12, atol=1e-12)
+print(np.max(np.abs(online - ref)))      # rounding-scale difference</code></pre>
 </div>
 
 <p>Then, on a machine with a GPU, exercise the real kernels. vLLM's merge has a dedicated
@@ -1704,8 +1692,7 @@ VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct</code></pr
     <p><strong>1.</strong> $|S| = 64 \times 8192^2 \times 2 = 8.00$ GiB per layer. Traffic:
     $4|S| = 32$ GiB, plus Q (128 MiB) + K (16 MiB) + V (16 MiB) + O (128 MiB) = 288 MiB;
     total 32.28 GiB. FLOPs $= 4 \times 64 \times 8192^2 \times 128 = 2.199\times10^{12}$.
-    $I = 2.199\times10^{12} / 3.466\times10^{10} = 63.4$ FLOP/byte — <em>identical</em> to the
-    8B model. Both $F$ and the dominant part of $Q$ scale with $h$, so $h$ cancels;
+    $I = 2.199\times10^{12} / 3.466\times10^{10} = 63.4$ FLOP/byte — close to the 8B model, not exactly identical once the different GQA Q/K/V/O traffic is retained. Both $F$ and the dominant part of $Q$ scale with $h$, so $h$ cancels;
     $I_{\text{materialised}} = T d_h / (b(T + d_h))$ depends only on $T$, $d_h$ and the dtype.
     That is why materialisation is a structural problem and not a big-model problem.</p>
 
@@ -1718,13 +1705,7 @@ VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct</code></pr
     a barrier that serialises the whole block, and shared memory is the scarce resource that
     limits occupancy. Recompute-over-communicate is the default instinct on a GPU.</p>
 
-    <p><strong>3.</strong> $\ell$ fails first, but not by overflowing — $\exp$ overflows before
-    it gets there. With $\sigma = 3$ the logits reach $\pm 12$ and the outlier is 40; in fp16
-    <code>np.exp(xb - m_new)</code> is fine (the shift makes every exponent $\le 0$) but
-    <code>p @ vb</code> accumulates 8192 terms in fp16 and loses roughly 13 bits, so the answer
-    drifts by percent-level amounts, and $\ell$ accumulates the same way. Keeping $\ell$ and $O$
-    in fp32 with fp16 operands recovers relative error around $10^{-3}$ — bounded by the
-    operands' own precision, which is exactly the design point of every production kernel.</p>
+    <p><strong>3.</strong> After subtracting the tile maximum, every exponent is nonpositive, so exp itself cannot overflow for finite inputs. This code's p@vb reduces 64 terms per tile, not 8192; the running state then combines 128 tiles. Narrow storage/accumulation can lose small updates, underflow rescale factors, or overflow an unnormalized weighted sum for sufficiently large values. The first failure depends on data and reduction implementation; there is no universal 13-bit loss or fixed relative-error guarantee. Compare against FP64 and record absolute error as well as relative error near zero.</p>
 
     <p><strong>4.</strong> SGLang's Triton kernel has no both-empty guard: <code>max_lse</code>
     is $-\infty$, <code>p_lse - max_lse</code> is NaN, and the output is NaN. vLLM's has the
@@ -1748,8 +1729,7 @@ VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct</code></pr
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>The cost of textbook attention is the $[h, T, T]$ intermediate, not the FLOPs. At
-  $T = 8192$ it is 4.00 GiB per Llama-3-8B layer and 99% of the HBM traffic; it drags arithmetic
-  intensity from 6553.6 down to 63.4 FLOP/byte, moving attention from 22× past the H100 ridge
+  $T = 8192$ it is 4.00 GiB per Llama-3-8B layer and 99% of the HBM traffic; the compulsory-traffic ideal is 6553.6 while materialization yields about 63.4 FLOP/byte; actual tiled traffic includes SRAM-driven rereads, moving attention from 22× past the H100 ridge
   to 4.7× left of it. <em>Derived.</em></li>
 
   <li>Softmax is invariant to <em>any</em> common shift of its inputs. The maximum is chosen
@@ -1770,7 +1750,7 @@ VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct</code></pr
   the last bits. <code>merge_attn_states</code> is only the two-way one.</li>
 
   <li>The identity element is where floating point bites: $-\infty$ minus $-\infty$ is NaN, and
-  both engines carry explicit guards and an inline incident report for exactly that case. Write
+  vLLM's quoted merge paths guard it, while the quoted SGLang Triton fallback lacks a both-empty guard. Distinguish that fallback from other paths. Write
   the empty-state branch before the arithmetic.</li>
 
   <li>Attention is ~7% of Llama-3-8B's decode FLOPs but a large share of its latency, because
@@ -1818,7 +1798,7 @@ VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct</code></pr
 </ul></div></section>
 <div class="pager"><a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html"><div class="pager__k">← Previous</div><div class="pager__t">Offload, hierarchical cache, and budgeting VRAM</div></a><a class="pager__next" href="03-02-flashattention.html"><div class="pager__k">Next →</div><div class="pager__t">FlashAttention 1 → 2 → 3</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

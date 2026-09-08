@@ -73,7 +73,7 @@ for each block of Q (size B_r):
         load K_j, V_j into SRAM
         S_ij = Q_i @ K_j.T                 # small, stays in SRAM
         update m_i, l_i, O_i               # online softmax
-    write O_i to HBM                       # ONE write, size (B_r, d)
+    write O_i / l_i to HBM                 # normalize weighted numerator
 ```
 
 Only `O(T·d)` is written — the output — instead of `O(T²)`.
@@ -90,9 +90,12 @@ $$m^{new} = \max(m, m')$$
 $$l^{new} = e^{m - m^{new}} l + e^{m' - m^{new}} l'$$
 $$O^{new} = e^{m - m^{new}} O + e^{m' - m^{new}} O'$$
 
-Each time the max grows, previously accumulated values are rescaled by
-`exp(m_old − m_new)`. The result is **numerically identical** to computing softmax
-over the full row.
+Here `O` is an **unnormalized weighted numerator**, not the final attention
+output: for the new tile, `l'=sum(exp(scores-m'))` and
+`O'=sum(exp(scores-m') * values)`. `m,l` are scalars per query row; `O` has `d_v`
+components. Start with `m=-inf,l=0,O=0`, handle empty/all-masked tiles explicitly,
+and finally return `O/l` for rows with positive `l`. Rescaling preserves the same
+real-number function; floating-point reduction order can change the last bits.
 
 ```mermaid
 flowchart TD
@@ -147,11 +150,12 @@ import torch.nn.functional as F
 out = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
 ```
 
-Conditions for the fast path: half precision (fp16/bf16), head dim ≤ 256,
-supported GPU, and no arbitrary dense `attn_mask` (use `is_causal=True` instead —
-passing an explicit mask usually falls back to the slow path). This is why
-Mistral dropped sliding windows in module 10: an unusual pattern can knock you
-off the fast kernel.
+Eligibility depends on PyTorch/backend version, device, dtype, dimensions and
+mask support. Inspect backend diagnostics for the actual inputs. A dense mask
+may prevent a particular fused kernel; replacing it with `is_causal=True` is
+valid only if the two masks represent the same attention pattern. Kernel
+availability can motivate architecture choices, but never justifies changing a
+pretrained model's mask silently.
 
 ## 11.3 FlashDecoding
 
@@ -319,8 +323,11 @@ continuous:  A finishes -> D starts immediately in that slot
 **individual decode steps**. When a request emits `[EOS]`, its slot is freed and a
 queued request takes it on the very next step.
 
-This only works if request slots are independently allocatable — which is exactly
-what PagedAttention provides. The two were designed together.
+Iteration-level scheduling does not require paged allocation.
+[Orca (OSDI 2022)](https://www.usenix.org/conference/osdi22/presentation/yu)
+predates PagedAttention (2023). Paging makes variable-length cache allocation
+more efficient; scheduling decides which requests run. They complement one
+another but are distinct mechanisms.
 
 Combined reported gains: up to **23×** throughput over naive static batching with
 contiguous allocation.
@@ -355,7 +362,7 @@ Understanding that decode is memory-bandwidth-bound explains almost everything
 else in this course:
 
 - why GQA/MLA help *speed*, not just capacity (module 09) — fewer bytes read
-- why FlashAttention's extra recomputation is free (§11.2)
+- why recomputation can be cheaper than extra memory traffic (§11.2)
 - why quantization speeds up decoding (module 14) — fewer bytes again
 - why speculative decoding works (module 14) — it converts memory-bound decode
   steps into compute-bound verification
@@ -381,6 +388,50 @@ implied. When they say "we use sparse attention," one is.
 
 ---
 
+## Worked online reduction and arithmetic intensity
+
+For scores `[0,1,2]` split into `[0,1]` and `[2]`, the first maximum is 1 and
+the first sum is `exp(-1)+1`. On the next tile the maximum becomes 2; scale the
+old sum and weighted numerator by `exp(-1)`, add the new tile, then divide.
+For values `[1,3,5]`, this yields the same weighted mean as ordinary softmax.
+
+```python transformer-check
+import torch
+scores = torch.tensor([0., 1., 2.], dtype=torch.float64)
+values = torch.tensor([[1.], [3.], [5.]], dtype=torch.float64)
+m = torch.tensor(float('-inf'), dtype=torch.float64)
+den = torch.tensor(0., dtype=torch.float64)
+num = torch.zeros(1, dtype=torch.float64)
+for start, end in [(0, 2), (2, 3)]:
+    tile = scores[start:end]
+    new_m = torch.maximum(m, tile.max())
+    correction = (m - new_m).exp()
+    p = (tile - new_m).exp()
+    num = correction * num + p @ values[start:end]
+    den = correction * den + p.sum()
+    m = new_m
+torch.testing.assert_close(num / den, scores.softmax(-1) @ values)
+assert den > 0
+print("Normalized online output:", (num / den).item())
+```
+
+The SRAM budget for a tile is **per multiprocessor/workgroup**, not the sum of
+all on-chip memory. A tensor fitting in aggregate GPU SRAM may not fit in the
+local workspace of the scheduled block.
+
+For a weight matrix with N entries reused across M query tokens, dominant work
+is `2MN` FLOPs and a single weight read costs `sN` bytes: weight-only intensity
+is `2M/s`. At BF16 and M=1 this is 1 FLOP/byte; at M=128 it is 128. KV reads,
+activation writes and imperfect reuse lower full-operation intensity. Prefill
+often has larger M; batched decode also increases reuse. Neither phase is
+universally compute- or bandwidth-bound across all batch/context sizes.
+
+**Benchmark exercise:** disclose device, versions, dtype, `(B,H,T_q,T_k,d_head)`,
+mask, warmup count, repetitions and backend. Synchronize CUDA before/after timing
+or use CUDA events. Compare equal masks/functions and report numerical error
+alongside allocated/peak memory. CPU checks above verify mathematics only;
+they do not substantiate GPU speedups or backend-selection claims.
+
 ## Key takeaways
 
 - GPU SRAM is ~10× faster than HBM and thousands of times smaller. Attention is
@@ -389,7 +440,8 @@ implied. When they say "we use sparse attention," one is.
 - **FlashAttention** tiles the computation into SRAM, uses an **online softmax**
   with running max/sum rescaling, and never materialises `(T, T)`. Memory drops
   from `O(T²)` to `O(T)`; 2–4× faster.
-- FlashAttention is **exact**. Same numbers, no quality trade-off — unlike
+- FlashAttention is **exact in real arithmetic**, with floating-point differences,
+  rather than a changed attention rule like
   everything in module 10.
 - It even **recomputes** scores in the backward pass: more FLOPs, still faster,
   because the bottleneck is bandwidth.
@@ -405,7 +457,7 @@ implied. When they say "we use sparse attention," one is.
   tables, non-contiguous allocation. Near-zero waste, plus copy-on-write **prefix
   sharing**. 2–4× throughput.
 - **Continuous batching** schedules per decode step, freeing slots the instant a
-  request finishes. Depends on paged allocation.
+  request finishes. Paged allocation is useful but not a prerequisite.
 - **Prefill is compute-bound; decode is memory-bandwidth-bound.** That single
   distinction explains most serving-system design.
 

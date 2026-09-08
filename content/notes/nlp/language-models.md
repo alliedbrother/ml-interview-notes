@@ -30,8 +30,8 @@ $$P(w_i\mid w_1,\dots,w_{i-1}) \approx P(w_i\mid w_{i-n+1},\dots,w_{i-1}) = \fra
 |---|---|---|---|
 | 1 | unigram | $5\times10^4$ | no context at all |
 | 2 | bigram | $2.5\times10^9$ | one word of context |
-| 3 | trigram | $1.25\times10^{14}$ | the practical ceiling |
-| 5 | 5-gram | $3\times10^{23}$ | vastly more parameters than words in existence |
+| 3 | trigram | $1.25\times10^{14}$ possible sequences | sparse storage and smoothing required |
+| 5 | 5-gram | about $3\times10^{23}$ possible sequences | useful sparse models store observed histories, not the full Cartesian space |
 
 **The sparsity problem is fundamental, not incidental.** Most valid trigrams
 never occur in any corpus, and an unseen n-gram gets probability zero, which
@@ -85,7 +85,8 @@ earlier position ($O(1)$ path length instead of $O(n)$), and the causal mask let
 all positions train **simultaneously** in one forward pass.
 
 That last point is the decisive one. An RNN's sequential dependency cannot use a
-GPU's parallelism; a transformer's forward pass is a stack of matrix
+sequence-axis parallelism during recurrence; GPUs still parallelize batch and
+matrix operations. A transformer's forward pass is a stack of matrix
 multiplications. The change is not primarily about representational power — it is
 about being able to spend $10^{25}$ FLOPs productively.
 
@@ -135,7 +136,9 @@ uncertain as if choosing uniformly among 20 tokens.
    tokenizers.
 2. **Identical corpus.** Perplexity on Wikipedia and on code are different
    numbers about different things.
-3. **Identical context length.** More context lowers perplexity for free.
+3. **Matched context/evaluation policy.** Longer context can help but is not free
+   and need not lower measured loss for a finite model. Match stride, boundaries,
+   masking and predicted-token counts.
 
 Perplexity also correlates imperfectly with usefulness: an instruction-tuned
 model typically has *worse* perplexity on raw web text than its base model while
@@ -152,7 +155,8 @@ $$L(N) \approx \left(\frac{N_c}{N}\right)^{\alpha_N}, \qquad L(D) \approx \left(
 
 The 2022 result that changed how models are sized. For a fixed compute budget
 $C \approx 6ND$, the compute-optimal allocation is roughly **20 tokens per
-parameter** — $N$ and $D$ should scale together, not $N$ alone.
+parameter** in its fitted experimental regime. This ratio is not a universal
+training rule; data quality, architecture, budget and deployment economics matter.
 
 | Model | Parameters | Tokens | Tokens/param |
 |---|---|---|---|
@@ -243,17 +247,16 @@ substrate. All three have supporting evidence.
 | Manipulate its context window | Have persistent memory between conversations |
 | Produce fluent, well-formed text | Guarantee that fluent text is true |
 
-**Hallucination** is not a bug to be patched — it is the direct consequence of
-the objective. The model is trained to produce **probable** continuations, and a
-fluent, plausible, false statement is exactly what "probable" selects when the
-model lacks the fact. Nothing in next-token prediction distinguishes truth from
-plausibility.
+**Hallucination risk** arises because high likelihood does not guarantee truth.
+Training data, model capacity, optimization, prompts and decoding all matter.
+Next-token prediction alone does not establish a theorem that every model must
+hallucinate, nor that factual reliability cannot improve through training.
 
-The practical mitigations are architectural rather than model-internal:
+Practical mitigations include both system design and model training:
 retrieval-augmented generation grounds answers in retrieved text; verifiable
 rewards during post-training penalise unsupported claims; abstention training
 teaches the model to say it does not know; and citation requirements make claims
-checkable. None of them eliminate the failure mode.
+checkable. None supplies an unconditional guarantee for arbitrary deployment inputs.
 
 ## Practical notes
 
@@ -261,7 +264,7 @@ checkable. None of them eliminate the failure mode.
 |---|---|
 | Context length | attention is $O(n^2)$; long context is expensive and quality degrades in the middle |
 | Lost in the middle | retrieval accuracy is highest at the start and end of a long context; put the important material there |
-| KV cache | dominates inference memory; GQA and paged attention are the standard mitigations |
+| KV cache | may dominate for large batches/contexts; weights or activations dominate other regimes; GQA reduces cache size and paging manages allocation |
 | Prompt caching | shared system prompts can be cached across requests — a large cost saving |
 | Determinism | even at temperature 0, batching and kernel non-determinism cause variation |
 | Tokenizer costs | non-Latin scripts cost 2–5× more tokens for the same content |
@@ -269,14 +272,63 @@ checkable. None of them eliminate the failure mode.
 
 ## Self-check
 
+### Runnable normalized counts and token-weighted language loss
+
+The toy bigram model maps a previous token to vocabulary logits using a PyTorch
+embedding table. This is an actual next-token training example, not a pretrained
+language-capability demonstration. Rows are separate documents, EOS is supervised,
+and padding is not; concatenation must not silently create cross-document targets.
+
+```python runnable
+import numpy as np
+import torch
+torch.manual_seed(9)
+torch.set_num_threads(1)
+counts = np.array([[2., 0., 1.], [0., 0., 0.]])
+smoothed = (counts+.5)/(counts.sum(1, keepdims=True)+.5*3)
+assert np.allclose(smoothed.sum(1), 1)
+assert np.allclose(smoothed[1], np.full(3, 1/3))
+tokens = torch.tensor([[1, 3, 4, 2, 0], [1, 3, 5, 4, 2]])  # PAD=0 BOS=1 EOS=2
+inputs = tokens[:, :-1]
+targets = tokens[:, 1:].clone()
+targets[targets == 0] = -100
+model = torch.nn.Embedding(6, 6)
+optimizer = torch.optim.Adam(model.parameters(), lr=.15)
+loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
+initial = loss_fn(model(inputs).reshape(-1, 6), targets.reshape(-1)).item()
+for _ in range(30):
+    optimizer.zero_grad()
+    loss = loss_fn(model(inputs).reshape(-1, 6), targets.reshape(-1))
+    loss.backward()
+    optimizer.step()
+with torch.no_grad():
+    token_losses = torch.nn.functional.cross_entropy(model(inputs).reshape(-1, 6),
+        targets.reshape(-1), ignore_index=-100, reduction="none")
+    count = (targets != -100).sum()
+    nll = token_losses.sum()/count
+assert count.item() == 7 and nll.item() < initial
+assert np.isfinite(np.exp(nll.item()))
+print("valid targets", count.item(), "mean NLL", nll.item(), "PPL", np.exp(nll.item()))
+```
+
+**Why not average batch perplexities?** Exponentiation is nonlinear and batches
+have unequal valid-token counts. Sum NLL and target counts, divide, then
+exponentiate. For fixed-window transformers, mask reused context targets so every
+evaluated token is counted once and maximize available left context within the
+window. Byte-normalized loss uses total nats divided by $\log2$ and the exact
+evaluated raw-byte count; it still requires matched corpus/boundary conventions.
+The [Transformers perplexity guide](https://huggingface.co/docs/transformers/en/perplexity)
+describes sliding-window evaluation. **Why can five-grams work despite the table's
+huge count?** Sparse observed n-grams plus normalized smoothing avoid allocating
+every possible sequence.
+
 1. Why is the chain-rule factorisation an identity rather than an assumption?
 2. Explain Kneser–Ney's continuation probability with the "Francisco" example.
 3. Give the three conditions under which a perplexity comparison is meaningful.
 4. State the Chinchilla result and explain why Llama 3 deliberately ignores it.
 5. What is the "emergence is a metric artefact" argument, and what does it not
    claim?
-6. Why is hallucination a consequence of the training objective rather than a
-   bug?
+6. Why does likelihood not guarantee truth, and why is that weaker than an impossibility theorem?
 7. What surprising finding about few-shot example labels suggests about what
    in-context learning is doing?
 

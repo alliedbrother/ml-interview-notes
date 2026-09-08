@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tensor parallelism — The Inference Engineering Book</title>
+<title>Tensor parallelism — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 5 · Parallelism and distributed inference · 05-01</div>
 <h1>Tensor parallelism</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/distributed/</code></li><li><code>vllm/model_executor/layers/linear.py</code></li><li><code>python/sglang/srt/layers/linear.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/distributed/</code></li><li><code>vllm/model_executor/layers/linear.py</code></li><li><code>python/sglang/srt/layers/linear.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Llama-3-70B in bf16 is 131 GiB of weights. An H100 SXM has 80 GB. There is no
 flag, no allocator trick, and no offload policy that makes that fit at serving latency, so
@@ -1136,7 +1136,7 @@ rows of garbage that <code>logits[..., : self.org_vocab_size]</code> then slices
 <section class="sec" id="cost" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">The price: communication volume and where TP stops paying</h2></div><div class="sec__body"><p>A ring all-reduce over $p$ ranks does a reduce-scatter followed by an all-gather, each moving
 $(p-1)/p$ of the tensor per rank. So for a tensor of $S$ bytes, each rank moves</p>
 
-<div class="math-display">$$V_{\text{AR}}(S, p) \;=\; 2\,\frac{p-1}{p}\,S \quad\text{bytes, both directions combined.}$$</div>
+<div class="math-display">$$V_{\text{AR}}(S, p) \;=\; 2\,\frac{p-1}{p}\,S \quad\text{bytes sent per rank, with the same volume received.}$$</div>
 
 <p>For a transformer forward pass with $L$ layers, two all-reduces each, $n$ tokens, width $d$,
 $b$ bytes per element, the per-rank bill is</p>
@@ -1148,17 +1148,17 @@ TP=8 that is $160 \times 1.75 \times 16\,\text{KiB} = 4.375$&nbsp;MiB per rank p
 NVIDIA rates fourth-generation NVLink on H100 SXM at 900&nbsp;GB/s per GPU, bidirectional, with
 an NVSwitch fabric giving every GPU in an 8-way HGX node that rate to any other
 (<a href="https://www.nvidia.com/en-us/data-center/nvlink/">NVIDIA NVLink</a>). Against that,
-4.375&nbsp;MiB takes 5.10&nbsp;&micro;s.</p>
+use 450&nbsp;GB/s in one direction for this sent-byte convention: 4.375&nbsp;MiB takes 10.19&nbsp;&micro;s under the ideal link model.</p>
 
 <p>Compare it to the decode step's floor. From
 <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>, a decode
 step cannot beat weight bytes over HBM bandwidth: $131\,\text{GiB} / 8 / 3.35\,\text{TB/s} =
 5.25$&nbsp;ms. (That charges all 131&nbsp;GiB. <a href="05-02-pipeline-parallelism.html">&sect;5.2</a>
 quotes 5.17&nbsp;ms for the same step because it drops the 2.1&nbsp;GiB input embedding, which is
-gathered a row at a time rather than streamed; the 1.5% moves nothing below.) So the bandwidth term of TP communication is <b>0.097% of the floor at batch 1</b>
+gathered a row at a time rather than streamed; the 1.5% moves nothing below.) So the bandwidth term of TP communication is <b>0.194% of the floor at batch 1</b>
 — nothing. Rearranged, the comm fraction has a pleasingly simple form:</p>
 
-<div class="math-display">$$\frac{t_{\text{comm}}}{t_{\text{floor}}} \;=\; \frac{4L\,n\,d\,\beta}{P\,B_{\text{net}}}\,(p-1) \;=\; 1.39\times10^{-4}\cdot n \cdot (p-1) \quad \text{for Llama-3-70B on H100+NVLink}$$</div>
+<div class="math-display">$$\frac{t_{\text{comm}}}{t_{\text{floor}}} \;=\; \frac{4L\,n\,d\,\beta}{P\,B_{\text{net}}}\,(p-1) \;=\; 2.78\times10^{-4}\cdot n \cdot (p-1) \quad \text{for Llama-3-70B on H100+NVLink}$$</div>
 
 <p>where $P$ is the parameter count, $\beta$ the HBM bandwidth and $B_{\text{net}}$ the
 interconnect bandwidth. Note what is <em>not</em> in it: the bytes-per-element $b$ cancels, because
@@ -1168,15 +1168,14 @@ whole scaling story.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 &mdash; TP all-reduce time as a percentage of the decode step's bandwidth floor, Llama-3-70B on H100 SXM over NVLink.</b>
-    <em>Derived</em> from the formula above. Log y-axis. Batch 1 is free; batch 256 at TP=32 spends
+    <em>Derived</em> from the formula above. Log y-axis. The batch-1 bandwidth term is small, not free; batch 256 at TP=32 spends
     more time on collectives than the arithmetic floor allows for the entire step. Bandwidth term only
     &mdash; collective <em>latency</em>, which dominates at batch 1, is added in the text.</p>
   <svg viewBox="0 0 900 400" width="100%" role="img" aria-labelledby="commTitle commDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="commTitle">Communication time as a fraction of decode step floor versus TP size</title>
     <desc id="commDesc">Log-scale plot with tensor-parallel size 2, 4, 8, 16, 32 on the x-axis and
     communication as a percentage of the decode step floor on the y-axis. Three lines for batch 1,
-    batch 64 and batch 256. Batch 1 stays below one tenth of one percent everywhere. Batch 64 reaches
-    27 percent at TP 32. Batch 256 crosses 100 percent between TP 16 and TP 32.</desc>
+    batch 64 and batch 256. Batch 1 remains below one percent over the plotted idealized range. Batch 64 reaches approximately 55 percent at TP 32. Batch 256 crosses 100 percent between TP 8 and TP 16. Beyond the assumed eight-GPU node, the constant-bandwidth extrapolation is hypothetical.</desc>
 
     <g stroke="currentColor" stroke-opacity="0.10" stroke-width="1">
       <line x1="120" y1="60" x2="120" y2="345"/>
@@ -1209,24 +1208,24 @@ whole scaling story.</p>
     <line x1="510" y1="60" x2="510" y2="345" stroke="var(--steel)" stroke-width="1" stroke-dasharray="3 3"/>
     <text x="516" y="72" font-size="10" fill="var(--steel)">node boundary</text>
 
-    <polyline points="160,331 300,300 440,276 580,254 720,234" fill="none" stroke="var(--steel)" stroke-width="2.2"/>
-    <polyline points="160,213 300,182 440,158 580,137 720,117" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
-    <polyline points="160,174 300,143 440,119 580,98 720,77" fill="none" stroke="var(--copper)" stroke-width="2.4"/>
+    <polyline points="160,311 300,280 440,256 580,234 720,214" fill="none" stroke="var(--steel)" stroke-width="2.2"/>
+    <polyline points="160,193 300,162 440,138 580,117 720,97" fill="none" stroke="var(--teal)" stroke-width="2.4"/>
+    <polyline points="160,154 300,123 440,99 580,78 720,57" fill="none" stroke="var(--copper)" stroke-width="2.4"/>
 
-    <g fill="var(--steel)"><circle cx="160" cy="331" r="3.5"/><circle cx="300" cy="300" r="3.5"/><circle cx="440" cy="276" r="3.5"/><circle cx="580" cy="254" r="3.5"/><circle cx="720" cy="234" r="3.5"/></g>
-    <g fill="var(--teal)"><circle cx="160" cy="213" r="3.5"/><circle cx="300" cy="182" r="3.5"/><circle cx="440" cy="158" r="3.5"/><circle cx="580" cy="137" r="3.5"/><circle cx="720" cy="117" r="3.5"/></g>
-    <g fill="var(--copper)"><circle cx="160" cy="174" r="3.5"/><circle cx="300" cy="143" r="3.5"/><circle cx="440" cy="119" r="3.5"/><circle cx="580" cy="98" r="3.5"/><circle cx="720" cy="77" r="3.5"/></g>
+    <g fill="var(--steel)"><circle cx="160" cy="311" r="3.5"/><circle cx="300" cy="280" r="3.5"/><circle cx="440" cy="256" r="3.5"/><circle cx="580" cy="234" r="3.5"/><circle cx="720" cy="214" r="3.5"/></g>
+    <g fill="var(--teal)"><circle cx="160" cy="193" r="3.5"/><circle cx="300" cy="162" r="3.5"/><circle cx="440" cy="138" r="3.5"/><circle cx="580" cy="117" r="3.5"/><circle cx="720" cy="97" r="3.5"/></g>
+    <g fill="var(--copper)"><circle cx="160" cy="154" r="3.5"/><circle cx="300" cy="123" r="3.5"/><circle cx="440" cy="99" r="3.5"/><circle cx="580" cy="78" r="3.5"/><circle cx="720" cy="57" r="3.5"/></g>
 
     <g font-size="11">
-      <text x="736" y="238" fill="var(--steel)">batch 1</text>
-      <text x="736" y="121" fill="var(--teal)">batch 64</text>
-      <text x="736" y="66" fill="var(--copper)">batch 256</text>
+      <text x="736" y="218" fill="var(--steel)">batch 1</text>
+      <text x="736" y="101" fill="var(--teal)">batch 64</text>
+      <text x="736" y="46" fill="var(--copper)">batch 256</text>
     </g>
     <g font-size="10" fill="currentColor" fill-opacity="0.65">
-      <text x="446" y="272">0.097%</text>
-      <text x="446" y="112">24.9%</text>
-      <text x="600" y="92">53.3%</text>
-      <text x="668" y="70">110%</text>
+      <text x="446" y="252">0.194%</text>
+      <text x="446" y="92">49.8%</text>
+      <text x="590" y="72">106.6%</text>
+      <text x="668" y="48">220%</text>
     </g>
   </svg>
 </div>
@@ -1236,7 +1235,7 @@ whole scaling story.</p>
 <p><b>Bandwidth.</b> Per-rank compute falls as $1/p$ but per-rank communication <em>rises</em>
 toward a ceiling: $2(p-1)/p \to 2$. At $p=2$ you move $1.0S$; at $p=8$, $1.75S$; at $p=32$,
 $1.94S$. So the ratio of comm to compute grows roughly as $p$, exactly as the formula says. At
-batch 256 the comm bill is 24.9% of the floor at TP=8 and 110% at TP=32 — past which the
+batch 256 the comm bill is 49.8% of the floor at TP=8 and 220% at TP=32 — past which the
 collectives alone exceed the time the arithmetic was supposed to take.</p>
 
 <p><b>Latency.</b> At batch 1 each all-reduce is 16&nbsp;KiB, far too small to reach peak
@@ -1259,12 +1258,11 @@ Dividing the pass's $2P/p$ FLOPs by $4L\frac{p-1}{p}db$ bytes per token gives</p
 
 <p>and the machine's own ratio is $\pi / B_{\text{net}}$. For Llama-3-70B at TP=8,
 $I_{\text{net}} = 3{,}815$ FLOP/byte. H100 NVLink gives $989.4\,\text{TFLOP/s} /
-900\,\text{GB/s} = 1{,}099$, so compute still dominates by 3.5&times;; the break-even is at
-$p \approx 25$, comfortably past the 8-GPU NVLink domain. Cross a node boundary onto InfiniBand
+450\,\text{GB/s} = 2{,}199$, so this ideal compute/link ratio is about 1.7; the break-even is at
+$p \approx 13$, comfortably past the 8-GPU NVLink domain. Cross a node boundary onto InfiniBand
 NDR at 400&nbsp;Gb/s = 50&nbsp;GB/s
 (<a href="https://www.nvidia.com/en-us/networking/quantum2/">NVIDIA Quantum-2</a>) and the
-machine ratio becomes 19,788 — break-even at $p \approx 2.35$. <b>Tensor parallelism is a
-single-NVLink-domain technique, and the arithmetic says so by a factor of eighteen.</b> Past the
+machine ratio becomes 19,788 — break-even at $p \approx 2.35$. <b>This example favors keeping TP inside the assumed eight-GPU NVLink domain; it is not a prohibition on multi-node TP.</b> Network topology, achieved bandwidth, workload and model capacity can change that choice. Past the
 node you use pipeline parallelism (<a href="05-02-pipeline-parallelism.html">&sect;5.2</a>) or
 data parallelism (<a href="05-03-data-and-expert-parallelism.html">&sect;5.3</a>), which move a
 $[n,d]$ activation once per stage boundary instead of 160 times per step.</p></div></section>
@@ -1424,9 +1422,7 @@ requires full-graph compilation".</p>
 
 <h3>Sharding at load time</h3>
 
-<p>No engine loads the full checkpoint and then slices. Each rank narrows the tensor as it
-streams off disk, so peak host memory is the shard, not the model. The column loader narrows
-along the output dimension:</p>
+<p>The loader below narrows the incoming tensor along the output dimension. This does not prove that only shard bytes were loaded or that peak host memory equals the shard: a narrow view can retain its parent's storage, and mmap, checkpoint format and loader implementation determine RSS. Measure peak host and device allocation for the actual loader. The simple $131/\mathrm{TP}$ weight budget also omits small replicated parameters and K/V projection replication once TP exceeds the KV-head count.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1493,7 +1489,7 @@ flowchart TD
     C --> D["shard_offset = num_heads * head_size = 512<br/>shard_size = num_kv_heads * head_size = 128"]
     D --> E["shard_rank = tp_rank // num_kv_head_replicas<br/>rank 9 at TP=16: 9 // 2 = 4"]
     E --> F["start_idx = 4 * 128 = 512<br/>loaded_weight.narrow(0, 512, 128)"]
-    F --> G["param_data.copy_ into qkv_proj.weight<br/>rows 512:640 of the ranks [640, 8192] tensor"]
+    F --> G["param_data.copy_ into qkv_proj.weight<br/>K at rows 512:640 of the ranks [768, 8192] tensor; V occupies 640:768"]
     G --> H["rank 8 computes 8 // 2 = 4 as well<br/>identical 128 rows, identical KV cache pages"]
   </script>
 </div>
@@ -1512,7 +1508,7 @@ flowchart TD
   <code>output_size_per_partition</code>. Output sizes are
   $[4{\cdot}128{\cdot}16,\ 1{\cdot}128{\cdot}16,\ 1{\cdot}128{\cdot}16] = [8192, 2048, 2048]$,
   divided by 16 to $[512, 128, 128]$ — a per-rank <code>qkv_proj.weight</code> of
-  <code>[640, 8192]</code>.</li>
+  <code>[768, 8192]</code>.</li>
   <li>Loading: the <code>WeightsMapper</code> &mdash; the checkpoint-name-to-module rewriting table that
   <a href="../08-compilation-and-runtime/08-04-weight-loading-and-adding-a-model.html">&sect;8.4</a> owns &mdash; at <code>vllm/model_executor/models/llama.py:L345-L354</code> turns
   <code>...k_proj.weight</code> into <code>(qkv_proj, "k")</code>, and
@@ -1592,6 +1588,7 @@ check whether a custom layer replicated the bias into every rank's GEMM.</p>
   <code>vllm/v1/worker/gpu_input_batch.py</code> (generator construction). Readers relying on
   exact reproducibility at TP&gt;1 should verify before assuming.</p>
 </div></div></section>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
 <section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Read the sharding out of the engine rather than trusting this chapter. Both
 <code>ColumnParallelLinear</code> and <code>RowParallelLinear</code> implement
 <code>extra_repr</code> that prints the partitioned sizes
@@ -1622,13 +1619,14 @@ for tp in (1,2,4,8,16,32):
     <span class="src">Sweep TP and read the reported cache size</span>
     <span class="tag tag--shell">shell</span>
   </div>
-  <pre class="code-block code-block--wrap"><code># vLLM
-for TP in 2 4 8; do
-  vllm serve meta-llama/Meta-Llama-3-70B --tensor-parallel-size $TP \
-      --max-model-len 8192 2&gt;&amp;1 | grep -E "GPU KV cache size|Maximum concurrency"
-done
+  <pre class="code-block code-block--wrap"><code># vLLM: run separately with TP=2, then 4, then 8.
+# Wait for readiness; record cache capacity and complete the benchmark.
+# Ctrl-C and confirm all workers exit before starting the next configuration.
+TP=2
+vllm serve meta-llama/Meta-Llama-3-70B --tensor-parallel-size "$TP" \
+    --max-model-len 8192
 
-# SGLang, same knob, aliased
+# After vLLM has fully stopped: SGLang, same knob, aliased
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-70B \
     --tp-size 8 --context-length 8192</code></pre>
 </div>
@@ -1683,7 +1681,7 @@ speedup-versus-TP measurement, with a profile attributing the gap to collectives
     token. Floor $= 15.01\text{e}9 / 4 / 3.35\text{e}12 = 1.12$&nbsp;ms &mdash; note the 15.01, not
     16.06: <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>
     streams 7.50&nbsp;B of the 8.03&nbsp;B parameters, because the embedding table is gathered rather
-    than read. At 900 GB/s, 768 KiB takes 0.87&nbsp;&micro;s, so 0.078% at batch 1 and 10.0% at
+    than read. At 450 GB/s one-way, 768 KiB takes 1.75&nbsp;&micro;s, so 0.156% at batch 1 and 20.0% at
     batch 128. Same shape as the 70B curve, shifted by the smaller $L\,d$ product.</p>
 
     <p><b>4.</b> Two things break. The activation: $\sigma(\sum_i Z_i) \neq \sum_i \sigma(Z_i)$,
@@ -1695,8 +1693,7 @@ speedup-versus-TP measurement, with a profile attributing the gap to collectives
 
     <p><b>5.</b> Weights per rank $= 131/\mathrm{TP}$ GiB; pool $= 76 - 131/\mathrm{TP}$ GiB.
     They cross at $\mathrm{TP} = 262/76 = 3.45$, so from TP=4 upward the card is mostly cache.
-    Below it you fail at load time with an allocator OOM; above it you fail at request time with
-    preemption and a falling cache hit rate — a scheduling problem, not a memory one.</p>
+    That equality is not loading feasibility. TP=2 has 65.5 GiB of weights below the stated 76 GiB budget and leaves 10.5 GiB for KV. Feasibility requires weights plus runtime reserves below usable memory, followed by enough cache for the requested workload; either stage can still encounter a capacity limit.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
@@ -1715,7 +1712,7 @@ speedup-versus-TP measurement, with a profile attributing the gap to collectives
   TP=8 to TP=16 (derived). Read <code>num_key_value_heads</code> before you size a cluster.</li>
 
   <li><b>TP's comm fraction is linear in batch and in $p-1$.</b>
-  $t_{\text{comm}}/t_{\text{floor}} = 1.39\times10^{-4} \cdot n \cdot (p-1)$ for Llama-3-70B on
+  $t_{\text{comm}}/t_{\text{floor}} = 2.78\times10^{-4} \cdot n \cdot (p-1)$ for Llama-3-70B on
   H100 + NVLink: negligible at batch 1, 25% at batch 256 and TP=8, over 100% at batch 256 and
   TP=32. At small batch the binding constraint is not bandwidth but the 160 fixed collective
   latencies, which TP does not amortise.</li>
@@ -1767,7 +1764,7 @@ speedup-versus-TP measurement, with a profile attributing the gap to collectives
 </ul></div></section>
 <div class="pager"><a href="../04-quantization/04-04-when-quantization-pays.html"><div class="pager__k">← Previous</div><div class="pager__t">When quantization pays — and when it does not</div></a><a class="pager__next" href="05-02-pipeline-parallelism.html"><div class="pager__k">Next →</div><div class="pager__t">Pipeline parallelism and bubbles</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -32,7 +32,7 @@ TF2 is eager by default. `tf.function` opts a Python function into graph mode:
 @tf.function
 def train_step(x, y):
     with tf.GradientTape() as tape:
-        loss = loss_fn(model(x, training=True), y)
+        loss = loss_fn(y, model(x, training=True))
     grads = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return loss
@@ -101,9 +101,11 @@ grads = tape.gradient(loss, [w])
 | Memory | the tape holds intermediates; keep it as narrow as possible |
 
 ```python
-with tf.GradientTape() as outer, tf.GradientTape() as inner:
-    y = x ** 3
-d1 = inner.gradient(y, x)      # 3x^2
+x = tf.Variable(2.0)
+with tf.GradientTape() as outer:
+    with tf.GradientTape() as inner:
+        y = x ** 3
+    d1 = inner.gradient(y, x)  # derivative computation must be recorded by outer
 d2 = outer.gradient(d1, x)     # 6x
 ```
 
@@ -178,17 +180,17 @@ subclassing bug that leaves dropout active at inference.
 model.compile(
     optimizer=keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-    metrics=["accuracy", keras.metrics.AUC(name="auc")],
+    metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
     jit_compile=True,                      # XLA
 )
 
 history = model.fit(
     train_ds, validation_data=val_ds, epochs=50,
     callbacks=[
-        keras.callbacks.EarlyStopping("val_auc", mode="max", patience=8,
+        keras.callbacks.EarlyStopping("val_accuracy", mode="max", patience=8,
                                       restore_best_weights=True),
         keras.callbacks.ModelCheckpoint("best.keras", save_best_only=True,
-                                        monitor="val_auc", mode="max"),
+                                        monitor="val_accuracy", mode="max"),
         keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=4),
         keras.callbacks.TensorBoard(log_dir="logs"),
         keras.callbacks.CSVLogger("history.csv"),
@@ -208,17 +210,40 @@ that `fit` gives you (callbacks, progress bars, distribution):
 
 ```python
 class CustomModel(keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.loss_tracker = keras.metrics.Mean(name="loss")
+
+    @property
+    def metrics(self):
+        return [self.loss_tracker]
+
     def train_step(self, data):
-        x, y = data
+        x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
-            loss = self.compute_loss(x, y, y_pred)
+            loss = self.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
+            scaled_loss = self.optimizer.scale_loss(loss)
         self.optimizer.apply_gradients(
-            zip(tape.gradient(loss, self.trainable_variables), self.trainable_variables))
-        for m in self.metrics:
-            m.update_state(y, y_pred)
-        return {m.name: m.result() for m in self.metrics}
+            zip(tape.gradient(scaled_loss, self.trainable_variables), self.trainable_variables))
+        self.loss_tracker.update_state(loss, sample_weight=tf.shape(y)[0])
+        return {"loss": self.loss_tracker.result()}
+
+    def test_step(self, data):
+        x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
+        y_pred = self(x, training=False)
+        loss = self.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
+        self.loss_tracker.update_state(loss, sample_weight=tf.shape(y)[0])
+        return {"loss": self.loss_tracker.result()}
 ```
+
+This Keras 3 fragment intentionally tracks loss only; construct it with functional
+`inputs`/`outputs` or implement `call`. Additional task metrics need their own
+correct state updates; a mean loss tracker must not receive `(y, y_pred)`.
+`compute_loss` includes configured loss and regularization terms. Multiclass AUC
+requires an explicit one-vs-rest/aggregation policy and matching one-hot labels
+and probabilities; default binary AUC is not valid for ten raw logits and sparse
+class IDs. See [custom train steps](https://keras.io/guides/custom_train_step_in_tensorflow/).
 
 ## tf.data
 
@@ -227,17 +252,17 @@ input pipeline that overlaps loading with computation.
 
 ```python
 ds = (tf.data.Dataset.from_tensor_slices((X, y))
+      .cache()  # finite deterministic inputs must fit the chosen cache
       .shuffle(10_000, reshuffle_each_iteration=True)
       .map(augment, num_parallel_calls=tf.data.AUTOTUNE)
       .batch(128, drop_remainder=True)
-      .prefetch(tf.data.AUTOTUNE)
-      .cache())
+      .prefetch(tf.data.AUTOTUNE))
 ```
 
 **Order matters, and the standard ordering is:**
 
 ```
-shuffle -> map(expensive) -> batch -> prefetch
+deterministic parse -> optional finite cache -> shuffle -> random augment -> batch -> prefetch
 ```
 
 | Rule | Reason |
@@ -309,16 +334,17 @@ Everything that creates variables must be **inside `strategy.scope()`**. The
 global batch size is split across replicas, so a `global_batch_size` of 512 on 8
 GPUs is 64 each — and your learning rate should be chosen for the global batch.
 
-TPUs add their own constraints: fixed shapes (use `drop_remainder=True`), data
-from cloud storage rather than local disk, and `steps_per_execution` set high to
-amortise host–device round trips.
+TPU pipelines often benefit from predictable shapes and amortized host round trips.
+Storage access depends on topology and runtime; cloud storage is not a universal
+requirement. Measure input throughput and verify replica sharding and global-batch
+loss normalization instead of diagnosing every idle accelerator as one fixed cause.
 
 ## Deployment
 
 | Target | Path |
 |---|---|
 | Server | SavedModel + **TF Serving** (gRPC/REST, versioning, batching) |
-| Mobile / embedded | **TFLite** — converted, quantised `.tflite` |
+| Mobile / embedded | **LiteRT** (formerly TensorFlow Lite), including `.tflite` conversion paths |
 | Browser / Node | **TensorFlow.js** |
 | Cross-framework | ONNX via `tf2onnx` |
 | Pipelines | **TFX** — data validation, transform, trainer, evaluator, pusher |
@@ -331,6 +357,8 @@ converter = tf.lite.TFLiteConverter.from_saved_model("saved_model/1")
 converter.optimizations = [tf.lite.Optimize.DEFAULT]
 converter.representative_dataset = rep_data_gen  # for full int8 quantisation
 converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+converter.inference_input_type = tf.int8
+converter.inference_output_type = tf.int8
 open("model.tflite", "wb").write(converter.convert())
 ```
 
@@ -368,14 +396,15 @@ real but not total.
 | Mobile / embedded | TFLite is mature and widely deployed | ExecuTorch is newer |
 | Browser | TF.js | ONNX Runtime Web |
 | TPU support | first class | improving via XLA |
-| Serving | TF Serving, TFX | TorchServe, vLLM, Triton |
+| Serving | TF Serving, TFX | vLLM, Triton; TorchServe is legacy with no planned security patches |
 | Pretrained LLMs | few released TF-first | essentially everything |
 | Graph compilation | `tf.function` + XLA, mature | `torch.compile`, newer but fast-moving |
 
 **A fair summary**: pick PyTorch for research and for anything involving modern
 pretrained language models; pick TensorFlow when you are deploying to mobile or
 the browser, when you are on TPUs, or when you are extending an existing TF
-production system.
+production system, subject to actual runtime and checkpoint support. These are
+workload-dependent considerations, not framework-wide performance guarantees.
 
 ## Common bugs
 
@@ -393,6 +422,64 @@ production system.
 | Serving output differs from training | preprocessing reimplemented outside the model |
 
 ## Self-check
+
+### Runnable CPU tape and tracing lab
+
+This independent fixture uses TensorFlow 2.x with its installed Keras backend;
+it needs no downloaded model or GPU. Constants require explicit watching;
+disconnected gradients return `None` by default, whereas a connected derivative
+can legitimately be zero. Variables/layers should be built before repeatedly
+calling a traced training function; Python lists and `tf.py_function` are not
+portable substitutes for graph-native state and `TensorArray`.
+
+```python runnable
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import numpy as np
+import tensorflow as tf
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
+tf.keras.utils.set_random_seed(7)
+x = tf.Variable(2.)
+with tf.GradientTape() as outer:
+    with tf.GradientTape() as inner:
+        y = x**3
+    first = inner.gradient(y, x)
+second = outer.gradient(first, x)
+assert first.numpy() == 12 and second.numpy() == 12
+constant = tf.constant(3.)
+with tf.GradientTape() as tape:
+    tape.watch(constant)
+    square = constant**2
+assert tape.gradient(square, constant).numpy() == 6
+
+def update(weight, inputs, targets):
+    with tf.GradientTape() as tape:
+        prediction = inputs @ weight
+        loss = tf.reduce_mean(tf.square(targets-prediction))
+    weight.assign_sub(0.05*tape.gradient(loss, weight))
+    return loss
+
+inputs = tf.constant([[1., 2.], [3., -1.]])
+targets = tf.constant([[1.], [0.]])
+a, b = tf.Variable([[0.1], [0.2]]), tf.Variable([[0.1], [0.2]])
+eager_loss = update(a, inputs, targets)
+graph_loss = tf.function(update)(b, inputs, targets)
+np.testing.assert_allclose(a.numpy(), b.numpy(), rtol=1e-6, atol=1e-7)
+np.testing.assert_allclose(eager_loss.numpy(), graph_loss.numpy(), rtol=1e-6)
+print("watched constants, second derivatives, eager/graph update parity passed")
+```
+
+**Why does caching augmented images freeze them?** A populated cache replays its
+stored tensors rather than executing the earlier random map again. Cache finite
+deterministic work before randomness, and verify cardinality before caching an
+infinite repeated dataset. **Does integer conversion prove deployment correctness?**
+No: inspect I/O scales and zero points, supported operations, runtime/delegate
+outputs, and quality tolerances. The
+[autodiff guide](https://www.tensorflow.org/guide/advanced_autodiff) and
+[data performance guide](https://www.tensorflow.org/guide/data_performance)
+specify the relevant contracts; edge guidance lives in
+[LiteRT documentation](https://ai.google.dev/edge/litert).
 
 1. Explain tracing, and why `print` inside a `@tf.function` fires once.
 2. Where must `cache()` go relative to a random augmentation, and what breaks

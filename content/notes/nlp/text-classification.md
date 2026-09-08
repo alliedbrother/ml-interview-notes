@@ -74,7 +74,11 @@ codes, and languages without clean word boundaries.
 ### Frozen embeddings plus a classifier
 
 ```python
-emb = SentenceTransformer("BAAI/bge-base-en-v1.5").encode(texts, normalize_embeddings=True)
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import LogisticRegression
+encoder = SentenceTransformer("BAAI/bge-base-en-v1.5")
+emb_train = encoder.encode(X_train, normalize_embeddings=True)
+emb_test = encoder.encode(X_test, normalize_embeddings=True)
 clf = LogisticRegression(max_iter=2000, class_weight="balanced").fit(emb_train, y_train)
 ```
 
@@ -89,22 +93,27 @@ with 8–64 examples per class and no prompts.
 
 ### Fine-tuning an encoder
 
+This optional downloaded-model configuration targets Transformers **4.57.1** and
+bf16-capable hardware. Define dataset splits, tokenizer, label maps and metrics
+before constructing a Trainer. Newer major versions may use a different
+length-grouping argument; do not mix unpinned examples.
+
 ```python
 model = AutoModelForSequenceClassification.from_pretrained(
     "microsoft/deberta-v3-base", num_labels=K, id2label=id2label, label2id=label2id)
 
 args = TrainingArguments(
-    learning_rate=2e-5, num_train_epochs=3, warmup_ratio=0.06,
+    output_dir="classifier-output", learning_rate=2e-5, num_train_epochs=3, warmup_ratio=0.06,
     per_device_train_batch_size=16, weight_decay=0.01,
-    eval_strategy="steps", eval_steps=200,
+    eval_strategy="steps", eval_steps=200, save_strategy="steps", save_steps=200,
     load_best_model_at_end=True, metric_for_best_model="f1",
     bf16=True, group_by_length=True,
 )
 ```
 
 Hyperparameters that matter, in order: learning rate ($2\times10^{-5}$ to
-$5\times10^{-5}$ — anything near $10^{-3}$ destroys the pretrained weights),
-epochs (2–4; more overfits), and `max_length` (truncation silently discards the
+$5\times10^{-5}$ as a pilot range, not a universal law),
+epochs selected on development data, and `max_length` (truncation silently discards the
 end of long documents).
 
 | Encoder | Note |
@@ -116,10 +125,10 @@ end of long documents).
 | XLM-R / mDeBERTa | multilingual |
 | Domain-specific (BioBERT, SciBERT, FinBERT, CodeBERT) | worth checking before general models |
 
-**Encoders are still the right tool here.** A fine-tuned 100M-parameter encoder
-beats a prompted 70B model on a task with a few thousand labelled examples, at a
-thousandth of the cost and with far lower latency. Reach for an LLM when labels
-are scarce, not when they are plentiful.
+Fine-tuned encoders can be strong, inexpensive task-specific models. Whether one
+beats a prompted larger model depends on the actual checkpoint, labels, domain,
+prompt, hardware and tuning budget. Measure accuracy and cost rather than applying
+a universal thousandfold comparison or label-count cutoff.
 
 ### LLM classification
 
@@ -203,9 +212,10 @@ Measure how much text you are losing before choosing. If 90% of documents fit in
 **Report the per-class table.** A macro-F1 of 0.78 can hide one class at 0.20,
 and that class is usually the one someone cares about.
 
-**Establish the human ceiling.** If two annotators agree only 85% of the time,
-a model at 85% is at the ceiling and further work is wasted. Measure
-inter-annotator agreement before optimising.
+**Measure annotation reliability.** Pairwise agreement of 85% is not a hard model
+accuracy ceiling against adjudicated or latent labels. Raters can make different
+errors, and adjudication changes the reference. Inspect ambiguity, systematic
+rater effects and task definition before interpreting either agreement or model accuracy.
 
 ### Error analysis
 
@@ -223,7 +233,8 @@ examples.
 
 Sort the confusion matrix by class frequency and look for **off-diagonal
 blocks** — groups of classes systematically confused with each other are a
-taxonomy problem, not a model problem.
+possible taxonomy, representation, annotation or model problem; inspect examples
+before assigning the cause.
 
 ## Robustness
 
@@ -268,6 +279,47 @@ the review queue**. The examples the model is least confident about are the most
 informative to label, and you are already paying a human to look at them.
 
 ## Self-check
+
+### Runnable grouped text baseline
+
+Each group contributes two related synthetic tickets and remains entirely on one
+side of the split. Vocabulary fitting is training-only. This deliberately simple
+fixture checks the pipeline contract, not production accuracy.
+
+```python runnable
+import numpy as np
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import make_pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score
+texts, labels, groups = [], [], []
+for group in range(30):
+    texts.extend([f"billing payment invoice account{group}", f"technical crash error account{group}"])
+    labels.extend([0, 1])
+    groups.extend([group, group])
+texts, labels, groups = np.array(texts), np.array(labels), np.array(groups)
+train, test = next(GroupShuffleSplit(n_splits=1, test_size=.3, random_state=3).split(texts, labels, groups))
+assert not set(groups[train]) & set(groups[test])
+model = make_pipeline(TfidfVectorizer(ngram_range=(1, 2)), LogisticRegression(random_state=0))
+model.fit(texts[train], labels[train])
+prediction = model.predict(texts[test])
+assert f1_score(labels[test], prediction, average="macro") == 1
+vocab = model.named_steps["tfidfvectorizer"].vocabulary_
+assert f"account{groups[test][0]}" not in vocab
+print("grouped split, train-only vocabulary and baseline predictions passed")
+```
+
+**Why is unknown-class rejection not solved by max probability?** Softmax can be
+confident on out-of-distribution inputs. Fit abstention rules on representative
+development cases and report coverage versus conditional error; do not tune the
+threshold on final test labels. **What about multilabel missing annotations?**
+Independent sigmoid loss still needs a mask for unobserved labels; unannotated
+does not automatically mean negative. **Why retain tail-critical tests?** A
+small long-document slice can carry most high-cost failures even if 90% of inputs
+fit the context limit. Compare truncation with head/tail or chunk aggregation on
+that slice. The [Trainer contract](https://huggingface.co/docs/transformers/main_classes/trainer)
+documents checkpoint/evaluation scheduling requirements.
 
 1. What is the first model you build for any text classification problem, and
    why?

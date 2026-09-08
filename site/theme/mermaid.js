@@ -10,7 +10,7 @@ let activeDrag = null;
 addEventListener('mousemove', e => activeDrag?.onMove(e));
 addEventListener('mouseup', () => { activeDrag?.onEnd(); activeDrag = null; });
 
-const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+let isDark = document.documentElement.dataset.theme === 'dark';
 
 /* ELK is fetched from a CDN at view time. A static import cannot be caught, so
    one failed request would leave mermaid configured for a layout engine it does
@@ -28,28 +28,33 @@ try {
   layoutEngine = 'dagre';
   console.warn('[mermaid] ELK layout unavailable, falling back to dagre:', err);
 }
+function configureTheme() {
+isDark = document.documentElement.dataset.theme === 'dark';
 mermaid.initialize({
   startOnLoad: false, theme: 'base', look: 'classic', layout: layoutEngine,
   themeVariables: {
     fontFamily: "'DM Sans', system-ui, sans-serif",
     fontSize: '17px',
-    primaryColor:         isDark ? '#173e56' : '#dce8f2',
-    primaryBorderColor:   isDark ? '#56b0e0' : '#0b4f75',
-    primaryTextColor:     isDark ? '#dbe8f5' : '#14273d',
-    secondaryColor:       isDark ? '#2e2517' : '#fbf1e3',
-    secondaryBorderColor: isDark ? '#e8a33d' : '#b45309',
-    secondaryTextColor:   isDark ? '#dbe8f5' : '#14273d',
-    tertiaryColor:        isDark ? '#1c2a1a' : '#eef4e3',
-    tertiaryBorderColor:  isDark ? '#9ccc51' : '#4d7c0f',
-    tertiaryTextColor:    isDark ? '#dbe8f5' : '#14273d',
-    lineColor:            isDark ? '#8ba6bf' : '#5b7186',
-    clusterBkg:           isDark ? '#17273a' : '#e9eef4',
-    clusterBorder:        isDark ? 'rgba(148,187,224,0.28)' : 'rgba(30,58,95,0.26)',
-    noteBkgColor:         isDark ? '#2e2517' : '#fbf1e3',
-    noteTextColor:        isDark ? '#dbe8f5' : '#14273d',
-    noteBorderColor:      isDark ? '#e8a33d' : '#b45309'
+    primaryColor:         isDark ? '#253d2f' : '#eaf3ed',
+    primaryBorderColor:   isDark ? '#91c8a5' : '#28775a',
+    primaryTextColor:     isDark ? '#e5e9e3' : '#242b28',
+    secondaryColor:       isDark ? '#402e27' : '#f8eee8',
+    secondaryBorderColor: isDark ? '#e4a487' : '#ad593e',
+    secondaryTextColor:   isDark ? '#e5e9e3' : '#242b28',
+    tertiaryColor:        isDark ? '#2b3347' : '#edf0f8',
+    tertiaryBorderColor:  isDark ? '#a7b7e6' : '#6473a4',
+    tertiaryTextColor:    isDark ? '#e5e9e3' : '#242b28',
+    lineColor:            isDark ? '#a7b0a8' : '#69716c',
+    clusterBkg:           isDark ? '#202422' : '#f0f2ef',
+    clusterBorder:        isDark ? '#5c685e' : '#bac5bc',
+    noteBkgColor:         isDark ? '#402e27' : '#f8eee8',
+    noteTextColor:        isDark ? '#e5e9e3' : '#242b28',
+    noteBorderColor:      isDark ? '#e4a487' : '#ad593e'
   }
 });
+}
+configureTheme();
+addEventListener('reader:theme', configureTheme);
 
 function initDiagram(shell) {
   const wrap = shell.querySelector('.mermaid-wrap');
@@ -135,7 +140,7 @@ function initDiagram(shell) {
     if (!svg) return;
     const clone = svg.cloneNode(true);
     clone.style.width = ''; clone.style.height = '';
-    const bg = isDark ? '#0b1622' : '#eef2f6';
+    const bg = isDark ? '#191c1b' : '#fafbf9';
     const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Diagram</title><style>
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
@@ -211,6 +216,7 @@ background:${bg};padding:40px;box-sizing:border-box}svg{max-width:100%;max-heigh
     }
   }, { passive: false });
   new ResizeObserver(() => { if (svgW) { setAdaptiveHeight(); fitDiagram(); } }).observe(wrap);
+  addEventListener('reader:theme', render);
   render();
 }
 document.querySelectorAll('.diagram-shell').forEach(initDiagram);

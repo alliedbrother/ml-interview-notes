@@ -54,8 +54,10 @@ DeepSeek V3 makes the numbers concrete: **671B total parameters, 37B active per
 token**. It carries the knowledge capacity of a 671B model at roughly the
 inference cost of a 37B one.
 
-Note carefully: **all 671B must still fit in memory.** MoE saves *compute and
-bandwidth per token*, not storage. This is why MoE models are deployed on
+Note carefully: **all 671B parameters still need storage.** High-throughput
+deployments generally keep weights resident across accelerators; offloading
+trades residency for transfer cost. MoE saves active expert computation, not
+total parameter storage. This is why MoE models are deployed on
 multi-GPU clusters despite modest active parameter counts.
 
 ## 12.2 The router
@@ -72,9 +74,8 @@ class Router(nn.Module):
     def forward(self, x):
         # x: (n_tokens, d_model)
         logits = self.gate(x)                              # (n_tokens, n_experts)
-        topk_logits, topk_idx = logits.topk(self.top_k, dim=-1)
-        # softmax over the SELECTED experts only -> weights sum to 1
-        topk_weights = F.softmax(topk_logits, dim=-1)
+        # Full softmax, then selection: task gradients survive even at k=1.
+        topk_weights, topk_idx = F.softmax(logits, dim=-1).topk(self.top_k, dim=-1)
         return topk_idx, topk_weights, logits
 ```
 
@@ -114,8 +115,11 @@ class MoELayer(nn.Module):
 
 Two details that matter:
 
-- **Softmax is over the selected `k` experts only**, not all `N`. The combination
-  weights sum to 1 over what was actually used.
+- **This reference normalizes over all `N` experts before selection.** Selected
+  weights sum to at most one. Renormalizing only selected logits is another
+  valid design for `k>1`, used by some models, but at `k=1` it gives constant
+  weight one and zero task-loss gradient to the router. Switch retains the
+  selected full-softmax probability; gating conventions are model-specific.
 - **Routing is per token, not per sequence.** Every token in a sentence may go to
   a different set of experts. This is why MoE routing is a load-balancing problem
   at all.
@@ -125,8 +129,8 @@ flowchart TD
     T["token vector x<br/>(d_model,)"] --> G["router: Linear(d_model, N)"]
     G --> L["logits over N experts"]
     L --> TK["top-k selection<br/>k = 8 of N = 256"]
-    TK --> SM["softmax over the k selected"]
-    SM --> W["weights w_1..w_k summing to 1"]
+    TK --> SM["gather probabilities from full softmax"]
+    SM --> W["selected weights sum to at most 1"]
     TK --> DISP["dispatch x to experts e_1..e_k"]
     DISP --> EO["expert outputs"]
     W --> COMB["weighted sum"]
@@ -136,20 +140,20 @@ flowchart TD
 
 ### Why top-k and not top-1?
 
-`k = 1` (Switch Transformer) is cheapest but training is unstable — routing
-decisions are discrete, so a token's gradient path changes abruptly when its
-argmax flips. With `k ≥ 2` the output is a *blend*, so the router receives
-gradient through multiple experts and transitions are smooth.
+`k = 1` minimizes expert work and can train successfully with the appropriate
+gating and balancing recipe. Both top-1 and top-k have discrete selection
+boundaries; blending selected experts does not make a changing top-k set smooth.
+For fixed selected experts, probability weights are differentiable.
 
 `k = 8` is the current norm (DeepSeek V3, Qwen3). gpt-oss uses `k = 4`; Llama 4
-uses `k = 2`.
+uses one routed expert plus one always-on shared expert, not two routed experts.
 
 ## 12.3 Load balancing
 
 The central failure mode of MoE, and the reason most of the machinery exists.
 
-Nothing in the router's objective encourages spreading tokens out. Left alone it
-**collapses**: a few experts get chosen for nearly everything, get more gradient,
+Task loss alone does not explicitly encourage balanced load. A router can
+**collapse**: a few experts get chosen for nearly everything, get more gradient,
 become better, and get chosen even more. The rest are never selected, never
 trained, and become dead weight.
 
@@ -171,14 +175,16 @@ $$\mathcal{L}_{aux} = \alpha \cdot N \sum_{i=1}^{N} f_i \cdot P_i$$
 | Symbol | Meaning |
 |---|---|
 | `N` | number of experts |
-| `f_i` | **fraction of tokens** routed to expert `i` (discrete count) |
+| `f_i` | **fraction of routing slots** assigned to expert `i`; sums to one |
 | `P_i` | **mean router probability** for expert `i` (differentiable) |
 | `α` | loss weight, typically 0.01 |
 
 The product is the trick. `f_i` carries the actual imbalance but is not
 differentiable; `P_i` is differentiable. Multiplying them gives a gradient that
 pushes probability *away* from experts already receiving many tokens. The sum is
-minimised when usage is uniform.
+discourages persistent concentration. Uniform `f_i=P_i=1/N` gives baseline
+`alpha`; this bilinear surrogate is not a proof that uniformity is its unique
+global minimum under arbitrary routing distributions.
 
 ```python
 def load_balancing_loss(logits, top_k_idx, n_experts, alpha=0.01):
@@ -186,7 +192,7 @@ def load_balancing_loss(logits, top_k_idx, n_experts, alpha=0.01):
     P = probs.mean(dim=0)                              # mean prob per expert
 
     one_hot = F.one_hot(top_k_idx, n_experts).float()  # (n_tokens, k, n_experts)
-    f = one_hot.sum(dim=1).mean(dim=0)                 # fraction routed per expert
+    f = one_hot.mean(dim=(0, 1))                      # normalize over tokens AND k
 
     return alpha * n_experts * torch.sum(f * P)
 ```
@@ -201,18 +207,19 @@ each expert gets a fixed-size buffer:
 
 $$\text{capacity} = \text{capacity factor} \times \frac{\text{tokens per batch} \times k}{N}$$
 
-A capacity factor of 1.0 means exactly even distribution. Real distributions are
+A capacity factor of 1.0 allocates the average routing-slot demand per expert;
+it does not force assignments to be uniform. Real distributions are
 uneven, so values of **1.25–2.0** are typical.
 
-Tokens arriving at a full expert are **dropped** — they skip that expert entirely
-and pass through via the residual connection only. Higher capacity factor means
+Assignments arriving at a full expert are **dropped** from that expert. Other
+selected/shared experts may still contribute; the residual remains. Higher capacity factor means
 fewer drops but more wasted memory and compute on padding.
 
-| Capacity factor | Dropped tokens | Wasted compute |
+| Capacity factor | Drop risk under imbalance | Nominal capacity above uniform demand |
 |---|---|---|
-| 1.0 | many | none |
-| 1.25 | some | ~25% |
-| 2.0 | few | ~100% |
+| 1.0 | high | 0%; imbalance still leaves unused slots |
+| 1.25 | lower, workload-dependent | 25% |
+| 2.0 | lower still, not guaranteed zero | 100% |
 
 *(Capacity factors apply to training and batched prefill. Newer implementations
 increasingly use dropless routing with variable-size grouped GEMMs.)*
@@ -221,7 +228,10 @@ increasingly use dropless routing with variable-size grouped GEMMs.)*
 
 Raschka notes DeepSeek V3 uses a **bias-based** approach instead: a per-expert
 bias term added to routing logits and adjusted during training to equalise load,
-with no auxiliary loss gradient. Avoids the `α` trade-off entirely. Arcee Trinity
+without routing-task gradients through that bias update. DeepSeek-V3 still adds
+a small sequence-wise auxiliary term, so it does not eliminate every auxiliary
+loss or coefficient. The [technical report](https://arxiv.org/html/2412.19437v2)
+separates these two mechanisms. Arcee Trinity
 Large also introduces "a new MoE load-balancing strategy."
 
 ## 12.4 Shared experts
@@ -280,6 +290,7 @@ Current state of play:
 | Uses a shared expert | Does not |
 |---|---|
 | DeepSeek V3 / R1 / V3.2 | Qwen3 |
+| Llama 4 Maverick | |
 | Kimi K2 | gpt-oss |
 | GLM-4.5, GLM-5 | MiniMax-M2 |
 | Qwen3-Next | |
@@ -314,7 +325,7 @@ flowchart LR
 | Model | Total | Active | Experts | Active experts | Expert hidden | Shared |
 |---|---|---|---|---|---|---|
 | DeepSeek V3 | 671B | 37B | 256 | 8 + 1 shared | 2048 | **yes** |
-| Llama 4 Maverick | 400B | 17B | 128 | **2** | **8192** | no |
+| Llama 4 Maverick | 400B | 17B | 128 routed | **1 routed + 1 shared** | **8192** | yes |
 | Qwen3 235B-A22B | 235B | 22B | 128 | 8 | 1536 | no |
 | Qwen3-Next | 80B | 3B | 512 | 10 + 1 shared | — | **yes** |
 | gpt-oss-20b | 21B | 3.6B | **32** | **4** | 2880 | no |
@@ -428,6 +439,53 @@ coarsened for throughput. Do not treat either as settled.
 
 ---
 
+## Worked router gradients, dispatch and loss scaling
+
+For top-1 selected-logit renormalization, `softmax([z_selected])=[1]`, so the
+task output loses its differentiable dependence on the router. Top-k indices
+are discrete and provide no alternative gradient. A full-softmax selected gate
+`p_e=exp(z_e)/sum_j exp(z_j)` instead has derivative
+`dp_e/dz_j=p_e*(1[e=j]-p_j)` within a fixed selection region. This is the
+important top-1 distinction in [Switch Transformers](https://arxiv.org/abs/2101.03961).
+
+```python transformer-check
+import torch
+logits = torch.tensor([[2., 0., -1.]], requires_grad=True)
+bad = logits.topk(1, dim=-1).values.softmax(-1).sum()
+bad_grad, = torch.autograd.grad(bad, logits)
+good = logits.softmax(-1).topk(1, dim=-1).values.sum()
+good_grad, = torch.autograd.grad(good, logits)
+assert bad_grad.count_nonzero() == 0
+assert good_grad.abs().sum() > 0
+slots = torch.tensor([[0, 1], [1, 2], [2, 0]])
+f = torch.nn.functional.one_hot(slots, 3).double().mean((0, 1))
+p = torch.full((3,), 1 / 3, dtype=torch.float64)
+torch.testing.assert_close(f.sum(), torch.tensor(1., dtype=torch.float64))
+torch.testing.assert_close(3 * (f * p).sum(), torch.tensor(1., dtype=torch.float64))
+print("Top-1 gradient and routing-slot normalization verified.")
+```
+
+With token A routed to experts `(0,1)` and B to `(1,2)`, expert 1's dispatch
+buffer contains both A and B. Combining must scatter outputs back by **token
+and slot**, not concatenate them in expert order. If one slot overflows capacity,
+the token may still receive other routed/shared outputs plus its residual;
+"residual only" applies when every expert contribution is dropped. Dropless
+grouped GEMMs avoid fixed-buffer dropping but do not eliminate communication.
+
+An expert-parallel layer commonly dispatches activations and routing metadata
+across devices and combines returned outputs. Router overhead grows with expert
+count even at fixed top-k; network bytes and imbalance can dominate tiny expert
+matmuls. Monitor assignment histograms over many updates and domains, not one
+small initialization batch. Uniform slot fractions sum to one; dividing counts
+only by token count instead makes them sum to k and changes the auxiliary-loss
+baseline to `alpha*k`.
+
+**Architecture evidence:** Llama 4 uses a shared MLP in addition to routed
+experts; "two active" counts one routed and one shared. The
+[versioned implementation](https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/llama4/modeling_llama4.py)
+shows the separate `shared_expert` path. Its sigmoid routing and input scaling
+are not identical to this course's full-softmax teaching router.
+
 ## Key takeaways
 
 - MoE replaces one FFN with `N` expert FFNs and routes each token to only `k` of
@@ -436,15 +494,14 @@ coarsened for throughput. Do not treat either as settled.
   inference cost of a modest one.
 - **All experts still occupy memory.** MoE saves compute and bandwidth per token,
   not storage.
-- The router is one linear layer plus top-k plus a softmax **over the selected
-  experts only**. Routing is per **token**, not per sequence.
-- `k ≥ 2` because top-1 routing is unstable — blending gives the router smooth
-  gradients.
-- Without intervention routers **collapse** onto a few experts. The
+- The reference selects top-k **full-softmax probabilities** so top-1 retains
+  task-loss gradients. Other models use selected renormalization or sigmoid
+  gates. Routing is per token; top-k selection boundaries remain discontinuous.
+- Routers can **collapse** onto a few experts. The
   load-balancing loss `α·N·Σ f_i·P_i` couples the non-differentiable usage
   fraction to the differentiable probability.
-- **Capacity factor** (1.25–2.0) bounds each expert's buffer; overflow tokens are
-  dropped through the residual.
+- **Capacity factor** bounds expert buffers; overflow assignments lose that
+  expert's contribution, while other expert contributions and residuals remain.
 - **Shared experts** are always-on and absorb common patterns so routed experts
   can specialise. DeepSeek/Kimi/GLM/Qwen3-Next use them; Qwen3/gpt-oss/MiniMax-M2
   do not. Genuinely contested.

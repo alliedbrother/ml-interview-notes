@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Numerics: FP32 to INT4, and why bf16 won — The Inference Engineering Book</title>
+<title>Numerics: FP32 to INT4, and why bf16 won — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 0 · Foundations · 00-05</div>
 <h1>Numerics: FP32 to INT4, and why bf16 won</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>python/sglang/srt/layers/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>python/sglang/srt/layers/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Three of the four models on vLLM's float16 denylist are Gemmas, and the reason string
 is four words long: <em>Numerical instability</em>. Nobody wrote that line because fp16 lost a
@@ -768,8 +768,7 @@ way: FP32's entire exponent, and whatever mantissa is left over.</p>
 </div>
 
 <p>The dashed line is the whole argument. FP32, TF32 and BF16 all put the mantissa boundary at
-the same place; they have <em>identical</em> exponent fields and therefore identical overflow
-behaviour. FP16 and FP8-E5M2 stop the exponent early to buy mantissa, and pay for it at the
+the same place; they have <em>identical</em> exponent widths but slightly different maximum finite values because their mantissas differ. FP16 and FP8-E5M2 stop the exponent early to buy mantissa, and pay for it at the
 top end.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: deriving the ranges</h2></div><div class="sec__body"><p>Let $e$ be the number of exponent bits and $m$ the number of mantissa bits. IEEE-754 stores
 the exponent biased by $B = 2^{e-1} - 1$, reserves the all-ones exponent field for
@@ -874,18 +873,14 @@ tensor-core input format, never a storage format, which is why it does not appea
 
 <h3>Why fp16 breaks and bf16 does not</h3>
 
-<p>bf16 has FP32's exponent field verbatim. Any value a model produced in fp32 is representable
-in bf16 to within a relative error of $2^{-8} \approx 0.4\%$ and <em>cannot overflow</em>. That
-single property is why bf16 training needs no loss scaling and why bf16 inference needs no
-range analysis: the cast is lossy in precision only.</p>
+<p>bf16 shares FP32's exponent width, not every finite endpoint: its maximum is approximately $3.3895\times10^{38}$, slightly below FP32's $3.4028\times10^{38}$. For a finite result rounding to a normal bf16 value, round-to-nearest relative error is bounded by $2^{-8}$; that bound excludes underflow, overflow, and nonfinite inputs. Its broad range usually removes the need for fp16-style loss scaling, but does not eliminate numerical validation.</p>
 
 <p>fp16 tops out at 65504, i.e. $2^{16}$. Transformer residual streams do not stay under
 $2^{16}$: Dettmers et al. document emergent outlier features whose magnitudes are up to
 20&times; the rest of the hidden state and which appear in essentially every sequence past
 roughly 6.7B parameters
 (<a href="https://arxiv.org/abs/2208.07339">LLM.int8(), arXiv:2208.07339</a>). Gemma-2 compounds
-this by design: it multiplies embeddings by $\sqrt{d}$ and soft-caps attention logits, both of
-which push intermediates upward. Once one hidden unit hits <code>inf</code>, the next
+this by design: it multiplies embeddings by $\sqrt{d}$, which raises their magnitude. Its attention soft-cap bounds logits instead of increasing their magnitude. Once one hidden unit hits <code>inf</code>, the next
 <code>RMSNorm</code> divides by an infinite variance and the entire row becomes
 <code>nan</code> — which is exactly what that four-word reason string in
 <code>vllm/config/model.py</code> is protecting you from.</p>
@@ -951,13 +946,7 @@ global memory.</p>
         c = accumulator.to(tl.float32)</code></pre>
 </div>
 
-<p>Why this matters: consider a $d = 4096$ dot product. If you accumulated in bf16, whose
-epsilon is $2^{-7}$, then once the running sum reaches magnitude $S$ every subsequent addend
-smaller than $S \cdot 2^{-8}$ rounds away entirely. Summing 4096 similarly-sized positive terms
-serially in bf16 loses roughly the last $\log_2(4096) = 12$ bits of the answer — more bits than
-bf16 has. It would be catastrophic. In fp32 the same reduction loses about 12 of 24 mantissa
-bits in the worst serial case, which is why it is survivable, and why tile-parallel reduction
-trees (which cut the serial depth from $K$ to $\log K$) are the norm.</p>
+<p>For a concrete reduction, serial bf16 addition of 4096 ones stalls at 256 under round-to-nearest-even: at 256 the spacing is 2, so adding 1 ties and rounds back to 256. FP32 represents this particular integer sum exactly. There is no universal loss of 12 bits merely because a dot product has 4096 terms. General error depends on conditioning, order, cancellation, and accumulator precision. For unit roundoff $u$ and $(n-1)u&lt;1$, a standard serial bound is $|\widehat s-s|\le\gamma_{n-1}\sum_i|x_i|$, where $\gamma_k=ku/(1-ku)$. Pairwise reduction shortens dependency depth; it does not repair already-rounded inputs.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">The rule</span>
@@ -1025,17 +1014,9 @@ loop. That subtraction is literally one line in vLLM's dequantisation kernel:</p
     iweights = iweights.to(result_ptr.type.element_ty)</code></pre>
 </div>
 
-<p>Here is the asymmetry that matters for engineering. Casting bf16 &rarr; fp8 needs no
-knowledge of the data distribution beyond a single amax, and that amax can be computed on the
-fly per token. Casting bf16 &rarr; int8 needs <em>both</em> $s$ and $z$, and getting them wrong
-does not saturate gracefully — it shifts and stretches the whole tensor. For weights you can
-compute $s, z$ exactly, offline, from the weights themselves. For activations you cannot,
-because you do not have the activations until a request arrives; you either calibrate on a
-sample corpus (and hope the deployment distribution matches) or compute scales dynamically per
-token and pay for the extra pass. <em>That</em> is the real reason INT8 activation quantisation
-needs calibration machinery and FP8 mostly does not.</p>
+<p>Both integer and floating low-bit formats need a scale policy. Symmetric INT8 can set $z=0$ and compute $s=\max|x|/127$ dynamically, just as FP8 can derive a scale from a live amax. Asymmetric integer quantization additionally learns or computes a zero point. Either family may use static calibration or dynamic scales; the choice depends on outliers, granularity, kernels, and overhead, not simply integer versus float. Define an all-zero-group policy such as $s=1$, validate nonfinite values, and distinguish clipping from rounding error.</p>
 
-<h3>Granularity: one scale for how many numbers?</h3>
+<p>See the <a href="https://docs.pytorch.org/docs/stable/notes/numerical_accuracy.html">PyTorch numerical accuracy notes</a> for reduced-precision reduction controls. CPU reference checks do not certify a GPU kernel or its accumulation mode.</p><h3>Granularity: one scale for how many numbers?</h3>
 
 <p>A single scale for a whole 4096&times;4096 weight matrix is set by its single largest
 element, so one outlier costs every other element its precision. Narrowing the sharing group
@@ -1358,9 +1339,7 @@ flowchart TD
     scales; outlier channels are the failure mode. fp4 KV is flagged in-repo as an accuracy
     risk.</p></div>
   <div class="ve-card ve-card--recessed"><span class="ve-card__k">Never</span><h4>Reductions</h4>
-    <p>GEMM accumulators, softmax max/sum, RMSNorm variance, logits before sampling. All fp32 in
-    both engines, all for the same reason: the reduction, not the element, is where the error
-    lives.</p></div>
+    <p>Softmax and normalization commonly use FP32 reductions. Integer GEMMs can use INT32 accumulators, and some floating GEMM paths permit reduced-precision partial reductions. Sampling logits also depend on the selected path. Inspect the actual operator contract.</p></div>
 </div></div></section>
 <section class="sec" id="worked-trace" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Worked trace: one activation row into an FP8 GEMM</h2></div><div class="sec__body"><p>Follow a single row of the hidden state, shape <code>[1, 4096]</code> in bf16, into an fp8
 linear layer in vLLM.</p>
@@ -1477,17 +1456,15 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
                 )</code></pre>
 </div>
 
-<p>With scale 1.0, an e4m3 KV cache clamps everything above 448 and rounds everything below
-0.00195 to zero. K and V values typically live well inside that window, so the model does not
+<p>With scale 1.0, an e4m3 KV cache clamps everything above 448 and rounds magnitudes below half the smallest subnormal, $2^{-10}\approx0.000977$, to zero under round-to-nearest-even (the exact tie also rounds to zero). K and V values typically live well inside that window, so the model does not
 crash and often does not obviously degrade — it just quietly loses the tails. The warning is
 <code>warning_once</code>, so it scrolls past on startup and never reappears. This is the
 canonical silent-corruption bug of the area: the format is legal, the flag is accepted, and the
 one signal you get is a single log line.</p>
 
 <p>Note the guard <code>"e5m2" not in layer.kv_cache_dtype</code>. E5M2 has fp16's exponent
-field, so it reaches 57344 and unity scale is genuinely fine — you trade the extra range for
-having only two mantissa bits. That is the whole e4m3-vs-e5m2 decision in one conditional: pick
-e4m3 and calibrate, or pick e5m2 and don't.</p>
+field, so it reaches 57344 and unity scale has more range headroom but is not automatically accurate — you trade the extra range for
+having only two mantissa bits. That is the whole e4m3-vs-e5m2 decision in one conditional: check the scale and accuracy for either format; e5m2 trades precision for greater range.</p>
 
 <h3>Mixing fp16 and bf16 checkpoints</h3>
 
@@ -1640,17 +1617,14 @@ python3 -m sglang.launch_server --model meta-llama/Llama-3.1-8B-Instruct --kv-ca
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>Exponent bits and mantissa bits are separate budgets. bf16 beat fp16 for LLMs by keeping
-  FP32's full 8-bit exponent (max 3.39e38, no overflow, no loss scaling) and paying with
-  mantissa bits that dot products were going to destroy anyway. fp16 caps at 65504 and real
+  FP32's 8-bit exponent width (bf16 max 3.39e38) while trading away precision. Range and precision errors remain separate concerns. fp16 caps at 65504 and real
   activations exceed it.</li>
 
-  <li>Storage dtype and accumulation dtype are independent. Every GEMM in both engines
-  accumulates in FP32 regardless of operand width — that is the only reason 3-to-4-significant-bit
+  <li>Storage dtype and accumulation dtype are independent. Many floating GEMMs use FP32 accumulators, while integer GEMMs may use INT32 and some kernels use reduced-precision partial accumulation — that is the only reason 3-to-4-significant-bit
   formats produce usable matmuls. When someone proposes a narrow dtype, the question is always
   "and the accumulator?"</li>
 
-  <li>Float formats carry their own scale; integer formats do not, which is why INT8 activations
-  need calibration or per-token dynamic scales while FP8 activations need only a live amax. This
+  <li>Float formats carry their own scale; integer formats do not, which is why both INT8 and FP8 activations can use static calibration or dynamic scales. This
   operational difference, not raw bit width, is why fp8 spread faster than int8 for W8A8.</li>
 
   <li>Scale granularity is the third axis after width and layout. Per-tensor &rarr; per-channel
@@ -1659,8 +1633,7 @@ python3 -m sglang.launch_server --model meta-llama/Llama-3.1-8B-Instruct --kv-ca
   scales.</li>
 
   <li>Reductions are where precision dies: GEMM accumulators, softmax max/sum, RMSNorm variance,
-  and pre-sampling logits are FP32 in both engines and should stay that way. Elements can be
-  narrow; sums cannot.</li>
+  often benefit from FP32, but precise storage and reduction contracts are kernel-specific. Low precision requires an error budget, not a universal dtype rule.</li>
 
   <li>The failure mode of every narrow format is silence. fp8 saturates rather than raising, a
   missing KV scale defaults to 1.0 behind a <code>warning_once</code>, and a bad INT8 calibration
@@ -1689,7 +1662,7 @@ python3 -m sglang.launch_server --model meta-llama/Llama-3.1-8B-Instruct --kv-ca
 </ul></div></section>
 <div class="pager"><a href="00-04-roofline-and-arithmetic-intensity.html"><div class="pager__k">← Previous</div><div class="pager__t">Arithmetic intensity and the roofline</div></a><a class="pager__next" href="../01-the-core-loop/01-01-prefill-vs-decode.html"><div class="pager__k">Next →</div><div class="pager__t">Prefill and decode are two different computers</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

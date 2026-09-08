@@ -36,12 +36,14 @@ word order entirely — "dog bites man" and "man bites dog" are identical.
 Weight each term by how often it appears in this document and how *rare* it is
 across the corpus:
 
-$$\mathrm{tfidf}(t,d) = \mathrm{tf}(t,d)\cdot\log\frac{N}{1+\mathrm{df}(t)}$$
+$$\mathrm{tfidf}(t,d)=\mathrm{tf}(t,d)\left[\log\frac{1+N}{1+\mathrm{df}(t)}+1\right]$$
 
 The IDF term is the interesting half. A word appearing in every document has
-$\mathrm{df} = N$, so its IDF is ~0 and it contributes nothing — TF-IDF performs
-automatic stopword removal. A word appearing in three documents out of a million
-gets a large weight, because it is highly discriminative.
+$\mathrm{df}=N$, so the displayed scikit-learn smoothed IDF is one, not zero.
+TF-IDF downweights common terms relative to rare ones; explicit `max_df` or a
+stopword policy removes them. A rare term gets larger IDF but is not necessarily
+predictive of the task. The [TfidfTransformer API](https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfTransformer.html)
+specifies this convention and optional row normalization.
 
 Practical settings that matter:
 
@@ -68,7 +70,7 @@ fine-tuned transformer. Always run it first.
 **BM25** is TF-IDF's better-engineered relative and the standard for retrieval.
 It adds term-frequency saturation (a parameter $k_1$ bounds the contribution of
 repeated terms) and document-length normalisation ($b$), both of which TF-IDF
-handles crudely. Every production keyword-search system uses BM25, not TF-IDF.
+handles differently. BM25 is widespread, not universal across production search.
 
 ## Word embeddings
 
@@ -100,12 +102,14 @@ this (word, context) pair real, or drawn from noise?
 
 $$\log\sigma(\mathbf{v}'^\top_{w_O}\mathbf{v}_{w_I}) + \sum_{i=1}^{k}\mathbb{E}_{w_i\sim P_n(w)}\bigl[\log\sigma(-\mathbf{v}'^\top_{w_i}\mathbf{v}_{w_I})\bigr]$$
 
-with $k = 5$–20 negatives drawn from the unigram distribution raised to the 3/4
+This noise-discrimination objective is different from normalized full-softmax
+likelihood, not merely a faster evaluation of its denominator. A common setup uses
+$k=5$–20 negatives drawn from the unigram distribution raised to the 3/4
 power — an empirical choice that samples rare words more often than their raw
 frequency would.
 
 **Subsampling frequent words** discards a token with probability
-$1-\sqrt{t/f(w)}$, which both speeds training and improves rare-word vectors, on
+$\max(0,1-\sqrt{t/f(w)})$ in this simplified subsampling rule, on
 the reasoning that the millionth occurrence of "the" carries almost no
 information.
 
@@ -125,7 +129,8 @@ global co-occurrence statistics:
 
 $$J = \sum_{i,j=1}^{V} f(X_{ij})\bigl(\mathbf{w}_i^\top\tilde{\mathbf{w}}_j + b_i + \tilde{b}_j - \log X_{ij}\bigr)^2$$
 
-with $X_{ij}$ the co-occurrence count and $f$ a weighting that caps the influence
+The sum is evaluated over nonzero co-occurrences, avoiding $\log0$; $X_{ij}$ is
+the co-occurrence count and $f$ caps the influence
 of very frequent pairs. The motivating insight is that **ratios** of
 co-occurrence probabilities encode meaning: $P(\text{solid}\mid\text{ice}) /
 P(\text{solid}\mid\text{steam})$ is large, while the same ratio for "water" is
@@ -213,16 +218,17 @@ sim = emb @ emb.T                              # cosine, since vectors are norma
 **Normalise before comparing.** With L2-normalised vectors, the dot product *is*
 cosine similarity, which lets you use fast inner-product search.
 
-**Asymmetric search needs prefixes.** Models like E5 and BGE are trained with
-distinct instructions for queries and documents (`"query: "` / `"passage: "`).
-Omitting them measurably degrades retrieval, and it is a silent failure.
+**Follow the exact checkpoint's input protocol.** E5 commonly uses `query:` and
+`passage:` prefixes. BGE English v1.5 instead specifies a retrieval query instruction
+and does not apply that instruction to documents. These are not interchangeable
+family-wide templates. See the [BGE v1.5 model card](https://huggingface.co/BAAI/bge-large-en-v1.5).
 
 ## Choosing an embedding model
 
 | Consideration | Guidance |
 |---|---|
 | Benchmark | **MTEB** is the standard leaderboard — but check the tasks that match your use case, not the average |
-| Dimensionality | 384 vs 768 vs 1536 — larger is marginally better and proportionally more expensive to store and search |
+| Dimensionality | larger vectors cost more storage/search; quality depends on training, task and any supported truncation |
 | Max sequence length | 512 tokens is common; long documents need chunking or a long-context model |
 | Domain | a general model may fail on legal, biomedical, or code text; check on your own data |
 | Multilingual | multilingual-E5, LaBSE, BGE-M3 for cross-lingual retrieval |
@@ -270,13 +276,14 @@ worth the dependency.
 | Doc2Vec | document vectors learned jointly with word vectors; largely superseded |
 | LSA / LSI | SVD on the term–document matrix; the original dense representation |
 | Topic models (LDA, NMF) | interpretable soft clustering |
-| **Hybrid dense + sparse** | combine BM25 with dense retrieval; reliably beats either alone |
+| **Hybrid dense + sparse** | complementary candidates; validate fusion against each baseline |
 | SPLADE | learned *sparse* representations — interpretable and searchable with an inverted index |
 
 **Hybrid retrieval is the practical default.** Dense embeddings capture semantic
 similarity and miss exact matches (product codes, rare names, specific numbers);
 BM25 does the reverse. Combining the two — usually with reciprocal rank fusion —
-beats either consistently, and the implementation is a dozen lines.
+can improve recall, but can also introduce irrelevant candidates or poor fusion
+weights. Measure the chosen relevance unit and filtered corpus.
 
 ## Bias in embeddings
 
@@ -295,7 +302,50 @@ handled at the system level.
 
 ## Self-check
 
-1. Why does IDF perform automatic stopword removal?
+### Runnable count weighting and exact retrieval oracle
+
+With three documents and document frequency two, smoothed IDF is
+$1+\log(4/3)$. A ubiquitous term has IDF one. The normalized dot-product oracle
+below gives the exact candidate ordering against which an approximate index
+should be evaluated; approximate-search recall concerns agreement with this
+neighbor set, not necessarily human relevance.
+
+```python runnable
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import normalize
+docs = ["common apple apple", "common apple berry", "common carrot"]
+vectorizer = TfidfVectorizer(norm=None)
+matrix = vectorizer.fit_transform(docs)
+vocab = vectorizer.vocabulary_
+assert np.isclose(vectorizer.idf_[vocab["common"]], 1)
+assert np.isclose(vectorizer.idf_[vocab["apple"]], 1+np.log(4/3))
+normalized = normalize(matrix)
+query = normalize(vectorizer.transform(["apple"]))
+scores = (query @ normalized.T).toarray()[0]
+assert scores[0] > scores[1] > scores[2]
+assert np.isclose(np.linalg.norm(normalized.toarray(), axis=1), 1).all()
+# BM25 term contribution with a declared positive-IDF convention.
+frequency = np.array([2., 1., 0.])
+length = np.array([3., 3., 2.])
+k1, b = 1.2, .75
+idf = np.log(1+(3-2+.5)/(2+.5))
+bm25 = idf*frequency*(k1+1)/(frequency+k1*(1-b+b*length/length.mean()))
+assert bm25[0] > bm25[1] > bm25[2]
+print("TF-IDF", scores, "BM25 apple contribution", bm25)
+```
+
+**What is an SGNS gradient?** For a positive dot product $s=v^Tu$, negative-log
+sigmoid loss has $\partial L/\partial v=(\sigma(s)-1)u$; a negative pair gives
+$\sigma(s)u$. Input and context embeddings are separate parameter tables. For
+sentence pooling, divide the sum of valid token states by their attention-mask
+count, not padded length. Contrastive InfoNCE uses a positive similarity relative
+to competing negatives with temperature; false negatives can push semantically
+equivalent sentences apart. Index/model revision, normalization and distance
+metric must match at ingestion and querying. Report bytes, latency and recall
+together when comparing exact and approximate search.
+
+1. Why does scikit-learn's default IDF not remove ubiquitous terms, and which settings do?
 2. What problem does negative sampling solve in word2vec, and what does it
    replace?
 3. Give two things fastText can do that word2vec cannot, and say why.

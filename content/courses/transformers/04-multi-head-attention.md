@@ -3,7 +3,7 @@
 > **Prerequisites:** module 03.
 > **You will learn:** the specific failure of single-head attention, how running
 > several heads in parallel fixes it, why the per-head dimension shrinks, and why
-> multi-head attention costs no more than single-head.
+> fixed-width multi-head attention preserves dominant matmul cost but not all costs.
 
 ---
 
@@ -23,8 +23,8 @@ Two readings:
 Both are valid English. Now think about what self-attention produces: **one**
 `(T, T)` attention matrix — one table of how related each word is to each other
 word. That table can encode `man ↔ telescope` strongly, or `astronomer ↔
-telescope` strongly. It cannot cleanly encode both, because they compete for
-probability mass in the same softmax.
+telescope` strongly. Both can have nonzero weight, but they share one
+distribution rather than independently selectable distributions.
 
 > A single attention head extracts a single perspective on a sequence.
 
@@ -38,7 +38,7 @@ flowchart TD
     S["'The man saw the astronomer with a telescope'"] --> H["single attention head"]
     H --> T1["ONE attention table"]
     T1 --> R1["captures: man &lt;-&gt; telescope<br/>(reading 1)"]
-    T1 -.->|"cannot also capture"| R2["astronomer &lt;-&gt; telescope<br/>(reading 2)"]
+    T1 -.->|"shares one probability budget"| R2["astronomer &lt;-&gt; telescope<br/>(reading 2)"]
 ```
 
 ## 4.2 The fix: run several attention modules in parallel
@@ -68,7 +68,7 @@ flowchart TD
 
 Each head runs exactly the module-03 computation, on the same input, with its own
 parameters. Because the heads are independent, they run **in parallel** — no
-extra wall-clock depth.
+extra dependency between heads. Finite hardware can still take longer.
 
 The original paper uses **8 heads**.
 
@@ -133,20 +133,22 @@ flowchart LR
     WO --> OUT["(2, 512)"]
 ```
 
-### The cost is free
+<span id="the-cost-is-free"></span>
+
+### Which costs stay fixed?
 
 This is the elegant part. Because each head is `d_model/H`-dimensional, `H` heads
-cost **the same** as one `d_model`-dimensional head:
+have the same dominant projection and attention-matmul counts as one
+`d_model`-dimensional head, assuming both include the same output projection:
 
 | | Single head, `d_k = 512` | 8 heads, `d_k = 64` |
 |---|---|---|
 | QKV projection params | `3 · 512 · 512` = 786k | `8 · 3 · 512 · 64` = 786k |
 | Score matrix size | `T × T` | `8 × T × T` ... |
-| Score-matrix FLOPs | `T² · 512` | `8 · T² · 64` = `T² · 512` |
+| Score-matrix FLOPs (multiply-add = 2) | `2 · T² · 512` | `2 · 8 · T² · 64` = `2 · T² · 512` |
 
-Identical parameter count, identical FLOPs. As the playlist puts it: you get the
-best of both worlds — the compute of single-head attention with the multiple
-perspectives of multi-head.
+Identical projection parameter count and score-matmul FLOPs under these width
+assumptions, but not identical softmax work or wall-clock performance.
 
 The one thing that *does* grow is the number of score matrices held in memory —
 `H` of them rather than one. That is a real cost at long context, and part of
@@ -158,7 +160,8 @@ After concatenation you have 8 independent 64-dim perspectives sitting
 side-by-side. `W_O` is a learned `(d_model, d_model)` matrix that **mixes** them.
 
 Without it, dimension `j` of the output would come only from head `⌊j/64⌋` — the
-heads would never communicate. `W_O` decides how much each perspective matters
+heads do not mix **at this operation**. A later dense FFN can mix their
+concatenated features even without an immediate `W_O`. `W_O` decides how much each perspective matters
 and lets them combine. The playlist describes it as deciding "how important each
 perspective is" and producing "the mixture of perspectives."
 
@@ -297,6 +300,42 @@ violated in modern models. Treat it as the default, not a constraint.
 
 ---
 
+## Worked fused-head equivalence and accounting
+
+PyTorch Linear stores `(out_features,in_features)` weights. To fuse per-head
+Q weights, concatenate their output rows and concatenate biases in the same
+order. Do K and V separately, then concatenate Q/K/V groups for one projection.
+Reshape `(B,T,H,d_head)` before transposing to `(B,H,T,d_head)`. Reordering rows
+without the corresponding reshape silently assigns features to the wrong heads.
+
+```python transformer-check
+import torch
+torch.manual_seed(4)
+b, t, d, h, dh = 2, 3, 8, 2, 4
+x = torch.randn(b, t, d)
+heads = torch.nn.ModuleList([torch.nn.Linear(d, dh) for _ in range(h)])
+fused = torch.nn.Linear(d, h * dh)
+with torch.no_grad():
+    fused.weight.copy_(torch.cat([head.weight for head in heads], dim=0))
+    fused.bias.copy_(torch.cat([head.bias for head in heads], dim=0))
+separate = torch.stack([head(x) for head in heads], dim=1)
+combined = fused(x).view(b, t, h, dh).transpose(1, 2)
+torch.testing.assert_close(separate, combined)
+assert sum(p.numel() for p in heads.parameters()) == sum(p.numel() for p in fused.parameters())
+print("Per-head and fused projections agree, including biases.")
+```
+
+For query width `H*d_k` and value width `H*d_v`, bias-free MHA has
+`2*d*H*d_k + 2*d*H*d_v` projection parameters. Both head widths `d/H` give
+`4*d**2`. Attention matmuls cost approximately `2*B*H*T**2*(d_k+d_v)` FLOPs,
+whereas softmax touches `B*H*T**2` scores regardless of head width. Transposes
+may be views, but a following contiguous reshape can copy.
+
+**Exercise solution:** doubling H while halving both head widths preserves the
+dominant matmul count, doubles score elements, and does not promise equal
+latency. Head specialization needs attention/ablation evidence: independent
+parameter sets are not statistically independent learned behaviors.
+
 ## Key takeaways
 
 - One attention head produces one `(T, T)` table — one perspective. Ambiguous or
@@ -304,10 +343,10 @@ violated in modern models. Treat it as the default, not a constraint.
 - Multi-head attention runs `H` independent `(W_q, W_k, W_v)` sets in parallel,
   concatenates the outputs, and mixes them with a learned `W_O`.
 - Per-head dimension is `d_model / H` by convention (512/8 = 64), so `H` heads
-  cost the **same parameters and FLOPs** as one full-width head. The perspectives
-  are effectively free.
+  preserve dominant matmul FLOPs and projection parameters at fixed total width.
+  Softmax work, attention storage and realized runtime still depend on H.
 - What is *not* free is memory: `H` score matrices instead of one.
-- `W_O` is essential — without it the heads' outputs never mix.
+- `W_O` immediately mixes head outputs; later dense layers can also mix them.
 - Efficient implementations fuse the per-head projections into one matmul and put
   heads in a batch dimension.
 - Modern models often decouple `d_head` from `d_model / H`, and choose width

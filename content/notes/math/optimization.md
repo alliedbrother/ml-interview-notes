@@ -17,7 +17,7 @@ first-order methods, to the practical recipes that actually train models.
 ```mermaid
 flowchart TD
     P["optimisation problem<br/>min f of x subject to constraints"] --> Q{"convex?"}
-    Q -->|"yes"| CV["global optimum guaranteed<br/>LP / QP / SOCP solvers,<br/>closed forms exist"]
+    Q -->|"yes"| CV["local minima are global<br/>attainment and solver<br/>conditions still required"]
     Q -->|"no"| NC["local methods only"]
     NC --> D{"gradient available?"}
     D -->|"no"| ZO["derivative-free:<br/>random search, CMA-ES,<br/>Bayesian optimisation"]
@@ -37,9 +37,7 @@ $$f(\theta) = \frac{1}{N}\sum_{i=1}^{N} \ell(f_\theta(x_i), y_i) + \Omega(\theta
 and this is worth pausing on. The thing you actually want to minimise is the
 **true risk** $\mathbb{E}_{(x,y)\sim \mathcal{D}}[\ell]$, which you cannot
 evaluate. Empirical risk minimisation substitutes the sample average. **Every
-generalisation problem in ML is the gap between those two objectives**, and no
-amount of optimiser cleverness closes it — a better optimiser can make it worse
-by fitting the sample more exactly.
+generalisation problem in ML is the gap between those two objectives**, and optimization does not alone resolve it. The selected solution and implicit regularization can improve or worsen generalization.
 
 ## Convexity, and why it is the dividing line
 
@@ -47,7 +45,7 @@ $f$ is convex if for all $x, y$ and $\lambda \in [0,1]$:
 
 $$f(\lambda x + (1-\lambda)y) \le \lambda f(x) + (1-\lambda)f(y)$$
 
-Equivalent characterisations for differentiable $f$:
+On a convex domain, the first-order characterization assumes differentiability. The Hessian characterization additionally assumes twice differentiability on an open domain:
 
 - **First order**: $f(y) \ge f(x) + \nabla f(x)^\top (y - x)$ — the tangent plane
   lies below the function everywhere.
@@ -65,8 +63,8 @@ holds.
 | Linear SVM (hinge loss) | yes, non-smooth |
 | PCA | non-convex but solvable exactly via SVD |
 | $k$-means | non-convex; Lloyd's algorithm is a local method |
-| Matrix factorisation | non-convex, benign landscape |
-| Any neural network with a hidden layer | no |
+| Matrix factorisation | non-convex; benign landscape only in specific formulations |
+| Typical jointly trained nonlinear network | generally non-convex |
 
 Two operations preserve convexity and are worth knowing because they let you
 *prove* a new objective is convex: non-negative weighted sums, and composition
@@ -78,21 +76,19 @@ are, and $\|\cdot\|$ composed with the affine $x \mapsto Ax-b$ stays convex.
 Two constants govern how fast first-order methods converge.
 
 - **$L$-smooth**: $\|\nabla f(x)-\nabla f(y)\| \le L\|x-y\|$. Gradients do not
-  change too fast; equivalently $\nabla^2 f \preceq LI$.
+  change too fast. For twice differentiable functions this requires $\|\nabla^2f\|_2\le L$, equivalently $-LI\preceq H\preceq LI$. For convex $f$, the lower bound is already zero.
 - **$\mu$-strongly convex**: $f(y) \ge f(x)+\nabla f(x)^\top(y-x)+\frac{\mu}{2}\|y-x\|^2$;
   equivalently $\nabla^2 f \succeq \mu I$.
 
-The **condition number** $\kappa = L/\mu$ decides everything:
+For $\mu>0$, $\kappa=L/\mu$ controls worst-case bounds. The table concerns function error with a suitable algorithm and step size, not arbitrary momentum:
 
 | Assumption | Gradient descent rate | Steps to $\epsilon$ |
 |---|---|---|
 | Convex, $L$-smooth | $O(1/k)$ | $O(1/\epsilon)$ |
-| Strongly convex, $L$-smooth | linear, $\left(\frac{\kappa-1}{\kappa+1}\right)^{k}$ | $O(\kappa\log\frac1\epsilon)$ |
+| Strongly convex, $L$-smooth | $f(x_k)-f_*\le(1-\mu/L)^k(f(x_0)-f_*)$ at $\eta=1/L$ | $O(\kappa\log\frac1\epsilon)$ |
 | + Nesterov momentum | accelerated | $O(\sqrt{\kappa}\log\frac1\epsilon)$ |
 
-Momentum turns $\kappa$ into $\sqrt{\kappa}$. For $\kappa = 10^4$ that is 100×
-fewer iterations. This is not a heuristic — it is a proven optimal rate for
-first-order methods, and it is why every serious optimiser has a momentum term.
+Suitably tuned Nesterov acceleration improves the worst-case dependence from $\kappa$ to $\sqrt\kappa$ in this smooth strongly convex setting. This is an order-bound comparison, not a guaranteed 100-fold runtime gain or a property of every momentum scheme.
 
 ## Gradient descent
 
@@ -103,14 +99,13 @@ $$\theta_{t+1} = \theta_t - \eta \nabla f(\theta_t)$$
 For a quadratic $f(\theta) = \frac12\theta^\top H\theta$, the update is
 $\theta_{t+1} = (I - \eta H)\theta_t$. Along the eigenvector with eigenvalue
 $\lambda_i$ the iterate is multiplied by $(1 - \eta\lambda_i)$ each step. This
-converges iff
+converges to the unique minimizer from every start iff, assuming $H$ is SPD,
 
 $$|1-\eta\lambda_i| < 1 \quad\text{for all } i \quad\Longleftrightarrow\quad 0 < \eta < \frac{2}{\lambda_{\max}}$$
 
 So **the largest stable learning rate is set by the sharpest direction, while
 progress is limited by the flattest.** That single sentence explains ill
-conditioning, why loss explodes past a threshold, and why normalisation layers
-(which shrink $\lambda_{\max}$) let you use bigger learning rates.
+conditioning and instability past a threshold. Normalization can alter optimization geometry, but does not universally shrink every maximum Hessian eigenvalue. Negative curvature cannot be stabilized toward a minimum by this positive-step linear iteration; zero eigenvalues leave flat coordinates unchanged.
 
 | $\eta$ relative to $2/\lambda_{\max}$ | Behaviour |
 |---|---|
@@ -129,7 +124,7 @@ conditioning, why loss explodes past a threshold, and why normalisation layers
 
 Mini-batch wins for two independent reasons. Statistically, the gradient
 estimate's standard error falls as $1/\sqrt{B}$ — so going from $B=32$ to
-$B=512$ (16× the compute) only halves the noise, a poor trade past a point.
+$B=512$ (16× the compute) reduces iid standard error by a factor of four, a poor trade past a point.
 Computationally, GPUs are matrix-multiply engines: $B=1$ leaves them idle, and
 throughput rises steeply up to a saturation point.
 
@@ -138,7 +133,7 @@ minima, and there is good evidence that the flat minima SGD prefers generalise
 better. This is why simply cranking the batch size up often *hurts* test
 accuracy unless you compensate.
 
-**Scaling rules for large batches** (both are empirical, both work):
+**Scaling rules for large batches** (empirical candidates, neither universal):
 
 - **Linear scaling**: multiply $\eta$ by $k$ when multiplying $B$ by $k$, with a
   warmup of a few epochs. Works up to $B \approx 8$k for ImageNet-scale work.
@@ -168,8 +163,7 @@ point:
 $$v_{t+1} = \beta v_t + \nabla f(\theta_t - \eta\beta v_t), \qquad \theta_{t+1} = \theta_t - \eta v_{t+1}$$
 
 Because it sees where momentum is about to put it, it corrects earlier when
-overshooting. Theoretically it gives the accelerated $O(\sqrt\kappa)$ rate; in
-deep learning the practical gain over heavy-ball momentum is modest but real.
+overshooting. With appropriate assumptions and tuning, Nesterov methods achieve accelerated rates. Empirical gains over heavy-ball in nonconvex networks are not guaranteed.
 
 ```mermaid
 flowchart LR
@@ -221,13 +215,14 @@ $$\theta_{t+1} = \theta_t - \eta \frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}$$
 
 **Why bias correction?** $m_0 = 0$, so $m_1 = (1-\beta_1)g_1 = 0.1 g_1$ — a
 10× underestimate. Dividing by $1-\beta_1^t$ removes exactly that
-initialisation bias, and the correction decays to 1 as $t$ grows. Without it,
-the first few hundred steps take absurdly small steps with $\beta_2 = 0.999$.
+initialization bias under stationary moment assumptions. The denominators approach one as $t$ grows. Ignoring epsilon at step one, the uncorrected ratio is $0.1/\sqrt{0.001}\operatorname{sign}(g)=\sqrt{10}\operatorname{sign}(g)$, versus a unit-sign corrected ratio: the initial step is larger, not absurdly small. Changing gradients and epsilon affect later behavior.
 
 Defaults: $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$. For
 transformers, $\beta_2 = 0.95$ and $\epsilon = 10^{-8}$ is common — a shorter
 second-moment window reacts faster to the loss spikes large language models
 suffer.
+
+The moments and zero-start correction follow the [original Adam algorithm](https://arxiv.org/abs/1412.6980); the first-step ratio above is direct substitution, not a claim about every later update.
 
 **Reading Adam correctly**: the update magnitude is roughly $\eta$ regardless of
 gradient scale, because $\hat m/\sqrt{\hat v} \approx \pm 1$. Adam is closer to
@@ -245,9 +240,7 @@ large gradients get *less* regularisation — the opposite of the intent. AdamW
 $$\theta_{t+1} = \theta_t - \eta\left(\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon} + \lambda\theta_t\right)$$
 
 The decay is applied directly to the parameters, not routed through the adaptive
-scaling. This is the default for essentially every modern transformer. **Exclude
-biases and normalisation parameters from weight decay** — decaying a LayerNorm
-gain toward zero is meaningless and measurably harmful.
+scaling. AdamW is a common transformer choice. Excluding biases and normalization gains is a useful recipe to test, not a mathematical requirement; parameter grouping and decay strength depend on the architecture and task.
 
 ### The full family, compared
 
@@ -275,10 +268,7 @@ column statistics; 8-bit optimisers quantise it; ZeRO shards it across devices.
 Adam converges faster in training loss; SGD with momentum often reaches better
 test accuracy on vision tasks. The going explanations are that Adam's
 per-parameter normalisation finds sharper minima, and that its implicit
-regularisation differs from SGD's. In language modelling Adam is simply
-necessary — SGD does not train transformers well at all, probably because of the
-extreme heterogeneity in gradient scale across layers, embeddings, and
-LayerNorm parameters. Use AdamW for transformers, and consider SGD+momentum for
+regularisation differs from SGD's. Language-model recipes commonly use adaptive optimizers because gradient scales can differ markedly, but this is not a theorem that SGD cannot train a transformer. Use AdamW for transformers, and consider SGD+momentum for
 convolutional vision models with long schedules.
 
 ## Learning-rate schedules
@@ -297,11 +287,7 @@ The single highest-leverage hyperparameter, and the one most worth scheduling.
 | Cyclical / warm restarts | sawtooth with restarts | escaping poor basins; ensembling snapshots |
 | ReduceLROnPlateau | drop when validation stalls | when you cannot pre-plan $T$ |
 
-**Warmup is not optional for transformers.** At step 0 the attention logits are
-near-uniform, the residual stream has no useful signal, and Adam's second-moment
-estimate is based on a handful of samples. A large step then destabilises
-LayerNorm statistics and can put the model in a bad basin it never leaves. 2,000
-to 10,000 warmup steps is typical, or roughly 1% of training.
+**Warmup is recipe-dependent.** It can reduce early instability while activations and optimizer statistics change rapidly. Initialization, normalization, batch size and optimizer affect whether it is needed and for how long. LayerNorm has no BatchNorm-style running statistics; monitor actual activations, gradients and loss before adopting a schedule.
 
 **Decay to (nearly) zero.** The end-of-training low learning rate does real work
 — it is where the model settles into a minimum rather than bouncing around it.
@@ -321,8 +307,7 @@ any component along the constraint surface could still be exploited.
 
 ### KKT conditions
 
-With inequality constraints $g_i(x)\le 0$, the necessary conditions at an
-optimum are:
+For differentiable constraints, KKT conditions are necessary at a local optimum under an appropriate constraint qualification (for example LICQ):
 
 1. **Stationarity**: $\nabla f + \sum_i \mu_i \nabla g_i + \sum_j \lambda_j \nabla h_j = 0$
 2. **Primal feasibility**: $g_i \le 0$, $h_j = 0$
@@ -331,13 +316,11 @@ optimum are:
 
 Condition 4 is the interesting one: either a constraint is active ($g_i = 0$) or
 its multiplier is zero. **This is exactly what makes SVM support vectors
-sparse** — only points on the margin have non-zero multipliers, and every other
-training point could be deleted without changing the solution.
+sparse** in a feasible hard-margin formulation: positive multipliers require active margin constraints, although active constraints can have zero multipliers. Soft-margin examples inside the margin or misclassified can also have nonzero multipliers.
 
 ### Duality
 
-Every convex problem has a dual. Weak duality ($d^\star \le p^\star$) always
-holds; strong duality ($d^\star = p^\star$) holds under Slater's condition. The
+A Lagrangian dual can be formed for nonconvex problems too. Weak duality ($d^\star\le p^\star$) does not require convexity. In convex problems with the usual affine equality and convex inequality structure, Slater's strict-feasibility condition is a sufficient strong-duality condition. The
 dual is why SVMs can use kernels: the dual formulation depends on the data only
 through inner products $x_i^\top x_j$, which can be swapped for $K(x_i,x_j)$
 without ever computing the feature map.
@@ -358,12 +341,12 @@ $$\mathrm{prox}_{\eta\lambda\|\cdot\|_1}(v)_i = \mathrm{sign}(v_i)\max(|v_i|-\et
 
 | Method | Update | Cost | Reality |
 |---|---|---|---|
-| Newton | $-H^{-1}\nabla f$ | $O(d^3)$ | exact for quadratics; impossible for $d>10^4$ |
+| Newton | $-H^{-1}\nabla f$ | $O(d^3)$ | one step for SPD quadratics; dense cost becomes prohibitive as dimension grows |
 | Gauss–Newton | $-(J^\top J)^{-1}J^\top r$ | $O(d^3)$ | least squares; PSD by construction |
-| Levenberg–Marquardt | $-(J^\top J+\lambda I)^{-1}J^\top r$ | $O(d^3)$ | interpolates Newton and GD |
+| Levenberg–Marquardt | $-(J^\top J+\lambda I)^{-1}J^\top r$ | $O(d^3)$ | damps Gauss-Newton toward a gradient-like step |
 | BFGS | rank-2 update to $H^{-1}$ | $O(d^2)$ memory | small/medium problems |
 | L-BFGS | last $m$ pairs only | $O(md)$ | the workhorse for classical ML; poor with minibatch noise |
-| Conjugate gradient | $H$-orthogonal directions | $O(d)$/iter | large sparse linear systems |
+| Conjugate gradient | $H$-orthogonal directions | one matvec plus $O(d)$ vector work per iteration | SPD systems; dense matvec costs $O(d^2)$ |
 | K-FAC | Kronecker-factored Fisher | practical | genuine speedups on some networks |
 | Hessian-free | CG on Hessian-vector products | practical | needs no explicit $H$ |
 
@@ -424,33 +407,168 @@ Choose roughly an order of magnitude below where the loss starts rising.
 
 ## A default recipe that works
 
-```python
-optimizer = torch.optim.AdamW(
-    [
-        {"params": decay_params,    "weight_decay": 0.1},
-        {"params": no_decay_params, "weight_decay": 0.0},   # biases, norms
-    ],
-    lr=3e-4, betas=(0.9, 0.95), eps=1e-8,
-)
+This complete CPU example makes accumulation units explicit. Equal-sized examples
+are accumulated through summed losses, divided by the actual window's example
+count, including the final partial window. A sequence model would count valid
+target tokens instead. The scheduler advances only after an optimizer step;
+OneCycle's momentum cycling is disabled deliberately.
 
-scheduler = torch.optim.lr_scheduler.OneCycleLR(  # or a warmup+cosine lambda
-    optimizer, max_lr=3e-4, total_steps=total_steps, pct_start=0.03,
-)
+```python runnable
+import math
+import torch
+from torch import nn
 
-for step, batch in enumerate(loader):
-    loss = model(batch).loss / accum_steps
-    loss.backward()
-    if (step + 1) % accum_steps == 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+torch.manual_seed(17)
+torch.set_num_threads(1)
+X = torch.randn(23, 3)
+y = X @ torch.tensor([1., -2., .5]) + .1
+model = nn.Linear(3, 1)
+optimizer = torch.optim.AdamW([
+    {"params": [model.weight], "weight_decay": .01},
+    {"params": [model.bias], "weight_decay": 0.},
+], lr=.01)
+batches = [(X[i:i+4], y[i:i+4]) for i in range(0, len(X), 4)]
+accum_steps, epochs = 4, 10
+total_steps = epochs * math.ceil(len(batches) / accum_steps)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer, max_lr=.05, total_steps=total_steps,
+    pct_start=.3, cycle_momentum=False,
+)
+before = nn.functional.mse_loss(model(X).squeeze(1), y).item()
+updates = 0
+for _ in range(epochs):
+    for start in range(0, len(batches), accum_steps):
+        window = batches[start:start+accum_steps]
+        count = sum(len(xb) for xb, _ in window)
+        optimizer.zero_grad(set_to_none=True)
+        for xb, yb in window:
+            loss = nn.functional.mse_loss(
+                model(xb).squeeze(1), yb, reduction="sum"
+            ) / count
+            loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.)
         optimizer.step()
         scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
+        updates += 1
+after = nn.functional.mse_loss(model(X).squeeze(1), y).item()
+assert updates == total_steps
+assert after < before
+print("optimizer updates:", updates, "MSE:", before, "->", after)
 ```
 
-Every line is a decision made above: decoupled weight decay excluding norms and
-biases, $\beta_2 = 0.95$ for transformer stability, ~3% warmup, cosine decay,
-global-norm clipping, and gradient accumulation to reach a large effective batch
-without the memory.
+## Worked convergence and constrained examples
+
+### The descent lemma supplies a usable step condition
+
+Write $h=y-x$ and integrate the gradient along the segment:
+$f(y)-f(x)=\int_0^1\nabla f(x+th)^\top h\,dt$.
+Lipschitz gradients bound the difference from $\nabla f(x)^\top h$
+by $\int_0^1Lt\|h\|^2dt=L\|h\|^2/2$. Thus
+
+$$
+f(x-\eta g)\le f(x)-\eta(1-L\eta/2)\|g\|^2.
+$$
+
+For $g=\nabla f(x)$ and $0<\eta<2/L$ this guarantees descent unless the
+gradient vanishes, as long as the relevant segment stays in the domain.
+For convex $L$-smooth $f$ with attained minimizer and $\eta=1/L$,
+$f(x_k)-f_*\le L\|x_0-x_*\|^2/(2k)$. Strong convexity additionally
+gives the geometric function-error bound shown earlier. These guarantees
+do not apply to Adam simply because it uses gradients.
+
+### Safeguarding Newton
+
+For $f(x)=x^4-x^2$, at $x=.1$ the gradient is $-.196$ and Hessian is
+$-1.88$. Newton's step $-f'/f''\approx-.1043$ heads toward the local maximum
+at zero and increases the objective. A Newton direction must be checked for
+descent, or its Hessian model modified.
+
+Armijo backtracking tests
+$f(x+\alpha p)\le f(x)+c\alpha g^\top p$ with $0<c<1$ and $g^\top p<0$,
+shrinking $\alpha$ until sufficient decrease. A trust-region method instead
+limits $\|p\|\le\Delta$ and compares actual decrease with predicted model
+decrease. A poor ratio rejects/shrinks the step; a good ratio can expand the
+radius. Neither blindly accepts an indefinite quadratic's stationary point.
+
+### Stochastic gradients: what averaging actually guarantees
+
+For a fixed dataset, uniform sampling makes $g_i=\nabla\ell_i$ satisfy
+$E[g_i\mid\theta]=N^{-1}\sum_i g_i$. With-replacement averaging over $B$
+independent draws has covariance $\Sigma/B$, where $\Sigma$ is the population
+covariance of the finite list of gradients. Sampling $B$ distinct indices
+instead gives $(N-B)\Sigma/[B(N-1)]$.
+
+For the scalar quadratic with noisy gradient $\mu x+\epsilon_t$,
+$E[\epsilon_t]=0$, variance $\sigma_g^2/B$, the recursion is
+$x_{t+1}=(1-\eta\mu)x_t-\eta\epsilon_t$. If $0<\eta\mu<2$ and noise is
+independent across steps, stationary variance is
+$\eta\sigma_g^2/[B\mu(2-\eta\mu)]$. A fixed step leaves a noise floor.
+Classical diminishing-step convergence results require assumptions such as
+unbiased bounded-variance noise and $\sum_t\eta_t=\infty$,
+$\sum_t\eta_t^2<\infty$, not merely "decrease LR occasionally."
+
+### A primal solution, multiplier and dual certificate
+
+Minimize $\tfrac12(x-2)^2$ subject to $x\le1$.
+The constrained solution is $x_*=1$, objective $1/2$. With
+$\mathcal L=\tfrac12(x-2)^2+\lambda(x-1)$,
+stationarity gives $x=2-\lambda$ and dual function
+$g(\lambda)=\lambda-\lambda^2/2$, $\lambda\ge0$.
+Its maximum at $\lambda_*=1$ is also $1/2$. Feasibility,
+stationarity, nonnegative multiplier and complementary slackness all hold.
+Strict feasibility at $x=0$ supplies Slater's condition.
+
+Constraint qualifications matter: minimize $x$ subject to $x^2\le0$.
+Only $x=0$ is feasible, but stationarity would require $1+\lambda(2x)=0$,
+impossible there. The gradient of the active constraint vanishes, violating
+the relevant qualification; the optimizer exists without KKT multipliers.
+
+### Soft-thresholding from its minimization problem
+
+Minimize $\tfrac12(z-v)^2+t|z|$ for $t\ge0$.
+On $z>0$, stationarity gives $z=v-t$ and requires $v>t$.
+On $z<0$, it gives $z=v+t$ and requires $v<-t$.
+At zero, $0\in-v+t[-1,1]$ precisely when $|v|\le t$.
+Combining cases gives $\operatorname{sign}(v)\max(|v|-t,0)$.
+ISTA applies this to $v=w-\eta X^\top(Xw-y)$ with $t=\eta\lambda$.
+
+```python runnable
+import numpy as np
+
+rng = np.random.default_rng(61)
+X = rng.normal(size=(60, 8))
+true = np.array([2., -1., 0., 0., 0., 0., 0., 0.])
+y = X @ true
+lam = 1.
+L = np.linalg.norm(X, 2)**2
+w = np.zeros(8)
+objectives = []
+for _ in range(600):
+    v = w-X.T@(X@w-y)/L
+    w = np.sign(v)*np.maximum(np.abs(v)-lam/L, 0.)
+    objectives.append(.5*np.sum((X@w-y)**2)+lam*np.abs(w).sum())
+assert np.max(np.diff(objectives)) < 1e-10
+g = X.T@(X@w-y)
+active = np.abs(w) > 1e-10
+assert np.max(np.abs(g[active]+lam*np.sign(w[active]))) < 1e-7
+assert np.max(np.abs(g[~active])) <= lam+1e-7
+assert np.isclose(.1/np.sqrt(.001), np.sqrt(10))
+assert np.isclose(np.sqrt(32/512), .25)
+
+def f(x):
+    return x**4-x**2
+x = .1
+gradient, hessian = 4*x**3-2*x, 12*x*x-2
+assert f(x-gradient/hessian) > f(x)
+p, alpha = -gradient, 1.
+while f(x+alpha*p) > f(x)+1e-4*alpha*gradient*p:
+    alpha *= .5
+assert f(x+alpha*p) < f(x)
+print("ISTA coefficients:", w, "Armijo step:", alpha)
+```
+
+For the theorem assumptions, see [Boyd and Vandenberghe's text](https://web.stanford.edu/~boyd/cvxbook/).
+The numerical checks test these examples, not convergence on arbitrary neural networks.
 
 ## Self-check
 
@@ -467,6 +585,28 @@ without the memory.
    two different answers exist.
 7. Why does random search beat grid search, in one sentence about effective
    dimensionality?
+
+## Worked self-check answers
+
+1. SPD eigenvalues $100,1$ require $0<\eta<.02$. At $\eta=.01$ the
+   flat coordinate contracts by $.99$; about 100 steps reduce it by $e^{-1}$.
+2. Zero-start EMAs underestimate stationary moments by factors
+   $1-\beta_1^t,1-\beta_2^t$. Their ratio matters: the first uncorrected
+   update is $\sqrt{10}$ times the corrected one for the given defaults.
+   There is no universal duration or direction of error for changing gradients.
+3. Coupled L2 enters Adam's moments and adaptive scale; AdamW applies decay
+   directly. Bias/norm exclusions are recipe choices to validate.
+4. Inspect the first invalid tensor and data before ranking interventions.
+   Test a smaller LR, revised warmup, stable logits/precision, and correctly
+   unscaled clipping. Each addresses a distinct possible failure.
+5. $\lambda_i g_i=0$: inactive inequalities have zero multipliers.
+   Hard-margin support vectors with positive multipliers are on the margin;
+   soft-margin positive multipliers can also occur inside it.
+6. Quadrupling iid batch size halves gradient standard error. Linear and
+   square-root LR scaling preserve different approximate regimes; neither
+   is a universal update rule. Tune and inspect optimizer-step counts.
+7. With few important continuous coordinates, random search explores many more
+   distinct values per coordinate than a comparably sized Cartesian grid.
 
 ## Where to go next
 

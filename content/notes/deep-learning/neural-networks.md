@@ -1,311 +1,616 @@
 ---
 order: 1
-description: From the perceptron to the multilayer network — what a neuron computes, why depth beats width, the universal approximation theorem and its limits, and a full forward pass worked by hand.
+description: Neuron geometry, representation learning, batched shapes and stable losses, approximation and generalization, worked forward and backward passes, and a controlled MLP experiment.
 meta: Deep Learning · foundations
 ---
 
 # Neural Networks: What Is Actually Being Computed
 
-A neural network is a stack of linear maps with a non-linearity between each
-pair. That is the whole architecture. Everything else — convolutions,
-attention, normalisation, residual connections — is a constraint or an addition
-on top of that skeleton, and every one of them exists because of a specific
-problem with training the plain version.
+A multilayer perceptron learns a representation and a decision rule together.
+Each hidden layer transforms coordinates; the output layer uses the resulting
+coordinates to predict a target. Convolution, recurrence and attention add
+different structural assumptions, rather than merely adding more neurons.
+
+Three questions must remain separate: **can the architecture represent a useful
+function, can training find it, and will it generalize?** A representation theorem
+answers the first question, not the other two. A falling training loss answers
+part of the second, not the third.
+
+Prerequisites: [linear algebra](../math/linear-algebra.md) for inner products and
+matrix maps, and [calculus](../math/calculus.md) for derivatives. Here $B$ is batch
+size, $d$ is feature width and $K$ is class count. Observations occupy rows of
+$X\in\mathbb R^{B\times d}$; this is a shape convention, not a memory-layout claim.
 
 ## The neuron
 
-A single artificial neuron computes a weighted sum and applies a non-linearity:
+A neuron computes an affine score followed by a scalar function:
 
-$$a = \phi\left(\sum_{j=1}^{d} w_j x_j + b\right) = \phi(\mathbf{w}^\top\mathbf{x}+b)$$
+$$z=w^\top x+b,\qquad a=\phi(z).$$
 
-| Piece | Role |
-|---|---|
-| $w_j$ | how much input $j$ matters, and in which direction |
-| $b$ | shifts the threshold; lets the neuron fire without any input |
-| $\mathbf{w}^\top\mathbf{x}$ | a **projection** — how much of $\mathbf{x}$ points along $\mathbf{w}$ |
-| $\phi$ | the non-linearity, without which the whole network collapses |
+Weights determine sensitivity to coordinates, the bias shifts the response, and
+the activation determines how that response combines with later neurons. The
+input derivative is $\partial a/\partial x_j=\phi'(z)w_j$, wherever it exists.
+A large weight does not automatically mean an important feature: activation
+saturation, correlated features, units and later layers change that interpretation.
 
-Geometrically, $\mathbf{w}^\top\mathbf{x}+b=0$ is a hyperplane, and the neuron
-measures signed distance from it. A single neuron is a linear classifier; a
-network is a composition of them.
+For $w\ne0$, $w^\top x+b=0$ is a hyperplane. Its signed Euclidean distance from
+$x$ is $(w^\top x+b)/\|w\|_2$, not the raw score. With $w=(3,4)$, $b=-5$ and
+$x=(1,2)$, the score is $6$ and the distance is $1.2$. Multiplying weights and
+bias by ten preserves the boundary but changes sigmoid probabilities. Decision
+geometry and probability calibration are distinct properties.
+
+An activation does not make a neuron inherently biological or probabilistic.
+A threshold neuron is a linear classifier. A ReLU neuron is a hinge function.
+A sigmoid can parameterize a Bernoulli probability when paired with an
+appropriate objective. Biological neurons have substantially different dynamics;
+the useful idea here is mathematical composition, not brain fidelity.
 
 ### The perceptron, and what it could not do
 
-Rosenblatt's 1958 perceptron used a step function and a simple update rule:
-$\mathbf{w} \leftarrow \mathbf{w} + \eta(y - \hat{y})\mathbf{x}$. It provably
-converges — in finite steps — **if the data is linearly separable**.
+For labels $y_i\in\{-1,+1\}$, the perceptron updates a misclassified example by
+$w\leftarrow w+\eta y_i x_i$, $b\leftarrow b+\eta y_i$. Incorporating the bias
+as an extra constant feature makes the updates one vector operation.
+Under linear separability with positive margin and bounded input norm, the
+algorithm makes finitely many mistakes. Without separability it can cycle.
 
-Minsky and Papert's 1969 counterexample was XOR:
+XOR illustrates a representational failure, not merely slow optimization:
 
-| $x_1$ | $x_2$ | XOR |
+| Input | Target | Sum $s=x_1+x_2$ |
 |---|---|---|
-| 0 | 0 | 0 |
-| 0 | 1 | 1 |
-| 1 | 0 | 1 |
-| 1 | 1 | 0 |
+| $(0,0)$ | 0 | 0 |
+| $(0,1)$ | 1 | 1 |
+| $(1,0)$ | 1 | 1 |
+| $(1,1)$ | 0 | 2 |
 
-No line separates $\{(0,1),(1,0)\}$ from $\{(0,0),(1,1)\}$. A single perceptron
-cannot represent XOR at all — not "learns it badly", cannot represent it.
+No affine boundary separates the opposite corners. But two hidden ReLUs suffice:
 
-**A two-layer network solves it with two neurons.** The hidden layer computes
-$h_1 = \mathrm{ReLU}(x_1 + x_2)$ and $h_2 = \mathrm{ReLU}(x_1 + x_2 - 1)$, and
-the output is $h_1 - 2h_2$:
+$$h_1=\operatorname{ReLU}(s),\qquad h_2=\operatorname{ReLU}(s-1),
+\qquad f(x)=h_1-2h_2.$$
 
-| $(x_1,x_2)$ | $h_1$ | $h_2$ | $h_1 - 2h_2$ |
-|---|---|---|---|
-| $(0,0)$ | 0 | 0 | 0 |
-| $(0,1)$ | 1 | 0 | 1 |
-| $(1,0)$ | 1 | 0 | 1 |
-| $(1,1)$ | 2 | 1 | 0 |
+The hidden coordinates are $(0,0),(1,0),(1,0),(2,1)$, respectively; $f$ is
+$0,1,1,0$. A threshold at $0.5$ separates the classes. The hidden layer has made
+an inseparable task linearly separable in its representation.
 
-The hidden layer has re-represented the input in coordinates where the problem
-*is* linearly separable. **That is what a hidden layer does**, and it is the
-single most useful sentence to hold onto: hidden layers learn representations,
-the output layer draws a line in them.
+This construction specifies correct values only on four Boolean inputs.
+Between them it defines a piecewise-linear extension, not a uniquely determined
+continuous XOR. Many functions interpolate the same training points and disagree
+elsewhere. Representation capacity alone cannot choose between them.
 
 ## The multilayer perceptron
 
-Stack $L$ layers, each an affine map followed by a non-linearity:
+Let the widths be $d_0,d_1,\ldots,d_L$, and use
+$W_\ell\in\mathbb R^{d_{\ell-1}\times d_\ell}$ throughout. For a batch:
 
-$$\mathbf{h}^{(0)} = \mathbf{x}, \qquad \mathbf{h}^{(\ell)} = \phi\bigl(W^{(\ell)}\mathbf{h}^{(\ell-1)} + \mathbf{b}^{(\ell)}\bigr), \qquad \hat{\mathbf{y}} = W^{(L)}\mathbf{h}^{(L-1)} + \mathbf{b}^{(L)}$$
+$$H_0=X,\quad Z_\ell=H_{\ell-1}W_\ell+\mathbf1b_\ell^\top,
+\quad H_\ell=\phi_\ell(Z_\ell),\quad 1\le\ell<L,$$
+
+$$Z_L=H_{L-1}W_L+\mathbf1b_L^\top.$$
+
+Activations act elementwise in a plain MLP. The final tensor contains logits or
+regression outputs as the task requires; it need not have a hidden activation.
+For a single column-vector example the same convention gives
+$z_\ell=W_\ell^\top h_{\ell-1}+b_\ell$.
 
 ```mermaid
 flowchart LR
-    X["input x<br/>d features"] --> L1["W1 x + b1<br/>affine"]
-    L1 --> A1["phi<br/>non-linearity"]
-    A1 --> L2["W2 h1 + b2"]
-    L2 --> A2["phi"]
-    A2 --> L3["W3 h2 + b3<br/>output layer, no activation"]
-    L3 --> OUT["logits"]
-    OUT --> LOSS["softmax + cross-entropy<br/>fused for stability"]
+    X["X: B by d"] --> A["Affine: X W1 + b1"]
+    A --> H["ReLU: B by hidden width"]
+    H --> Z["Affine: H W2 + b2"]
+    Z --> L["Logits: B by K"]
+    L --> C["Stable cross-entropy: scalar"]
 ```
 
-**The non-linearity is load-bearing.** Without it,
+### Why the nonlinearity matters
 
-$$W_3(W_2(W_1\mathbf{x})) = (W_3W_2W_1)\mathbf{x} = W'\mathbf{x}$$
+Two affine maps without an activation give
 
-— a composition of linear maps is a linear map, so a hundred layers without
-activations is exactly equivalent to one layer. Depth buys you nothing at all.
-This is worth deriving once, because it explains why every architecture has
-non-linearities and why "linear layers" alone are never a model.
+$$ (XW_1+\mathbf1b_1^\top)W_2+\mathbf1b_2^\top
+=X(W_1W_2)+\mathbf1(b_1^\top W_2+b_2^\top).$$
+
+The result is affine again. Depth adds no nonlinear representational power.
+Nevertheless, linear regression is useful, and a narrow linear bottleneck
+imposes a rank constraint. Factorization can also change optimization and
+implicit regularization when the represented function class is unchanged.
+
+For a ReLU network, fix the signs of every preactivation. Each ReLU then becomes
+a diagonal matrix of zeros and ones, so the network is affine within that region.
+Changing signs changes the formula. The decision boundary can therefore be
+assembled from many linear pieces. More pieces provide flexibility, not a
+guarantee that training selects a smooth or robust boundary.
 
 ### Batch form
 
-In practice everything is batched, and the convention is row-major:
+PyTorch stores `nn.Linear(d_in, d_out).weight` as `(d_out,d_in)` and evaluates
+`X @ weight.T + bias`. Its stored weight is the transpose of our $W$. For an
+input `(B,T,d_in)`, the layer transforms the last dimension and returns
+`(B,T,d_out)`; it does not mix sequence positions. Flattening `(B,T)` into an
+example axis preserves this operation. Flattening `(T,d_in)` into one feature
+axis changes the model and its parameter count.
 
-$$H^{(\ell)} = \phi\bigl(H^{(\ell-1)}W^{(\ell)} + \mathbf{b}^{(\ell)}\bigr)$$
-
-with $H \in \mathbb{R}^{B\times d}$ and $W \in \mathbb{R}^{d_{in}\times d_{out}}$.
-The bias is **broadcast** across the batch, which is why its gradient is a sum
-over the batch dimension.
+One bias influences every observation, so its gradient sums the incoming gradient
+over observations. If the objective is a batch mean, its $1/B$ is already inside
+that incoming gradient. Dividing at every layer would incorrectly shrink
+early-layer gradients repeatedly.
 
 ### Output layers and their losses
 
-| Task | Final layer | Loss |
+| Task | Output and target contract | Objective |
 |---|---|---|
-| Binary classification | 1 logit | `BCEWithLogitsLoss` |
-| Multiclass (exclusive) | $K$ logits | `CrossEntropyLoss` (applies softmax internally) |
-| Multilabel | $K$ logits | `BCEWithLogitsLoss` — **not** softmax |
-| Regression | 1 linear unit | MSE, or Huber for outliers |
-| Multi-output regression | $K$ linear units | MSE |
-| Count | 1 unit, exponentiated | Poisson NLL |
-| Quantiles | one unit per quantile | pinball loss |
-| Heteroscedastic regression | mean and log-variance | Gaussian NLL |
+| Binary | logits and floating targets both `(B,1)` or both `(B,)` | binary cross-entropy with logits |
+| Exclusive multiclass | logits `(B,K)`, integer class IDs `(B,)` | categorical cross-entropy |
+| Multilabel | logits and binary floating targets `(B,K)` | independent binary cross-entropies |
+| Regression | prediction and target exactly matching shapes | MSE, MAE or Huber |
+| Counts | log-rate or positive rate; nonnegative count target | Poisson negative log likelihood |
+| Quantiles | one scalar per requested quantile | asymmetric pinball loss |
+| Heteroscedastic regression | mean and positive variance | Gaussian negative log likelihood |
 
-**Do not put a softmax before `CrossEntropyLoss`.** It applies `log_softmax`
-itself, and the fused version is both faster and numerically safe. Applying
-softmax twice degrades training silently — the model still learns, just worse,
-which is why the bug survives so long.
+Multiclass softmax forces probabilities to sum to one. That is correct for
+one-of-$K$ outcomes, not labels that can simultaneously be true. Independent
+sigmoids can express multiple positive labels but do not model their joint
+dependence automatically.
+
+For one binary observation, a stable loss is
+
+$$\ell(z,y)=\max(z,0)-yz+\log(1+e^{-|z|}),\qquad
+\frac{\partial\ell}{\partial z}=\sigma(z)-y.$$
+
+For categorical classification,
+
+$$\ell(z,y)=\log\sum_j e^{z_j}-z_y
+=m+\log\sum_j e^{z_j-m}-z_y,\quad m=\max_jz_j.$$
+
+Subtracting the maximum avoids overflow without changing probabilities.
+Logits $(1000,999)$ with target $0$ yield loss
+$\log(1+e^{-1})\approx0.3133$ and probabilities $(0.7311,0.2689)$.
+Directly exponentiating $1000$ would overflow common floating-point formats.
+
+Pass raw logits to PyTorch's fused losses. Feeding `softmax(z)` into
+`CrossEntropyLoss` treats probabilities as another set of logits and optimizes
+a different objective. Adding epsilon inside `-log(p)` also changes the loss;
+its exact derivative is no longer simply $p-y$.
+
+For Gaussian regression with mean $\mu$ and log-variance $s$:
+
+$$\ell=\tfrac12\left[s+(y-\mu)^2e^{-s}\right]+\text{constant}.$$
+
+The $s$ term penalizes arbitrarily inflated uncertainty. Monitor variance
+predictions nonetheless: outliers, misspecified likelihoods and numerical overflow
+can still destabilize training. For quantile $q$, pinball loss on residual
+$r=y-\hat y$ is $\max(qr,(q-1)r)$. Multiple quantile heads may cross unless the
+parameterization or objective prevents it. Output heads are statistical models,
+not interchangeable cosmetic activations.
 
 ## A worked forward pass
 
-A 2-input, 2-hidden, 1-output network. Weights:
+Use a two-input, two-hidden-unit, one-logit network:
 
-$$W^{(1)} = \begin{bmatrix}0.5 & -0.3\\ 0.8 & 0.2\end{bmatrix},\quad \mathbf{b}^{(1)}=\begin{bmatrix}0.1\\-0.2\end{bmatrix},\quad W^{(2)}=\begin{bmatrix}1.2 & -0.7\end{bmatrix},\quad b^{(2)}=0.3$$
+$$W_1=\begin{bmatrix}0.5&0.8\\-0.3&0.2\end{bmatrix},
+\quad b_1=(0.1,-0.2),\quad W_2=\begin{bmatrix}1.2\\-0.7\end{bmatrix},
+\quad b_2=0.3.$$
 
-Input $\mathbf{x} = [1.0,\; 2.0]^\top$, ReLU activation, sigmoid output.
+For $x=(1,2)$, the hidden scores are
+$z_{11}=0.5-0.6+0.1=0$ and $z_{12}=0.8+0.4-0.2=1$.
+ReLU gives $h=(0,1)$. The final logit is $-0.4$;
+$p=\sigma(-0.4)\approx0.401312$. For target $1$, loss is
+$\log(1+e^{0.4})\approx0.913015$ and the logit gradient is
+$g=p-1\approx-0.598688$.
 
-**Layer 1 pre-activation:**
+The output-weight gradient is $h^\top g=(0,-0.598688)^\top$, and the output-bias
+gradient is $g$. The hidden gradient is
+$gW_2^\top=(-0.718425,0.419082)$. Taking the usual ReLU derivative $0$ at its
+kink gives hidden-score gradient $(0,0.419082)$ and
 
-$$z_1 = 0.5(1.0) + (-0.3)(2.0) + 0.1 = 0.5 - 0.6 + 0.1 = 0.0$$
-$$z_2 = 0.8(1.0) + 0.2(2.0) - 0.2 = 0.8 + 0.4 - 0.2 = 1.0$$
+$$\nabla_{W_1}\ell=
+\begin{bmatrix}0&0.419082\\0&0.838163\end{bmatrix},
+\qquad \nabla_{b_1}\ell=(0,0.419082).$$
 
-**Activation:** $h_1 = \mathrm{ReLU}(0.0) = 0.0$, $h_2 = \mathrm{ReLU}(1.0) = 1.0$.
+The first unit receives no local gradient for this example, but another example
+can activate it. Decimal expressions intended to equal zero can also round to
+tiny nonzero values in a program; finite-difference checks should avoid kinks.
 
-Note that $h_1$ is exactly at ReLU's kink. Its gradient is undefined there;
-frameworks define $\mathrm{ReLU}'(0) = 0$ by convention, so no gradient flows
-back through that unit for this example.
-
-**Output:** $z^{(2)} = 1.2(0.0) + (-0.7)(1.0) + 0.3 = -0.4$, so
-$\hat{y} = \sigma(-0.4) = 0.401$.
-
-**Loss** with target $y=1$: $-\log(0.401) = 0.914$ nats.
-
-**Output gradient:** $\partial L/\partial z^{(2)} = \hat{y} - y = -0.599$.
-Predicted minus actual — the same clean form that appears for every canonical
-link/loss pairing.
+Gradient descent makes the negative second output weight less negative, raising
+the logit and probability of the positive target. A derivative should pass this
+directional sanity check as well as a shape check.
 
 ## Why depth
 
 ### Universal approximation
 
-A network with **one** hidden layer and enough units can approximate any
-continuous function on a compact set to arbitrary accuracy. So why go deeper?
+A standard approximation statement for suitable activations such as ReLU says
+that, on a compact subset of Euclidean space, a sufficiently wide one-hidden-layer
+network can approximate a continuous function uniformly to any prescribed
+positive tolerance. Width and parameters may depend on the function and
+tolerance. It does not say one fixed network represents every continuous
+function exactly.
 
-Because the theorem says nothing about *how many* units, *whether you can find*
-the weights, or *how much data* you need. It is an existence result, and the
-existence can require exponentially many units.
+The theorem supplies neither efficient training nor enough observations to
+identify the function. It says nothing about behavior outside the compact domain.
+A ReLU regressor extrapolates using the affine pieces established by its learned
+parameters; excellent interpolation does not imply plausible extrapolation.
 
-### Depth is exponentially more efficient
+### Depth can make composition efficient
 
-For functions with compositional structure, a deep network needs exponentially
-fewer parameters than a shallow one. The clean example: the parity function on
-$n$ bits requires $O(2^n)$ units in one hidden layer and $O(n)$ units in
-$O(\log n)$ layers.
+Boolean parity has an $O(n)$ shallow ReLU construction using hinges on the integer
+sum of $n$ bits, so it is not an unrestricted exponential shallow-network lower
+bound. Depth-separation results require a specific activation, distribution,
+approximation error and resource measure.
 
-The intuition is **reuse**. A deep network builds features hierarchically —
-edges, then textures, then parts, then objects — and each level reuses the level
-below. A shallow network must enumerate every combination separately.
+Consider the tent map on $[0,1]$:
 
-| Property | Shallow and wide | Deep and narrow |
-|---|---|---|
-| Universal approximator | yes | yes |
-| Parameters for compositional functions | exponential | polynomial |
-| Feature reuse | none | extensive |
-| Trainability | easy | needs residuals, normalisation, careful init |
-| Inductive bias | weak | hierarchical composition |
+$$t(x)=2\operatorname{ReLU}(x)-4\operatorname{ReLU}(x-1/2)
++2\operatorname{ReLU}(x-1).$$
 
-**Depth is a bet that the target function is compositional.** Images, language,
-audio, and code all are — they are built from parts that are built from parts.
-Tabular data mostly is not, which is a large part of why deep learning does not
-dominate there.
+It rises from zero to one and falls to zero. Repeated composition creates more
+oscillations using a small reusable block. A shallow univariate piecewise-linear
+representation needs additional breakpoints to reproduce them. This illustrates
+compositional efficiency without claiming every real task requires depth.
+For formal assumptions, see [Telgarsky's depth-separation result](https://proceedings.mlr.press/v49/telgarsky16.html).
+
+Depth also complicates optimization: gradients traverse products of Jacobians,
+intermediate distributions evolve, and many parameter settings represent the
+same function. Residuals and normalization address some problems, not all.
+Depth is a useful inductive bias when hierarchical composition matches the task,
+not a universal replacement for width or good features.
 
 ### What each layer learns
 
-In a trained vision network the progression is remarkably consistent and
-visualisable: early layers detect oriented edges and colour blobs (closely
-resembling Gabor filters, and closely resembling what mammalian V1 does), middle
-layers detect textures and simple shapes, later layers detect object parts, and
-final layers detect whole objects. Language models show an analogous
-progression: surface form, then syntax, then semantics, then task structure.
+Vision models often develop edge/color responses followed by more task-specific
+features. But individual units need not correspond to human concepts, and
+transformer layers do not follow a universal syntax-then-semantics curriculum.
+Representations can be distributed, redundant and dependent on the chosen basis.
 
-This hierarchy is **why transfer learning works**: the early layers learn
-features that are useful for almost any task in that modality, so only the later
-layers need retraining.
+Inspect them with held-out linear probes, nearest-neighbor examples and controlled
+perturbations. A successful probe establishes accessibility to that probe, not
+causal use by the original model. Transfer works when learned features align
+with the new task and distribution; early layers are not automatically reusable
+without adaptation. See [transfer learning](./transfer-learning-and-finetuning.md).
 
 ## Capacity, parameters, and compute
 
-For a network with layer widths $d_0, d_1, \dots, d_L$:
+For a fully connected network with biases:
 
-$$\text{parameters} = \sum_{\ell=1}^{L}\bigl(d_{\ell-1}d_\ell + d_\ell\bigr)$$
+$$P=\sum_{\ell=1}^L(d_{\ell-1}d_\ell+d_\ell).$$
 
-Worked: an MLP with widths $784 \to 512 \to 256 \to 10$ has
-$784{\cdot}512 + 512 = 401{,}920$, plus $512{\cdot}256+256 = 131{,}328$, plus
-$256{\cdot}10+10 = 2{,}570$ — **535,818 parameters** in total.
+Widths $784\to512\to256\to10$ give
+$401,920+131,328+2,570=535,818$ parameters. A dense multiply costs approximately
+$2Bd_{in}d_{out}$ FLOPs when multiplication and addition count separately.
+Biases, activations, reductions and memory movement add costs beyond that count.
 
-| Quantity | Rule of thumb |
-|---|---|
-| Forward FLOPs | $\approx 2 \times$ parameters, per example |
-| Backward FLOPs | $\approx 2\times$ forward |
-| Training FLOPs | $\approx 6 \times$ parameters $\times$ tokens/examples |
-| Activation memory | $\approx$ batch $\times$ sum of layer widths $\times$ bytes |
-| Optimiser memory (AdamW, mixed precision) | $\approx 18$ bytes per parameter |
+Backward typically needs products for input and weight gradients, making dense
+training roughly three forward-equivalent matrix multiplies. Frozen weights,
+unused input gradients, attention, sparse lookups and checkpoint recomputation
+change that ratio. The transformer shorthand $6ND$ is a rough dense-model
+training estimate, not a universal accuracy guarantee.
 
-The $6ND$ rule (6 × parameters × tokens) is the standard estimate for
-transformer pretraining compute and is accurate to within a factor of ~1.2.
+Itemize memory. FP32 weights, gradients and two Adam moments require roughly
+$4+4+8=16$ bytes per parameter before activations and workspaces. Low-precision
+weights plus master copies, quantized optimizer state and sharding produce
+different totals. Activations grow with batch size and layer widths; naive
+attention can additionally store quadratic sequence-by-sequence matrices.
+
+Parameter count is not statistical capacity by itself. Norms, margins,
+augmentation, optimization, data structure and sample size all matter.
+Interpolation and double descent do not make enlarging every overfitting network
+a reliable remedy. Compare held-out performance under a fixed selection protocol.
+
+### A supervised-learning workflow
+
+Split data before fitting scalers or selecting hyperparameters. Fit preprocessing
+only on training observations, use validation for architecture and checkpoint
+selection, and evaluate the chosen model once on the test set. For time series,
+users or repeated measurements, random rows can leak related observations; use
+the dependency-aware splits in [model evaluation](../ml/model-evaluation.md).
+
+Cross-entropy measures probability quality, confusion matrices expose class-wise
+failures, and calibration checks expose overconfidence. Majority-class accuracy
+can conceal zero minority recall. Selecting an operating threshold is a separate
+validation decision from fitting logits.
+
+### Symmetries and identifiability
+
+Permuting hidden units and applying the inverse permutation to the next weight
+matrix leaves the function unchanged. For ReLU, multiplying one unit's incoming
+weights and bias by $c>0$ and dividing its outgoing weights by $c$ also preserves
+the function, because $\operatorname{ReLU}(cz)=c\operatorname{ReLU}(z)$.
+Two trained models can therefore compute the same outputs while having different
+weight histograms. Comparing raw weights is not always a meaningful comparison
+of learned functions.
+
+These symmetries help explain why a Hessian can have small or zero curvature
+directions without the predictor being uninformative. Weight decay may prefer
+one factorization over another, and optimization may travel along nearly flat
+directions. Function-space measurements on representative inputs complement
+parameter-space diagnostics.
 
 ## Building one from scratch
 
-```python
+This complete experiment uses PyTorch for differentiation and optimization,
+then verifies a two-layer derivative against NumPy formulas. It trains an affine
+baseline and an MLP on the same two-moons data with training-only standardization
+and validation-selected checkpoints held in memory. It requires NumPy,
+scikit-learn and PyTorch; it downloads and writes nothing.
+
+```python runnable
+import copy
 import numpy as np
+import torch
+from torch import nn
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
-class MLP:
-    def __init__(self, sizes, seed=0):
-        rng = np.random.default_rng(seed)
-        # He initialisation — variance 2/fan_in, correct for ReLU
-        self.W = [rng.normal(0, np.sqrt(2 / a), (a, b)) for a, b in zip(sizes[:-1], sizes[1:])]
-        self.b = [np.zeros(b) for b in sizes[1:]]
+torch.set_num_threads(1)
+torch.manual_seed(17)
+np.random.seed(17)
+X, y = make_moons(n_samples=1000, noise=0.16, random_state=17)
+X_train, X_hold, y_train, y_hold = train_test_split(
+    X, y, test_size=0.4, stratify=y, random_state=18
+)
+X_val, X_test, y_val, y_test = train_test_split(
+    X_hold, y_hold, test_size=0.5, stratify=y_hold, random_state=19
+)
+scaler = StandardScaler().fit(X_train)
+def tensors(features, labels):
+    return (torch.tensor(scaler.transform(features), dtype=torch.float32),
+            torch.tensor(labels, dtype=torch.long))
+xt, yt = tensors(X_train, y_train)
+xv, yv = tensors(X_val, y_val)
+xs, ys = tensors(X_test, y_test)
+loss_fn = nn.CrossEntropyLoss()
 
-    def forward(self, X):
-        self.cache = [X]                       # activations, needed for the backward pass
-        for i, (W, b) in enumerate(zip(self.W, self.b)):
-            Z = self.cache[-1] @ W + b
-            A = np.maximum(Z, 0) if i < len(self.W) - 1 else Z   # linear output
-            self.cache.append(A)
-        return self.cache[-1]
+def train(hidden):
+    torch.manual_seed(20)
+    model = (nn.Sequential(nn.Linear(2, 24), nn.Tanh(), nn.Linear(24, 2))
+             if hidden else nn.Linear(2, 2))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02, weight_decay=0.001)
+    best_loss = float("inf")
+    best_state = copy.deepcopy(model.state_dict())
+    for epoch in range(300):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        loss = loss_fn(model(xt), yt)
+        assert torch.isfinite(loss)
+        loss.backward()
+        optimizer.step()
+        model.eval()
+        with torch.inference_mode():
+            val_loss = loss_fn(model(xv), yv).item()
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_state = copy.deepcopy(model.state_dict())
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.inference_mode():
+        test_loss = loss_fn(model(xs), ys).item()
+        accuracy = (model(xs).argmax(1) == ys).float().mean().item()
+    print("MLP" if hidden else "affine", "validation", round(best_loss, 4),
+          "test loss", round(test_loss, 4), "test accuracy", round(accuracy, 3))
+    return model, accuracy
 
-    def backward(self, dZ, lr):
-        for i in reversed(range(len(self.W))):
-            A_prev = self.cache[i]
-            dW = A_prev.T @ dZ / len(dZ)
-            db = dZ.mean(0)
-            if i > 0:
-                dA = dZ @ self.W[i].T
-                dZ = dA * (self.cache[i] > 0)   # ReLU derivative
-            self.W[i] -= lr * dW
-            self.b[i] -= lr * db
+linear, linear_accuracy = train(False)
+mlp, mlp_accuracy = train(True)
+assert mlp_accuracy > 0.92
+assert mlp_accuracy > linear_accuracy + 0.04
 
-def softmax_cross_entropy(logits, y):
-    z = logits - logits.max(1, keepdims=True)           # log-sum-exp stability
-    p = np.exp(z); p /= p.sum(1, keepdims=True)
-    loss = -np.log(p[np.arange(len(y)), y] + 1e-12).mean()
-    dZ = p.copy(); dZ[np.arange(len(y)), y] -= 1        # p - y, the clean gradient
-    return loss, dZ
+# Verify a smooth two-layer backward pass in float64.
+rng = np.random.default_rng(21)
+a = rng.normal(size=(5, 3))
+w1 = rng.normal(size=(3, 4)) * 0.2
+b1 = rng.normal(size=4) * 0.1
+w2 = rng.normal(size=(4, 2)) * 0.2
+b2 = np.zeros(2)
+labels = np.array([0, 1, 0, 1, 1])
+h = np.tanh(a @ w1 + b1)
+logits = h @ w2 + b2
+shifted = logits - logits.max(axis=1, keepdims=True)
+log_probs = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
+loss_np = -log_probs[np.arange(5), labels].mean()
+g = np.exp(log_probs)
+g[np.arange(5), labels] -= 1
+g /= len(labels)
+gw2, gb2 = h.T @ g, g.sum(axis=0)
+g1 = (g @ w2.T) * (1 - h * h)
+gw1, gb1 = a.T @ g1, g1.sum(axis=0)
+params = [torch.tensor(v, dtype=torch.float64, requires_grad=True)
+          for v in (w1, b1, w2, b2)]
+tw1, tb1, tw2, tb2 = params
+z = torch.tanh(torch.tensor(a) @ tw1 + tb1) @ tw2 + tb2
+loss_torch = nn.functional.cross_entropy(z, torch.tensor(labels))
+loss_torch.backward()
+np.testing.assert_allclose(loss_np, loss_torch.item(), rtol=1e-12)
+for parameter, expected in zip(params, (gw1, gb1, gw2, gb2)):
+    np.testing.assert_allclose(parameter.grad.numpy(), expected, atol=1e-12)
+print("All manual gradients match autograd.")
 ```
 
-Every non-obvious line is a decision explained elsewhere on this site: He
-initialisation for ReLU, caching activations because the backward pass needs
-them, the max-subtraction for numerical stability, and $\mathbf{p}-\mathbf{y}$
-as the fused softmax/cross-entropy gradient.
+Under this split and budget, the nonlinear model captures curvature the affine
+model cannot. Assertions catch a lost nonlinearity, broken label contract or
+incorrect reduction; they are not universal accuracy guarantees.
+
+Extend the comparison by varying width with a fixed budget and repeating several
+split seeds. Record training loss, validation loss and parameter count. A lower
+training loss with worse validation loss is not a win. A decision grid generated
+with `model(grid).argmax(1)` should show a line for the affine model and a curved
+boundary for the MLP. Visualization is useful, but an attractive boundary should
+not replace a numerical evaluation protocol.
 
 ## Choosing the architecture
 
-| Data | Architecture | Why |
-|---|---|---|
-| Tabular | boosted trees first; MLP if it plateaus | axis-aligned splits suit tabular structure |
-| Images | CNN or Vision Transformer | translation locality; ViTs need more data or pretraining |
-| Sequences, text | Transformer | parallel training, long-range dependencies |
-| Time series | boosted trees on lags first; then TCN or Transformer | often surprisingly hard to beat lag features |
-| Graphs | GNN | permutation invariance over neighbourhoods |
-| Sets | Deep Sets / attention pooling | permutation invariance |
-| Audio | Conv frontend + Transformer | local spectral structure, then long context |
-| Small data (< 10k rows) | classical ML, or fine-tune a pretrained model | deep nets from scratch need data |
+Convolutions share local feature detectors, recurrent networks share a state
+transition, transformers mix positions through content-dependent attention, and
+graph/set models can enforce permutation properties. An unconstrained MLP must
+learn those relationships from examples when they are not otherwise provided.
 
-Sizing an MLP, in practice: start with 2–3 hidden layers, width somewhere between
-the input and output dimensions (128–512 is a reasonable band), and scale up only
-after the model demonstrably underfits. Adding capacity to an overfitting model
-is the most common wasted effort in the field.
+| Data or constraint | Useful baseline | What to compare |
+|---|---|---|
+| Tabular | linear model and boosted trees | missing values, categories, calibration and MLP gains |
+| Images | pretrained CNN or vision transformer | resolution, augmentation, latency and transfer |
+| Text | pretrained transformer | tokenization, context and adaptation budget |
+| Time series | lag features, then TCN/recurrent/attention model | temporal leakage and horizon |
+| Graphs | graph-aware model | neighborhood assumptions and oversmoothing |
+| Sets | invariant or attention pooling | order invariance and cardinality |
+| Audio | convolutional/spectral frontend plus sequence model | resolution and causal latency |
+| Small labeled data | simple model or frozen features | uncertainty and overfitting |
+
+For an MLP, start with a few hidden layers, verify targets and preprocessing,
+and inspect learning curves before scaling. Widths $128$ to $512$ are candidate
+starting points, not a law relating hidden width to input/output dimensions.
+A bottleneck may remove relevant information; an extremely wide layer may spend
+memory without improving validation performance.
+
+## Representation, uncertainty, and deployment contracts
+
+### Inputs are part of the architecture
+
+A dense layer accepts numbers, but the meaning of those numbers determines its
+inductive bias. Encoding a nominal category as integers $0,1,2$ asserts an
+ordering and equal spacing that may not exist. A one-hot representation instead
+lets each category have its own coefficient; a learned embedding compresses that
+representation and shares statistical structure across categories. Unknown and
+missing categories need a policy established during training, not an arbitrary
+integer invented at deployment.
+
+Continuous units matter too. A weight of $0.01$ on a feature measured in dollars
+cannot be compared directly with a weight of $2$ on one measured in thousands of
+dollars. Standardization changes parameter geometry and optimizer conditioning
+without changing which affine functions can be represented when the transform
+is invertible. A zero-variance feature requires explicit handling rather than
+division by zero. Missing-value indicators can reveal informative missingness,
+but also expose shortcuts tied to a data-collection process that later changes.
+
+Interactions illustrate what a hidden layer contributes. An affine predictor
+$w_1x_1+w_2x_2+b$ has zero mixed second derivative. A task depending on the
+product $x_1x_2$ therefore needs engineered interaction features or a nonlinear
+representation. A network can approximate the product on a bounded domain,
+but providing known interactions can reduce data requirements. Learning features
+and designing features are complementary choices, not competing ideologies.
+
+### Compression and invariance can remove the target
+
+A bottleneck $h\in\mathbb R^r$ forces all later predictions to depend on $x$
+only through $h(x)$. If two inputs map to the same representation, no downstream
+head can distinguish them. That can be desirable when they differ only by
+nuisance variation, and fatal when they require different labels. Increasing
+the output head's width cannot recover information already discarded upstream.
+
+Consider classifying the presence of a local texture versus predicting its exact
+position. Pooling position-specific features may help the first task by reducing
+location sensitivity while making the second impossible without retaining
+position information. Likewise, a permutation-invariant set representation is
+appropriate for an unordered collection, but not for a sentence whose meaning
+depends on word order. Architecture should enforce only invariances justified
+by the task.
+
+This reasoning also sharpens transfer learning. A frozen representation can
+support a new linear head only if the needed distinctions remain accessible.
+A head failing to improve may reflect insufficient training, but it may also
+reflect a representation that intentionally removed the new target's signal.
+Compare a frozen probe with partial and full adaptation before concluding the
+dataset is inherently unlearnable.
+
+### Probabilities require distributional assumptions
+
+Cross-entropy encourages the conditional probabilities of the training
+distribution when the model class and optimization permit it. It does not make
+predictions calibrated under arbitrary distribution shift. A network can be
+confident on inputs far outside its training support because its logits continue
+to be computed there even when no relevant evidence was observed.
+
+Class weighting changes the effective objective. For binary positive weight
+$a$ and true conditional probability $\pi(x)$, minimizing weighted Bernoulli
+cross-entropy gives the idealized probability
+
+$$p^*(x)=\frac{a\pi(x)}{a\pi(x)+1-\pi(x)}.$$
+
+For $a=9$ and $\pi=0.1$, the optimum is $0.5$, not $0.1$. This is useful for
+altering an operating tradeoff, but the resulting raw sigmoid should not be
+interpreted as the unweighted population probability without adjustment and
+validation. Oversampling can produce a related prior change. Discrimination,
+calibration and cost-sensitive decisions are separate objectives.
+
+Deployment evaluation should therefore include the intended population, relevant
+subgroups, input-quality failures and plausible shifts. Confidence thresholds
+can support abstention, but an overconfident out-of-distribution predictor may
+not abstain when it should. Ensembles and other uncertainty methods are useful
+tools, not automatic guarantees against unknown inputs.
+
+### What must travel with the weights
+
+A usable predictor includes preprocessing statistics, feature order, category
+maps, tokenizer or image transforms where relevant, output-label ordering and
+the chosen operating threshold. A tensor checkpoint without those contracts can
+load successfully and still produce systematically wrong predictions. Verify
+training/evaluation mode and compare a fixed set of reference inputs across
+serialization or deployment conversions.
+
+Numerical agreement is task-dependent: a small logit perturbation near a tie can
+change an argmax, while larger changes far from a boundary may preserve labels.
+Check both prediction differences and the application's quality metric. That
+same distinction will recur in quantization, compilation and inference serving;
+the mathematical network is only one component of the complete prediction system.
 
 ## Common misconceptions
 
-| Claim | Correction |
+| Claim | More precise statement |
 |---|---|
-| "Neural networks work like the brain" | the analogy stops at the word "neuron"; biological neurons spike, are stochastic, and do not backpropagate |
-| "More layers always helps" | without residuals and normalisation, deep plain networks train *worse* — that is the degradation problem ResNets solved |
-| "Universal approximation means depth is unnecessary" | it says nothing about the number of units, trainability, or sample complexity |
-| "Neural networks are black boxes by necessity" | interpretability techniques exist; and on tabular data an interpretable model is often as accurate |
-| "You need a GPU for everything" | a 500k-parameter MLP trains on a laptop in seconds |
-| "Deep learning beats trees on tabular data" | it usually does not, and the reasons are well documented |
-| "Bias terms are unimportant" | without them, every hyperplane must pass through the origin |
-| "More parameters means overfitting" | double descent; implicit regularisation matters more than raw count |
+| More layers always help | Extra expressivity may be unnecessary or hard to optimize |
+| Approximation guarantees learning | It is an existence statement under assumptions |
+| More parameters necessarily overfit | Data and training matter, not count alone |
+| Hidden units are individually meaningful | Representations can be distributed and basis-dependent |
+| Good accuracy implies good probabilities | Calibration and operating thresholds need separate checks |
+| A GPU is required | Small experiments run comfortably on CPUs |
+| Networks necessarily beat trees on tables | Compare strong baselines under matched splits and budgets |
+| Biases do not matter | They shift thresholds and priors; they can also overfit |
+
+Before blaming architecture, verify label dtype, loss reduction, train/eval mode,
+feature scaling and actual parameter updates. Try fitting a small consistent
+batch without regularization. Failure narrows the investigation, but can also
+reflect contradictory labels, inadequate capacity or poor optimization rather
+than an autograd defect.
 
 ## Self-check
 
-1. Prove that a network without activations is equivalent to a single linear
-   layer.
-2. Construct a two-neuron hidden layer that solves XOR, and verify all four
-   inputs.
-3. Why is universal approximation not an argument against depth?
-4. Count the parameters in a $100 \to 64 \to 64 \to 3$ MLP.
-5. Why must the bias gradient be summed over the batch?
-6. Your multilabel classifier uses softmax and never predicts two labels. Explain.
-7. What does a hidden layer *do*, in one sentence?
+1. **Collapse two affine layers.** The effective weight is $W_1W_2$ and bias is
+   $b_1^\top W_2+b_2^\top$. If intermediate width is $r$, the effective matrix
+   has rank at most $r$, even though the expression remains affine.
+2. **Verify XOR.** At sums $0,1,2$, hidden pairs are $(0,0),(1,0),(2,1)$,
+   producing $0,1,0$. Both sum-one inputs receive the positive representation.
+3. **What does approximation fail to guarantee?** Finding parameters, sufficient
+   samples, efficient width, optimization stability and extrapolation remain
+   unresolved. Approximation on a compact domain is not arbitrary-input correctness.
+4. **Count a $100\to64\to64\to3$ MLP.** Layer counts are $6464$, $4160$ and
+   $195$, totaling $10,819$. Batch size changes compute, not parameter count.
+5. **Why sum a bias gradient?** Every row uses the same $b_k$, giving
+   $\partial L/\partial b_k=\sum_i\partial L/\partial Y_{ik}$. Mean reduction
+   contributes one $1/B$, not one at every layer.
+6. **Why not softmax for simultaneous labels?** It allocates one unit of mass
+   among mutually exclusive outcomes. Independent sigmoids can both approach one,
+   describing marginal events rather than a single categorical outcome.
+7. **What does a hidden layer do?** It learns coordinates useful to subsequent
+   computation. Separability, compression and nuisance removal are possible
+   outcomes, not guarantees from merely adding a layer.
+8. **Does multiplying binary logits by ten preserve quality?** Zero-threshold
+   decisions stay fixed, but probabilities become more extreme. Cross-entropy
+   rises sharply for confident mistakes; calibration may improve or worsen.
+9. **Why can training improve while validation worsens?** The model can fit
+   sample-specific variation or shortcuts. Check splits and compare regularization
+   under validation, without selecting repeatedly on test performance.
+10. **Where is mean reduction applied in the experiment?** The categorical
+    outgoing gradient divides by five once. Matrix products and bias sums then
+    propagate derivatives of that already normalized scalar loss.
 
 ## Where to go next
 
-- [Backpropagation & Autodiff](./backpropagation-and-autodiff.md) — how the
-  gradients in that code are computed.
-- [Activations & Initialization](./activations-and-initialization.md) — choosing
-  $\phi$ and the starting weights.
-- [Optimization & Training](./optimization-and-training.md) — actually making it
-  converge.
+- [Backpropagation and autodiff](./backpropagation-and-autodiff.md): local
+  derivative rules and independent numerical checks.
+- [Activations and initialization](./activations-and-initialization.md): signal
+  and gradient scales at the start of training.
+- [Optimization and training](./optimization-and-training.md): correct updates,
+  accumulation, validation and checkpoint semantics.
+- [Bias, variance and generalization](../ml/bias-variance-and-generalization.md):
+  why fitting observations is not enough.
+
+Primary reading: [Deep Learning, chapter 6](https://www.deeplearningbook.org/contents/mlp.html),
+[depth separation](https://proceedings.mlr.press/v49/telgarsky16.html), and
+[PyTorch autograd mechanics](https://docs.pytorch.org/docs/stable/notes/autograd.html).
+The experiment runs with PyTorch 2.8 and requires no pretrained checkpoint.

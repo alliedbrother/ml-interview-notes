@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Prefix caching by hash (vLLM) — The Inference Engineering Book</title>
+<title>Prefix caching by hash (vLLM) — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 2 · Memory and the KV cache · 02-03</div>
 <h1>Prefix caching by hash (vLLM)</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/kv_cache_utils.py</code></li><li><code>vllm/v1/core/block_pool.py</code></li><li><code>benchmarks/benchmark_prefix_caching.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/kv_cache_utils.py</code></li><li><code>vllm/v1/core/block_pool.py</code></li><li><code>benchmarks/benchmark_prefix_caching.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Every request to your chat endpoint carries the same 2,000-token system prompt.
 On an H100 running Llama-3-8B that is 33.2 TFLOP of prefill per request that the GPU has already
@@ -695,7 +695,7 @@ Same name, different contents — the engine would serve one request's KV to ano
 
 <p>So a block's name is a hash of <em>its parent's name</em> together with its own token ids. That
 single recursion makes the name a fingerprint of the entire prefix ending at that block boundary.
-Two blocks share a name if and only if every token before them matched.</p>
+Matching prefixes and all cache-identity inputs produce the same hash in the same namespace; equal hashes do not logically prove equal inputs because collisions are possible.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 — the hash chain.</b> Two requests share a 32-token prefix,
@@ -1063,8 +1063,7 @@ id) to a block:</p>
         return cached_blocks</code></pre>
 </div>
 
-<p>And the prefix scan is a single loop that stops at the first miss — which is <em>sound</em>
-precisely because of the chain:</p>
+<p>The prefix scan stops at the first missing physical block because this API returns a contiguous reusable prefix. A token or identity change changes all descendant hashes. Physical eviction is different: it removes an index entry, not the deterministic hashes of later blocks, which may remain stored but cannot fill the ancestor hole. The source comment below compresses these two different reasons for a miss.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1090,10 +1089,9 @@ $O(S/B)$ expected-$O(1)$ dict probes to look up, terminating at the first miss. 
 per newly full block. There is no search, no comparison against other stored sequences, and no
 structure larger than a dict. For Llama-3-8B on an 80&nbsp;GB H100, whose KV pool is 52.32&nbsp;GiB
 (<a href="02-01-kv-cache-sizing.html">§2.1</a>, derived), the map holds at most
-$52.32\,\text{GiB} / 2\,\text{MiB} = 26{,}785$ entries — at 36 bytes a key, under a megabyte of
-index guarding fifty gigabytes of cache.</p>
+$52.32\,\text{GiB} / 2\,\text{MiB} = 26{,}785$ entries — at 36 raw key bytes per entry, under a megabyte of key payload. Python objects, dictionaries, reference counts, and allocator overhead make the full index larger.</p>
 
-<h3>Eviction, and why preemption is nearly free</h3>
+<h3>Eviction and the conditions for inexpensive resumption</h3>
 
 <p>A cached block is not pinned. It sits in the free queue as an eviction candidate with
 <code>ref_cnt == 0</code>, still carrying its hash and still findable, and loses that hash only at
@@ -1248,8 +1246,8 @@ for people first reading the hit-rate metric: a perfectly cached prompt reports 
         <tr><td>Any token differs at index $j$</td><td>All blocks from $\lfloor j/B \rfloor$ onward miss</td><td>the chain, <code>hash_block_tokens</code></td></tr>
         <tr><td>Different LoRA adapter</td><td>All blocks miss</td><td><code>_gen_lora_extra_hash_keys</code></td></tr>
         <tr><td>Different <code>cache_salt</code></td><td>All blocks miss (first block keyed, chain propagates)</td><td><code>generate_block_hash_extra_keys</code></td></tr>
-        <tr><td>Different image, same placeholder tokens</td><td>Blocks covering the placeholder miss</td><td><code>_gen_mm_extra_hash_keys</code></td></tr>
-        <tr><td>Block evicted and reallocated</td><td>Hash removed, that block and its chain descendants miss</td><td><code>_maybe_evict_cached_block</code></td></tr>
+        <tr><td>Different image, same placeholder tokens</td><td>The block containing the changed multimodal identity and all subsequent chained blocks miss</td><td><code>_gen_mm_extra_hash_keys</code></td></tr>
+        <tr><td>Block evicted and reallocated</td><td>Evicted block loses its index entry; descendant hashes may remain, but longest-contiguous-prefix lookup stops at the missing ancestor</td><td><code>_maybe_evict_cached_block</code></td></tr>
         <tr><td><code>prompt_logprobs</code> set on the request</td><td>Lookup skipped entirely for this request</td><td><code>SamplingParams</code>, <code>skip_reading_prefix_cache</code></td></tr>
         <tr><td><code>reset_prefix_cache()</code> (RLHF weight update)</td><td>Whole map cleared, every hash reset</td><td><code>BlockPool.reset_prefix_cache</code></td></tr>
       </tbody>
@@ -1316,9 +1314,7 @@ negligible by accident, but no longer collision-<em>resistant</em> against an ad
 inputs, which is exactly why the non-cryptographic path keeps a random per-process
 <code>NONE_HASH</code> seed (issue #12621).</p>
 
-<p>The mitigation for both is <code>cache_salt</code>, added in PR
-<a href="https://github.com/vllm-project/vllm/pull/17045">#17045</a>. Per-request, first block only,
-propagated by the chain:</p>
+<p>Cache namespaces and collision resistance address different risks. Assign cache_salt at a trusted authenticated gateway for tenant/user isolation; a caller-controlled salt does not enforce an authorization boundary. Use a suitable cryptographic hash where adversarial collisions matter. Salting alone does not turn a non-cryptographic hash into a collision-resistant one.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1429,8 +1425,7 @@ structure does and does not give you.</p>
 <p>The last two rows are the substantive ones. A tree knows that node $X$ is the parent of node $Y$,
 so it can evict leaves before internal nodes and rank a waiting request by match depth without
 touching the block pool. A hash map knows neither. What it buys instead is a lookup with no
-allocations, no rebalancing, no locks around a mutable structure, and a constant small enough that
-the prefix-cache lookup never shows up in a scheduler profile. Which side of that trade is correct
+allocations, no rebalancing, no locks around a mutable structure, and low expected probe cost. Hash construction, CPU contention, and long requests can still make lookup measurable; profile rather than assume. Which side of that trade is correct
 depends on your workload — the argument <a href="02-04-radixattention.html">§2.4</a> takes up.</p>
 
 <div class="callout callout--note">
@@ -1472,8 +1467,8 @@ real implementation, not a shim) replicates each sampled prompt <code>--repeat-c
 
 <p>Three things to try, in order. Serve with caching on, scrape <code>/metrics</code>, and confirm
 the hits/queries ratio matches the shared fraction of your prompt. Then add
-<code>"cache_salt": "<em>random-string</em>"</code> to the request body and watch the hit rate
-collapse to zero — the isolation mechanism working. Then prepend a single per-request token and
+a fresh unique <code>cache_salt</code> value to every request body and watch the hit rate
+collapse to zero — the isolation mechanism working. Reusing one fixed new salt gives only an initial cold miss and allows later reuse. Then prepend a single per-request token and
 confirm the hit rate collapses <em>identically</em>. Confusing those two failure modes in
 production costs hours. <a href="../LABS.html">Lab 04</a> does all three against both engines.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
@@ -1542,7 +1537,7 @@ production costs hours. <a href="../LABS.html">Lab 04</a> does all three against
 <section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>The parent-hash term is not an optimisation, it is the correctness condition. $h_i = H(h_{i-1}, t_i, e_i)$ makes a block's name a fingerprint of its entire prefix; drop it and identical 16-token runs after different contexts become interchangeable, which in a chat workload happens within seconds.</li>
   <li>The extra-keys tuple — LoRA name, multimodal identifier plus in-block offset, <code>cache_salt</code>, prompt-embedding digest — is the complete list of things that change KV without changing token ids. It is the soundness boundary; anything added to the engine that alters K/V must join it.</li>
-  <li>Reuse is $B\lfloor m/B\rfloor$ tokens for a token-level match of $m$. Losing up to 15 tokens is irrelevant; losing alignment is fatal. A one-token prepend takes a 1,999-token match to a zero-token hit, and the metric looks identical to a salt collision.</li>
+  <li>Reuse is $B\lfloor m/B\rfloor$ tokens for a token-level match of $m$. Losing up to 15 tokens is irrelevant; losing alignment is fatal. A one-token prepend takes a 1,999-token match to a zero-token hit, and the metric can look like a namespace change from a fresh salt, not a hash collision.</li>
   <li>Cached blocks are eviction candidates that keep their hash until the moment they are handed out. That is why a preemption victim resumes with a near-total hit — and why <code>preempted_hits / preempted_queries</code> is the metric that tells you whether recompute is still cheaper than swap.</li>
   <li>A fully cached prompt reports a hit of $B\lfloor (S-1)/B \rfloor$, not $S$: the last token must be recomputed for logits, and block alignment rounds that up to a whole block.</li>
   <li>Cross-request prefix caching leaks timing to anyone who can measure TTFT. <code>cache_salt</code> trades reuse for isolation at whatever granularity you choose; there is no setting that gives you both.</li>
@@ -1558,7 +1553,7 @@ production costs hours. <a href="../LABS.html">Lab 04</a> does all three against
 </ul></div></section>
 <div class="pager"><a href="02-02-pagedattention.html"><div class="pager__k">← Previous</div><div class="pager__t">PagedAttention: fragmentation, blocks, block tables</div></a><a class="pager__next" href="02-04-radixattention.html"><div class="pager__k">Next →</div><div class="pager__t">RadixAttention: the tree (SGLang)</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

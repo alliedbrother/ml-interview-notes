@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MLA in full detail — The Inference Engineering Book</title>
+<title>MLA in full detail — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 7 · Architectures that change the inference story · 07-02</div>
 <h1>MLA in full detail</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mla/</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mla/</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">MLA stores 68.6 KiB per token where Llama-3-70B stores 320 KiB. Then, if you implement it
 the obvious way, you rebuild 4.8 MiB of keys and values out of that latent on every single decode step and
@@ -634,7 +634,7 @@ piece of algebra in production inference. This chapter goes through it slowly, w
 <div class="kpis">
   <div class="kpi kpi--hero"><div class="kpi__n">71&times;</div><div class="kpi__l">Bytes the naive decompression materialises per context token vs. the latent it replaces (derived)</div></div>
   <div class="kpi"><div class="kpi__n">3.4&times;</div><div class="kpi__l">FLOPs the absorbed attention core costs vs. the un-absorbed one (derived)</div></div>
-  <div class="kpi"><div class="kpi__n">171</div><div class="kpi__l">Query-block length past which absorption cannot win on FLOPs at any context (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">171</div><div class="kpi__l">query threshold in the rectangular full-pair FLOP model</div></div>
 </div></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is a comment vLLM leaves in the middle of its MLA metadata builder, explaining why the
 chunked-prefill workspace is capped:</p>
@@ -687,11 +687,11 @@ small position-carrying slice of width $d_{\text{rope}}$ that every head also sh
 values do not exist in HBM. They exist only as a function of $c_t$ and two weight matrices, $W_{UK}$ and
 $W_{UV}$, that are the same for every token and every step.</p>
 
-<p>That last clause is the whole game. Because $W_{UK}$ and $W_{UV}$ are token-independent, they can be
-moved out of the per-token computation and pre-multiplied into the query and output projections once, at
-load time. The attention kernel then never sees a per-head key — it attends the transformed query directly
-against the cached latent. vLLM's own file header calls these the two "approaches" and names them after
-what they are cheap in:</p>
+<p>Associativity moves key expansion onto the query side and value expansion after attention.
+That does not require pre-multiplying all query/output weights once at loading. The cited
+implementation reshapes weights at load time, then applies query and output batch matrix
+multiplications at runtime; it avoids materializing a potentially huge combined output matrix.
+The attention kernel consumes the latent cache, with two cost-oriented formulations:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -849,7 +849,9 @@ are mutually exclusive, and it is worth deriving that rather than asserting it.<
 <p>Write the un-absorbed score between query token $i$ and key token $j$, ignoring the softmax scale. With
 no RoPE anywhere:</p>
 
-<div class="math-display">$$s_{ij} = q_i^{\top} k_j = q_i^{\top} \left( W_{UK}\, c_j \right) = \left( W_{UK}^{\top} q_i \right)^{\top} c_j$$</div>
+<div class="math-display">$$s_{ij}=q_i^\top W_{UK}c_j=(W_{UK}^\top q_i)^\top c_j.$$</div>
+<p>Here column-vector notation defines $W_{UK}\in\mathbb{R}^{d_{\mathrm{nope}}\times r}$.
+Code may store its transpose for row-vector multiplication; keep that convention explicit.</p>
 
 <p>The right-hand form never builds $k_j$. Now suppose RoPE were applied to the reconstructed key, as it is
 in an ordinary transformer. RoPE is a block-diagonal rotation $R_p$ that depends on the position $p$, and it
@@ -1123,9 +1125,9 @@ over the full latent rank. This is the price of the memory saving, and it is why
 <a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">&sect;3.5</a>'s intensity number is 242 rather
 than something GQA-like: the numerator grew while the denominator shrank.</p>
 
-<p><b>Three: at decode, absorption wins from context length 2.</b> Setting naive $= $ absorbed and solving
-for $S$ with one query token gives $S^{*} \approx 1.006$. There is no decode regime in which decompressing
-is right.</p>
+<p><b>Three: the FLOP-only comparison favors absorption from context length 2</b> for one
+query under these dimensions. This is not a proof of faster execution for every decode backend:
+launches, occupancy, available kernels and existing expanded-cache reuse can change latency.</p>
 
 <p>To put the 3.4&times; in wall-clock terms: at 4,096 tokens of context, TP=1, batch 1, the absorbed
 attention core over all 61 layers is 69.6 GFLOP, which is 70 &micro;s at the H100's 989.4 TFLOP/s, against
@@ -1137,7 +1139,7 @@ intensity decay from &sect;3.5, seen from the kernel's side.</p></div></section>
 <section class="sec" id="prefill-vs-decode" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Why prefill wants the other formulation</h2></div><div class="sec__body"><p>Everything above assumed one query token. Change that and the accounting inverts, because the naive
 path's up-projection is paid <em>per context token</em> and then shared by every query in the block, while
 the absorbed path's folds are paid <em>per query token</em>. Let $Q$ be the query-block length and $S$ the
-context. Absorption is cheaper when</p>
+context. For a rectangular block attending all S keys, the FLOP comparison is:</p>
 
 <div class="math-display">$$\underbrace{2h r_{kv}(d_{\text{nope}}+d_v)}_{\text{folds}} \cdot Q \;+\; 278{,}528\,QS \;<\; \underbrace{2 r_{kv} h (d_{\text{nope}}+d_v)}_{\text{up-projection}} \cdot S \;+\; 81{,}920\,QS$$</div>
 
@@ -1145,9 +1147,9 @@ context. Absorption is cheaper when</p>
 $33{,}554{,}432 \cdot (Q/S) + 196{,}608\,Q < 33{,}554{,}432$. Two consequences:</p>
 
 <div class="cards cards--3">
-  <div class="ve-card ve-card--hero"><span class="ve-card__k">ceiling</span><h4>Q &ge; 171 never wins</h4><p>The second term alone exceeds the budget once $Q > 33{,}554{,}432 / 196{,}608 = 170.7$. From a 171-token query block upwards, absorption loses on FLOPs at <em>any</em> context length.</p></div>
-  <div class="ve-card"><span class="ve-card__k">crossover</span><h4>Q = 128 needs S &gt; 512</h4><p>Solving for the minimum context: $Q=8 \Rightarrow S^{*}=8.4$, $Q=32 \Rightarrow S^{*}=39$, $Q=64 \Rightarrow S^{*}=102$, $Q=128 \Rightarrow S^{*}=512$.</p></div>
-  <div class="ve-card ve-card--recessed"><span class="ve-card__k">degenerate</span><h4>Q = S never wins</h4><p>A fresh prefill has $Q=S$: the two constant terms cancel exactly and the comparison reduces to $278{,}528 &lt; 81{,}920$, which is false. Absorption is <em>always</em> wrong for a cold prefill.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">rectangular model</span><h4>Q &ge; 171 loses on FLOPs</h4><p>Under the full Q*S pair count, the extra attention term exceeds the possible projection saving. This is not a universal causal-prefill latency threshold.</p></div>
+  <div class="ve-card"><span class="ve-card__k">crossover</span><h4>Q = 128 needs S &gt; 512</h4><p>In that rectangular model, Q=8,32,64,128 give context thresholds about 8.4,39,102,512.</p></div>
+  <div class="ve-card ve-card--recessed"><span class="ve-card__k">cold causal prefill</span><h4>Count valid pairs</h4><p>For a prefix P and Q new causal queries, valid pairs are P*Q + Q*(Q+1)/2. Cold prefill has P=0. Equal per-token projection costs cancel, leaving a more expensive absorbed attention core, but total FLOPs are not multiplied by exactly 3.4 because projections remain.</p></div>
 </div>
 
 <p>That is the derivation behind vLLM's "compute friendly for prefill, data-movement friendly for decode",
@@ -1276,9 +1278,10 @@ global:</p>
     # ^ TODO(matt): tune this</code></pre>
 </div>
 
-<p>Compare those to the derivation. FlashMLA's 128 sits just under the FLOP ceiling of 171;
+<p>Compare those to the rectangular-model derivation. FlashMLA's 128 sits under its threshold of 171;
 FlashAttnMLA's 512 sits well above it, meaning vLLM routes query blocks through the absorbed kernel that a
-pure FLOP count says should use MHA. That is not obviously wrong — the FLOP model ignores the 71&times;
+full-pair FLOP model favors MHA for. Actual causal pair counts and prefix reuse differ.
+That is not obviously wrong — the simple model also ignores the 71&times;
 traffic the naive path materialises, the chunked-context workspace it needs, and the merge-and-rescale pass
 that stitches chunks back together. It does mean the thresholds are empirical, which the <code>TODO(matt):
 tune this</code> and the header's "this is something we should probably tune" both concede. Only a
@@ -1518,15 +1521,44 @@ cache. Two caches, one indexed by the other; the absorbed-weight machinery is un
 </div></div></section>
 <section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">trap 1</span><h4>Benchmarking MLA at TP=1</h4><p>Per-rank intensity is 242 at TP=1 and 30 at TP=8 (<a href="../03-attention-kernels/03-05-mha-mqa-gqa-mla.html">&sect;3.5</a>, derived), because the query heads shard and the replicated latent does not. A backend that looked compute-bound in your single-GPU profile is 8&times; further from the ridge in production, reading the same bytes. The one escape hatch is decode context parallelism, which does shard the latent along the sequence axis, and it is off by default in both engines &mdash; <code>decode_context_parallel_size = 1</code> (<code>vllm/config/parallel.py:L342</code>) and <code>dcp_size = 1</code> (<code>python/sglang/srt/server_args.py:L1033-L1040</code>). See <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>.</p></div>
-  <div class="ve-card"><span class="ve-card__k">trap 2</span><h4>Prefill OOM at long context</h4><p>The MHA path materialises 80 KiB of K/V per context token per layer. vLLM caps the gathered context at 64k rows and merges chunks with <code>merge_attn_states</code>; if you disable chunked prefix caching on SGLang (<code>--disable-chunked-prefix-cache</code>) you push more traffic through the one-shot path instead. Neither engine will let an unchunked 128k prefill through.</p></div>
+  <div class="ve-card"><span class="ve-card__k">trap 2</span><h4>Prefill workspace is a separate budget</h4><p>Expanded K/V needs 80 KiB per context token per layer under these shapes.
+Chunking and dispatch control peak workspace. Disabling chunked prefix caching does not
+universally force a one-shot prefill or prove either engine rejects an unchunked 128k input;
+trace scheduler chunking, backend dispatch and workspace limits separately.</p></div>
   <div class="ve-card"><span class="ve-card__k">trap 3</span><h4>Sharding kv_b_proj wrong</h4><p>The folded weights come from <code>kv_b_proj</code>, which is a <code>ColumnParallelLinear</code> over $h \cdot (d_{\text{nope}} + d_v)$. Get the shard wrong and you hit vLLM's assert at <code>vllm/model_executor/layers/attention/mla_attention.py:L1091-L1100</code>, printing <code>kv_b_proj_weight.shape=</code> alongside <code>self.kv_lora_rank=</code>, <code>self.num_heads=</code>, <code>self.qk_nope_head_dim=</code> and <code>self.v_head_dim=</code> — read those four and the arithmetic tells you which one is off.</p></div>
   <div class="ve-card"><span class="ve-card__k">trap 4</span><h4>Analytic FLOP models that assume MHA</h4><p>vLLM's own performance model charges decode attention at <code>qk_head_dim</code> and <code>v_head_dim</code>: <code>flops["attn_qk"] = 2 * q * TC * qk_head_dim * L</code> (<code>vllm/v1/metrics/perf.py:L677-L678</code>). That is the 192/128 un-absorbed geometry. Under absorption the real widths are 576/512, so the model under-counts decode attention by 3.4&times;. It also bills a <code>kv_b_proj</code> the absorbed path never calls &mdash; but that term is <em>numerically</em> right, because the q-fold and v-fold <code>bmm</code>s cost $2h\,r_{kv}(d_{\text{nope}}+d_v)$, identically the <code>kv_b_proj</code> product (33.55 MFLOP/layer/token for DeepSeek-V3). So it is a mislabel, not a double-count: <strong>the whole error is the attention core &mdash; one term, one 3.4&times; constant.</strong> <a href="../10-benchmarking/10-05-profiling-and-capacity.html">&sect;10.5</a> quantifies the impact by context length and notes the decode FLOP path is untested. Fine as a projection model; wrong as a decode roofline.</p></div>
 </div>
 
-<p>One more, and it is the most common: applying the GQA cell formula to MLA. As
-<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> found, $2 L h_{kv} d_h b$ gives
-4.77 MiB per token instead of 68.6 KiB. The 71&times; error is not a coincidence — it is exactly the
-decompression ratio from Figure 2. You are computing the size of the thing MLA refuses to store.</p></div></section>
+<p>Do not apply an equal-width GQA cache formula to this MLA geometry.
+The expanded per-token cache is L*h*(d_nope+d_rope+d_v)*b = 61*128*320*2 bytes,
+or 4.765625 MiB. The latent cache is 61*576*2 = 70,272 bytes (68.625 KiB).
+Their ratio is 71.11. The asymmetric 192-wide keys and 128-wide values must both be counted;
+<code>2*L*h*d_h*b</code> with one head width cannot directly produce that comparison.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Expanded and absorbed MLA agree numerically</h2></div><div class="sec__body">
+<p>This is a single-head, row-vector reference with a separate already-rotated positional slice. Expanded and absorbed scores, attention probabilities and output must agree in float64. Keep the original unabsorbed QK scale: replacing it with the latent width's square root changes the function. Multi-head execution repeats the fold per head and applies the output projection afterward; finite-precision paths need tolerance-based validation.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+rng = np.random.default_rng(42)
+queries, context, rank, key_dim, value_dim, rope_dim = 3, 5, 4, 2, 3, 2
+c = rng.normal(size=(context, rank))
+q = rng.normal(size=(queries, key_dim))
+q_rope = rng.normal(size=(queries, rope_dim))
+k_rope = rng.normal(size=(context, rope_dim))
+uk = rng.normal(size=(rank, key_dim))
+uv = rng.normal(size=(rank, value_dim))
+scale = (key_dim + rope_dim) ** -0.5
+expanded_scores = (q @ (c @ uk).T + q_rope @ k_rope.T) * scale
+absorbed_scores = ((q @ uk.T) @ c.T + q_rope @ k_rope.T) * scale
+np.testing.assert_allclose(absorbed_scores, expanded_scores, atol=1e-12)
+def softmax(a):
+    e = np.exp(a - a.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+a = softmax(expanded_scores)
+np.testing.assert_allclose(a @ (c @ uv), (a @ c) @ uv, atol=1e-12)
+assert 3*5 + 3*4//2 == 21  # prefix P=5, Q=3 causal pairs
+print("MLA score/output parity and causal-pair accounting pass.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Read the two formulations against each other, in the file that defines both:</p>
 
 <div class="code-file">
@@ -1540,9 +1572,10 @@ grep -n "reorder_batch_threshold" $V/vllm/v1/attention/backends/mla/*.py    # ev
 grep -rn "use_mla" $V/vllm/platforms/cuda.py                                # the separate ladder</code></pre>
 </div>
 
-<p>Then flip the dispatch and watch the shapes change. On SGLang, the absorbed path is forced by setting the
-prefix threshold to zero, exactly as its own DeepGEMM warm-up script does
-(<code>python/sglang/compile_deep_gemm.py:L37</code>):</p>
+<p>Then inspect the dispatch predicate before flipping a threshold. The cited prefix condition
+is <code>prefix_len &gt;= (threshold or 0)</code>, among other eligibility checks. Setting the
+threshold to zero makes that condition easier to satisfy for the chunked/MHA path; it does
+<strong>not</strong> force absorption. Profile the resolved branch under both settings:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1551,8 +1584,8 @@ prefix threshold to zero, exactly as its own DeepGEMM warm-up script does
   </div>
   <pre class="code-block code-block--wrap"><code>SGLANG_CHUNKED_PREFIX_CACHE_THRESHOLD=0 python -m sglang.launch_server \
   --model-path deepseek-ai/DeepSeek-V3 --tp 8 --attention-backend flashmla
-# vs. the default 8192; profile a long-prefix extend under both and compare the
-# attention kernel names in the trace (MQA 576-wide vs MHA 192-wide).</code></pre>
+# Compare the default 8192 only after checking the actual eligible dispatch branch.
+# Record kernel shapes; threshold zero does not force absorbed MQA.</code></pre>
 </div>
 
 <p>On vLLM, the equivalent knob is the backend choice, because the threshold is a backend constant:
@@ -1629,12 +1662,12 @@ same cache, three different definitions of "decode".</p></div></section>
   <li>The real price of MLA is the attention core, not the folds. Per-head key width goes 192 &rarr; 576 and
   value width 128 &rarr; 512, a flat <b>3.4&times;</b> more FLOPs per context token (derived). That is what
   buys the 71&times; reduction in bytes touched.</li>
-  <li>RoPE cannot be absorbed because $q_i^{\top} R_{j-i} W_{UK} c_j$ needs a different folded matrix for
-  every relative distance. The 64-wide decoupled slice is the minimum bribe that keeps the other 512
-  dimensions position-free; it is the reason the cache cell is 576 and not 512.</li>
-  <li>Prefill must not absorb. With $Q$ query tokens the folds are paid $Q$ times while the up-projection is
-  paid once and shared, so absorption cannot win at any context once $Q \ge 171$ (derived), and a cold prefill
-  where $Q = S$ loses by exactly the 3.4&times; core ratio.</li>
+  <li>The conventional rotated expanded-key expression cannot use one position-independent
+  absorbed matrix for all distances. A separate RoPE slice preserves position-free latent
+  content; its width 64 is a checkpoint choice, not a proven minimum.</li>
+  <li>Use actual query-key pair counts when comparing prefill formulations. The 171-query
+  threshold belongs to the rectangular FLOP model. Cold causal prefill has triangular pairs;
+  its total cost ratio includes projections and is not exactly the 3.4 attention-core ratio.</li>
   <li>"Decode" is a per-backend constant in vLLM — 1 for <code>TRITON_MLA</code>, 128 for
   <code>FLASHMLA</code>, 512 for <code>FLASH_ATTN_MLA</code> — and a per-batch prefix-length threshold in
   SGLang (8,192 by default). Both are admittedly untuned; the source says so in two places.</li>
@@ -1671,7 +1704,7 @@ constant-size recurrent state — the other way to attack the same bottleneck.
 direct engineering answer to MLA's replicated cache.</p></div></section>
 <div class="pager"><a href="07-01-mixture-of-experts.html"><div class="pager__k">← Previous</div><div class="pager__t">Mixture of Experts</div></a><a class="pager__next" href="07-03-ssm-and-hybrids.html"><div class="pager__k">Next →</div><div class="pager__t">Hybrid SSM / Mamba models and non-KV state</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1687,6 +1720,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#worked-trace">Worked trace: one decode token through vLLM</a>
 <a href="#dsa-indexer">The second cache: DeepSeek-V3.2's DSA indexer</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

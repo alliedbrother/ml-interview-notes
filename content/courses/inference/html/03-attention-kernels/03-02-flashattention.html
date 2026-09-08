@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FlashAttention 1 → 2 → 3 — The Inference Engineering Book</title>
+<title>FlashAttention 1 → 2 → 3 — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-02</div>
 <h1>FlashAttention 1 → 2 → 3</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/flash_attn.py</code></li><li><code>vllm/vllm_flash_attn/</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/flash_attn.py</code></li><li><code>vllm/vllm_flash_attn/</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">FlashAttention performs strictly more arithmetic than the textbook attention it replaces —
 it rescales an accumulator on every inner iteration, and in the backward pass it recomputes the entire
@@ -754,7 +754,7 @@ the shared-memory budget and the score accumulator jointly allow. §3 derives bo
 <div class="math-display">$$
 \text{FLOPs} = 4 T^2 d_h, \qquad
 \text{bytes}_{\text{naive}} \approx 4 \cdot 2 T^2, \qquad
-\text{bytes}_{\text{flash}} = 4 \cdot 2 T d_h
+\text{bytes}_{\text{compulsory}} = 4 \cdot 2 T d_h
 $$</div>
 
 <p>The naive count is the four passes over the score matrix; the flash count is $Q$, $K$, $V$ in and $O$
@@ -762,15 +762,10 @@ out, each $T \times d_h$. Divide, and the $T^2$ and $d_h$ terms collapse into so
 
 <div class="math-display">$$
 I_{\text{naive}} \;\approx\; \frac{4T^2 d_h}{8T^2} = \frac{d_h}{2}, \qquad
-I_{\text{flash}} \;=\; \frac{4T^2 d_h}{8 T d_h} = \frac{T}{2}
+I_{\text{compulsory}} \;=\; \frac{4T^2 d_h}{8 T d_h} = \frac{T}{2}
 $$</div>
 
-<p><strong>Naive attention's arithmetic intensity does not depend on sequence length at all.</strong> It is
-$d_h/2$ — 64 for every model with $d_h = 128$, forever, no matter how long the context gets. Against the
-H100's ridge of $I^\ast = 295$ FLOP/byte (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>),
-that is permanently, structurally memory-bound, and $d_h$ would have to reach 590 before it stopped being so.
-FlashAttention's intensity, meanwhile, is $T/2$, and crosses the ridge at $T = 590$ tokens. Past roughly
-600 tokens of context, FlashAttention prefill is a compute-bound kernel and naive attention never is.</p>
+<p>With materialized scores, intensity approaches $d_h/2$ for bf16 as T grows; finite Q/K/V/O traffic makes this an asymptote. The $T/2$ FlashAttention figure counts only compulsory Q/K/V reads and O writes, not actual finite-SRAM tile rereads. Original FlashAttention analyzes HBM access complexity $\Theta(T^2d_h^2/M)$ for SRAM capacity M in its stated regime. Therefore a compulsory-byte crossing at T=590 does not prove the actual kernel becomes compute-bound there. Measure HBM traffic and achieved throughput for the real tile schedule.</p>
 
 <div class="table-wrap">
   <div class="table-wrap__cap">One Llama-3-8B head, $T = 8192$, $d_h = 128$, bf16, forward pass, non-causal.
@@ -803,7 +798,7 @@ and there are $(T/B_r)(T/B_c)$ pairs:</p>
 $$</div>
 
 <p>At $T = 8192$, $d_h = 128$, $B_c = 64$ that is 134.2 MFLOP — <strong>0.39% more arithmetic</strong>, and
-it buys away 98.5% of the traffic. That is the trade, quantified, for one head. Note that the $T^2$
+the compulsory-traffic comparison suggests up to 98.5% less traffic; actual savings depend on finite-SRAM rereads and caching. That is the trade, quantified, for one head. Note that the $T^2$
 exponentials are <em>not</em> extra: naive attention computes exactly the same ones. Only the rescale is new.</p>
 
 <p>The backward pass pays much more, and this is where "more FLOPs" stops being a rounding error. A
@@ -840,8 +835,7 @@ and a hard 255-register-per-thread ceiling. Take a block of 8 warps (256 threads
 The fp32 output accumulator is $4 B_r d_h = 65{,}536$ bytes, i.e. 256 bytes or <strong>64 registers per
 thread</strong>. The fp32 score accumulator is $4 B_r B_c = 32{,}768$ bytes, another <strong>32 registers</strong>.
 That is 96 before a single address, operand descriptor, or softmax temporary. Doubling $B_r$ to 256 would
-put the output accumulator alone at 128 registers per thread and leave the kernel unable to hold anything
-else; doubling $B_c$ to 128 costs another 32 and is done only at $d_h = 64$, where the output accumulator
+put the output accumulator at 128 registers per thread, leaving fewer registers for scores and temporaries but not exhausting the 255-register per-thread ceiling by itself; doubling $B_c$ to 128 costs another 32 and is done only at $d_h = 64$, where the output accumulator
 halves. The rule of thumb falls straight out:</p>
 
 <div class="math-display">$$
@@ -864,7 +858,7 @@ softmax update, and writes $O_i$, $m_i$, $\ell_i$ back to HBM. Parallelism is on
 <h3>FlashAttention-2: three changes, each with a named bottleneck</h3>
 
 <p><strong>(a) Fewer non-matmul FLOPs.</strong> FA1 divided by the running sum on every iteration:
-$O_i \leftarrow \mathrm{diag}(\ell^{(j)})^{-1}\left(\mathrm{diag}(\ell^{(j-1)})e^{m^{(j-1)}-m^{(j)}} O_i + e^{S-m^{(j)}}V_j\right)$.
+</p><div class="math-display">$$O_i \leftarrow \mathrm{diag}(\ell^{(j)})^{-1}\left(\mathrm{diag}(\ell^{(j-1)})e^{m^{(j-1)}-m^{(j)}} O_i + e^{S-m^{(j)}}V_j\right).$$</div><p>
 FA2 keeps the accumulator <em>unnormalised</em> — $\tilde O_i \leftarrow e^{m^{(j-1)}-m^{(j)}}\tilde O_i + \tilde P_{ij}V_j$ —
 and divides by $\ell$ exactly once, after the inner loop ends. It also stores only the logsumexp
 $L = m + \log \ell$ instead of $m$ and $\ell$ separately. Small-looking, but these are non-matmul FLOPs, and
@@ -885,8 +879,7 @@ and shared $Q$ ("split-K"). Every warp then held a partial slab of $S$ covering 
 axis for <em>all</em> the rows — which means no warp owns a complete softmax row. To normalise, all four warps
 must write their partials to shared memory, `__syncthreads`, and reduce. FA2 splits $Q$ across warps and
 shares $K$ and $V$ ("split-Q"). Each warp now owns a disjoint set of query rows end to end: its own $S$ rows,
-its own $m$ and $\ell$, its own $O$ rows. <strong>No shared-memory round trip, no barrier, no cross-warp
-reduction inside the inner loop.</strong></p>
+its own $m$ and $\ell$, its own $O$ rows. <strong>No cross-warp softmax reduction is needed for those owned query rows.</strong> Shared-memory tile staging and pipeline synchronization can still require barriers.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 2 — the FA1 → FA2 restructuring.</b>
@@ -1095,8 +1088,7 @@ problem: block-level quantisation (a scale per tile rather than per tensor) plus
 multiplying $Q$ and $K$ by a random orthogonal matrix, which leaves $QK^\top$ unchanged but spreads outliers
 across channels. The paper reports 2.6× lower RMS error than a per-tensor FP8 baseline, and up to
 1.2 PFLOP/s on H100 SXM5 (<a href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a>, abstract and §4.3).
-The per-tile scales are exactly the <code>q_descale</code>/<code>k_descale</code>/<code>v_descale</code>
-arguments you will see vLLM pass in §5.</p>
+The paper's per-tile scaling must not be equated with every runtime descale interface: inspect the q_descale/k_descale/v_descale shapes and kernel path, which may use per-sequence/head scales.</p>
 
 <div class="callout callout--warn">
   <span class="callout__k">The inference caveat</span>
@@ -1288,8 +1280,7 @@ which for Llama-3-8B is $128^{-1/2} = 0.0884$.</p>
 <p>FA3 is gated hard to SM90 — <code>vllm/vllm_flash_attn/flash_attn_interface.py:L62-L69</code> returns
 <em>"FA3 is only supported on devices with compute capability 9.x"</em>. Everything in §4 about warp
 specialisation, TMA, and ping-pong exists only on Hopper, and on an A100 vLLM silently runs FA2. The rest of
-<code>get_flash_attn_version</code> is a list of demotions: ALiBi forces FA2, batch-invariant mode forces
-FA2, head sizes over 128 on Blackwell force FA2.</p>
+<code>get_flash_attn_version</code> is a list of demotions: ALiBi forces FA2, batch-invariant mode can demote FA4 to FA2 but does not universally demote FA3, head sizes over 128 on Blackwell force FA2.</p>
 
 <p><code class="c-sglang">SGLang</code> reaches the same kernels but with a structurally different policy.
 Its <code>FlashAttentionBackend</code> has <strong>no FA2 path at all</strong>:</p>
@@ -1416,9 +1407,9 @@ selector as <code>fa_version=</code>. The kernels underneath are the same Dao-AI
   head into one row block, filling $B_r$ with (position, head) pairs rather than positions alone; passing
   <code>None</code> lets the kernel heuristic decide.</li>
 
-  <li>On device: grid $= 1 \times 32 \times \lceil 8192/128 \rceil = 2048$ thread blocks. Each loads its
+  <li>On device: the logical query tiling has $1\times32\times\lceil8192/128\rceil=2048$ tiles; persistent launch scheduling and GQA packing can change the actual grid. Each loads its
   32 KB $Q$ tile, then runs 128 iterations of the inner loop over 64-key blocks — halved by
-  <code>causal=True</code> for the average row block, so about 32 iterations mean. Each iteration: producer
+  <code>causal=True</code> for the average row block, so about 65 iterations for 128-row query tiles against 64-key tiles (ends cover 2,4,...,128 key tiles). The coarse half-of-128 estimate is 64, not 32. Each iteration: producer
   TMA-loads $K_j, V_j$; consumers wgmma $Q_i K_j^\top$, exp2, rescale the register-resident $\tilde O_i$,
   wgmma $\tilde P_{ij} V_j$. Nothing of size $T \times T$ is ever addressed in HBM.</li>
 
@@ -1432,7 +1423,7 @@ instinct is to fill in everything you know. The two arguments describe mutually 
 kernel picks its addressing path from which one is present.</p>
 
 <p><strong>Silently getting FA2 when you expected FA3.</strong> <code>get_flash_attn_version</code> demotes on
-ALiBi, on batch-invariant mode, and on unsupported head sizes. The only signal is a
+ALiBi, on applicable version-specific batch-invariant restrictions, and on unsupported head sizes. The only signal is a
 <code>logger.info_once("Using FlashAttention version %s", ...)</code> at
 <code>vllm/v1/attention/backends/flash_attn.py:L868-L871</code>. Grep the log for that line before profiling
 anything.</p>
@@ -1461,16 +1452,17 @@ attention and find the GPU 24% occupied, that is not a bug, that is $T_q = 1$.
     <span class="tag tag--shell">shell</span>
   </div>
   <pre class="code-block code-block--wrap"><code># What version did vLLM pick? Look for "Using FlashAttention version N".
-VLLM_LOGGING_LEVEL=INFO vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+VLLM_LOGGING_LEVEL=INFO vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-model-len 8192 2&gt;&amp;1 | grep -i "FlashAttention version"
 
-# Force FA2 on a Hopper box and re-run a prefill-heavy benchmark.
+# Request FA2 explicitly; confirm acceptance and selected version in the log.
 # The config field read at fa_utils.py:L102-L110 is attention_config.flash_attn_version.
-vllm bench latency --model meta-llama/Meta-Llama-3-8B-Instruct \
-  --input-len 8192 --output-len 1 --batch-size 1
+vllm bench latency --model meta-llama/Llama-3.1-8B-Instruct \
+  --input-len 8192 --output-len 1 --batch-size 1 \
+  --attention-config '{"flash_attn_version": 2}'
 
 # SGLang: name the backend explicitly rather than relying on the Hopper default.
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct \
   --attention-backend fa3</code></pre>
 </div>
 
@@ -1547,9 +1539,7 @@ to <code>--input-len 128 --output-len 512</code> and you are measuring §3.3 ins
   <code>seqused_k</code> is needed.</p></div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>Naive attention's arithmetic intensity is $d_h/2$ — independent of sequence length, and permanently
-  left of the H100's 295 FLOP/byte ridge. FlashAttention's is $T/2$, which crosses the ridge at about 590
-  tokens. The whole family of optimisations is one substitution: $T^2$ bytes of traffic for $T d_h$.</li>
+  <li>Naive materialized-attention intensity approaches d_h/2 in bf16. FlashAttention avoids the quadratic score intermediate, but its actual IO still depends on SRAM, tile rereads, and caching; T/2 is a compulsory-traffic ideal, not a guaranteed achieved intensity or a universal 590-token compute-bound threshold.</li>
 
   <li>The extra arithmetic is real but tiny in the forward ($T^2 d_h / B_c$ rescale multiplies, 0.39% at
   $T=8192$) and substantial in the backward (+25% matmul FLOPs to recompute $S$). Both are the right trade
@@ -1603,7 +1593,7 @@ to <code>--input-len 128 --output-len 512</code> and you are measuring §3.3 ins
 </ul></div></section>
 <div class="pager"><a href="03-01-naive-attention-and-online-softmax.html"><div class="pager__k">← Previous</div><div class="pager__t">Naive attention and the online softmax</div></a><a class="pager__next" href="03-03-decode-attention.html"><div class="pager__k">Next →</div><div class="pager__t">Decode attention: FlashDecoding, split-K, paged kernels</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

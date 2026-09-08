@@ -35,7 +35,7 @@ flowchart TD
 | | Encoder-only | Decoder-only | Encoder-Decoder |
 |---|---|---|---|
 | Attention | bidirectional | causal | both + cross |
-| Can generate? | no | **yes** | yes |
+| Ordinary left-to-right generation? | not its standard objective | **yes** | yes |
 | Sees full input at once | yes | only the prefix | yes (encoder side) |
 | Objective | masked LM | next-token | seq2seq |
 | Examples | BERT | GPT, Llama, Qwen | T5, Whisper |
@@ -70,7 +70,8 @@ anywhere in the encoder and you get `3 × 512`.
 
 Because there is no mask, `how` attends to `you` and `you` attends to `how`.
 That bidirectionality is exactly what makes encoders good at *understanding* and
-useless at *generating* — a generator cannot look at the future.
+unsuited to ordinary left-to-right decoding without changing its objective or
+mask. Iterative masked-token generation is a different valid generation method.
 
 ## 8.3 Causal masking: the core of the decoder
 
@@ -78,17 +79,18 @@ useless at *generating* — a generator cannot look at the future.
 
 Video 81 opens with a claim worth unpacking carefully:
 
-> **The Transformer decoder is auto-regressive at inference time, and
-> non-auto-regressive at training time.**
+> **The Transformer decoder uses an autoregressive likelihood in both training
+> and inference; teacher forcing parallelizes training positions.**
 
 **Autoregressive** means each output is conditioned on previously generated
 outputs. Stock prediction is autoregressive: Friday's forecast depends on
 Thursday's and Wednesday's. An RNN decoder is autoregressive: each timestep's
 input is the previous timestep's output.
 
-Sequential generation is **unavoidable at inference**. To emit word 3 you must
+Ordinary autoregressive generation is **sequential**. To emit word 3 you must
 know words 1 and 2, and you only know them because you generated them. There is
-no way around it.
+no unknown sampled prefix available in advance. Speculative verification can
+process proposals together without changing this factorization (module 14).
 
 But at *training* time, something changes.
 
@@ -110,11 +112,11 @@ positions can be processed in parallel.
 
 ```mermaid
 flowchart TD
-    subgraph SLOW["Auto-regressive training — what we want to avoid"]
+    subgraph SLOW["Sequential execution of training positions"]
         S1["step 1"] --> S2["step 2"] --> S3["step 3"] --> S4["step 4"]
         S4 --> SN["300-word output = 301 sequential decoder passes<br/>x 100,000 training rows"]
     end
-    subgraph FAST["Non-auto-regressive training — teacher forcing"]
+    subgraph FAST["Parallel autoregressive training — teacher forcing"]
         F1["all tokens known from data"] --> F2["ONE parallel decoder pass"]
     end
 ```
@@ -147,8 +149,9 @@ We are now stuck between two failures:
 
 | Approach | Training speed | Data leakage |
 |---|---|---|
-| Auto-regressive training | very slow | none |
-| Parallel training | fast | **catastrophic** |
+| Sequential causal execution | slow | none |
+| Parallel execution without a causal mask | fast | **catastrophic** |
+| Parallel execution with a causal mask | fast | none from future-token attention |
 
 ### The fix: mask before softmax
 
@@ -168,8 +171,8 @@ scaled scores            mask (added)              masked scores
                               |
                               v
                     [ 1.00  0.00  0.00 ]
-                    [ 0.06  0.88  0.06 ]   <- row sums to 1, future is exactly 0
-                    [ 0.07  0.20  0.73 ]
+                    [ 0.0573  0.9427  0.0000 ]  <- future weight is exactly zero
+                    [ 0.0730  0.2680  0.6590 ]  <- rounded values
 ```
 
 Each row still sums to 1 — softmax renormalizes over the surviving entries. Row 1
@@ -201,7 +204,7 @@ scores = scores.masked_fill(~causal_mask(T, scores.device), float('-inf'))
 weights = torch.softmax(scores, dim=-1)
 ```
 
-In practice use the fused path, which never materialises the mask:
+For a square causal prefill, SDPA can select an eligible fused implementation:
 
 ```python
 out = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
@@ -447,13 +450,60 @@ way; only cross-attention drops out.
 
 **"Non-autoregressive".** The playlist uses this for teacher-forced parallel
 *training*. In the wider literature "non-autoregressive generation" means
-something else entirely — models that emit all output tokens simultaneously at
-*inference*. Do not confuse them; the playlist's usage is about training only.
+different factorization or parallel/iterative generation schemes, not merely
+teacher-forced execution. The wording here is corrected: decoder training is
+still autoregressive in its likelihood, even when token positions run in parallel.
 
 **Cross-attention naming.** The paper says "encoder-decoder attention"; the
 playlist and common usage say "cross-attention". Same thing.
 
 ---
+
+## Worked target, padding and cross-attention contracts
+
+For a document `[BOS,a,b,EOS]`, inputs `[BOS,a,b]` predict `[a,b,EOS]`.
+The likelihood remains `p(a|BOS)p(b|BOS,a)p(EOS|BOS,a,b)` during parallel
+teacher forcing. Set padded **target labels** to `-100` for cross entropy;
+mask padding **keys** separately. Packing unrelated documents also needs a
+document-equality condition in the causal mask, and ignored cross-boundary
+targets. One mask cannot substitute for all three contracts.
+
+Cross-attention uses decoder queries of length U and encoder keys/values of
+length T, giving a rectangular `(U,T)` score matrix. Encoder K/V can be computed
+once per source sequence and reused at every decoder step. Source padding is
+masked, but a left-to-right causal restriction is not generally applied across
+source columns. Decoder self-attention remains causal independently.
+
+```python transformer-check
+import torch
+import torch.nn.functional as F
+torch.manual_seed(8)
+scores = torch.tensor([[3., 2.1, .8], [1.2, 4., 1.5], [.9, 2.2, 3.1]])
+allowed = torch.ones(3, 3, dtype=torch.bool).tril()
+a = scores.masked_fill(~allowed, float('-inf')).softmax(-1)
+torch.testing.assert_close(a[1], torch.tensor([.05732418, .94267582, 0.]))
+assert a[0, 1:].count_nonzero() == 0
+q, k, v = [torch.randn(1, 1, 3, 4) for _ in range(3)]
+baseline = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
+changed = v.clone()
+changed[:, :, 2] += 100
+torch.testing.assert_close(baseline[:, :, :2],
+    F.scaled_dot_product_attention(q, k, changed, attn_mask=allowed)[:, :, :2])
+decoder_q = torch.randn(1, 1, 2, 4)
+source_k, source_v = torch.randn(1, 1, 5, 4), torch.randn(1, 1, 5, 4)
+source_valid = torch.tensor([True, True, True, False, False])
+cross = F.scaled_dot_product_attention(decoder_q, source_k, source_v, attn_mask=source_valid[None, :])
+unpad = F.scaled_dot_product_attention(decoder_q, source_k[:, :, :3], source_v[:, :, :3])
+torch.testing.assert_close(cross, unpad)
+assert cross.shape == (1, 1, 2, 4)
+print("Causal arithmetic, future isolation and rectangular source padding verified.")
+```
+
+SDPA boolean masks use **True = allowed**. `nn.MultiheadAttention` boolean
+key-padding masks instead use **True = ignored**. Name tensors `allowed` or
+`padding` rather than relying on a generic `mask` variable's implied polarity.
+Teacher forcing also creates an exposure mismatch: evaluation histories include
+model mistakes; this is distinct from future-token leakage.
 
 ## Key takeaways
 

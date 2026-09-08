@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Streaming and the end-to-end request lifecycle — The Inference Engineering Book</title>
+<title>Streaming and the end-to-end request lifecycle — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 9 · The serving system around the engine · 09-03</div>
 <h1>Streaming and the end-to-end request lifecycle</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/entrypoints/launchers/api_server/entry.py</code></li><li><code>vllm/entrypoints/openai/chat_completion/serving.py</code></li><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>python/sglang/srt/managers/tokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/entrypoints/launchers/api_server/entry.py</code></li><li><code>vllm/entrypoints/openai/chat_completion/serving.py</code></li><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>python/sglang/srt/managers/tokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Eight parts of this book have taken the engine apart one subsystem at a time. This chapter puts it back together by following a single streaming chat request from the TCP socket to the GPU and back out again, hop by hop, in both engines, with the real function name at every step. Read it with both repos checked out; every hop below is a file and a line number you can jump to.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is a log line SGLang emits in production:</p>
@@ -1078,7 +1078,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             self.output.add(output, aggregate=self.aggregate)</code></pre>
 </div>
 
-<p><b><code>put</code> never blocks and never allocates unboundedly.</b> That is vLLM's whole answer to a slow client: merge deltas in place. This is the structural twin of SGLang's backlog warning, minus the warning.</p>
+<p><b><code>put</code> merges into one queue slot, but that is not a byte-memory bound.</b> Merged token arrays and text can still grow with unconsumed output. Bound output length, buffered bytes, consumer lifetime, and concurrency separately. This is the structural twin of SGLang's backlog warning, minus the warning.</p>
 
 <p><b>Hop 13 &mdash; out of the engine API.</b> <code>AsyncLLM.generate</code> is the consumer:</p>
 
@@ -1499,7 +1499,7 @@ sequenceDiagram
     SC->>SC: apply_chat_template then tokenizer.encode on the event loop
     SC->>TM: generate_request with GenerateReqInput input_ids
     TM->>TM: _init_req_state creates rid_to_state entry
-    Note over TM,SD: PROCESS BOUNDARY - ZMQ PUSH to PULL, msgpack TokenizedGenerateReqInput
+    Note over TM,SD: PROCESS BOUNDARY - ZMQ PUSH to PULL, pickle by default (msgpack when configured)
     TM->>SD: _send_one_request then _dispatch_to_scheduler then sock_send
     SD->>SD: recv_requests NOBLOCK then process_input_requests
     SD->>SD: handle_generate_request then _add_request_to_queue
@@ -1903,7 +1903,7 @@ curl -N -s http://localhost:8000/v1/chat/completions \
   <p><b>1.</b> <code>self.aggregate</code> is <code>output_kind == RequestOutputKind.DELTA</code>, and <code>stream=false</code> maps to <code>FINAL_ONLY</code> (<code>chat_completion/protocol.py:L737-L739</code>). With <code>FINAL_ONLY</code>, <code>make_request_output</code> returns <code>None</code> for every non-final step (<code>output_processor.py:L292-L297</code>), so nothing is ever put until the end &mdash; there is no second output to merge. Correct because a non-streaming client wants one cumulative body, and building it incrementally in the frontend would be pure waste.</p>
   <p><b>2.</b> vLLM: two per step (encode <code>EngineCoreOutputs</code> in the engine, decode in the frontend) plus one encode/decode pair at submission, amortised to zero over a long generation. SGLang: four per step (scheduler&rarr;detok, detok&rarr;HTTP worker). Neither changes with batch size <em>per step</em>, because both engines encode the whole batch as one struct &mdash; that is the point of <code>EngineCoreOutputs.outputs</code> and <code>BatchTokenIDOutput</code>. Per <em>request</em> the cost therefore falls as batch size rises.</p>
   <p><b>3.</b> <code>completion_tokens</code> is 17 &mdash; the gate controls emission, not generation, and the finished branch always emits. Frames: the condition for <code>stream_interval &gt; 1</code> is <code>len(req.output_ids) % 4 == 1</code>, which fires at 1, 5, 9, 13, 17; the 17th also finishes, and <code>finished_output</code> suppresses the duplicate. So five content frames plus the terminal frame and <code>[DONE]</code>.</p>
-  <p><b>4.</b> vLLM: at least one extra full step. The stop string is found in <code>detokenizer.update</code> while processing step <em>k</em>; by the time the abort is sent, <code>run_busy_loop</code> has begun step <em>k+1</em>. <code>_process_aborts_queue</code> drains it partway through <em>k+1</em>, so <em>k+1</em> completes for that request and <em>k+2</em> does not include it. SGLang: zero extra steps &mdash; <code>_check_str_based_finish</code> runs inside <code>update_finish_state</code> in the same step.</p>
+  <p><b>4.</b> The outcome depends on request state and timing. Before scheduling, either engine can cancel with zero extra forwards; an in-flight forward may finish before an abort is observed. Frontend stop detection adds a round-trip and can allow a later vLLM step to launch, while scheduler-side SGLang detection can avoid that particular race. Neither is a universal extra-step count. The 4.48 ms idealized decode floor is not an upper bound on cancellation latency.</p>
   <p><b>5.</b> For unbounded: every request is eventually served, and policy belongs at the router where request-level context lives. For bounded: a 503 lets clients retry elsewhere and gives autoscalers a real signal, whereas an unbounded queue turns overload into a latency cliff that looks like a hang. The 503 is the debuggable one &mdash; a discrete event with a message string in the logs. Rising TTFT with no error is what gets misdiagnosed as a GPU problem.</p>
   </div>
 </details></div></section>
@@ -1927,7 +1927,7 @@ curl -N -s http://localhost:8000/v1/chat/completions \
 </ul></div></section>
 <div class="pager"><a href="09-02-tokenization-and-detokenization.html"><div class="pager__k">← Previous</div><div class="pager__t">Tokenization and incremental detokenization</div></a><a class="pager__next" href="09-04-routers-and-load-balancing.html"><div class="pager__k">Next →</div><div class="pager__t">Routers, KV-aware balancing, session affinity</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

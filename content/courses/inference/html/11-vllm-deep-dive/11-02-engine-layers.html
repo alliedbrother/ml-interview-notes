@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AsyncLLM → EngineCore → Executor → Worker — The Inference Engineering Book</title>
+<title>AsyncLLM → EngineCore → Executor → Worker — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 11 · vLLM deep dive · 11-02</div>
 <h1>AsyncLLM → EngineCore → Executor → Worker</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>vllm/v1/executor/abstract.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/async_llm.py</code></li><li><code>vllm/v1/engine/core.py</code></li><li><code>vllm/v1/engine/core_client.py</code></li><li><code>vllm/v1/executor/abstract.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">vLLM's engine is five objects deep and two processes wide, and the boundary between those processes is drawn at exactly one place. This chapter is about where the lines fall, what each layer owns exclusively, what crosses each boundary, and what the split costs. <a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> already walked a request across these hops; here we stop moving and look at the structure.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>This is the entire error message a vLLM user gets when the thing that actually broke was a CUDA illegal memory access inside an attention kernel on TP rank 3:</p>
@@ -652,7 +652,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <p>Five layers, named top to bottom: <code>AsyncLLM</code>, <code>EngineCoreClient</code>, <code>EngineCore</code>, <code>Executor</code>, <code>Worker</code>. Two of those names are boundaries pretending to be objects.</p></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model: two clocks, one wire, N ranks</h2></div><div class="sec__body"><p>The stack has exactly two interesting cuts in it, and they are cut for different reasons.</p>
 
-<p><b>The first cut &mdash; between <code>EngineCoreClient</code> and <code>EngineCore</code> &mdash; defeats the GIL.</b> Above it sits per-token host work that scales with batch size: detokenisation, chunk objects, JSON, socket writes. Below it sits the step loop, whose period is set by the GPU. Both are Python, so in one process they contend for one interpreter lock and <em>add</em>; in two they <em>overlap</em>. &sect;<a href="#first-principles">3</a> makes that arithmetic.</p>
+<p><b>The frontend/engine process boundary separates Python-heavy work.</b> Independent interpreters can reduce GIL contention, but GPU and native work may already overlap inside one process. The sum/max comparison below is a serial-versus-perfect-pipeline model, not an inevitable consequence of process count.</p>
 
 <p><b>The second cut &mdash; between <code>Executor</code> and <code>Worker</code> &mdash; gets one Python interpreter per GPU,</b> because a CUDA context belongs to a process. It exists only when there is more than one rank: at <code>world_size == 1</code> the backend resolves to <code>uni</code> (<code>vllm/config/parallel.py:L980-L981</code>) and <code>UniProcExecutor</code> builds the worker inline in the EngineCore process (<code>vllm/v1/executor/uniproc_executor.py:L52-L73</code>), so a single-GPU server is two processes wide, not three. That cut is <a href="../05-parallelism/05-05-worker-orchestration.html">&sect;5.5</a>'s subject; this chapter treats it as given.</p>
 
@@ -706,19 +706,19 @@ flowchart TD
   <span class="callout__k">Ownership rule</span>
   <p>A layer owns state exclusively if no other layer can name the object. <code>OutputProcessor.request_states</code> is invisible to <code>EngineCore</code>; <code>Scheduler.waiting</code> is invisible to <code>AsyncLLM</code>. Both track "the set of live requests" and they are allowed to disagree transiently &mdash; that disagreement is what abort handling is <em>for</em>, and &sect;<a href="#lifecycles">7</a> is about reconciling it.</p>
 </div></div></section>
-<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: what a process boundary costs, and what it buys</h2></div><div class="sec__body"><p>Let $T_{\text{step}}$ be the engine's step period, wall-clock from one <code>schedule()</code> to the next. For Llama-3-8B in bf16 on an H100 SXM at batch 1 the book's derived weight-bandwidth floor is $T_{\text{step}} = 4.48$&nbsp;ms (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>), and because batch 32 is far below the ridge point $I^\* = 295$ the period barely moves as $B$ grows. Let $c$ be the host CPU cost of turning <em>one</em> generated token into <em>one</em> byte-stream frame &mdash; detokenise, build the chunk, JSON, socket write &mdash; and $B$ the batch size.</p>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: what a process boundary costs, and what it buys</h2></div><div class="sec__body"><p>Let $T_{\text{step}}$ denote the measured GPU/engine service term for the configuration being modeled. The illustrative 15 GB streamed-weight floor is 4.48 ms on the stated H100 bandwidth, not a universal actual step period. KV traffic, achieved bandwidth, launch work and batch shape can change it even below the compute ridge. Let $c$ be the host cost per emitted token frame and $B$ the scheduled batch; streaming intervals and speculative multi-token outputs require corresponding accounting.</p>
 
 <p>Per step the frontend does $B$ units of $c$: one forward pass yields one token per sequence, and every sequence has its own socket. Compare the two placements:</p>
 
 <div class="math-display">$$ T_{\text{one process}} = T_{\text{step}} + Bc \qquad\qquad T_{\text{two processes}} = \max\left(T_{\text{step}},\; Bc\right) $$</div>
 
-<p>The addition in the first expression is not a modelling choice; it is CPython. One interpreter lock means the detokeniser loop and the scheduler loop cannot both execute bytecode, so their costs are strictly serial. The second expression is the same two loops in different interpreters on different cores.</p>
+<p>These are explicit execution models: the first assumes no overlap and the second assumes independent resources and perfect pipelining, before IPC overhead. The GIL serializes Python bytecode in a conventional interpreter, but GPU execution and native operations can run while it is released. A single process is therefore not necessarily serial, and a process split is not automatically faster.</p>
 
-<p><a href="../09-serving-system/09-03-request-lifecycle.html">&sect;9.3</a> derived the frontend budget $T_{\text{step}}/B$ &mdash; 140&nbsp;&micro;s per token at $B=32$, 35&nbsp;&micro;s at $B=128$. That budget is exactly the $c$ at which the two placements differ by 2&times;: substitute $c = T_{\text{step}}/B$ and you get $2T_{\text{step}}$ against $T_{\text{step}}$. The budget is therefore also the <em>break-even point of the process split</em>. Above it, the single-process design degrades without bound while the split degrades only to $Bc$.</p>
+<p>At $c=T_{\text{step}}/B$ the ideal serial and perfect-overlap models differ by two. This is their largest relative benefit, not a break-even threshold with IPC: that threshold depends on transfer overhead and achievable overlap. For very large $Bc$, both periods are dominated by frontend work.</p>
 
 <div class="kpis">
   <div class="kpi kpi--hero"><div class="kpi__n">4.48 ms</div><div class="kpi__l">$T_{\text{step}}$, Llama-3-8B bf16 H100, batch 1 (derived)</div></div>
-  <div class="kpi"><div class="kpi__n">223 /s</div><div class="kpi__l">Output messages crossing ZMQ, any batch size (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">223 /s</div><div class="kpi__l">Idealized message rate if the step remains 4.48 ms; not batch-independent</div></div>
   <div class="kpi"><div class="kpi__n">~1.3 KB</div><div class="kpi__l">One EngineCoreOutputs at B=32, plain decode (derived)</div></div>
 </div>
 
@@ -747,7 +747,7 @@ flowchart TD
 
 <p>The input direction is per-request and dominated by <code>prompt_token_ids</code>: a 2,048-token Llama-3 prompt at roughly 3 msgpack bytes per id is about 6.2&nbsp;KB, sent once. Generating 256 tokens occupies 256 &times; 4.48&nbsp;ms = 1.15&nbsp;s, so the amortised input rate is 5.4&nbsp;KB/s per in-flight request &mdash; derived, and again negligible.</p>
 
-<p><b>2. One IPC round-trip of latency, added once to TTFT.</b> An <code>add_request</code> traverses ROUTER&rarr;DEALER, is decoded on the input thread, waits in <code>input_queue</code>, and is drained by <code>_process_input_queue</code>. The queue wait is bounded by the current step: up to 4.48&nbsp;ms, zero if the engine is idle. Against a TTFT containing a full prefill that is noise &mdash; but it is <em>not</em> noise for aborts, which is why they get a second queue the step loop drains mid-flight (&sect;<a href="#lifecycles">7</a>).</p>
+<p><b>2. Admission and abort latency.</b> IPC adds transport and queueing delay. A regularly progressing loop may drain the queue at a step boundary, but 4.48 ms is an idealized GPU lower bound, not an upper bound on waiting. Prefill, CPU scheduling, outstanding work or failure can extend the delay. Abort handling has its own drain points; trace arrival and acknowledgement instead of inferring a bound from bandwidth.</p>
 
 <p><b>3. A materially worse debugging story.</b> This is the real cost, and the opening error message is what it looks like. No stack trace spans the boundary; a <code>py-spy dump</code> on the API server shows an idle event loop no matter what the engine is doing.</p>
 
@@ -875,7 +875,7 @@ flowchart TD
             self.timestamp = time.monotonic()</code></pre>
 </div>
 
-<p>Two details are load-bearing. <code>timestamp</code> is <code>time.monotonic()</code> stamped in the <em>engine</em> process, and monotonic clocks are not comparable across processes &mdash; the <code>EngineCoreEvent</code> docstring at <code>vllm/v1/engine/__init__.py:L177-L186</code> says so. The frontend uses it for intervals only. And <code>finished_requests</code> is the engine telling the frontend which IDs it has forgotten, reconciling the two sets of live-request state without the frontend having to ask.</p>
+<p>The engine stamps <code>time.monotonic()</code>. The quoted historical comment is more restrictive than modern <a href="https://docs.python.org/3/library/time.html#time.monotonic">CPython's same-host clock contract</a>: separate processes on the same compatible host and clock namespace can compare readings. Different hosts, time namespaces or incompatible runtimes require clock identification, synchronization and an uncertainty budget. Neither monotonic value is a Unix timestamp. <code>finished_requests</code> reconciles frontend and engine lifetimes.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 2 &mdash; what crosses the ZMQ boundary in each direction, with the real fields.</b> Sizes are derived from the msgpack encoding at $B=32$, plain decode, no logprobs.
@@ -1425,7 +1425,7 @@ flowchart TD
 
 <p>The frontend goes first and its removal is authoritative: <code>abort_requests</code> pops the <code>RequestState</code>, expands parents into their <code>n&gt;1</code> children, and pushes a final <code>FinishReason.ABORT</code> output into the collector so the waiting <code>generate()</code> unblocks (<code>vllm/v1/engine/output_processor.py:L508-L529</code>). Only the surviving internal IDs go on the wire; the engine's copy dies asynchronously, and the KV blocks come back then &mdash; not before.</p>
 
-<p>The window between the two is real: a client that disconnects mid-generation frees its mailbox immediately and its GPU blocks up to one step &mdash; 4.48&nbsp;ms &mdash; later. Under a mass disconnect at $B$ in flight that is $B$ abort messages through one socket, one queue, and one idempotent scheduler pass.</p>
+<p>The frontend can drop its state before the engine releases KV. Reclamation depends on abort delivery, loop progress and outstanding GPU holders. A measured step period can help estimate this gap in normal operation; the 4.48 ms bandwidth floor cannot bound it. Under mass disconnect, verify eventual idempotent cleanup and queue backpressure.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Why generate() aborts</span>
@@ -1542,11 +1542,11 @@ flowchart TD
             self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)</code></pre>
 </div>
 
-<p>An <code>if</code> on a config flag, two imports, one attribute. <code>AsyncLLM</code>, <code>EngineCoreClient</code>, <code>EngineCore</code>, the <code>Scheduler</code>, the <code>Executor</code> and the wire format are untouched, because the runner's contract upward is exactly <code>execute_model(SchedulerOutput) -&gt; ModelRunnerOutput</code> plus <code>sample_tokens</code>. <b>A rewrite is affordable in proportion to how narrow the interface above it is.</b> Contrast the V0&rarr;V1 rewrite, which moved the process boundary itself and therefore touched everything.</p></div></section>
+<p>The upper runner interface and process topology remain recognizable, but V2 is not implementation-local: scheduler branches change resumed-request packaging, full token-ID transfer and bookkeeping, and attention paths also differ. See <a href="11-01-repo-map-and-v1.html#exercises">the cross-directory grep exercise</a>. A shared interface limits coupling; it does not mean all its producers are untouched.</p></div></section>
 <section class="sec" id="reading-guide" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls, and a reading guide for contributors</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Adding a field in the middle of a wire struct</h4><p><code>array_like=True</code> makes fields positional. Insert one anywhere but the end of <code>EngineCoreRequest</code> or <code>EngineCoreOutput</code> and a frontend and engine at different commits silently mis-decode everything after it. The comments on <code>mm_cache_miss_hashes</code> and <code>spec_decode_metrics</code> both say "appended last" for this reason.</p></div>
   <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Blocking the event loop in output_handler</h4><p>Anything added to <code>process_outputs</code> runs $B$ times per step in the same event loop as every SSE writer. At $B=128$ the per-token budget is 35&nbsp;&micro;s (derived, &sect;9.3) &mdash; a regex over generated text there is not a small change.</p></div>
-  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Comparing timestamps across the boundary</h4><p>Both are <code>time.monotonic()</code> from the engine process. Subtracting one from a frontend <code>time.monotonic()</code> gives a meaningless number, not a queueing delay.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Comparing timestamps across the boundary</h4><p>Check host identity, clock implementation and namespace before subtracting engine and frontend timestamps. A process boundary alone does not invalidate a same-clock interval. Cross-host tracing requires synchronized clocks or offset estimates with uncertainty.</p></div>
   <div class="ve-card"><span class="ve-card__k">Pitfall</span><h4>Debugging with the wrong process attached</h4><p><code>py-spy dump --pid $(pgrep -f EngineCore)</code>, not the API server PID. The engine sets its process title at <code>vllm/v1/engine/core.py:L1285-L1289</code> specifically so you can find it.</p></div>
 </div>
 
@@ -1562,7 +1562,7 @@ flowchart TD
         <tr><td>A new out-of-band control call</td><td><code>vllm/v1/engine/core_client.py</code> + a method on <code>EngineCore</code></td><td><code>UTILITY</code> dispatches by <code>getattr</code> on the name</td></tr>
         <tr><td>Scheduling policy</td><td><code>vllm/v1/core/sched/scheduler.py</code> (<a href="11-03-the-v1-scheduler-in-code.html">&sect;11.3</a>)</td><td>The engine's only decision-maker</td></tr>
         <tr><td>A new rank topology or launcher</td><td><code>vllm/v1/executor/abstract.py</code> + a subclass</td><td><code>get_class</code> also accepts a fully-qualified class name</td></tr>
-        <tr><td>Anything about tensors or CUDA graphs</td><td><code>vllm/v1/worker/gpu/model_runner.py</code> &mdash; the default for every dense model; <code>vllm/v1/worker/gpu_model_runner.py</code> is the fallback (<a href="11-04-model-runner-and-backends.html">&sect;11.4</a>)</td><td>Below every boundary in this chapter</td></tr>
+        <tr><td>Anything about tensors or CUDA graphs</td><td><code>vllm/v1/worker/gpu/model_runner.py</code> &mdash; the default for eligible dense configurations after all guards; <code>vllm/v1/worker/gpu_model_runner.py</code> is the fallback (<a href="11-04-model-runner-and-backends.html">&sect;11.4</a>)</td><td>Below every boundary in this chapter</td></tr>
       </tbody>
     </table>
   </div>
@@ -1618,19 +1618,19 @@ print(type(llm.llm_engine.engine_core).__name__)
   <summary>Answers</summary>
   <div class="fold__body">
   <p><b>1.</b> <code>block</code> is <code>self.process_input_queue_block</code>, set <code>True</code> in <code>EngineCoreProc.__init__</code> (<code>vllm/v1/engine/core.py:L1070</code>) and overridden by the DP subclass. The guard <code>while not self.has_work() and self.is_running()</code> means it only blocks when there is genuinely nothing to do; an unconditional block would stall the loop with requests already in flight, because the next wake-up would wait on a client message rather than the GPU.</p>
-  <p><b>2.</b> The forward pass takes 4.48&nbsp;ms (derived), during which the input IO thread is free to receive aborts. Handling them at the top of the loop would defer an abort arriving at $t=0.1$&nbsp;ms to the <em>next</em> iteration &mdash; wasting a step of KV residency and letting <code>update_from_output</code> append a token to an abandoned request. The saving is one step of latency per abort.</p>
-  <p><b>3.</b> 5 float32 + 5 int32 = 40 bytes per request, well under the 256-byte threshold, so each is inlined as <code>msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, ...)</code> rather than becoming its own frame (<code>vllm/v1/serial_utils.py:L243-L250</code>). That is roughly 39 base bytes plus ~90 bytes of inlined payload and headers per request, about 8.3&nbsp;KB at $B=64$. Note the threshold is <em>per tensor</em>, and these tensors are per-request &mdash; so growing the batch never pushes one over it.</p>
+  <p><b>2.</b> Draining aborts after the in-flight result and before output retirement can avoid appending a newly computed token for an already abandoned request. Relative to a top-only check, this may save waiting until the next drain point; it does not guarantee an entire additional forward or a fixed 4.48 ms saving. Queued, executing and already-retired requests have different timelines.</p>
+  <p><b>3.</b> Width is six, including the sampled-token addition: six logprobs, six IDs and one sampled-token rank per output token. With float32/int32/int32 this is $6(4)+6(4)+4=52$ raw bytes per request, or 3328 bytes at batch 64; int64 IDs/ranks instead yield 80 bytes per request and 5120 total. Each per-request array remains below the 256-byte threshold in either layout. Inspect the actual dtypes and whether the encoded arrays are per-request or batched. Exact wire size additionally includes shape, dtype, extension and message headers; the earlier 8.3 KB estimate cannot be justified from the two-array count.</p>
   <p><b>4.</b> Nothing fails &mdash; and that is the interesting part. The env var does default to <code>True</code> (<code>vllm/envs.py:L157</code>), and there <em>is</em> an <code>assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING</code> at <code>vllm/v1/executor/uniproc_executor.py:L180-L183</code> with the message "To get deterministic execution, please set VLLM_ENABLE_V1_MULTIPROCESSING=0". But <code>ParallelConfig</code> gets there first: selecting <code>external_launcher</code> makes it <code>os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"</code> and log "Disabling V1 multiprocessing for external launcher." (<code>vllm/config/parallel.py:L932-L934</code>). Because <code>vllm.envs</code> resolves lazily through <code>__getattr__</code>, by the time <code>_init_executor</code> reads it the value is already <code>False</code> and the assert passes. It is a backstop against someone re-setting the variable later, not the normal outcome. The assert exists because the design assumes every rank's scheduler makes identical decisions, and background-process scheduling adds non-determinism on top of what the <code>abstract.py:L79-L80</code> TODO already admits.</p>
-  <p><b>5.</b> Both <code>EngineCoreOutputs.timestamp</code> and <code>EngineCoreEvent.timestamp</code> mislead: they are <code>time.monotonic()</code> in the engine process, and the docstring at <code>vllm/v1/engine/__init__.py:L179-L183</code> warns they "should not be compared with timestamps from other processes." The minimum fix is to append a <code>time.time()</code>-based field at the <em>end</em> of the struct with a default, preserving positional compatibility. Better: send one clock-offset sample in <code>EngineCoreReadyResponse</code> &mdash; a plain dataclass, not <code>array_like</code>, so a field may go anywhere &mdash; and convert in the frontend, at zero per-step cost.</p>
+  <p><b>5.</b> Monotonic timestamps are not wall-clock epochs, but modern same-host compatible processes can compare them. For cross-host spans attach host/clock identity and use synchronized timestamps or an offset protocol with error bounds; one noisy offset sample cannot establish exact one-way delay. Appending an optional field is less disruptive for positional encoding but does not prove mixed-version compatibility: test both old/new decoders, defaults and startup version checks.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li><b>The process split turns addition into a maximum.</b> One process costs $T_{\text{step}} + Bc$ because of the GIL; two cost $\max(T_{\text{step}}, Bc)$. &sect;9.3's frontend budget &mdash; 140&nbsp;&micro;s at $B=32$ &mdash; is exactly the $c$ at which the split is worth 2&times;.</li>
+  <li><b>The process split turns addition into a maximum.</b> In an ideal serial-versus-overlapped model, the costs are $T_{\text{step}} + Bc$ and $\max(T_{\text{step}}, Bc)$; actual overlap and IPC overhead must be measured. &sect;9.3's frontend budget &mdash; 140&nbsp;&micro;s at $B=32$ &mdash; is exactly the $c$ at which the split is worth 2&times;.</li>
   <li><b>The boundary is crossed once per <em>step</em>, not once per token.</b> <code>EngineCoreOutputs</code> carries the whole batch, so at $B=128$ the cost is one encode and one decode per 128 tokens &mdash; about 41 wire bytes per token, several times smaller than the SSE frame the frontend produces from it. Batching is what makes the split affordable.</li>
   <li><b>Field order in <code>EngineCoreRequest</code> and <code>EngineCoreOutput</code> is wire ABI.</b> <code>array_like=True</code> drops field names; <code>omit_defaults=True</code> trims trailing defaults; <code>gc=False</code> keeps these objects out of the cyclic collector. All three are deliberate and all three constrain how you may edit those classes.</li>
   <li><b><code>Executor</code> has exactly one primitive:</b> <code>collective_rpc</code>, restricted by its own docstring to control messages. Every other method is a one-line wrapper over it, which is why adding a topology means implementing three abstract methods &mdash; <code>_init_executor</code>, <code>collective_rpc</code> and <code>check_health</code> (<code>vllm/v1/executor/abstract.py:L116-L117</code>, <code>:L200-L201</code>, <code>:L272-L273</code>) &mdash; and almost nothing else.</li>
   <li><b><code>external_launcher</code> cannot be the default because vLLM says its own scheduler is not deterministic.</b> The <code># TODO</code> at <code>vllm/v1/executor/abstract.py:L79-L80</code> is why a broadcast <code>SchedulerOutput</code> beats a replicated scheduler: it costs a shared-memory write per step and needs no determinism guarantee at all.</li>
-  <li><b>Aborts have two owners with different clocks; death has one.</b> The frontend's <code>RequestState</code> dies synchronously, the engine's <code>Request</code> and its KV blocks up to one step later. Engine death inverts this: one sentinel frame fails every in-flight stream at once, because nothing in flight can complete. And the V2 model runner slots in below the <code>Worker</code> behind one <code>if</code> in <code>init_device</code> &mdash; the payoff of keeping that interface down to <code>execute_model</code> plus <code>sample_tokens</code>.</li>
+  <li><b>Aborts have two state owners and asynchronous retirement; death propagates.</b> The frontend's <code>RequestState</code> dies synchronously, the engine's <code>Request</code> and its KV blocks after delivery, processing and in-flight safety allow. Engine death inverts this: one sentinel frame fails every in-flight stream at once, because nothing in flight can complete. And the V2 model runner slots in below the <code>Worker</code> behind one <code>if</code> in <code>init_device</code> &mdash; the payoff of keeping that interface down to <code>execute_model</code> plus <code>sample_tokens</code>.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
   <li><a href="https://github.com/vllm-project/vllm/issues/11400">vllm-project/vllm#11400</a> &mdash; the issue <code>ExecutorWithExternalLauncher</code>'s docstring points at, on running vLLM under torchrun-compatible launchers. Read it alongside the determinism TODO.</li>
@@ -1642,7 +1642,7 @@ print(type(llm.llm_engine.engine_core).__name__)
 </ul></div></section>
 <div class="pager"><a href="11-01-repo-map-and-v1.html"><div class="pager__k">← Previous</div><div class="pager__t">Repo map, and what V1 changed</div></a><a class="pager__next" href="11-03-the-v1-scheduler-in-code.html"><div class="pager__k">Next →</div><div class="pager__t">The V1 scheduler, in code</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

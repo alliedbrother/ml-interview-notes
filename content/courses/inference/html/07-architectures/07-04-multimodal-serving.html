@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Multimodal serving — The Inference Engineering Book</title>
+<title>Multimodal serving — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 7 · Architectures that change the inference story · 07-04</div>
 <h1>Multimodal serving</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/multimodal/</code></li><li><code>vllm/v1/core/encoder_cache_manager.py</code></li><li><code>python/sglang/srt/multimodal/</code></li><li><code>python/sglang/srt/mem_cache/multimodal_cache.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/multimodal/</code></li><li><code>vllm/v1/core/encoder_cache_manager.py</code></li><li><code>python/sglang/srt/multimodal/</code></li><li><code>python/sglang/srt/mem_cache/multimodal_cache.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A user pastes one 1024&times;1024 screenshot into a Qwen2-VL chat. Before a single word of
 their question is read, the engine has committed 1,369 KV slots &mdash; 171&nbsp;MiB at Llama-3-8B's
@@ -633,9 +633,9 @@ for the token expansion that joins them.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Run a vision-language model under vLLM's defaults and the first thing that surprises you is not
 latency. It is that the engine refuses to schedule.</p>
 
-<p>vLLM's V1 scheduler owns a second budget besides the token budget. When it cannot satisfy that
-budget it does not queue the encoder work for later &mdash; it truncates the request's prefill to
-stop <em>before</em> the image:</p>
+<p>The V1 scheduler has an encoder budget as well as a token budget. If encoder work cannot
+fit now, it can defer that work by stopping this prefill chunk before the image. That is
+scheduling delay, not necessarily permanent rejection of the request:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -730,13 +730,12 @@ fixed-size input, no KV cache, no incremental state, bidirectional attention, an
 spliced into the language model's embedding sequence at exactly the positions the tokenizer reserved
 with placeholder token ids.</p>
 
-<p>Everything awkward in this chapter follows from that splice. The encoder output must be kept alive
-from the step that computed it until the step that consumes it (so it needs its own cache, with its
-own budget). It must be produced whole, because bidirectional attention cannot be chunked the way
-causal prefill can (so it fights chunked prefill, <a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>).
-And the KV blocks it eventually produces are only reusable by a later request if that request has the
-same image at the same offset (so it perturbs prefix caching,
-<a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a>).</p>
+<p>Encoder embeddings must stay alive until the language model consumes them.
+Bidirectional attention prevents independently finalizing a prefix without its future keys;
+it does not prohibit exact tiled attention over the full image. The model/API may still
+schedule an image as one encoder item. Reusing its language-model KV additionally requires
+the same preceding causal prefix, positions, model/adapter and processing identity, not only
+the same image at the same offset. Encoder-embedding reuse has a different, less contextual key.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; the full pipeline, bytes to prefill.</b> Shapes are
@@ -1191,9 +1190,10 @@ identity for an image it knows it will send repeatedly.</p>
 
 <h3>SGLang: rewrite the placeholder ids themselves</h3>
 
-<p>SGLang reaches the same guarantee without touching the hash function. Because the placeholder ids
-are clobbered before they are ever embedded (Figure 2), SGLang is free to overwrite them with a
-per-image sentinel derived from the item hash:</p>
+<p>SGLang rewrites placeholder IDs to image-derived sentinels. Since these can exceed the
+vocabulary, every path to an embedding lookup must mask, replace or otherwise safely handle
+them before lookup; overwriting embeddings afterward does not retroactively make an invalid
+lookup safe. Trace the selected model's preprocessing and speculative path:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1224,10 +1224,11 @@ def _compute_pad_value(hash: int) -&gt; int:
             last_idx = end_idx</code></pre>
 </div>
 
-<p>The radix tree (<a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a>) then
-needs no multimodal awareness whatsoever: two different images produce two different token sequences
-and diverge naturally at the first image token. Position sensitivity comes free, because a radix tree
-matches prefixes by construction.</p>
+<p>The radix tree sees these sentinels as ordinary sequence elements, but a 30-bit hash
+suffix is not a unique image identity. Under uniform hashing, n distinct items have collision
+probability approximately 1 - exp(-n*(n-1)/(2*2^30)); at 10,000 it is about 4.55%.
+This does not by itself prove wrong reuse in the complete engine: inspect additional identity
+fields, namespaces and collision checks. Do not claim the sentinel alone guarantees distinct images.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Tradeoff</span>
@@ -1241,16 +1242,15 @@ matches prefixes by construction.</p>
   (<code>python/sglang/srt/managers/schedule_batch.py:L196-L202</code>). That is the leak showing.</p>
 </div>
 
-<p>The two identities are computed from different things. SGLang hashes the <em>preprocessed feature
-tensor</em> (<code>hash_feature</code>, <code>python/sglang/srt/managers/mm_utils.py:L837-L862</code>
-&mdash; SHA-256 over the tensor bytes), namespaced by a processor fingerprint
-(<code>python/sglang/srt/multimodal/cache/identity.py:L327-L375</code>); vLLM hashes the raw input
-plus the kwargs. SGLang's is immune to a kwargs mismatch but pays SHA-256 over 24.6&nbsp;MiB of fp32
-pixels per image; vLLM's is cheaper but only as correct as the kwargs it was handed.</p></div></section>
-<section class="sec" id="scheduling" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Scheduling: an image cannot be split</h2></div><div class="sec__body"><p>Chunked prefill (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>) works
-because causal attention lets you compute tokens $[0,c)$ now and $[c, 2c)$ later. A ViT uses
-bidirectional attention, so patch 5,000 attends to patch 3 and the item must be encoded whole. The
-two engines land on opposite sides of the resulting conflict.</p>
+<p>The cited SGLang identity combines preprocessed tensor bytes with a processor fingerprint;
+vLLM's key includes raw-input identity and processing arguments. Neither is universally
+immune to configuration errors. Changed pixel limits can produce identical processed data,
+while fingerprint changes can still invalidate an entry. Correct identity must include every
+choice that changes embeddings, including model/processor revision and trusted supplied IDs.</p></div></section>
+<section class="sec" id="scheduling" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Scheduling: an image cannot be split</h2></div><div class="sec__body"><p>The item-level scheduler treats a vision encoding as a unit.
+That does not prevent the encoder's attention kernel from tiling queries and keys. Unlike causal
+prefix extension, an independently finalized patch prefix would miss later bidirectional context.
+Once the full embeddings exist, language-model prefill can consume them in chunks.</p>
 
 <p>vLLM's default <em>permits</em> a chunk boundary inside the placeholder span: the encoder runs
 whole, the embeddings sit in the encoder cache, and successive chunks slice them
@@ -1377,17 +1377,14 @@ flowchart TD
 <p>What actually crosses the wire in each direction is worth being precise about, because it is the
 whole economic argument.</p>
 
-<p><b>Outbound</b>: the language server sends media <em>references</em>, not pixels. The encoder does
-its own fetch, decode, resize and normalise &mdash; <code>EncoderPreprocessor</code> is documented as
-"Takes raw media URLs / base64 data and produces HF processor output dicts (CPU tensors). The GPU
-model is never touched here"
-(<code>python/sglang/srt/disaggregation/encoder/preprocessor.py:L92-L100</code>). So the expensive CPU
-preprocessing moves off the prefill box too, which is at least as valuable as moving the ViT.</p>
+<p><b>Outbound</b>: URL inputs send references and move fetching/preprocessing to the encoder.
+Base64 inputs carry the media bytes themselves with encoding overhead; they are not only a
+small reference. Measure both directions and preprocessing CPU cost for the actual payload type.</p>
 
 <p><b>Inbound</b>: an <code>EmbeddingData</code> carrying <code>req_id</code>, <code>num_parts</code>,
 <code>part_idx</code>, <code>grid_dim</code>, <code>modality</code>, dtype/shape, and the tensor
-itself (<code>python/sglang/srt/disaggregation/encoder/receiver.py:L397-L432</code>). It lands in a
-preallocated GPU ring:</p>
+itself (<code>python/sglang/srt/disaggregation/encoder/receiver.py:L397-L432</code>). It lands in
+a preallocated GPU pool; the shown allocator's free-list/first-fit policy is not a ring:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1441,9 +1438,9 @@ need comparable memory. An encoder pool runs only the vision tower &mdash; no KV
 context &mdash; so it fits on cheaper, smaller cards while the language side keeps its H100s entirely
 for KV. The third is fan-out: the receiver splits one request's items across several encoder URLs
 (<code>MMReceiverHTTP.encode</code>, <code>python/sglang/srt/disaggregation/encoder/receiver.py:L2430-L2470</code>),
-so a ten-image request is encoded in parallel and reassembled by <code>part_idx</code>. P/D has no
-equivalent &mdash; a prefill is one sequence on one node. Encoders find their language servers by
-POSTing their URL to each <code>--encoder-register-urls</code> bootstrap endpoint on startup, default
+so a multi-image request can distribute independent items and reassemble by part index.
+This differs from sequence/context parallelism, which can also distribute prefill work across
+devices; P/D is not inherently one sequence on one node. Encoders register their URL at bootstrap, default
 port 8997 (<code>python/sglang/srt/server_args.py:L3232-L3241</code>), and
 <code>--enable-prefix-mm-cache</code> (which the arg validator requires be paired with
 <code>--encoder-only</code>, <code>python/sglang/srt/server_args.py:L7809-L7812</code>) gives the pool
@@ -1635,6 +1632,24 @@ budgeted.</p>
   <code>python/sglang/srt/model_executor/model_runner.py</code>. Reader should verify before sizing a
   deployment close to the memory limit.</p>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Cache identity and trust boundaries</h2></div><div class="sec__body">
+<p>Separate processor-output, encoder-embedding and language-KV caches. Only the last depends on the complete causal prefix; a language-worker embedding hit avoids a transfer that an encoder-worker hit does not. For URLs, constrain schemes/hosts and redirect destinations, enforce decoded size/frame/audio-duration limits, and isolate media decoding. Treat caller-supplied IDs as trusted claims only within an authenticated namespace. The birthday calculation below is a hash-space check, not a demonstrated engine exploit.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">from math import exp
+
+buckets = 2**30
+items = 10_000
+probability = 1 - exp(-items*(items-1)/(2*buckets))
+assert 0.045 &lt; probability &lt; 0.046
+def kv_identity(prefix, image_id, model_revision, processor_revision):
+    return (tuple(prefix), image_id, model_revision, processor_revision)
+a = kv_identity([1, 2], "image-A", "model-v1", "processor-v1")
+b = kv_identity([9, 2], "image-A", "model-v1", "processor-v1")
+assert a != b
+assert kv_identity([1, 2], "image-A", "model-v2", "processor-v1") != a
+print("30-bit collision approximation:", probability)
+print("Matching image identity alone is insufficient for causal KV reuse.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Confirm the token expansion for yourself without a GPU &mdash; the arithmetic is pure Python:</p>
 
 <div class="code-file">
@@ -1681,11 +1696,10 @@ SGLANG_VLM_CACHE_SIZE_MB=12 python -m sglang.launch_server \
     --model-path Qwen/Qwen2-VL-7B-Instruct --chunked-prefill-size 8192</code></pre>
 </div>
 
-<p>The measurement to take: send the <em>same</em> image twice, back to back, and compare TTFT.
-The second should skip the ViT entirely (vLLM: <code>check_and_update_cache</code> returns True;
-SGLang: <code>embedding_cache.get_single</code> hits). Then send it twice with different
-<code>max_pixels</code> in the request's <code>mm_processor_kwargs</code> and confirm both TTFTs are
-cold &mdash; that is the identifier including the processor kwargs, doing exactly what &sect;5 says.</p></div></section>
+<p>Send repeated images and log the exact cache tier's hit/miss, encoder invocations and
+transfer bytes, not just TTFT. Cache lifetimes differ. Change processing arguments, then inspect
+both processed output and identity: different max-pixel limits need not change an already-small
+image, and not every backend keys arguments identically. Run servers sequentially or isolate GPUs.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read the file.</b> In <code>vllm/v1/core/encoder_cache_manager.py</code>, why does
   <code>get_freed_mm_hashes</code> filter with <code>if mm_hash not in self.cached</code> before
@@ -1739,10 +1753,10 @@ cold &mdash; that is the identifier including the processor kwargs, doing exactl
   differ on the <code>offset - start_token_idx</code> component even though the identifier matches,
   and SGLang's differ because the token sequence is shifted. Same outcome, two mechanisms.</p>
 
-  <p><b>5.</b> On the encoders, via <code>--enable-prefix-mm-cache</code>. A catalogue hit then costs
-  one <code>/encode</code> round trip and 10.7&nbsp;MiB on the wire but zero ViT FLOPs. On the
-  language side you would pay the same wire and pay it once per language replica instead of once per
-  pool.</p>
+  <p><b>5.</b> An encoder-side embedding hit avoids ViT computation but still transfers its
+  output to the language worker. A language-worker embedding hit can avoid both that remote
+  computation and the repeated embedding transfer, but duplicates cache capacity across replicas.
+  Choose placement from locality, replication and hit rates; neither tier dominates universally.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="key-takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
@@ -1758,14 +1772,12 @@ cold &mdash; that is the identifier including the processor kwargs, doing exactl
   admission-control on it; SGLang counts bytes with a plain LRU because its lookup happens inside the
   forward pass, after admission. Neither number scales with your KV pool.</li>
 
-  <li>Both engines make the cache key depend on <em>which</em> image and <em>where</em>, at different
-  layers: vLLM adds <code>(identifier, offset)</code> to the block hash's extra keys; SGLang
-  overwrites the placeholder ids with <code>1_000_000 + hash mod 2^30</code> so the radix tree needs
-  no special case at all &mdash; at the price of out-of-vocabulary ids leaking into every downstream
-  consumer.</li>
+  <li>KV reuse needs complete prefix identity. SGLang's 30-bit sentinel supplies a convenient
+  radix token but is collision-prone, not a unique image proof. Check all surrounding cache
+  identities and safe handling of out-of-vocabulary sentinels.</li>
 
-  <li>That identifier includes the per-request processor kwargs. Inconsistent <code>max_pixels</code>
-  across otherwise identical requests silently doubles your encoder work and kills prefix reuse, with
+  <li>Processing configuration participates in cache correctness. Its effect on both processed
+  tensors and cache identity is backend-specific; inconsistent arguments can reduce reuse, with
   no error anywhere.</li>
 
   <li>A ViT on one image has arithmetic intensity $\approx N_p$ &mdash; 5,476 for a 1024&times;1024
@@ -1798,7 +1810,7 @@ cold &mdash; that is the identifier including the processor kwargs, doing exactl
 </ul></div></section>
 <div class="pager"><a href="07-03-ssm-and-hybrids.html"><div class="pager__k">← Previous</div><div class="pager__t">Hybrid SSM / Mamba models and non-KV state</div></a><a class="pager__next" href="07-05-lora-and-pooling-models.html"><div class="pager__k">Next →</div><div class="pager__t">LoRA serving, embeddings, rerankers, pooling</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1813,6 +1825,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#epd">Encode-prefill disaggregation</a>
 <a href="#worked-trace">Worked trace: one image through vLLM</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#key-takeaways">Key takeaways</a>

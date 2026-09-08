@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Arithmetic intensity and the roofline — The Inference Engineering Book</title>
+<title>Arithmetic intensity and the roofline — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,11 +623,10 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 0 · Foundations · 00-04</div>
 <h1>Arithmetic intensity and the roofline</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/kernels/</code></li><li><code>python/sglang/benchmark/one_batch.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>benchmarks/kernels/</code></li><li><code>python/sglang/benchmark/one_batch.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">An H100 SXM is rated at 989 TFLOP/s of dense bf16. A batch-1 decode step of Llama-3-8B
-uses about 0.34% of that. No kernel you write, no compiler you enable, and no amount of
-occupancy tuning changes that number — because the step never had enough arithmetic in it
+uses about 0.34% of that. Under the assumed compulsory traffic, improving arithmetic throughput alone does not raise that ideal bandwidth ceiling — because the step never had enough arithmetic in it
 to keep the tensor cores fed. This chapter builds the one-page model that tells you, before
 you write any code, whether an optimisation can possibly help.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is the symptom that starts every serving investigation. You load Llama-3-8B in bf16
@@ -638,14 +637,7 @@ GPU did not get faster. Something about the first measurement was structurally w
 waste is not in your code. §3 derives both of those figures as bandwidth floors, so you can check
 the claim before you believe it.</p>
 
-<p>The instinct at this point is to profile and optimise the kernels. That instinct is wrong,
-and knowing <em>why</em> it is wrong is the most valuable thing in Part 0. Chapter
-<a href="00-03-gpu-architecture.html">§0.3</a> established the hardware: tensor cores on one
-side of a memory hierarchy, HBM on the other. The tensor cores consume operands far faster
-than HBM can supply them, so every kernel sits somewhere on a spectrum between <em>plenty of
-arithmetic per byte I loaded</em> and <em>I loaded a lot and barely did anything with it</em>.
-That single ratio decides which half of the machine is your bottleneck, and therefore which
-optimisations are even in play.</p></div></section>
+<p>Profile first, then identify the limiting resource. Arithmetic intensity relates useful work to transferred bytes, but better kernels may reduce actual rereads, improve achieved bandwidth, fuse launches, or change the algorithm. The roofline rules out improvements from extra arithmetic peak alone on a bandwidth-bound kernel; it does not rule out software optimization.</p></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>Think of the GPU as a workshop with an enormously productive machine floor and a single
 loading dock. Work arrives as pallets of bytes. If a pallet keeps the floor busy for a long
 time, the dock idles and the floor is the limit; if it is consumed instantly, the floor idles
@@ -753,18 +745,18 @@ gives them a chapter of their own.</p></div></section>
 $\beta$ achievable HBM bandwidth in bytes/s. For a kernel, let $F$ be the FLOPs it performs
 and $Q$ the bytes it must move across the HBM boundary. Then</p>
 
-<div class="math-display">$$I = \frac{F}{Q}, \qquad \text{achievable FLOP/s} \;=\; \min\!\left(\pi,\; \beta \cdot I\right), \qquad I^{*} = \frac{\pi}{\beta}.$$</div>
+<div class="math-display">$$I = \frac{F}{Q}, \qquad \text{achieved FLOP/s} \;\le\; \min\!\left(\pi,\; \beta \cdot I\right), \qquad I^{*} = \frac{\pi}{\beta}.$$</div>
 
 <p>Three things about $Q$ matter and are routinely got wrong.</p>
 
 <ul>
-  <li><strong>$Q$ is compulsory traffic, not total traffic</strong> — each distinct byte that
+  <li><strong>For the optimistic calculations below, $Q$ is compulsory traffic, not total traffic</strong> — each distinct byte that
   must cross the HBM boundary at least once, counted once. A value re-read from L2 or SRAM does
   not count again. So the $I$ computed below is an <em>upper bound</em> on what any kernel can
   achieve for that computation; a kernel that spills tiles back to HBM sits further left than
   the algebra says. FlashAttention
   (<a href="../03-attention-kernels/03-02-flashattention.html">§3.2</a>) is exactly the story of
-  driving actual traffic down to compulsory traffic.</li>
+  reducing materialized intermediates and HBM traffic; finite SRAM still requires tile rereads. An operational roofline can instead use measured total HBM traffic, counting every HBM reread.</li>
   <li><strong>$Q$ counts reads and writes.</strong> Inputs, weights, and outputs.</li>
   <li><strong>$\pi$ and $\beta$ are achievable, not advertised.</strong> Spec-sheet peak assumes
   perfect tiling, no throttling, and no tail effects. Every number in this chapter uses the spec
@@ -773,7 +765,7 @@ and $Q$ the bytes it must move across the HBM boundary. Then</p>
   prediction in this book should be re-checked against them.</li>
 </ul>
 
-<h3>The H100 ridge point</h3>
+<h3>Composing kernels, not only totals</h3><p>For sequential kernels, a tighter lower bound is $\sum_i\max(F_i/\pi_i,Q_i/\beta_i)$, not merely $\max(\sum_iF_i/\pi,\sum_iQ_i/\beta)$. A compute-heavy kernel taking at least 3 ms and a separate bandwidth-heavy kernel taking at least 4 ms need at least 7 ms if they cannot overlap, even when the aggregate roofline suggests 4 ms. Launch gaps and synchronization add further costs. Shared-prefix reuse, quantization metadata, tensor-parallel communication, and speculative multi-token verification each change the accounting assumptions.</p><h3>The H100 ridge point</h3>
 
 <div class="table-wrap">
   <div class="table-wrap__cap">Cited — NVIDIA H100 datasheet (SXM form factor), dense rates without structured sparsity</div>
@@ -814,7 +806,7 @@ every token. At $T = 1$, $I \to d/(d+2) \approx 1$, and the GEMM is not a GEMM a
 <p>Setting $I(T) = I^{*}$ and solving gives the batch at which a square projection becomes
 compute-bound:</p>
 
-<div class="math-display">$$T^{*} = \frac{I^{*} d}{d - b\,I^{*}} \;=\; \frac{295 \times 4096}{4096 - 2 \times 295} \;\approx\; 345 \text{ tokens.}$$</div>
+<div class="math-display">$$T^{*} = \frac{b I^{*} d}{2(d - b\,I^{*})} \;=\; \frac{295 \times 4096}{4096 - 2 \times 295} \;\approx\; 345 \text{ tokens.}$$</div>
 
 <p><em>Derived.</em> A Llama-3-8B projection needs about 345 tokens in flight before an H100's
 bf16 tensor cores are the limit. A 1,024-token prompt is comfortably past it; so is every
@@ -843,7 +835,7 @@ general $[1, K] \times [K, N]$ shape:</p>
 
 <div class="math-display">$$I = \frac{2KN}{b\,(K + KN + N)} \;\xrightarrow[\;KN \gg K+N\;]{}\; \frac{2}{b}.$$</div>
 
-<p>For bf16, $I = 1.0$ FLOP per byte. Not approximately — the fused QKV projection at
+<p>For bf16, $I$ approaches 1.0 FLOP per byte — the fused QKV projection at
 $K = 4096$, $N = 6144$ gives $50{,}331{,}648$ FLOPs over $50{,}352{,}128$ bytes, an intensity of
 0.9996. Notice what dropped out: $K$, $N$, the layer, the model, the head count. Only $b$
 survives. <strong>Every dense weight matrix, read once and applied to one token, does exactly
@@ -853,8 +845,7 @@ it, forever.</p>
 <p>On the roofline that is $\beta \cdot I = 3.35$ TFLOP/s against a ceiling of 989.4: a batch-1
 bf16 decode step can use at most <strong>0.34%</strong> of the H100's advertised tensor-core
 throughput. Quantizing weights to fp8 doubles $I$ to 2.0 and doubles achievable throughput —
-still 0.68% of peak, but the time <em>halved</em>, because in the memory-bound regime time is
-bytes over bandwidth and nothing else. That is the whole argument for weight-only quantization,
+still 0.68% of peak, but the time <em>halved</em>, because in the memory-bound regime the ideal memory-time term is bytes over bandwidth. Conversion, scale metadata, launch gaps, and achieved bandwidth determine the realized speedup. That is the whole argument for weight-only quantization,
 made before opening <a href="../04-quantization/04-01-the-design-space.html">§4.1</a>.</p>
 
 <h3>(c) Decode attention against the KV cache</h3>
@@ -950,7 +941,7 @@ bytes, exactly 128 KiB.</p>
 
 <p><em>All four derived</em> from the formula above with the cited 3.35 TB/s. The first pair is
 the number to carry around: <strong>a single H100 cannot generate Llama-3-8B faster than about
-223 tokens per second at batch 1 in bf16, no matter what you do to the software.</strong> Not
+223 tokens per second at batch 1 in bf16 under one full target-model forward per accepted token and the stated streamed-weight assumptions. Speculative verification can emit multiple accepted tokens per weight stream; it is outside this particular ceiling.</strong> Not
 because the kernels are bad — because streaming 15 GB of weights at 3.35 TB/s takes 4.48 ms.
 Measure 6 ms and you have 1.5 ms of slack to hunt for in launch overhead and CUDA graphs
 (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">§8.1</a>); measure 4.6 ms and
@@ -996,13 +987,11 @@ flowchart TD
   </script>
 </div>
 
-<p>The negative results are as useful as the positive ones. At $I = 1$ a faster matmul kernel is
-worthless — you would be making the idle half of the machine idler. Past the ridge, KV
-quantization saves memory but buys no time. Most disappointing optimisations in this field are
+<p>The negative results are as useful as the positive ones. At $I = 1$ a kernel with greater arithmetic throughput alone cannot raise the bandwidth ceiling — you would be making the idle half of the machine idler. A compute-bound kernel may see little benefit from reduced bytes, but a full step mixes kernels with different bottlenecks. Most disappointing optimisations in this field are
 optimisations applied on the wrong side of the ridge.</p></div></section>
 <section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><p>Neither engine contains a file called <code>roofline.py</code>. What both contain is
 machinery whose sole purpose is to raise $T$ — the number of tokens handed to one forward
-pass — because that is the only knob that moves a decode step rightward.</p>
+pass — because it improves weight reuse; reducing transferred bytes is another way to move rightward.</p>
 
 <h3>vLLM: one flat token budget, then one flat GEMM</h3>
 
@@ -1250,8 +1239,7 @@ the first decode step after a prefill is not representative:</p>
 
 <p>Two details make this a valid roofline probe rather than a vibe. The
 <code class="c-sglang">model_runner.synchronize()</code> calls on both sides of the timed region
-drain the asynchronous CUDA stream, so <code>perf_counter</code> measures GPU work, not launch
-time. And <code class="c-sglang">extend()</code>
+drain the asynchronous CUDA stream, so <code>perf_counter</code> measures completed wall-clock work including host dispatch and synchronization overhead, not just enqueue time. CUDA events delimit device-stream time when that is the desired quantity. And <code class="c-sglang">extend()</code>
 (<code>python/sglang/benchmark/one_batch.py:L487-L521</code>) versus
 <code class="c-sglang">decode()</code> (<code>python/sglang/benchmark/one_batch.py:L526-L537</code>)
 differ only in <code>prepare_for_extend</code> versus <code>prepare_for_decode</code> and the
@@ -1266,8 +1254,7 @@ and the residual is the lesson.</p></div></section>
   <div class="ve-card">
     <span class="ve-card__k">01</span>
     <h4>Using the sparsity number</h4>
-    <p>NVIDIA's headline "1,979 TFLOPS BF16" for H100 SXM assumes 2:4 structured sparsity, which
-    no LLM inference path uses. Halving it to 989 moves the ridge from 590 to 295 — a factor of
+    <p>NVIDIA's headline "1,979 TFLOPS BF16" for H100 SXM assumes 2:4 structured sparsity, which ordinary dense LLM inference does not automatically exploit. Halving it to 989 moves the ridge from 590 to 295 — a factor of
     two error in every prediction downstream. Check whether the footnote says "with sparsity"
     before you divide by anything.</p>
   </div>
@@ -1283,8 +1270,7 @@ and the residual is the lesson.</p></div></section>
     <span class="ve-card__k">03</span>
     <h4>Optimising on the wrong side of the ridge</h4>
     <p>The classic wasted week: a decode kernel at $I = 1$ gets hand-tuned tiling, wins 3% and
-    the engineer concludes tuning does not work. It cannot work. At $I = 1$ the tensor cores are
-    99.7% idle by construction; the only wins available are fewer bytes or more bandwidth.</p>
+    the engineer concludes tuning does not work. Arithmetic-only optimization cannot beat the bound. Better kernels can nevertheless reduce HBM rereads, improve achieved bandwidth, fuse launches, and reduce overhead.</p>
   </div>
   <div class="ve-card">
     <span class="ve-card__k">04</span>
@@ -1407,10 +1393,9 @@ numbers. Every prediction in this book should be re-derived against them.</p></d
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>A dense weight matrix applied to one token does exactly $2/b$ FLOPs per byte — 1.0 in bf16
-  — independent of model, layer, and shape. That is why decode is memory-bound on every GPU ever
-  built, and why the fix is never a better matmul.</li>
+  — independent of model, layer, and shape. That is why decode is memory-bound on modern high-compute GPUs under this low-intensity workload, and why extra peak arithmetic alone is not the fix; a better implementation can still improve bandwidth utilization or reduce traffic.</li>
   <li>Decode attention's intensity is $2h/(b\,h_{kv})$: independent of context length <em>and</em>
-  of batch size. Weight reads amortise across a batch; KV reads never do. That asymmetry is why
+  of batch size. Weight reads amortise across a batch; independent-request KV reads do not. Shared-prefix-aware attention can exploit additional KV reuse; ordinary prefix caching alone need not reduce repeated decode reads. That asymmetry is why
   long-context serving is a different engineering problem from high-concurrency serving.</li>
   <li>The ridge for H100 SXM bf16 is 295 FLOP/byte, reached at about 345 tokens per step for a
   Llama-3-8B projection. At hidden size $d \le 2I^{*} = 590$, no batch size makes a square bf16
@@ -1448,7 +1433,7 @@ numbers. Every prediction in this book should be re-derived against them.</p></d
 </ul></div></section>
 <div class="pager"><a href="00-03-gpu-architecture.html"><div class="pager__k">← Previous</div><div class="pager__t">GPU architecture for inference engineers</div></a><a class="pager__next" href="00-05-numerics.html"><div class="pager__k">Next →</div><div class="pager__t">Numerics: FP32 to INT4, and why bf16 won</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

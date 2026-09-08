@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Formats and kernels: FP8, INT8, INT4, Marlin, Machete — The Inference Engineering Book</title>
+<title>Formats and kernels: FP8, INT8, INT4, Marlin, Machete — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 4 · Quantization · 04-03</div>
 <h1>Formats and kernels: FP8, INT8, INT4, Marlin, Machete</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>csrc/libtorch_stable/quantization/marlin/</code></li><li><code>csrc/libtorch_stable/quantization/machete/</code></li><li><code>vllm/model_executor/kernels/linear/</code></li><li><code>python/sglang/srt/layers/quantization/fp8_utils.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>csrc/libtorch_stable/quantization/marlin/</code></li><li><code>csrc/libtorch_stable/quantization/machete/</code></li><li><code>vllm/model_executor/kernels/linear/</code></li><li><code>python/sglang/srt/layers/quantization/fp8_utils.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Quantise Llama-3-70B's gate projection to INT4 and the weight shrinks from 470&nbsp;MB to
 121&nbsp;MB. Then write the obvious kernel &mdash; dequantise to bf16, call cuBLAS &mdash; and the layer gets
@@ -669,10 +669,7 @@ the entire design brief for Marlin, Machete, and every kernel in this chapter.</
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>A tensor core accepts a fixed menu of operand types. If your format is on the menu, the GEMM is an
 ordinary GEMM and the only interesting question is where the scale factors get applied. If your format
 is <em>not</em> on the menu &mdash; and INT4 weights against bf16 activations are not &mdash; the kernel must
-convert, and the only question that matters is <em>where</em>. Convert in HBM and you lose. Convert in
-shared memory and you have merely moved the problem. Convert in registers, one 32-bit word at a time,
-with the conversion instructions interleaved into the same instruction stream as the <code>mma</code>s
-they feed, and the conversion is free: it runs on the integer/ALU pipes while the tensor cores are busy.</p>
+convert, and the only question that matters is <em>where</em>. Materializing expanded weights in HBM can erase bandwidth savings. Shared-memory and register conversion trade storage, occupancy and scheduling differently. Register conversion can overlap integer/ALU work with tensor-core instructions, but its cost is not automatically zero: measure stalls, register pressure, repeated conversion and achieved throughput.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; the mixed-precision GEMM pipeline, W4A16.</b>
@@ -1705,7 +1702,7 @@ layer: full shape $N = 8192$, $K = 28672$; per rank $K_{\text{part}} = 14336$.</
   <li><b>Inside the kernel:</b> TMA loads the prepacked B block into shared memory; each thread pulls a
   128-bit slice into registers; the upconvert runs (interleaved layout, since 4-bit and not converting to
   fp8/int8 &mdash; <code>machete_prepacked_layout.cuh:L56-L59</code>); <code>wgmma</code> with register-source A
-  accumulates in fp32; the epilogue applies the group scale and stores bf16.</li>
+  applies group scales during upconversion/inner reduction when they vary along K; the GEMM accumulates in fp32 and the epilogue stores bf16. Such group scales cannot be applied just once after the full K sum.</li>
   <li><b>Prefill step, M = 2048.</b> Same weights, same kernel object, <em>different compiled schedule</em>:
   <code>"M &gt; 256"</code> matches first, giving tile <code>(128, 256)</code> cluster <code>(2,1,1)</code>.</li>
 </ol>
@@ -1735,8 +1732,7 @@ the logs says "you lost Machete"; the only signal is the one-off
     in the startup log rather than assuming.</p></div>
   <div class="ve-card"><span class="ve-card__k">Silent</span><h4>Padding tax on every forward</h4>
     <p><code>marlin_padded_nk</code> warns once, at load, then every forward pads activations and slices
-    outputs. A model with hidden size 6144 and TP=5 can end up padding to a 15% larger weight and paying for
-    it on every token, with no per-step signal.</p></div>
+    outputs. A local dimension 1200 from a divisible global dimension 6000 at TP=5 can require padding to a 128-wide tile boundary, 1280: a 6.7% expansion on that axis in this illustrative layout. Actual supported shapes must also satisfy head and quantization-group constraints; nonintegral sharding is not padding.</p></div>
   <div class="ve-card"><span class="ve-card__k">Perf</span><h4>atomicAdd reduce is off by default</h4>
     <p><code>should_use_atomic_add_reduce</code> (<code>marlin_utils.py:L633-L654</code>) would help when
     <code>n &lt; 2048 and k &gt;= 2048</code> &mdash; the split-K decode shape &mdash; but returns False unless
@@ -1748,6 +1744,7 @@ the logs says "you lost Machete"; the only signal is the one-off
     resources</em>" (<code>rocm_native.py:L165-L170</code>). Tile tables are tuned against a compiler version,
     not just a GPU.</p></div>
 </div></div></section>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
 <section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Both kernel families ship a microbenchmark. Marlin's sweeps batch sizes across a model's real layer
 shapes:</p>
 
@@ -1769,9 +1766,7 @@ VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor
 <p>Three things worth measuring, none of which need a paper to justify:</p>
 
 <ol>
-  <li>Plot Marlin's speedup over bf16 against M and find the crossover. The formula in §4.3.4 predicts
-  $M^{*} \approx 76$ for W4A16 on H100; the measured knee will be lower, because the dequant instructions
-  are not perfectly free and the kernel does not hit 100% of peak.</li>
+  <li>Plot Marlin's speedup over bf16 against M and separately locate its own memory/compute ridge. The ideal $M^{*}\approx76$ is the W4A16 own-ridge, not its crossover with bf16. Actual knees and pairwise speedups depend on achieved bandwidth, compute, conversion and shapes; do not assume a fixed direction of shift.</li>
   <li>Run the same model with <code>VLLM_DISABLED_KERNELS=MacheteLinearKernel</code> and without, at M=1 and
   M=256. Machete's advantage should be largest at moderate M where TMA and wgmma pay, and smallest at M=1
   where both kernels are pure weight streaming.</li>
@@ -1835,12 +1830,12 @@ VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor
 </ol></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>The tensor-core menu is short &mdash; fp16, bf16, e4m3, s8, plus Blackwell's block-scaled fp4 &mdash;
-  and it is the only thing that decides whether a format is fast. Everything else in a low-bit kernel is
+  and it constrains native multiplication support. Actual speed also depends on layout, conversion, occupancy, cache behavior, launches and achieved bandwidth. Everything else in a low-bit kernel is
   machinery for getting an off-menu format onto the menu without touching HBM.</li>
   <li>Dequantising to HBM and calling cuBLAS is 2.3&times; <em>slower</em> than bf16 on a Llama-3-70B FFN
   weight at M=1 (derived). The win comes entirely from keeping weights packed until the register file.</li>
   <li>Marlin's contribution is a layout, not an algorithm: the repack writes weights in
-  <code>{0,2,4,6,1,3,5,7}</code> nibble order precisely so that one 32-bit load plus two <code>LOP3</code>s
+  <code>{0,2,4,6,1,3,5,7}</code> nibble order precisely so that one 32-bit load plus four <code>LOP3</code>s across the shifted nibble groups
   emit the eight fp16 values a lane's <code>mma</code> fragment wants, with no cross-lane movement.</li>
   <li>Per-tensor and per-channel scales factor out of the k-sum and live in the epilogue; group-wise and
   block-wise scales do not, and must be applied on register fragments inside the mainloop. That single
@@ -1882,7 +1877,7 @@ VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor
 </ul></div></section>
 <div class="pager"><a href="04-02-gptq-awq-smoothquant.html"><div class="pager__k">← Previous</div><div class="pager__t">GPTQ, AWQ, SmoothQuant, and calibration</div></a><a class="pager__next" href="04-04-when-quantization-pays.html"><div class="pager__k">Next →</div><div class="pager__t">When quantization pays — and when it does not</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

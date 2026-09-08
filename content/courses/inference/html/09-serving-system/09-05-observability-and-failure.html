@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Observability, failure modes, recovery — The Inference Engineering Book</title>
+<title>Observability, failure modes, recovery — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 9 · The serving system around the engine · 09-05</div>
 <h1>Observability, failure modes, recovery</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/metrics/</code></li><li><code>vllm/v1/fault_tolerance/</code></li><li><code>python/sglang/srt/observability/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/metrics/</code></li><li><code>vllm/v1/fault_tolerance/</code></li><li><code>python/sglang/srt/observability/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Your Grafana board says p99 inter-token latency is 9.9&nbsp;ms and has said 9.9&nbsp;ms every minute
 for three weeks. Users are complaining that generation stutters. Both facts are true, and the dashboard
@@ -1366,9 +1366,7 @@ known-good completion, checked on every deploy. vLLM offers one narrow numerical
 
 <h3>Slow or disconnected clients</h3>
 
-<p>A client that opens a stream and reads slowly holds a sequence resident in KV for the whole time it
-dawdles, because the engine cannot free the blocks until the request finishes or is aborted. A hundred
-such clients are a hundred sequences of KV pressure producing almost no throughput. This is the
+<p>A slow reader can accumulate frontend output without keeping completed engine KV live. Live generation retains its required KV until completion or abort; buffered completed text has a separate lifetime. A hundred slow clients can therefore cause byte-buffer pressure even after engine slots are released. This is the
 backpressure path that <a href="09-03-request-lifecycle.html">&sect;9.3</a> traces end to end; from an
 observability standpoint the signature is <code>num_requests_running</code> high,
 <code>gen_throughput</code> low, and <code>e2e_request_latency</code> far exceeding
@@ -1525,8 +1523,7 @@ there is a separate <code>/load</code> endpoint returning the in-flight request 
 (<code>vllm/entrypoints/serve/instrumentator/basic.py:L30-L49</code>), which is what
 <a href="09-04-routers-and-load-balancing.html">&sect;9.4</a>'s balancers consume.</p>
 
-<p>SGLang folds readiness into the same route, and goes further &mdash; the health check is a real
-one-token generation, so it proves the whole path works rather than just that a Python object exists:</p>
+<p>SGLang generation health uses a one-token request; ordinary <code>/health</code> only follows that path when <code>SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION</code> enables it. Do not infer generation success from the ordinary short-circuit route:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1705,10 +1702,7 @@ the 0.3&nbsp;s floor of the third family. TTFT (floor 0.001) is fine on vLLM and
 floor is 0.1.</p>
 <p><b>2.</b> $79.65 \times 0.90 = 71.69$&nbsp;GiB requested, minus 32.87&nbsp;GiB of weights, minus
 the same ~6.0&nbsp;GiB of activations, graphs and non-torch allocations, leaves <b>32.82&nbsp;GiB</b> per
-GPU, i.e. $32.82 \times 1024^2 / 320 \approx 107{,}500$ tokens. One 32k request is
-$32768/107{,}500 = $ <b>30.5%</b> of the pool &mdash; only three such requests fit, so a 90% threshold is
-useless; you would need to alarm nearer 70% and, better, cap <code>max_model_len</code>. At 8192 the
-same request is 7.6%, and a 90% threshold leaves room for one more admission. Note that doing this in
+GPU. With evenly sharded GQA KV heads at TP=4, each rank stores $320/4=80$ KiB/token, so $32.82\times1024^2/80\approx430{,}178$ token slots. A 32,768-token request consumes about <b>7.6%</b>, and an 8192-token request about <b>1.9%</b>. Admission still needs headroom for outputs, sharing, fragmentation, and other live requests; KV replication would require different arithmetic. Note that doing this in
 decimal GB &mdash; "80 GB times 0.9 minus 33 GB" &mdash; and then reporting the answer in GiB inflates
 the pool by about 7%; mixing the two units inside one expression is the single most common way this
 derivation goes wrong. The lesson is that a percentage threshold is only meaningful relative to the
@@ -1726,14 +1720,14 @@ fast.</p>
 <code>STAT_LOGGER_PLUGINS_GROUP</code>, taking <code>IterationStats.inter_token_latencies_iter</code>
 (<code>stats.py:L437</code>) and exporting a Gauge of the per-interval max plus a histogram with your own
 edges. Cost: one pass over a list that already exists, on the frontend process, not the GPU path. On
-SGLang: either override the ITL buckets so the existing histogram resolves your range, or add a stage to
+SGLang: narrower buckets improve quantile resolution but do not recover an exact maximum; record a separate interval-maximum statistic if that is required. Alternatively add a stage to
 <code>RequestStage</code> and let <code>per_stage_req_latency_seconds</code> carry it &mdash; its
 exponential buckets already start at 1&nbsp;ms. Cost of the stage approach: one observation per stage
 per request on the scheduler thread.</p>
 </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-<li>A histogram cannot report anything below its lowest bucket edge. vLLM's ITL floor of 10&nbsp;ms sits
+<li>A histogram cannot resolve the distribution within its first bucket, though interpolated quantiles can lie below that bucket edge. vLLM's ITL floor of 10&nbsp;ms sits
 above a healthy Llama-3-8B ITL of ~5&nbsp;ms, so <code>histogram_quantile</code> on it returns
 $q \times 10$&nbsp;ms and nothing else. Alert on <code>rate(_sum)/rate(_count)</code>; fix the buckets
 with <code>--bucket-inter-token-latency</code> on SGLang or a stat-logger plugin on vLLM.</li>
@@ -1788,7 +1782,7 @@ for the VRAM subtraction behind every KV threshold in this chapter.</li>
 </ul></div></section>
 <div class="pager"><a href="09-04-routers-and-load-balancing.html"><div class="pager__k">← Previous</div><div class="pager__t">Routers, KV-aware balancing, session affinity</div></a><a class="pager__next" href="../10-benchmarking/10-01-workload-characterization.html"><div class="pager__k">Next →</div><div class="pager__t">Workload characterization</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CUDA graphs and kernel-launch overhead — The Inference Engineering Book</title>
+<title>CUDA graphs and kernel-launch overhead — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,12 +623,11 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 8 · Compilation and runtime · 08-01</div>
 <h1>CUDA graphs and kernel-launch overhead</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/cudagraph_dispatcher.py</code></li><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/model_executor/cuda_graph_config.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/cudagraph_dispatcher.py</code></li><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/model_executor/cuda_graph_config.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">A Llama-3-8B decode step has a hard floor of 4.48&nbsp;ms set by HBM bandwidth. An eager
-PyTorch forward at TP=8 cannot even <em>issue</em> its kernels in that time. CUDA graphs close the gap by
-replacing hundreds of launches with one &mdash; and the price is that every buffer address and every tensor
-shape must be frozen forever.</p></div>
+<div class="prose"><p class="lead">CUDA graphs reduce repeated host submission work by replaying a captured workflow.
+The runners below use stable buffers and shape buckets. Weight-bandwidth arithmetic motivates
+profiling launch overhead; it does not establish an actual step time or GPU-idle percentage.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the number this book has been carrying since <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>:
 Llama-3-8B in bf16 is 15.0&nbsp;GB of weights, and reading them once at H100 SXM's 3.35&nbsp;TB/s costs
 <b>4.48&nbsp;ms</b>. That is the bandwidth-bound floor of a batch-1 decode step. Nothing you do to the
@@ -692,8 +691,8 @@ on PyTorch 2.4.1 / CUDA 12.6 / driver 560.35.03:</p>
   <em>CUDA Graph Best Practice for PyTorch</em> guide breaks per-launch cost into Language Transitions
   (10&ndash;100&nbsp;&micro;s), Runtime Processing (5&ndash;20&nbsp;&micro;s), Driver Operations
   (5&ndash;15&nbsp;&micro;s) and Hardware Submission (1&ndash;5&nbsp;&micro;s) &mdash; ranges, on unnamed
-  hardware, with no configuration given. Treat the 2.37&nbsp;&micro;s as a hard <em>lower bound</em> on
-  what a graph removes and the rest as an unquantified multiple of it.</p>
+   hardware, with no configuration given. The cited 2.37 microseconds is a measurement under
+   its stated setup, not a universal lower bound on launch cost or graph savings.</p>
 </div>
 
 <h3>Deriving the gap</h3>
@@ -712,30 +711,27 @@ Two cases, both arithmetic:</p>
   Launch cost is the <em>cited</em> driver-only 2.374 &micro;s; the framework layers on top are unquantified and additive.</div>
   <div class="table-scroll">
     <table class="dt">
-      <thead><tr><th>Config</th><th>Weights/rank</th><th>$T_{\text{GPU}}$</th><th>$N_{\text{kernels}}$</th><th>$B_{\text{host}}$</th><th>Driver-only host time</th><th>Verdict</th></tr></thead>
+      <thead><tr><th>Config</th><th>Weights/rank</th><th>Weight-read floor</th><th>Illustrative launches</th><th>Floor/launch</th><th>Submission estimate</th><th>Interpretation</th></tr></thead>
       <tbody>
-        <tr><td>TP=1</td><td class="num">15.0 GB</td><td class="num">4.48 ms</td><td class="num">330</td><td class="num">13.6 &micro;s</td><td class="num">0.78 ms (17%)</td><td>marginal &mdash; any framework cost above 11 &micro;s/op tips it</td></tr>
-        <tr><td>TP=8</td><td class="num">1.88 GB</td><td class="num">0.56 ms</td><td class="num">395</td><td class="num">1.42 &micro;s</td><td class="num">0.94 ms (168%)</td><td><b>launch-bound before Python is even considered</b></td></tr>
+        <tr><td>TP=1</td><td>15.0 GB</td><td>4.48 ms</td><td>330</td><td>13.6 us</td><td>0.78 ms</td><td>Profile host and device critical paths</td></tr>
+        <tr><td>TP=8</td><td>1.88 GB</td><td>0.56 ms</td><td>395</td><td>1.42 us</td><td>0.94 ms</td><td>Potential launch pressure, not an established regime</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<p>Read the second row again. At TP=8 the bare driver API needs 0.94&nbsp;ms of CPU time to issue a step
-whose GPU work is 0.56&nbsp;ms. The step cannot finish faster than 0.94&nbsp;ms no matter how good the
-kernels are, and the GPU sits idle at least <b>40%</b> of the time. Tensor parallelism shrinks $T_{\text{GPU}}$
-and <em>grows</em> $N_{\text{kernels}}$; the two effects multiply. This is why the graph question gets
-sharper, not softer, as you scale out.</p>
-
-<p>There is a device-side floor too. That same H100 measurement puts an <em>empty</em> kernel's duration at
-1.235&nbsp;&micro;s. Multiply by 330 and you get <b>0.41&nbsp;ms</b> &mdash; 9% of the 4.48&nbsp;ms step
-that is pure per-kernel dispatch even with an infinitely fast CPU. Graphs shrink that too, because the
-driver walks a pre-built node list instead of re-ingesting each launch.</p>
+<p>The TP=8 row compares a submission estimate with a <em>lower bound</em> on weight-read
+time, not total GPU work. Collectives, attention, kernel efficiency and synchronization remain.
+Thus it proves neither launch-bound execution nor 40% GPU idle time. A GPU critical path
+longer than 0.94 ms could hide much of that submission work.</p>
+<p>Likewise, an empty-kernel duration is not an independently additive dispatch constant for
+every useful kernel. Measure eager and graph timelines with the same capture boundary and
+inputs before assigning an irreducible per-node cost.</p>
 
 <div class="diagram-shell">
-  <p class="diagram-shell__cap"><b>Figure 1 &mdash; one Llama-3-8B decode step at TP=8, eager versus replayed.</b>
-  Derived from the table above: 395 launches, 2.374 &micro;s of driver time each (cited), 0.56 ms of device work.
-  The eager lane is host-bound; the graph lane is not. Bar widths are to scale within each lane.</p>
+  <p class="diagram-shell__cap"><b>Figure 1 &mdash; hypothetical submission-limited schedule.</b>
+  This illustration assumes 395 launches and 0.56 ms of device work. The latter is only a
+  weight-read floor for the real model; the diagram is not a measured TP=8 timeline.</p>
   <svg viewBox="0 0 900 330" width="100%" role="img" aria-labelledby="tlTitle tlDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="tlTitle">Decode step timeline with and without CUDA graphs</title>
     <desc id="tlDesc">Two pairs of lanes. In the eager pair the CPU lane is packed solid with 395 launch
@@ -836,9 +832,10 @@ flowchart TD
   </script>
 </div>
 
-<p>Everything hard about CUDA graphs follows from one sentence in that diagram: <b>pointer args baked
-in</b>. The graph does not know it is a model. It knows a list of kernels and a blob of argument bytes.
-Change where a tensor lives and the graph silently reads the old address.</p></div></section>
+<p>Ordinary replay in these runners preserves captured arguments. Rebinding a Python tensor
+does not update its recorded device address. This is the runner's contract, not a universal
+CUDA restriction: CUDA supports constrained graph/node parameter updates and conditional nodes.
+Those facilities require explicit integration and do not rerun arbitrary captured Python.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What capture actually constrains</h2></div><div class="sec__body"><h3>1. Addresses are frozen, so buffers must be persistent and written in place</h3>
 
 <p>The capture path copies each kernel's argument bytes, which for a PyTorch op means the
@@ -909,11 +906,9 @@ is not an error &mdash; it is silently wrong output. Memorise the flag.</p>
 metadata builder declares how much capture it tolerates. This chapter uses it only as an input to mode
 resolution.</p>
 
-<h3>2. Shapes are frozen, so you need one graph per shape</h3>
-
-<p>A kernel node's grid dimensions are part of the recording. Change the batch size and the grid is wrong.
-So both engines capture a discrete ladder of batch sizes and round every real batch <em>up</em> to the next
-rung. vLLM generates the ladder from one rule:</p>
+<h3>2. These runners use shape buckets for stable replay</h3>
+<p>Recorded grids and argument layouts must remain compatible. Rather than updating executable
+nodes on every request, the cited runners capture a ladder and pad to an eligible bucket:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1005,19 +1000,16 @@ ladder.</p>
     <text x="358" y="128" font-size="11" fill="currentColor" fill-opacity="0.85">batch 9 pads to 12: 3 of 12 rows wasted, 25.0 percent</text>
     <text x="358" y="154" font-size="11" fill="currentColor" fill-opacity="0.7">real rows: 9</text>
 
-    <text x="70" y="272" font-size="11.5" fill="currentColor" fill-opacity="0.8">Below the ridge (I* = 295 on H100) the padded rows ride along in the same weight read and cost almost nothing.</text>
-    <text x="70" y="290" font-size="11.5" fill="currentColor" fill-opacity="0.8">Above it they cost real FLOPs: padding 300 to 304 adds 64 GFLOP, about 65 us at peak bf16.</text>
+    <text x="70" y="272" font-size="11.5" fill="currentColor">Padding latency depends on kernel shape, traffic and achieved utilization.</text>
+    <text x="70" y="290" font-size="11.5" fill="currentColor">Extra-row FLOPs are an accounting quantity, not a measured time penalty.</text>
   </svg>
 </div>
 
-<p>Now price that waste, because the answer is counter-intuitive. A decode GEMM at batch $B$ reads
-$2N$ bytes of bf16 weights and does $2BN$ FLOPs, so its arithmetic intensity is $\approx B$&nbsp;FLOP/byte.
-H100's ridge is $I^{*} = 295$ (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>),
-so <b>every decode GEMM below batch 295 is bandwidth-bound and its time does not depend on $B$ at all</b>.
-Padding 9 rows up to 16 re-reads the same 15.0&nbsp;GB of weights and costs essentially nothing. The padded
-rows do not touch attention either, because vLLM zeroes their sequence lengths
-(<code>vllm/v1/worker/gpu_model_runner.py:L2252-L2255</code>) and points their block table at a reserved
-null block:</p>
+<p>The weight-only GEMM model gives intensity approximately B for bf16. Below an ideal
+ridge, its bandwidth term stays constant with B, but real latency can still change through
+tiling, occupancy, activation traffic and launch behavior. Padding 9 to 16 is not guaranteed
+free. Null sequence lengths and reserved block IDs protect padded attention rows; other
+padded operators can still execute work:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1029,19 +1021,16 @@ null block:</p>
             blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)</code></pre>
 </div>
 
-<p>Padding only becomes expensive above the ridge, where the extra rows are real FLOPs: at batch 300
-padded to 304, the four fake rows add $2 \times 4 \times 8.03\times10^{9} = 64$&nbsp;GFLOP, about
-65&nbsp;&micro;s at 989.4&nbsp;TFLOP/s. A box that lives at batch 300+ should think about the step size;
-one that lives at batch 8 should not.</p>
+<p>Padding 300 to 304 adds about 64 GFLOPs under the 2BN convention, whose peak-compute
+time is about 65 microseconds. Neither that number nor a sub-ridge batch establishes the
+actual padding penalty. Choose buckets from measured workload-weighted latency and memory cost.</p>
 
 <h3>3. No host-side control flow, which is why prefill mostly is not captured</h3>
 
-<p>A graph has no <code>if</code>. Whatever branch the Python took during capture is baked in forever.
-Decode survives this because every request contributes exactly one token: the shape is $(B, 1)$, the
-control flow is identical every step, and only <em>values</em> in persistent buffers change. Prefill does
-not &mdash; sequence lengths differ per request and per step, and the token count ranges over the whole
-chunked-prefill budget, so capturing it means one graph per token-count bucket with buckets thousands
-wide. Which is exactly how SGLang describes its opt-in prefill capture; note the last sentence:</p>
+<p>Captured Python branches are not re-evaluated during ordinary replay. Device values may
+change inside stable buffers; conditional CUDA graph nodes are a separate API capability.
+Prefill's variable lengths and metadata create more dispatch cases, but do not make it
+inherently uncapturable. SGLang's opt-in path captures eligible prefill buckets:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1208,8 +1197,8 @@ which is the direct link back to <a href="../02-memory-and-kv-cache/02-06-offloa
         )</code></pre>
 </div>
 
-<p>The estimate is not a guess &mdash; vLLM captures the two largest buckets on a throwaway KV cache, uses
-the first as the shared-pool cost and the second as the marginal per-graph cost, and extrapolates:</p>
+<p>This is a measured-sample extrapolation: two large captures estimate a shared cost and
+a marginal cost. It can differ from actual allocations across the complete bucket set:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1226,9 +1215,10 @@ the first as the shared-pool cost and the second as the marginal per-graph cost,
                     per_graph_estimate[mode] = per_graph * (len(descs) - 1)</code></pre>
 </div>
 
-<p>Read the model that implies, for one runtime mode: <b>pool = (cost of the largest graph) + (N&minus;1)
-&times; (marginal cost per graph, floored at 1 MiB)</b>. With 51 decode buckets that floor alone is
-50&nbsp;MiB of pure bookkeeping, and the shared part is the largest shape's activation working set.
+<p>The estimator is largest-capture cost plus (N-1) times a marginal estimate floored at
+1 MiB. For 51 buckets that reserves at least 50 MiB in the marginal term; it does not prove
+50 MiB of actual pure driver bookkeeping. Compare reserved estimates with observed allocation.</p>
+<p>
 Under the default <code>FULL_AND_PIECEWISE</code> there are two modes, and they are combined
 asymmetrically &mdash; <code>max(shared_memory_estimate.values()) + sum(per_graph_estimate.values())</code>
 (<code>gpu_model_runner.py:L6926-L6931</code>) &mdash; because the two mode's graphs overlay in one pool at
@@ -1458,10 +1448,10 @@ flowchart TD
   (<code>L4545-L4556</code>) publishes the decision.</li>
   <li>Inside the model, <code>CUDAGraphWrapper.__call__</code> reads the forward context, sees its own
   mode matches, finds the entry for this descriptor, and calls <code>entry.cudagraph.replay()</code>
-  (<code>cuda_graph.py:L360-L361</code>). <b>One</b> host-side submission for 330 kernels.</li>
-  <li>The GPU reads 15.0&nbsp;GB of weights once for all 16 rows &mdash; the same 4.48&nbsp;ms it would
-  have taken for 13. The three padded rows cost nothing measurable because batch 16 is far below the
-  $I^{*} = 295$ ridge.</li>
+  (<code>cuda_graph.py:L360-L361</code>). One submission covers the captured model region;
+  inspect the capture boundary before including sampling/frontend kernels in its node count.</li>
+  <li>The 13-to-16 padding has a constant weight-read term in the ideal model, but actual
+  kernel time and traffic must be measured. Below-ridge arithmetic is not a zero-cost proof.</li>
 </ol>
 
 <p>Now flip one thing: give one request a two-token query while
@@ -1569,9 +1559,9 @@ so bugs that only appear under graph dispatch still reproduce:</p>
         NS("exec.graph"),
     ] = False</code></pre>
 </div>
-<p>If a bug disappears under <code>--enforce-eager</code> but survives
-<code>--debug-cuda-graph</code>, it is a dispatch or buffer-lifetime bug, not a kernel bug. That bisection
-is worth the flag on its own.</p>
+<p>If eager and breakable-graph modes differ, compare dispatch, shapes, input contents,
+lifetime and synchronization. This narrows the reproducer but does not exclude a kernel defect:
+different padding or synchronization can expose a kernel bug only in one path.</p>
 
 <h4>Capture OOM at startup</h4>
 <p>The pool is allocated after the KV cache is sized, so an under-estimate surfaces as a capture
@@ -1590,6 +1580,29 @@ failure, not a serving failure. SGLang's message is the checklist:</p>
     "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
 )</code></pre>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Replay ownership and a controlled measurement</h2></div><div class="sec__body">
+<p>A graph output is normally overwritten on later replay: retain a clone if another request needs the old value. Warm kernels and allocations before capture, establish side-stream dependencies, keep captured buffers alive, update inputs in place, and do not concurrently reuse a shared graph pool without its permitted ordering. Forked capture streams must rejoin through recorded events. A useful experiment crosses compile on/off, graph on/off, backend and batch bucket while recording the resolved modes, pool bytes, host submission, device critical path and latency distribution. The CPU alias check below illustrates buffer ownership only; it does not execute CUDA capture. See <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html">NVIDIA's graph lifecycle and update contracts</a>.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+persistent_input = np.zeros(3)
+captured_reference = persistent_input
+persistent_output = np.zeros(3)
+def replay_reference():
+    np.multiply(captured_reference, 2, out=persistent_output)
+    return persistent_output
+
+persistent_input[:] = [1., 2., 3.]
+borrowed = replay_reference()
+saved = borrowed.copy()
+persistent_input = np.array([7., 8., 9.])  # rebind, not an update
+np.testing.assert_array_equal(replay_reference(), [2., 4., 6.])
+captured_reference[:] = persistent_input
+np.testing.assert_array_equal(replay_reference(), [14., 16., 18.])
+np.testing.assert_array_equal(borrowed, [14., 16., 18.])
+np.testing.assert_array_equal(saved, [2., 4., 6.])
+print("In-place input update and replay-output ownership contracts pass.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. Price the graphs on your own box.</b> Run the same model twice and diff time-per-output-token:</p>
 <div class="code-file">
   <div class="code-file__hd"><span class="src">shell</span><span class="tag tag--shell">shell</span></div>
@@ -1600,16 +1613,16 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --port 30001 \
   --cuda-graph-backend-decode=disabled</code></pre>
 </div>
-<p>Benchmark at batch 1 and again at your TP degree. The derivation above predicts the gap widens
-sharply with TP.</p>
+<p>Run one server at a time, stopping it before launching the next, or isolate devices.
+Set explicit TP flags for the compared configuration and record resolved compile/graph/backend
+modes. Eager flags can change more than graph replay. Report both host and device timing.</p>
 
 <p><b>2. Read the padding you are actually paying.</b> Turn on <code>cudagraph_metrics</code> in vLLM's
 observability config: <code>gpu_model_runner.py:L4149-L4156</code> records a <code>CUDAGraphStat</code>
 per step and <code>vllm/compilation/cuda_graph.py:L33-L120</code> aggregates it into a table of unpadded
-tokens, padded tokens, paddings, mode and count. If most steps pad 9&rarr;16, add rungs with
-<code>-O.cudagraph_capture_sizes</code> (vLLM) or <code>--cuda-graph-bs-decode</code> (SGLang &mdash;
-<code>--cuda-graph-bs</code> still parses but is a deprecated alias, <code>server_args.py:L8869-L8876</code>);
-if most pad 300&rarr;304, do not bother.</p>
+tokens, padded tokens, paddings, mode and count. Measure both common 9-to-16 and 300-to-304
+cases rather than optimizing raw waste percentages. Add eligible capture sizes only when
+saved latency justifies extra startup time and graph/KV memory opportunity cost.</p>
 
 <p><b>3. Watch the startup cost.</b> Grep for <code>Graph capturing finished in</code> (vLLM) or the
 <code>Capturing batches (bs=... avail_mem=... GB)</code> progress bar (SGLang,
@@ -1682,11 +1695,11 @@ the per-launch overhead this chapter had to cite from a paper.</p></div></sectio
     spec-decode for attention backend &lt;name&gt; (support: &hellip;)"</code>. The enum name is exactly
     right: single-token decode is not uniform-batch decode.</p>
 
-    <p><b>5.</b> Something like <code>[1, 2, 4, 6, 8, 200, 208]</code>. A rung exactly at 6 for the 90%
-    case, a rung exactly at 200 for the 10% case &mdash; not because the padding costs FLOPs (200 is still
-    below the ridge) but because a <em>miss</em> above the largest rung drops you to eager entirely. Do not
-    spend rungs between 8 and 200: you have no traffic there and each costs at least 1&nbsp;MiB plus
-    capture time. The dominant memory term is the 208-graph itself, not the count.</p>
+    <p><b>5.</b> A candidate list includes exact hot sizes such as 6 and 200, with small
+    supporting buckets if needed. Do not declare it fits a 1 GiB budget from the 1 MiB estimator
+    floor: measure largest-shape activation/graph allocation and the combined modes.
+    Unused intermediate rungs provide no workload benefit; eager misses and padding costs
+    must be measured for the actual traffic distribution.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
@@ -1695,17 +1708,12 @@ the per-launch overhead this chapter had to cite from a paper.</p></div></sectio
   duration. Everything above the driver &mdash; PyTorch dispatch, Python &mdash; is additional and still
   unquantified on named hardware.</li>
 
-  <li>Whether you are launch-bound is a ratio, not a constant: GPU time per step divided by kernels per
-  step. Tensor parallelism attacks it from both sides, so <b>TP=8 Llama-3-8B is launch-bound on driver
-  cost alone (0.94&nbsp;ms of launches for 0.56&nbsp;ms of work)</b> while TP=1 is merely marginal.</li>
-
-  <li>Capture freezes addresses and shapes. Everything else in this chapter &mdash; persistent buffers,
-  copy-into-place, the bucket ladder, the padded null blocks, why prefill is opt-in &mdash; is a
-  consequence of those two words.</li>
-
-  <li>Bucket padding is nearly free below the roofline ridge, because the padded rows ride along in a
-  weight read that was going to happen anyway. It becomes real above batch 295. Spend your rungs where your
-  traffic is, not where the waste percentage looks worst.</li>
+  <li>Launch pressure depends on measured host submission and device critical paths.
+  Comparing launch time to a weight-bandwidth lower bound cannot establish GPU idle time.</li>
+  <li>Ordinary runner replay requires compatible addresses, shapes and lifetimes. CUDA graph
+  updates and conditionals exist but do not automatically relax these runners' contracts.</li>
+  <li>Bucket choice is a measured tradeoff among padding, eager misses, startup time and
+  memory. No ideal roofline ridge makes all smaller-batch padding free.</li>
 
   <li><b>"Graphs remove CPU launch overhead" is incomplete.</b> Capture is an address-stability contract,
   and SGLang spends it on cross-rank zero-copy: a captured two-shot all-reduce skips two full-size
@@ -1744,7 +1752,7 @@ the per-launch overhead this chapter had to cite from a paper.</p></div></sectio
 </ul></div></section>
 <div class="pager"><a href="../07-architectures/07-05-lora-and-pooling-models.html"><div class="pager__k">← Previous</div><div class="pager__t">LoRA serving, embeddings, rerankers, pooling</div></a><a class="pager__next" href="08-02-torch-compile.html"><div class="pager__k">Next →</div><div class="pager__t">torch.compile, Inductor, piecewise capture</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1757,6 +1765,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#beyond-launch-overhead">Capture changes device-side cost too</a>
 <a href="#worked-trace">Worked trace: batch 13, TP=1, vLLM</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

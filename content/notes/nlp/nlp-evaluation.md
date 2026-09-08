@@ -68,7 +68,7 @@ Recall-oriented, designed for summarisation:
 
 | Variant | Measures |
 |---|---|
-| ROUGE-N | $n$-gram recall |
+| ROUGE-N | overlapping $n$-grams; implementations may report precision, recall, and F1, so name the statistic |
 | **ROUGE-L** | longest common subsequence — order-sensitive without requiring contiguity |
 | ROUGE-W | weighted LCS, favouring consecutive matches |
 | ROUGE-S | skip-bigram co-occurrence |
@@ -87,10 +87,10 @@ summarisation**, and it is a good illustration of a metric shaping research.
 | **BLEURT** | a trained regression model fine-tuned on human ratings |
 | **COMET** | trained on human judgements using **source, hypothesis, and reference** |
 | **COMET-QE / CometKiwi** | **reference-free** quality estimation |
-| BARTScore | probability of generating the reference under a seq2seq model |
+| BARTScore | seq2seq conditional log-likelihood; source-to-hypothesis, reference-to-hypothesis, and other directions measure different properties |
 
-**COMET is the current standard for translation** and correlates far better with
-human judgement than BLEU. Reference-free quality estimation is the one that
+**COMET is widely used for translation**, with correlations depending on its
+checkpoint, language, domain, and human evaluation. Reference-free quality estimation
 changes practice: it lets you score live production output with no reference,
 route low-confidence segments to human review, and detect degradation
 continuously.
@@ -104,10 +104,10 @@ continuously.
 | chrF | character $n$-gram F | partly | yes | moderate |
 | METEOR | matching with stems/synonyms | partly | yes | moderate |
 | BERTScore | embedding similarity | **yes** | yes | good |
-| **COMET** | trained neural | **yes** | yes | **best** |
+| **COMET** | trained neural | **yes** | yes for reference-based variants | checkpoint- and evaluation-dependent |
 | COMET-QE | trained neural | **yes** | **no** | good |
 | LLM judge | prompted model | **yes** | optional | good, with biases |
-| Human | — | yes | no | the ground truth |
+| Human | — | yes | not always | expertise, rubric, and agreement determine reliability |
 
 ## Task-specific metrics
 
@@ -124,14 +124,14 @@ continuously.
 | Retrieval | Recall@k, MRR, NDCG |
 | RAG | faithfulness, answer relevance, context relevance, citation accuracy |
 
-**pass@k is the metric that got generation evaluation right.** For code, do not
-compare strings — **run the tests**. It is objective, it credits any correct
-solution regardless of style, and it is exactly what the user cares about. The
-unbiased estimator from $n \ge k$ samples:
+**pass@k measures test-passing coverage, not proof of correctness.** Execute
+untrusted generated code only in a sandbox with resource, filesystem, and network
+restrictions. Incomplete tests can accept incorrect or malicious solutions.
+Under the standard independent sampling protocol, the estimator from $n\ge k$ samples is:
 
 $$\mathrm{pass@}k = \mathbb{E}\left[1 - \frac{\binom{n-c}{k}}{\binom{n}{k}}\right]$$
 
-where $c$ is the number of correct samples. The lesson generalises: **wherever
+where $c$ is the number of samples passing the specified tests. The lesson generalises: **wherever
 you can verify the output programmatically, do that instead of comparing text.**
 
 **Summarisation faithfulness deserves its own measurement.** ROUGE cannot detect
@@ -175,16 +175,17 @@ reliability over "rate this 1-10", because it forces the model to attend to
 specific criteria rather than overall impression.
 
 **Validate your judge against human labels.** Score 100 examples both ways and
-measure agreement. If judge–human agreement is no better than human–human
-agreement, the judge is usable. If it is much worse, fix the rubric before
-trusting any judged number.
+measure agreement with intervals and per-error-category confusion rates. Agreement
+approaching a relevant human-human baseline is encouraging, not sufficient for
+deployment. Check costly false accepts, subgroup errors, and calibration against
+adjudicated labels; low or high aggregate agreement alone does not decide usability.
 
 ## Benchmarks and their problems
 
 | Benchmark | Measures |
 |---|---|
 | GLUE / SuperGLUE | general language understanding — largely saturated |
-| **MMLU / MMLU-Pro** | broad knowledge across 57 subjects |
+| **MMLU / MMLU-Pro** | MMLU has 57 subjects; MMLU-Pro groups its more demanding questions into 14 broad categories |
 | GSM8K / MATH | mathematical reasoning |
 | HumanEval / MBPP / SWE-bench | code generation and repository-level fixes |
 | HellaSwag, ARC, WinoGrande | commonsense reasoning |
@@ -229,12 +230,12 @@ about your application.
 
 | Practice | Why |
 |---|---|
-| **Confidence intervals** | a 1-point difference on 500 examples is noise |
+| **Confidence intervals** | uncertainty in a difference depends on paired outcomes, not just sample count and marginal scores |
 | **Paired tests** | McNemar for classification, paired bootstrap for anything else |
 | Multiple seeds | seed variance often exceeds the claimed improvement |
 | Multiple prompts | format sensitivity is large; report a distribution |
 | Multiple samples | for stochastic generation, report mean and variance |
-| Correct for multiple comparisons | 20 benchmarks at $\alpha = 0.05$ gives a 64% chance of a false positive |
+| Correct for multiple comparisons | for 20 independent true-null tests each at $\alpha=0.05$, probability of at least one false positive is $1-0.95^{20}\approx64\%$; dependence changes this calculation |
 
 **Test-set sizing**, worst-case 95% half-width for a proportion:
 
@@ -245,12 +246,16 @@ about your application.
 | 1,000 | ±3.1 pts |
 | 10,000 | ±1.0 pt |
 
-Most published NLP improvements of under one point on a thousand-example test set
-are not distinguishable from noise, and the paired bootstrap is the two-line fix.
+These half-widths are normal-approximation bounds for a single binomial
+proportion near 0.5, not confidence intervals for paired model differences.
+Use paired outcomes and match resampling units to independent users/documents.
+A bootstrap estimates uncertainty; it does not remove selection bias or turn
+an underpowered experiment into a conclusive one.
 
 ## Human evaluation
 
-Still the ground truth for open-ended generation.
+Often the most relevant reference for open-ended generation, but itself noisy
+and dependent on expertise, incentives, and the rubric.
 
 | Protocol | Note |
 |---|---|
@@ -264,16 +269,16 @@ Still the ground truth for open-ended generation.
 | Requirement | Detail |
 |---|---|
 | Clear guidelines with examples | especially of edge cases |
-| **Inter-annotator agreement** | Cohen's/Fleiss' $\kappa$; below ~0.6 means the task is underspecified |
+| **Inter-annotator agreement** | Cohen's/Fleiss' $\kappa$; interpret prevalence, rater differences, and rubric ambiguity, not a universal 0.6 cutoff |
 | Randomised presentation order | removes position bias |
 | Attention checks | detect inattentive annotators |
 | Multiple annotators per item | 3 is a common minimum |
 | Fair pay and reasonable workload | quality tracks conditions |
 
-**Measure inter-annotator agreement first.** If humans agree only 70% of the
-time, a model at 70% is at the ceiling and further optimisation is measuring
-noise. This single number reframes many "the model is not good enough"
-conversations.
+**Measure inter-annotator agreement first**, but do not treat pairwise agreement
+as a hard accuracy ceiling. A model can agree with adjudicated consensus more
+often than two noisy individual raters agree with each other. Inspect ambiguity,
+systematic rater bias, and the target definition before interpreting the number.
 
 ## Building an evaluation you can trust
 
@@ -308,6 +313,56 @@ measurement, and it takes an afternoon to build.
 5. Why is macro-F1 preferred to accuracy on imbalanced multiclass?
 6. Your model scores 84.2% and a rival 85.0% on 500 examples. What do you do?
 7. Why measure inter-annotator agreement before optimising a model?
+
+### Worked paired evidence and pass@k
+
+Two systems can differ by the same one percentage point with very different
+evidence. On 1,000 examples, ten wins and zero losses give exact two-sided
+McNemar $p\approx0.00195$; 105 wins and 95 losses have much weaker evidence.
+Only disagreements enter the conditional binomial test. This assumes independent
+paired items and a prespecified comparison, not repeatedly selecting a winning run.
+
+```python runnable
+import math
+import numpy as np
+from scipy.stats import binomtest
+
+rng = np.random.default_rng(7)
+few = np.r_[np.ones(10), np.zeros(990)]
+many = np.r_[np.ones(105), -np.ones(95), np.zeros(800)]
+assert np.isclose(few.mean(), many.mean())
+p_few = binomtest(10, 10, p=0.5).pvalue
+p_many = binomtest(105, 200, p=0.5).pvalue
+assert p_few < 0.01 and p_many > 0.05
+resampled = rng.choice(many, size=(2000, len(many)), replace=True).mean(1)
+interval = np.quantile(resampled, [0.025, 0.975])
+assert interval[0] < 0 < interval[1]
+
+def pass_at_k(n, c, k):
+    if not (0 <= c <= n and 1 <= k <= n):
+        raise ValueError("require 0 <= c <= n and 1 <= k <= n")
+    if n - c < k:
+        return 1.0
+    return -math.expm1(sum(math.log1p(-c / (n - i)) for i in range(k)))
+
+assert math.isclose(pass_at_k(10, 2, 3), 1 - math.comb(8, 3) / math.comb(10, 3))
+assert pass_at_k(10, 0, 3) == 0 and pass_at_k(10, 10, 3) == 1
+print("paired p-values:", p_few, p_many, "bootstrap interval:", interval)
+```
+
+**Answers.** The original 84.2% versus 85.0% example on 500 cases is only four
+net wins; obtain item-level paired outcomes, account for tuning on this set,
+then report a paired interval and operational effect size. For a judge, swapping
+positions reduces a bias but does not certify correctness. Maintain separate
+confusion tables for unsupported claims and stylistic preference, and review
+high-cost false accepts even when aggregate agreement looks high. A failed
+format parse is an explicit outcome, not a silently dropped evaluation example.
+
+The [MMLU-Pro repository](https://github.com/TIGER-AI-Lab/MMLU-Pro) describes its
+categories. [SciPy's exact binomial test](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.binomtest.html)
+implements the conditional test used above. Pin dataset revision, prompt,
+tokenizer, metric implementation, model revision, seeds, and generation settings
+alongside results; a metric signature alone cannot capture all these choices.
 
 ## Where to go next
 

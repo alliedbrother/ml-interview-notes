@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Decode attention: FlashDecoding, split-K, paged kernels — The Inference Engineering Book</title>
+<title>Decode attention: FlashDecoding, split-K, paged kernels — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-03</div>
 <h1>Decode attention: FlashDecoding, split-K, paged kernels</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/triton_attn.py</code></li><li><code>csrc/rocm/attention.cu</code></li><li><code>csrc/libtorch_stable/attention/merge_attn_states.cu</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/triton_attn.py</code></li><li><code>csrc/rocm/attention.cu</code></li><li><code>csrc/libtorch_stable/attention/merge_attn_states.cu</code></li><li><code>python/sglang/srt/layers/attention/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A Llama-3-8B decode step at batch 1 launches its attention kernel with a grid of
 <b>eight thread blocks</b>. An H100 SXM has 132 streaming multiprocessors. 124 of them have
@@ -720,8 +720,7 @@ being split.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; the occupancy problem and the split-K fix, drawn to scale.</b>
-    Each square is one of an H100 SXM's 132 SMs; a filled square receives at least one thread block in
-    the first wave. Llama-3-8B, TP=1, <em>derived</em> from the grid expressions above.</p>
+    Each square represents one of an H100 SXM's 132 SMs in an idealized placement. Allocated grid slots, early-exit blocks, and actual active SMs are distinct; placement is not guaranteed. Llama-3-8B, TP=1, <em>derived</em> from the grid expressions above.</p>
   <svg viewBox="0 0 880 350" width="100%" role="img" aria-labelledby="occTitle occDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="occTitle">SM occupancy for three decode attention launch configurations</title>
     <desc id="occDesc">Three grids of 132 squares. The first, batch 1 with the 2D kernel, has 8 filled.
@@ -806,10 +805,10 @@ $b$ bytes per KV element, $S$ the number of KV splits, $N_{SM} = 132$.</p>
 
 <h3>The grid</h3>
 
-<p>The 2D (unsplit) grid has $G_{2D} = \lceil B/\text{BLOCK\_Q} \rceil \cdot h_{kv}$ blocks. Adding
+<p>The 2D (unsplit) grid has $G_{2D} = (\lfloor B/\text{BLOCK\_Q}\rfloor+B)h_{kv}$ for the quoted vLLM wrapper blocks. Adding
 the split axis multiplies it:</p>
 
-<div class="math-display">$$G_{3D} = \left\lceil \frac{B}{\text{BLOCK\_Q}} \right\rceil \cdot h_{kv} \cdot S$$</div>
+<div class="math-display">$$G_{3D} = \left(\left\lfloor \frac{B}{\text{BLOCK\_Q}} \right\rfloor+B\right)h_{kv}S$$</div>
 
 <p>and the smallest useful $S$ is the one that first fills the machine:</p>
 
@@ -820,8 +819,7 @@ the split axis multiplies it:</p>
 fixed 16 gets you 16 blocks. That constant is not adaptive — precisely the axis on which SGLang
 differs (&sect;4).</p>
 
-<p>Splitting past $S^{*}$ buys nothing and costs merge traffic, so every implementation
-clamps.</p>
+<p>Splitting beyond one SM wave can still improve latency hiding or resource balance; it also increases merge traffic. S* is a first-wave coverage heuristic, not a universal optimal split count.</p>
 
 <h3>Segment length, and the early exit</h3>
 
@@ -920,7 +918,7 @@ $2 \times (2 \times 4 \times 16 \times 128) = 32{,}768$ FLOP. The ratio is</p>
 <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> derived
 as $2h/(b\,h_{kv})$, now visible as a property of a single tile of a single kernel. Against the
 H100's ridge of $I^{*} = 295$ that is 74&times; memory-bound, and no scheduling trick changes it:
-the split moves work onto more SMs, it does not move the operating point on the roofline. What
+the split exposes more parallel work but adds partial-state traffic, so actual operational intensity can decrease. What
 GQA buys is the factor $g$ itself — an MHA model ($g = 1$) runs the same kernel at
 $I = 1$.</p>
 
@@ -1282,17 +1280,7 @@ lets long contexts oversubscribe. Run it for Llama-3-8B, $s = 2560$, $N_{SM} = 1
   </div>
 </div>
 
-<p>The two policies have visibly different shapes. SGLang <em>targets</em> a constant amount of
-parallelism &mdash; <code>ext_device_core_count</code> = 702 working blocks here &mdash; and decays
-the split count as the batch supplies it, holding 768&ndash;1,024 blocks from batch 16 upward. Below
-that it undershoots, because <code>max_kv_splits</code> caps the count at 8: batch 1 gets 8 splits
-where the target wants 88, so 64 working blocks, <em>half</em> of vLLM's 128. vLLM has the opposite
-failure: it holds 16 segments until the threshold and then drops to none, launching 2,560 blocks and
-16 segments of partial state at batch 16 where SGLang launches 768 blocks and 6 &mdash; 3.3&times; the
-blocks and 2.7&times; the partial-state traffic for a batch that no longer needs it. In exchange, vLLM's grid is a constant and is
-trivially CUDA-graph-capturable, which is why it pins the count and captures at fixed sizes
-(<code>vllm/v1/attention/backends/triton_attn.py:L143-L154</code>), while SGLang pays a
-device-side launch per step for a data-dependent one.</p>
+<p>SGLang adapts its active split count to batch and context while the quoted vLLM path uses a fixed segment count below a threshold. Distinguish allocated grid slots from useful work: extra query tiles can return early, and padded split rows can be masked. Data-dependent active splits can coexist with CUDA graphs when maximum launch dimensions and buffers stay fixed; adaptation does not inherently require a new device launch or recapture.</p>
 
 <p>SGLang's stage-1 grid puts the GQA group on the head axis explicitly:</p>
 
@@ -1514,7 +1502,7 @@ Following one layer's attention from the model forward to the two kernel launche
 </ol>
 
 <p>Two kernel launches, 128 + 32 thread blocks, 10.5&nbsp;MB of KV read and 0.5&nbsp;MB of
-partial state round-tripped, per layer. Times 32 layers: 336&nbsp;MB for one token, matching the
+partial state round-tripped, per layer. Times 32 layers: about 336 MB of KV plus 17 MB of partial-state round-trip traffic for one token, matching the
 335&nbsp;MB <a href="../00-foundations/00-02-decode-loop-and-kv-cache.html">&sect;0.2</a> derived
 from the KV size formula. The split does not reduce bytes. It only stops 124 SMs from
 watching.</p></div></section>
@@ -1580,23 +1568,11 @@ costs you the occupancy of Figure 1.</p>
 
 <h3>CUDA graphs need the split count pinned</h3>
 
-<p>A graph records launch dimensions, so $S$ cannot vary with runtime state. vLLM captures with
-a fixed 16 segments, preallocates scratch at <code>seq_threshold_3D</code> rows, and snaps the
-threshold to the nearest capture size so no captured graph straddles the 2D/3D boundary
-(<code>vllm/v1/attention/backends/triton_attn.py:L143-L154</code>); FA3 gets the same treatment
-via <code>flash_attn_max_num_splits_for_cuda_graph</code>, default 32
-(<code>vllm/config/attention.py:L49-L50</code>). Get it wrong and the symptom is not a crash but
-a stale intermediate buffer — a replay reading <code>segm_output</code> rows this step never
-wrote.</p>
+<p>A captured graph fixes launch geometry and buffer addresses, not necessarily every amount of useful work. A maximum grid with device-side masks can vary active split counts safely. Validity masks must agree between producer and reducer so unwritten partial rows are never consumed. Depending on the mistake, violations can produce stale results, an illegal access, or a runtime error.</p>
 
 <h3>Over-splitting short sequences</h3>
 
-<p>At $s = 128$ vLLM's fixed 16 segments give 8 working blocks and 8 that return at line 325,
-while the merge still reads all 16 (masked) rows. The same 532&nbsp;KB of partial state
-(266&nbsp;KB written, 266&nbsp;KB read) now sits against 524&nbsp;KB of KV — the split
-<em>more than doubles</em> the bytes moved, to fill SMs on a workload that finishes in
-microseconds anyway. SGLang avoids this by construction, since
-<code>num_kv_splits = cdiv(seq_lens, kv_chunk_size)</code> shrinks with $s$.</p>
+<p>At s=128, TILE_SIZE=16 and 16 maximum segments give eight useful key segments. Inactive producers return and reducer loads can be masked, so 532 KB is an allocation/full-16-segment upper accounting, not guaranteed actual traffic. With eight written and read partials across 32 heads, useful partial traffic is about 266 KB against 524 KB of KV, still substantial. Measure cache traffic and masks instead of charging every padded row.</p>
 
 <h3>Kernel block size vs allocator block size</h3>
 
@@ -1652,8 +1628,7 @@ sed -n '1036,1082p' $V/vllm/v1/attention/ops/triton_unified_attention.py</code><
 </div>
 
 <p><code>128 // num_kv_heads_per_rank</code> is the batch size at which vLLM stops splitting.
-If it is 2, your deployment almost never takes the 2D path; if it is 128, almost never the
-3D one.</p>
+With threshold 2, batches above 2 use 2D; with threshold 128, batches up to 128 may use 3D when the other eligibility checks pass.</p>
 
 <p><b>2. Watch the grid change.</b> The cheapest observation is an Nsight Systems trace: two
 kernel names (<code>kernel_unified_attention</code> and <code>reduce_segments</code>) per layer on
@@ -1718,13 +1693,7 @@ with a long context isolates exactly the axis Figure 1 draws.</p></div></section
     the 3D grid is 1&times;4&times;16 = <b>64 blocks</b> (48.5%). Even split, Qwen2-7B at batch 1
     leaves half the GPU idle — the small $h_{kv}$ hurts.</p>
 
-    <p><b>2.</b> Lines 587&ndash;642 are the <code>if IS_3D:</code> branch: it stores
-    <code>acc</code> raw and calls <code>store_segm_reduce_scalars</code>. The
-    <code>else:</code> at line 643 begins <code>acc = acc / L[:, None]</code> — the division
-    exists only on the 2D path. Dividing per segment would be wrong because $\ell_i$ is the
-    exponential sum <em>relative to that segment's own maximum</em> $m_i$; normalising against it
-    discards what the merge needs to put segments on a common scale. You would be averaging
-    softmaxes instead of computing the softmax of the union.</p>
+    <p><b>2.</b> The quoted 3D branch stores the unnormalized acc together with its maximum and shifted sum; its reducer expects precisely that representation. Dividing acc by ell without changing the reducer is wrong. A different valid representation stores the normalized output together with LSE=m+log(ell) and merges by LSE weights, as the previous online-softmax chapter derives. Averaging normalized outputs with equal weights is generally not the softmax of their union.</p>
 
     <p><b>3.</b> On TP=8, $h = 8$ and $h_{kv} = 1$ per rank, so <code>BLOCK_Q</code> = 2 and
     <code>seq_threshold_3D</code> = 128. Batch 4 &le; 128 &rArr; <b>3D path</b>,
@@ -1735,11 +1704,7 @@ with a long context isolates exactly the axis Figure 1 draws.</p></div></section
     4&times;1&times;8 = 32. Both fall short of 132: TP shrinks $h_{kv}$ faster than either policy
     compensates.</p>
 
-    <p><b>4.</b> Partial state per (token, head) is $S(d_h + 2) \cdot 4$ B
-    = 16 &times; 514 &times; 4 &asymp; 33&nbsp;KB, written once and read once per layer. The KV
-    read at $s = 4096$ for the 576-wide compressed latent is $576 \times 4096 \times 2 \approx
-    4.7$&nbsp;MB per layer, so the merge is ~1.4%; it reaches 10% around $s \approx 570$. The
-    rule: negligible whenever $s \gg S(d_h+2)\cdot 4 / (2 h_{kv} d_h b)$.</p>
+    <p><b>4.</b> With S=16 and value width 512, each query head writes and reads 16*(512+2)*4=32896 bytes per direction. Comparing all 128 query heads gives 2*128*32896=8421376 bytes of partial traffic. The shared bf16 latent at s=4096 costs 576*4096*2=4718592 bytes if fetched once, so the partial round trip is about 178.5% of that ideal KV read, not 1.4%. Equating the ratio to 10% gives s about 73102. A real tiled MLA implementation may reread shared latent tiles and use a different partial layout; use matching head counts and kernel contracts in both numerator and denominator.</p>
 
     <p><b>5.</b> <code>PARTITION_SIZE = 512</code>, versus 160 keys per Triton segment at
     $s = 2560$ and 256 on ROCm. A CUDA-core kernel amortises its setup (block-table reads, Q into
@@ -1753,21 +1718,21 @@ with a long context isolates exactly the axis Figure 1 draws.</p></div></section
   <li>Decode attention is ~7% of a decode step's FLOPs and a much larger share of its latency:
   the only term that grows with context, and the only one whose bandwidth cost is not amortised
   across the batch.</li>
-  <li>The batch-1 grid is $\lceil B/\text{BLOCK\_Q}\rceil \cdot h_{kv}$ blocks — 8 for
+  <li>The batch-1 grid is $(\lfloor B/\text{BLOCK\_Q}\rfloor+B)h_{kv}$ allocated grid slots in the quoted wrapper blocks — 8 for
   Llama-3-8B, 1 for a TP=8 70B rank. Split-K manufactures the missing parallelism at a cost of one
   fp32 round trip of $(\tilde{O}, m, \ell)$ per (token, head, segment): ~5% extra HBM traffic at
   $s = 2560$, 25% at $s = 512$.</li>
   <li>Both engines clamp the split where the machine fills, by different mechanisms: vLLM with a
   compile-time 16 segments plus a batch threshold of <code>128 // num_kv_heads</code>, SGLang with
   a device-side kernel solving <code>cdiv(core_count &times; log2(s/64), token_grid)</code> each
-  step. Coarse and graph-capturable versus adaptive and one launch more expensive.</li>
+  step. A fixed grid and adaptive useful work can both be graph-compatible; count actual helper launches on the selected path.</li>
   <li>The paged gather is four lines of address arithmetic and under 1% of KV traffic. Its real
   cost is a serial load dependency plus the constraint that a tile must not straddle physical
   blocks — which is why <code>kernel_block_size</code> exists as a subdivision of the allocator's
   block size.</li>
   <li>GQA is what makes decode attention affordable: one KV tile feeds $g$ query heads and the
   tile's intensity is exactly $2g/b$ — 4 FLOP/byte for Llama-3-8B, 74&times; below the H100's
-  ridge. Splitting the KV changes occupancy, never the point on the roofline.</li>
+  ridge. Splitting changes parallelism and adds partial-state bytes, changing actual operational intensity.</li>
   <li>vLLM deleted its bespoke PagedAttention kernel in commit <code>d715b3aa1e</code>:
   FlashAttention and FlashInfer absorbed both of its distinguishing features — block-table
   addressing and split-K — while adding tensor cores it never had. On CUDA the decode path is now
@@ -1800,7 +1765,7 @@ with a long context isolates exactly the axis Figure 1 draws.</p></div></section
 </ul></div></section>
 <div class="pager"><a href="03-02-flashattention.html"><div class="pager__k">← Previous</div><div class="pager__t">FlashAttention 1 → 2 → 3</div></a><a class="pager__next" href="03-04-flashinfer-and-backends.html"><div class="pager__k">Next →</div><div class="pager__t">FlashInfer and the attention-backend abstraction</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

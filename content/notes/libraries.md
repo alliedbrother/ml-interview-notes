@@ -1,7 +1,7 @@
 ---
 order: 2
 description: The Python stack for machine learning — NumPy, pandas, scikit-learn, PyTorch, TensorFlow, the boosting libraries, visualization, Hugging Face, and the MLOps tooling around them.
-meta: 9 topics · complete
+meta: 9 published topics · practical reference
 ---
 
 # Libraries for ML
@@ -40,7 +40,7 @@ flowchart TD
     PD --> VIZ["Matplotlib / Seaborn / Plotly"]
     SK --> VIZ
     PT --> HF["Hugging Face<br/>pretrained models and adapters"]
-    TF --> HF
+    TF --> LEGACY["Transformers v4 legacy TF models;<br/>v5 model backend is PyTorch"]
     SK --> OPS["MLOps: tracking, registry,<br/>serving, monitoring"]
     BOOST --> OPS
     HF --> OPS
@@ -57,16 +57,45 @@ flowchart TD
 | Text generation, chat, extraction | a pretrained LLM + LoRA via `peft`, served with vLLM |
 | Time series forecasting | boosted trees on lag features first; deep models only if that plateaus |
 | Anything on a phone or in a browser | TensorFlow → TFLite / TF.js, or ONNX Runtime |
-| Anything that must run on CPU cheaply | ONNX Runtime with int8 quantisation |
+| CPU-constrained inference | benchmark native execution against supported ONNX/LiteRT exports and calibrated quantization |
 | Exploring a new dataset | pandas + Seaborn, in that order |
 
 ## A note on what changes and what does not
 
 APIs move. `pandas` 3.0 makes copy-on-write mandatory, Keras went
-multi-backend, `torch.compile` replaced TorchScript, scikit-learn's set-output
+multi-backend, `torch.compile` optimizes execution while `torch.export` addresses
+export, and scikit-learn's set-output
 API changed how transformers return frames. None of that changes the underlying
 ideas: contiguous memory is fast, index alignment is silent, fitting outside a
 cross-validation fold leaks, and gradients accumulate.
 
 Learn the model each library imposes and the API churn becomes a lookup, not a
 relearning.
+
+The selection table gives starting hypotheses, not row-count laws. Benchmark the
+actual sparse/dense representation, task, quality target, memory, and latency.
+An export that runs but changes predictions is not a successful optimization.
+[PyTorch export](https://docs.pytorch.org/docs/stable/export.html) and the
+[Transformers v5 migration guide](https://github.com/huggingface/transformers/blob/main/MIGRATION_GUIDE_V5.md)
+describe the distinct current backend/export contracts.
+
+### Reproducible learning paths
+
+Start tabular work with NumPy, pandas, evaluation, and scikit-learn before comparing
+boosters. Start deep learning with array shapes and derivatives before either
+framework, then Hugging Face. Serving assumes a fitted preprocessing/model artifact,
+an immutable version, and a known prediction schema, not just an endpoint.
+
+Record Python and package versions with `importlib.metadata.version`; distinguish
+CPU examples from CUDA, TensorFlow, remote-checkpoint, and optional serving extras.
+An example labeled `python runnable` is a self-contained local fixture; other
+fragments declare surrounding state or external prerequisites. Do not install all
+GPU runtimes into one environment merely to reproduce a table.
+
+A cross-library capstone should retain one fixed train/development/test manifest:
+clean a synthetic transaction table, fit a fold-local pipeline, compare a boosted
+baseline, inspect calibration and subgroup counts, and package its schema and
+prediction fixtures for serving. Passing means reordered columns are handled or
+rejected explicitly, fitted transforms exclude validation rows, and offline and
+served outputs agree within a declared tolerance. Conversion boundaries must record
+whether labels, nullable dtypes, sparse structure, or device placement are lost.

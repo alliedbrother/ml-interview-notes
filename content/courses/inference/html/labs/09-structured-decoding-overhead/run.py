@@ -238,6 +238,7 @@ def stream_one(args, schema: dict | None) -> dict:
     chunks = 0
     text_parts: list[str] = []
     completion_tokens = 0
+    finish_reason = None
     try:
         with urllib.request.urlopen(req, timeout=args.timeout) as resp:
             for raw in resp:
@@ -255,6 +256,8 @@ def stream_one(args, schema: dict | None) -> dict:
                 if usage and usage.get("completion_tokens"):
                     completion_tokens = usage["completion_tokens"]
                 for ch in obj.get("choices", []):
+                    if ch.get("finish_reason") is not None:
+                        finish_reason = ch["finish_reason"]
                     piece = (ch.get("delta") or {}).get("content")
                     if piece:
                         if ttft is None:
@@ -267,12 +270,17 @@ def stream_one(args, schema: dict | None) -> dict:
         return {"error": f"unreachable: {e.reason}"}
     e2e = time.perf_counter() - t0
     text = "".join(text_parts)
+    if not completion_tokens:
+        return {"error": "Missing completion-token usage; streamed chunks are not tokens"}
     return {
         "ttft": ttft if ttft is not None else e2e,
         "e2e": e2e,
         "chunks": chunks,
-        "completion_tokens": completion_tokens or chunks,
+        "completion_tokens": completion_tokens,
+        "token_usage_reported": completion_tokens > 0,
+        "finish_reason": finish_reason,
         "valid_json": _is_json(text),
+        "valid_schema": valid_schema(text, schema) if schema is not None else None,
         "text": text,
     }
 
@@ -282,6 +290,19 @@ def _is_json(text: str) -> bool:
         json.loads(text)
         return True
     except Exception:  # noqa: BLE001
+        return False
+
+
+def valid_schema(text: str, schema: dict) -> bool:
+    from jsonschema import validators
+    from jsonschema.exceptions import ValidationError
+
+    validator = validators.validator_for(schema)
+    validator.check_schema(schema)
+    try:
+        validator(schema).validate(json.loads(text))
+        return True
+    except (json.JSONDecodeError, ValidationError):
         return False
 
 
@@ -301,6 +322,11 @@ def resolve_model(args) -> str:
 
 def run_arm(args, schema_name: str, concurrency: int) -> dict:
     base = SCHEMAS[schema_name]
+    if base is not None:
+        try:
+            import jsonschema  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError("Install this lab's requirements.txt before a schema sweep") from exc
     schemas = ([uniquify(base) for _ in range(args.requests)]
                if args.unique_schemas else [base] * args.requests)
 
@@ -330,6 +356,10 @@ def run_arm(args, schema_name: str, concurrency: int) -> dict:
         "ttft_p99_ms": ttfts[min(int(0.99 * len(ttfts)), len(ttfts) - 1)] * 1000,
         "e2e_mean_ms": statistics.fmean(r["e2e"] for r in ok) * 1000,
         "valid_json_frac": valid / len(ok),
+        "valid_schema_frac": (sum(r["valid_schema"] is True for r in ok) / len(ok)
+                              if base is not None else None),
+        "token_usage_complete": all(r["token_usage_reported"] for r in ok),
+        "truncated": sum(r["finish_reason"] == "length" for r in ok),
         "first_error": errs[0] if errs else None,
     }
 
@@ -358,7 +388,7 @@ def cmd_sweep(args) -> int:
 
     hdr = (f"{'schema':<8}{'conc':>6}{'req/s':>9}{'out tok/s':>11}"
            f"{'ttft p50':>10}{'ttft p99':>10}{'e2e mean':>10}"
-           f"{'valid json':>12}{'vs none':>9}")
+           f"{'valid json':>12}{'schema OK':>12}{'vs none':>9}")
     print("\nMeasured on YOUR hardware — no number here was predicted")
     print("-" * len(hdr))
     print(hdr)
@@ -372,18 +402,21 @@ def cmd_sweep(args) -> int:
         b = baseline.get(r["concurrency"])
         rel = (f"{r['out_tok_per_s'] / b['out_tok_per_s']:.2f}x"
                if b and b["out_tok_per_s"] else "-")
+        schema_pct = (f"{r['valid_schema_frac'] * 100:.0f}%"
+                      if r['valid_schema_frac'] is not None else 'n/a')
         print(f"{r['schema']:<8}{r['concurrency']:>6}{r['req_per_s']:>9.2f}"
               f"{r['out_tok_per_s']:>11.1f}{r['ttft_p50_ms']:>9.1f}m"
               f"{r['ttft_p99_ms']:>9.1f}m{r['e2e_mean_ms']:>9.1f}m"
-              f"{r['valid_json_frac'] * 100:>11.0f}%{rel:>9}")
+              f"{r['valid_json_frac'] * 100:>11.0f}%"
+              f"{schema_pct:>12}{rel:>9}")
     print("-" * len(hdr))
 
     bad = [r for r in rows
            if r.get("schema") not in (None, "none") and "error" not in r
-           and r["valid_json_frac"] < 0.99]
+           and r["valid_schema_frac"] < 1.0]
     if bad:
-        print("\nWARNING: a constrained arm produced output that does not parse "
-              "as JSON.")
+        print("\nWARNING: a constrained arm failed its actual JSON Schema; "
+              "inspect truncation, unsupported constraints and server errors.")
         print("The constraint may not have been applied at all. Check that the "
               "server was")
         print("started with a grammar backend, and that it accepted "

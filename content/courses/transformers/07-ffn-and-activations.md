@@ -78,13 +78,11 @@ gained?
 would collapse — `W_2(W_1 x)` is just `(W_2 W_1) x`, a single linear map. The
 activation is the point; the expansion gives it room to work.
 
-The playlist makes an important structural observation here: **self-attention is
-almost entirely linear.** Projections are linear, the score matmul is bilinear,
-the weighted sum is linear. Softmax is the only nonlinearity, and it acts on
-*weights*, not on content. So if the FFN were removed, a Transformer would have
-very little capacity to represent nonlinear relationships in the data.
-
-The FFN is where nonlinearity lives.
+Attention is already nonlinear in its input: `QK.T` multiplies two
+input-dependent projections, and softmax changes the weights as the input
+changes. Holding weights fixed makes aggregation linear in V, not linear in X.
+The FFN adds a large **positionwise nonlinear feature transformation**;
+attention's projections also mix features while its aggregation mixes tokens.
 
 ### Where the parameters live
 
@@ -145,7 +143,8 @@ $$\mathrm{ReLU}(x) = \max(0, x)$$
 
 Cheap, non-saturating for positive inputs, sparse (~50% zeros). Its flaw is the
 **dying ReLU** problem: a neuron whose pre-activation is always negative outputs
-zero forever, and its gradient is zero forever too. It never recovers.
+zero with zero local activation derivative on those inputs. Upstream features
+can change and reactivate it, so permanence is not guaranteed.
 
 ### GELU (BERT, GPT-2/3)
 
@@ -166,7 +165,9 @@ y = F.gelu(x)                      # exact
 y = F.gelu(x, approximate='tanh')  # the approximation, used by GPT-2
 ```
 
-### SwiGLU (Llama, PaLM, and everything since)
+<span id="swiglu-llama-palm-and-everything-since"></span>
+
+### SwiGLU (Llama, PaLM, and many later models)
 
 The current standard, and structurally different from the two above — it changes
 the *shape* of the FFN, not just the nonlinearity.
@@ -219,15 +220,17 @@ class SwiGLU(nn.Module):
         return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 ```
 
-Note `bias=False` throughout. Modern models drop FFN biases — they cost
-parameters and contribute nothing measurable.
+This example chooses `bias=False`, as many models do. Bias removal is not
+universal: the [gpt-oss reference MLP](https://raw.githubusercontent.com/openai/gpt-oss/main/gpt_oss/torch/model.py)
+includes both expert projection biases and a modified gated activation.
 
 **Why gating helps** is not fully settled. Noam Shazeer's paper introducing
 SwiGLU ends with a famously honest line: the architectures' success is attributed
 "to divine benevolence." The working explanation is that multiplicative
 interaction adds expressiveness a single nonlinearity cannot, letting the network
-learn input-dependent filtering. Empirically it wins consistently, so everyone
-uses it.
+learn input-dependent filtering. Its empirical success does not make it
+universal: [Gemma 3](https://huggingface.co/docs/transformers/model_doc/gemma3)
+uses a GELU-tanh-based gated MLP, not SwiGLU.
 
 ### Comparison
 
@@ -237,7 +240,7 @@ uses it.
 | Smooth | no | yes | yes |
 | Matrices in FFN | 2 | 2 | **3** |
 | Typical `d_ff` | `4·d` | `4·d` | `~8/3·d` |
-| Used by | Transformer 2017 | BERT, GPT-2/3 | Llama, Qwen, Gemma, Mistral, DeepSeek |
+| Used by | Transformer 2017 | BERT, GPT-2/3 (ungated); Gemma 3 uses gated GELU | Llama, Qwen, Mistral, DeepSeek |
 
 Raschka's one-line summary of the shift: "the more efficient SwiGLU has replaced
 activation functions like GELU."
@@ -290,13 +293,51 @@ to 5.4 in practice, and the SwiGLU three-matrix structure changes the arithmetic
 
 ---
 
+## Worked gate gradients and matched budgets
+
+Let `a=xW_gate`, `b=xW_up`, and `h=silu(a)*b`. For an upstream gradient g at h,
+`dL/da=g*b*silu'(a)` and `dL/db=g*silu(a)`, where
+`silu'(a)=sigmoid(a)+a*sigmoid(a)*(1-sigmoid(a))`. The gate is not restricted to
+`[0,1]`; SiLU may be negative or exceed one. GEGLU changes SiLU to GELU while
+retaining the three-matrix structure.
+
+```python transformer-check
+import torch
+torch.manual_seed(7)
+a = torch.randn(5, dtype=torch.float64, requires_grad=True)
+b = torch.randn(5, dtype=torch.float64, requires_grad=True)
+g = torch.randn(5, dtype=torch.float64)
+loss = (torch.nn.functional.silu(a) * b * g).sum()
+ga, gb = torch.autograd.grad(loss, (a, b))
+s = a.sigmoid()
+torch.testing.assert_close(ga, g * b * (s + a * s * (1 - s)))
+torch.testing.assert_close(gb, g * torch.nn.functional.silu(a))
+d, classic_width, gated_width = 12, 48, 32
+assert 2 * d * classic_width == 3 * d * gated_width
+print("Gate gradients agree; matched budgets require different inner widths.")
+```
+
+A two-matrix FFN costs `2*d*m` weights, a gated FFN `3*d*g`. Matched parameter
+and dominant projection-FLOP budgets therefore use `g=2m/3`, subject to kernel
+alignment. Equal inner width instead gives the gated model 50% more projection
+weights, confounding an activation comparison.
+
+**Parameter exercise:** with `d=4096`, `H=32`, `H_kv=8`, `d_head=128`, and
+gated width 14336, bias-free GQA projections contain 41,943,040 weights and
+the FFN 176,160,768: about 80.8% of those per-block projection weights, not
+two-thirds. Add norms, embedding/output tables, layer count and biases for a
+whole-model fraction. MoE must separate total expert weights from active ones.
+The FFN memory interpretation describes learned feature/value associations;
+it is not evidence that all model facts reside in FFNs rather than distributed
+attention and residual computations.
+
 ## Key takeaways
 
 - The FFN is two (or three) linear layers with a nonlinearity between, applied
   **independently to each token** — the exact complement of attention, which
   mixes across tokens.
-- Attention is almost entirely linear; softmax acts on weights, not content. The
-  FFN supplies nearly all of the model's nonlinearity.
+- Attention and FFNs are both nonlinear in their inputs; the FFN provides
+  positionwise expansion, gating and feature transformation.
 - The FFN holds roughly **two-thirds of a Transformer's parameters**. This is why
   MoE targets it.
 - The key-value-memory reading: hidden neurons are learned pattern detectors
@@ -305,7 +346,7 @@ to 5.4 in practice, and the SwiGLU three-matrix structure changes the arithmetic
 - ReLU → GELU (smooth, no dying neurons) → SwiGLU (gated, three matrices).
 - SwiGLU's third matrix means `d_ff` shrinks to ~`8/3 · d_model` to hold
   parameters constant.
-- Modern FFNs drop biases entirely.
+- Bias-free FFNs are common, with exceptions such as gpt-oss expert MLPs.
 - `d_ff / d_model` ranges from 3.0 to 5.4 in practice; the 4× rule is historical.
 
 ## Self-check
