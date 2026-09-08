@@ -16,13 +16,13 @@ and the headline result is not a mean. It is the WORST inter-token gap the short
 requests saw, and where it fell relative to the injection.
 
     # server A — chunked prefill on (vLLM's default)
-    vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 32768 \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 32768 \
         --max-num-batched-tokens 2048 --port 8000
 
     python3 run.py --port 8000 --label chunked --json chunked.json
 
     # server B — off, the pathological baseline
-    vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-model-len 32768 \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --max-model-len 32768 \
         --no-enable-chunked-prefill --max-num-batched-tokens 32768 --port 8001
 
     python3 run.py --port 8001 --label unchunked --json unchunked.json
@@ -62,7 +62,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 def stream_one(args, prompt: str, max_tokens: int, arrivals: list | None = None) -> dict:
     """One streaming request. If `arrivals` is given, append (abs_time, gap)
-    for every token after the first, so gaps can be located in wall-clock time
+    for every content chunk after the first, so gaps can be located in wall-clock time
     rather than only summarised."""
     import urllib.error
     import urllib.request
@@ -350,9 +350,10 @@ def main() -> int:
                     help="approximate prompt length of the short requests (default: 128)")
     ap.add_argument("--short-output-len", type=int, default=256,
                     help="max_tokens for the short requests (default: 256)")
-    ap.add_argument("--long-input-len", type=int, default=32768,
+    ap.add_argument("--long-input-len", type=int, default=32000,
                     help="approximate prompt length of the injected long request "
-                         "(default: 32768). Must be <= the server's max-model-len.")
+                         "(default: 32000). Actual tokenized input plus output allowance "
+                         "and template tokens must fit the server context limit.")
     ap.add_argument("--long-output-len", type=int, default=16,
                     help="max_tokens for the long request (default: 16); its decode is "
                          "not what you are measuring")

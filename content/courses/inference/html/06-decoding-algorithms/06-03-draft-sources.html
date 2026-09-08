@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Draft sources: draft models, n-gram, suffix decoding — The Inference Engineering Book</title>
+<title>Draft sources: draft models, n-gram, suffix decoding — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 6 · Decoding algorithms · 06-03</div>
 <h1>Draft sources: draft models, n-gram, suffix decoding</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/spec_decode/ngram_proposer.py</code></li><li><code>vllm/v1/spec_decode/suffix_decoding.py</code></li><li><code>python/sglang/srt/speculative/ngram_worker.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/spec_decode/ngram_proposer.py</code></li><li><code>vllm/v1/spec_decode/suffix_decoding.py</code></li><li><code>python/sglang/srt/speculative/ngram_worker.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A draft that costs a forward pass has to earn it. Before a Llama-3.2-1B drafter
 proposes its first token for Llama-3-70B it has already taken 10.5% of your KV pool — six
@@ -767,16 +767,15 @@ tie.</p>
 <p>Read the figure as a sentence: <strong>a matcher that is right 43% of the time is worth as
 much as a 1B draft model that is right 70% of the time, when the target is 8B — and the bar
 rises to 67% when the target is 70B.</strong> The bar moves because $c$ moves, and $c$ moves
-because it is a parameter ratio. That is the whole chapter.</p></div></section>
-<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: deriving c</h2></div><div class="sec__body"><p>Both target and draft are memory-bound at decode (<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>),
-so time is streamed bytes over bandwidth and the bandwidth cancels:</p>
-
-<div class="math-display">$$c \;=\; \frac{t_D}{t_T} \;=\; \frac{N_D^{\text{stream}}}{N_T^{\text{stream}}},$$</div>
+because it is approximated by a parameter ratio under the following assumptions.</p></div></section>
+<section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: deriving c</h2></div><div class="sec__body"><p>If target and draft are both weight-bandwidth-bound, use the same precision and achieve equal bandwidth,
+streamed weight bytes give an approximate cost ratio:</p>
+<div class="math-display">$$c = t_D/t_T \approx N_D^{\text{stream}}/N_T^{\text{stream}}.$$</div>
 
 <p>where $N^{\text{stream}}$ counts parameters actually read per token — every matmul weight plus
 the output head, but not the input embedding table, which is gathered. Under tensor parallelism
-of the same degree the shards divide out too, so <strong>$c$ is the parameter ratio, full
-stop</strong>. vLLM enforces the "same degree" precondition rather than handling the mismatch:</p>
+of the same degree their ideal shard factors cancel. Actual c can differ because of KV traffic,
+small-GEMM efficiency, collectives and launch costs. vLLM validates TP compatibility:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -867,17 +866,17 @@ sequences at 8k context.</p>
 <p>Add the draft. Its weights are 2.30 GiB, 0.575 GiB per shard, straight off the KV pool. Its
 KV is $2 \times 16 \times 8 \times 64 \times 2 = 32$ KiB per token — 10% on top of every token
 you cache. The pool becomes 145.0 GiB holding 352 KiB tokens: <strong>432,026 tokens, 52
-sequences, a 10.5% loss of concurrency</strong>. <em>Derived.</em> That is before §6.2's
+sequences, a 10.3% loss of integer request concurrency</strong>. The unrounded token-capacity loss is about 10.5%. <em>Derived.</em> This precedes
 per-step drafting slot reservation, and before you have measured a single acceptance. A
 zero-parameter draft source costs exactly none of it.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Same tokenizer</span>
-  <p>Verification compares the drafted token id against the target's distribution at that
-  position. If the two models tokenize differently, id 4711 does not denote the same string in
-  both, so $p(x)/q(x)$ compares unrelated quantities and the §6.2 proof — which assumes $p$ and
-  $q$ are distributions on the <em>same</em> $V$ — no longer applies. vLLM's default is to refuse
-  the configuration outright: <code>"Target and draft model should have the same vocabulary size.
+  <p>Practical model pairing needs compatible token identities or a validated mapping.
+  Equal-size different tokenizers can yield poor proposals, but do not by themselves invalidate
+  exact rejection over the common integer-ID space: any correctly accounted proposal q is
+  allowed. Correctness fails if IDs/probabilities are mapped inconsistently. The engine guard says:
+  <code>"Target and draft model should have the same vocabulary size.
   ... Using models with different tokenizers can cause out-of-bounds errors during speculative
   decoding."</code> (<code>vllm/config/speculative.py:L1418-L1433</code>). The opt-in escape is
   <code>use_heterogeneous_vocab</code>, which builds a token-level intersection, maps ids in both
@@ -996,7 +995,7 @@ collapses to whatever the model's own repetitiveness gives you, which is close t
 <h3>The matcher, read</h3>
 
 <p>vLLM's is numba-JIT'd KMP. It does not scan for a fixed $n$; it finds the <em>longest</em>
-suffix match in $[\,\texttt{prompt\_lookup\_min},\ \texttt{prompt\_lookup\_max}\,]$ in one
+suffix match from <code>prompt_lookup_min</code> through <code>prompt_lookup_max</code> in one
 linear pass, by reversing the sequence and running the failure function:</p>
 
 <div class="code-file">
@@ -1176,8 +1175,8 @@ many tokens it produced without a sync, so it doesn't: it pads with $-1$, ships 
 a dedicated stream, and <em>trims the scheduler's own bookkeeping afterwards</em>
 (<code>update_scheduler_for_invalid_drafts</code>, L475-L515) — which is also why the runner has
 to shallow-copy <code>SchedulerOutput</code> before handing it over
-(<code>vllm/v1/worker/gpu_model_runner.py:L4299-L4314</code>). Padded $-1$ drafts are rejected
-for free by the sampler's first branch, which §6.2 already showed.</p>
+(<code>vllm/v1/worker/gpu_model_runner.py:L4299-L4314</code>). A sampler can skip invalid
+$-1$ slots, but scheduled verification positions and bookkeeping are not free end to end.</p>
 
 <p><strong>When it pays:</strong> long contexts, large batches, async scheduling, or a
 disaggregated setup where a host sync stalls other streams. At batch 4 with 512-token contexts,
@@ -1452,18 +1451,17 @@ ragged metadata is what makes them a single forward pass.</p></div></section>
         <tr><td>Open-ended chat, creative writing, translation</td><td><code>draft_model</code> if a same-tokenizer small model exists; otherwise §6.4</td><td class="num">0.02–0.17</td><td>No literal repetition to match. Only a model generalises.</td></tr>
         <tr><td>Very large target (70B+, MoE)</td><td><code>draft_model</code> becomes cheap</td><td class="num">≈ 0.02</td><td>$c$ is a parameter ratio, so a fixed draft gets relatively free as the target grows.</td></tr>
         <tr><td>Long context, big batch, async or disaggregated scheduling</td><td><code>ngram_gpu</code> over <code>ngram</code></td><td class="num">≈ 0</td><td>Same matcher; the win is removing a host sync from the step loop.</td></tr>
-        <tr><td>High load, batch near the roofline ridge</td><td>none — shorten κ or disable</td><td>—</td><td>§6.2: $S_\infty &lt; 1$ unconditionally once the step is compute-bound.</td></tr>
+        <tr><td>High load near the measured crossover</td><td>test shorter κ or disabling</td><td>—</td><td>The §6.2 cost model predicts a loss; measure the actual workload.</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<p>One asymmetry the table does not show: the free sources are not mutually exclusive with LoRA,
-and the model-based ones nearly are. SGLang's LoRA validator returns early for NGRAM and then
-starts raising for everything else — "LoRA is only compatible with NGRAM, EAGLE, NEXTN, EAGLE3,
-DFLASH, or DSPARK speculative decoding"
-(<code>python/sglang/srt/server_args.py:L9569-L9583</code>). A draft that has no weights has no
-adapters to keep in sync.</p></div></section>
+<p>LoRA compatibility is a method/runner-specific contract, not a general prohibition on
+model-based drafts. The quoted SGLang validator lists NGRAM, EAGLE, NEXTN, EAGLE3, DFLASH and
+DSPARK as compatible methods (<code>python/sglang/srt/server_args.py:L9569-L9583</code>).
+Weightless sources avoid draft-adapter synchronization, while model-based sources still need
+the supported configuration and an acceptance measurement under the active target adapter.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><h3>The draft's memory is subtracted before the pool is sized</h3>
 
 <p>The 10.5% concurrency loss derived in §3 is not a runtime slowdown you can profile; it appears
@@ -1495,11 +1493,10 @@ the traffic.</p>
 
 <h3>Tokenizer mismatch does not fail loudly enough</h3>
 
-<p>Equal vocab <em>size</em> is not equal vocab. vLLM's guard compares
-<code>get_vocab_size()</code> only (L1424-L1433); two models with 128,256-entry vocabularies and
-different merges pass the check and then verify garbage — the ids are in range, so there is no
-out-of-bounds crash, only an $\alpha$ near the chance level and no error at all. If you are
-pairing models from different families deliberately, use
+<p>Equal vocabulary size is not semantic tokenizer compatibility. Different merges can pass
+an ID-range check yet produce poorly aligned proposals. Exact rejection remains valid over
+consistent integer IDs/probabilities; a low acceptance rate is not itself output bias.
+For deliberate cross-tokenizer pairing, inspect the mapping and probability accounting, use
 <code>use_heterogeneous_vocab: true</code> and read the intersection size the mapper logs:
 "VocabMapping initialized: target_vocab=%d, draft_vocab=%d, intersection=%d"
 (<code>vllm/v1/spec_decode/vocab_mapping.py:L122-L136</code>), which warns below 100 shared
@@ -1513,6 +1510,23 @@ tokens.</p>
 <code>max_end_pos</code> — the newest. On a request whose prompt and generation disagree about
 what follows a span, the two engines will propose different tokens from the same context. Both
 are correct; only their hit rates differ.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Coverage is not conditional acceptance</h2></div><div class="sec__body">
+<p>A lookup method can have high acceptance when it finds a match yet match few requests. Report match coverage, proposals per matched request, accepted length and full draft/verify latency separately. Shared suffix stores also need tenant/model/tokenizer namespaces, bounded retention and access controls; retrieving another tenant's text is a privacy boundary even if target verification preserves output probabilities.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">def expected_emitted(alpha, depth):
+    return sum(alpha ** i for i in range(depth + 1))
+
+def mixture_yield(coverage, alpha, depth):
+    return 1 + coverage * (expected_emitted(alpha, depth) - 1)
+
+rare_accurate = mixture_yield(0.1, 0.99, 3)
+common_moderate = mixture_yield(0.9, 0.7, 3)
+assert rare_accurate &lt; common_moderate
+assert abs(mixture_yield(0, 1, 3) - 1) &lt; 1e-12
+assert abs(mixture_yield(1, 1, 3) - 4) &lt; 1e-12
+print("Expected emitted tokens:", rare_accurate, common_moderate)
+print("Compare these with measured full iteration cost, not acceptance alone.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Run the same prompts through three draft sources and read <code>mean_acceptance_length</code>
 off the metrics, which is $E$ from §6.2 directly.</p>
 
@@ -1610,8 +1624,8 @@ derived or cited; nothing here was measured.</p>
     parameter you never touched the draft to change. The direction is worth understanding: $E$
     saturates in $\kappa$ (the marginal token is worth only $\alpha^{\kappa+1}$) while the cost
     term $1+\kappa c$ is linear, so at $c = 0.165$ the model-based draft's speedup <em>decays</em>
-    toward 1.46 as $\kappa$ grows, and the free draft — which pays no $\kappa c$ at all and whose
-    own $E$ still grows — needs less and less $\alpha$ per token to match it. Redo the same solve
+    through about1.46 at kappa=7 and ultimately toward zero for fixed c&gt;0 and alpha&lt;1.
+    A negligible-cost matcher can require lower acceptance to match that increasingly costly chain. Redo the solve
     at $c = 0.018$ and the threshold barely moves (0.670 → 0.654), because there the cost term
     only reaches 1.125 at $\kappa=7$. Flatness in $\kappa$ is a small-$c$ phenomenon; sensitivity
     to $c$ is unconditional.</p>
@@ -1639,18 +1653,17 @@ derived or cited; nothing here was measured.</p>
     verified-position width, not to a wasted draft pass. That is the asymmetry that makes free
     drafts safe to leave on. What you must measure is $E$ separately for each population — a
     single blended <code>mean_acceptance_length</code> hides a 3.0 and a 1.05 averaging to a
-    respectable-looking 2.4. At high load the argument reverses regardless of source: §6.2's
-    $S_\infty = E/(\kappa+1+\kappa c) &lt; 1$ holds for $c = 0$ too, so a free draft that is wrong
-    still costs $(\kappa+1)/E$ in throughput once the step is compute-bound. The right response is
+    respectable-looking 2.4. Under §6.2's ideal compute-bound model, the ratio is at most one
+    when c=0, with equality for perfect acceptance. Imperfect extra positions can still cost
+    throughput; the result is model-dependent, not a universal theorem. The response to test is
     the same one §6.2 identified — shrink $\kappa$ as batch grows, via
     <code>num_speculative_tokens_per_batch_size</code>.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>$c$ is derivable and $\alpha$ is not. In the memory-bound regime $c$ is exactly the ratio of
-  streamed parameters, and tensor-parallel shards cancel — so a Llama-3.2-1B draft costs 16.5% of
-  a Llama-3-8B step and 1.8% of a Llama-3-70B one. Everything else about draft selection follows
-  from that one number.</li>
+  <li>Parameter ratios provide an idealized estimate of draft cost, not an exact latency
+  ratio. Measure c and acceptance separately, including communication, KV, matching overhead
+  and actual kernel efficiency.</li>
 
   <li>The indifference threshold — the acceptance a free matcher needs to tie a draft model — is
   driven far harder by $c$ than by $\kappa$: at $\kappa=3$ it is 0.43 against the 8B target and
@@ -1667,11 +1680,10 @@ derived or cited; nothing here was measured.</p>
   not. Both of vLLM's implementations prefer the <em>oldest</em> occurrence of the longest match,
   not the most recent; SGLang's default ranks by recency. The folklore is wrong about vLLM.</li>
 
-  <li>Moving a zero-FLOP matcher onto the GPU is not about arithmetic. The CPU path needs
-  <code>sampled_token_ids</code> as Python lists, which forces a CUDA-wide stream sync inside every
-  step, and its numba <code>prange</code> is capped at one thread by
-  <code>min(1, cpu_count // 2)</code>. <code>ngram_gpu</code> buys branch-free, sync-free drafting
-  at the price of trimming the scheduler's bookkeeping after the fact.</li>
+  <li>GPU matching can avoid host-visible token transfers and synchronization. The cited CPU
+  path's event-specific wait should not be described as necessarily CUDA-wide. The Numba
+  thread expression also needs later clamping and TP context inspected before asserting
+  exactly one worker. GPU drafting retains scheduler and verification overhead.</li>
 
   <li>A suffix automaton buys three things a fixed window cannot: ranked continuations at
   <em>every</em> achievable match length simultaneously (via the suffix-link walk), draft length
@@ -1710,7 +1722,7 @@ derived or cited; nothing here was measured.</p>
 </ul></div></section>
 <div class="pager"><a href="06-02-speculative-decoding.html"><div class="pager__k">← Previous</div><div class="pager__t">Speculative decoding and the correctness proof</div></a><a class="pager__next" href="06-04-eagle-medusa-mtp.html"><div class="pager__k">Next →</div><div class="pager__t">Medusa, EAGLE-1/2/3, MTP, and tree attention</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1725,6 +1737,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#worked-trace">Worked trace: one n-gram step in SGLang</a>
 <a href="#decision">Choosing: workload shape to draft source</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

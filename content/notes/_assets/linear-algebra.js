@@ -130,12 +130,16 @@
       while (host.firstChild) host.removeChild(host.firstChild);
       var grid = document.createElement('div');
       grid.className = 'widget__matrix';
+      grid.setAttribute('role', 'table');
+      grid.setAttribute('aria-label', current.length + ' by ' + current[0].length + ' matrix');
       current.forEach(function (rowData, i) {
         var row = document.createElement('div');
         row.className = 'widget__mrow';
+        row.setAttribute('role', 'row');
         rowData.forEach(function (value, j) {
           var cell = document.createElement('div');
           cell.className = 'widget__cell';
+          cell.setAttribute('role', 'cell');
           cell.setAttribute('data-row', String(i));
           cell.setAttribute('data-col', String(j));
           cell.textContent = value.toFixed(1);
@@ -172,13 +176,23 @@
 
     if (multiplyBtn) {
       multiplyBtn.addEventListener('click', function () {
-        var scalar = scalarInput ? (parseFloat(scalarInput.value) || 0) : 0;
+        var scalar = scalarInput ? scalarInput.valueAsNumber : NaN;
+        var valid = Number.isFinite(scalar) && current.every(function (row) {
+          return row.every(function (v) { return Number.isFinite(v * scalar); });
+        });
+        if (scalarInput) {
+          scalarInput.setCustomValidity(valid ? '' : 'Enter a finite scalar that keeps the matrix entries finite.');
+          if (!valid) scalarInput.reportValidity();
+        }
+        if (!valid) return;
         current = current.map(function (row) {
           return row.map(function (v) { return v * scalar; });
         });
         render();
       });
     }
+
+    if (scalarInput) scalarInput.addEventListener('input', function () { scalarInput.setCustomValidity(''); });
 
     if (transposeBtn) {
       transposeBtn.addEventListener('click', function () {
@@ -225,12 +239,16 @@
     }
 
     function build() {
+      if (Object.keys(inputs).some(function (key) { return !inputs[key].checkValidity(); })) return;
       var c = palette();
       var width = widthOf(host, 280);
       var height = 320;
       var margin = { top: 18, right: 18, bottom: 18, left: 18 };
       var iw = width - margin.left - margin.right;
       var ih = height - margin.top - margin.bottom;
+      MAX = Math.max(6, Math.ceil(d3.max(Object.keys(inputs), function (key) {
+        return Math.abs(+inputs[key].value || 0);
+      }) + 1));
 
       var root = d3.select(host);
       root.selectAll('*').remove();
@@ -239,7 +257,8 @@
         .attr('width', width)
         .attr('height', height)
         .attr('viewBox', '0 0 ' + width + ' ' + height)
-        .attr('preserveAspectRatio', 'xMidYMid meet');
+        .attr('preserveAspectRatio', 'xMidYMid meet')
+        .attr('role', 'img').attr('aria-label', 'Vectors a and b with equal coordinate scales; values and angle are listed alongside.');
 
       var defs = svg.append('defs');
       [['a', c.blue], ['b', c.rose]].forEach(function (pair) {
@@ -254,12 +273,13 @@
 
       var g = svg.append('g').attr('transform', 'translate(' + margin.left + ',' + margin.top + ')');
 
-      var x = d3.scaleLinear().domain([-MAX, MAX]).range([0, iw]);
-      var y = d3.scaleLinear().domain([-MAX, MAX]).range([ih, 0]);
+      var unit = Math.min(iw, ih) / (2 * MAX);
+      var x = d3.scaleLinear().domain([-MAX, MAX]).range([iw / 2 - MAX * unit, iw / 2 + MAX * unit]);
+      var y = d3.scaleLinear().domain([-MAX, MAX]).range([ih / 2 + MAX * unit, ih / 2 - MAX * unit]);
       var cx = x(0), cy = y(0);
 
       var grid = g.append('g');
-      d3.range(-MAX, MAX + 1).forEach(function (v) {
+      x.ticks(12).forEach(function (v) {
         grid.append('line')
           .attr('x1', x(v)).attr('x2', x(v)).attr('y1', 0).attr('y2', ih)
           .attr('stroke', c.border).attr('stroke-width', 1);
@@ -295,7 +315,7 @@
       var angleDeg = isNaN(angleRad) ? 0 : angleRad * (180 / Math.PI);
 
       if (dotOut) dotOut.textContent = dot.toFixed(2);
-      if (angleOut) angleOut.textContent = angleDeg.toFixed(1) + '°';
+      if (angleOut) angleOut.textContent = magA === 0 || magB === 0 ? 'Undefined' : angleDeg.toFixed(1) + '°';
 
       var cosTheta = dot / (magA * magB);
       if (isNaN(cosTheta)) cosTheta = 0;
@@ -304,20 +324,19 @@
         /* Cover the whole range: a blank readout for most of the input space
            teaches nothing, and the default vectors land in the middle. */
         var explanation;
-        if (magA === 0 || magB === 0) explanation = 'A zero vector has no direction — the dot product is 0.';
-        else if (cosTheta > 0.95) explanation = 'Almost the same direction — about as similar as it gets.';
-        else if (cosTheta > 0.3) explanation = 'Pointing broadly the same way — positively similar.';
-        else if (cosTheta > 0.1) explanation = 'Only loosely related — a small positive dot product.';
-        else if (cosTheta >= -0.1) explanation = 'Near perpendicular: nothing in common, dot product near zero.';
-        else if (cosTheta >= -0.95) explanation = 'Pointing broadly opposite ways — anti-similar.';
-        else explanation = 'Almost exactly opposite — maximally anti-similar.';
+        if (magA === 0 || magB === 0) explanation = 'The zero vector has no direction: its dot product is 0, but its angle and cosine similarity are undefined.';
+        else if (Math.abs(cosTheta) < 1e-10) explanation = 'The vectors are perpendicular: their dot product and cosine similarity are both 0. Orthogonality does not imply statistical independence.';
+        else {
+          var angleKind = cosTheta > 1 - 1e-10 ? 'zero' : cosTheta < -1 + 1e-10 ? 'straight' : dot > 0 ? 'acute' : 'obtuse';
+          explanation = 'Cosine similarity = ' + cosTheta.toFixed(3) + '. The angle is ' + angleKind + '; the dot product also depends on both vector lengths.';
+        }
         noteOut.textContent = explanation;
       }
 
       /* the wedge between a and b, swept the short way round */
       view.angleG.selectAll('*').remove();
       if (magA > 0 && magB > 0) {
-        var angleA = Math.atan2(-a.y, a.x);
+        var angleA = Math.atan2(-a.y, a.x) + Math.PI / 2;
         var cross = a.x * b.y - a.y * b.x;
         var sweep = cross === 0 ? 1 : -Math.sign(cross);
         var arc = d3.arc().innerRadius(0).outerRadius(30)
@@ -373,7 +392,10 @@
     }
 
     Object.keys(inputs).forEach(function (k) {
-      inputs[k].addEventListener('input', update);
+      inputs[k].min = '-1000000';
+      inputs[k].max = '1000000';
+      inputs[k].required = true;
+      inputs[k].addEventListener('input', build);
     });
 
     register('dot-product', build);
@@ -385,24 +407,25 @@
     var host = byId('interactive-classifier');
     if (!host || typeof d3 === 'undefined') return;
 
-    /* Sampled once, so resizing or flipping the theme does not deal a
-       whole new crowd of customers. */
+    /* Fixed-seed points make comparisons repeatable across visits. */
     var cloud = null;
     function points() {
       if (cloud) return cloud;
-      var hipsters = d3.range(30).map(function () {
-        return { x: d3.randomNormal(2.5, 0.9)(), y: d3.randomNormal(7.5, 0.9)(), cls: 0, icon: '🥸' };
+      var normal = d3.randomNormal.source(d3.randomLcg(0.42))(0, 0.9);
+      var negative = d3.range(30).map(function () {
+        return { x: 2.5 + normal(), y: 7.5 + normal(), cls: 0 };
       });
-      var techies = d3.range(30).map(function () {
-        return { x: d3.randomNormal(7.5, 0.9)(), y: d3.randomNormal(2.5, 0.9)(), cls: 1, icon: '🚀' };
+      var positive = d3.range(30).map(function () {
+        return { x: 7.5 + normal(), y: 2.5 + normal(), cls: 1 };
       });
-      cloud = hipsters.concat(techies).filter(function (d) {
+      cloud = negative.concat(positive).filter(function (d) {
         return d.x >= 0 && d.x <= 10 && d.y >= 0 && d.y <= 10;
       });
       return cloud;
     }
 
     var angle = -Math.PI / 4;   /* survives redraws */
+    var offset = 0;
 
     function draw() {
       var c = palette();
@@ -431,7 +454,7 @@
         .attr('fill', c.dim)
         .attr('font-size', 9.5)
         .attr('font-weight', 600)
-        .text('STARTUP PITCH ENTHUSIASM');
+        .text('FEATURE x1');
 
       svg.append('text')
         .attr('class', 'widget__mono')
@@ -440,10 +463,11 @@
         .attr('fill', c.dim)
         .attr('font-size', 9.5)
         .attr('font-weight', 600)
-        .text('LOVE FOR OBSCURE INDIE MUSIC');
+        .text('FEATURE x2');
 
-      var x = d3.scaleLinear().domain([0, 10]).range([0, iw]);
-      var y = d3.scaleLinear().domain([0, 10]).range([ih, 0]);
+      var side = Math.min(iw, ih);
+      var x = d3.scaleLinear().domain([0, 10]).range([(iw - side) / 2, (iw + side) / 2]);
+      var y = d3.scaleLinear().domain([0, 10]).range([(ih + side) / 2, (ih - side) / 2]);
 
       var xAxis = g.append('g')
         .attr('transform', 'translate(0,' + ih + ')')
@@ -456,35 +480,35 @@
           .attr('fill', c.dim).attr('font-size', 9.5).attr('class', 'widget__mono');
       });
 
-      /* the separator sits under the crowd so the emoji stay readable,
-         and is clipped to the plot so it never crosses the axis labels */
+      /* Clip the separator so it cannot cross the axis labels. */
       var clipId = 'la-clf-clip';
       svg.append('defs').append('clipPath').attr('id', clipId)
         .append('rect').attr('x', 0).attr('y', 0).attr('width', iw).attr('height', ih);
       var line = g.append('g').attr('clip-path', 'url(#' + clipId + ')').append('line')
         .attr('stroke', c.text).attr('stroke-width', 2.5).attr('stroke-linecap', 'round');
 
-      g.selectAll('text.la-emoji')
+      g.selectAll('path.la-sample')
         .data(points())
-        .enter().append('text')
-        .attr('class', 'la-emoji')
-        .attr('x', function (d) { return x(d.x); })
-        .attr('y', function (d) { return y(d.y); })
-        .attr('text-anchor', 'middle')
-        .attr('dominant-baseline', 'central')
-        .attr('font-size', 22)
+        .enter().append('path')
+        .attr('class', 'la-sample')
+        .attr('transform', function (d) { return 'translate(' + x(d.x) + ',' + y(d.y) + ')'; })
+        .attr('d', d3.symbol().type(function (d) { return d.cls ? d3.symbolTriangle : d3.symbolCircle; }).size(65))
+        .attr('fill', function (d) { return d.cls ? c.rose : c.blue; })
+        .attr('opacity', 0.8)
         .style('cursor', 'pointer')
-        .text(function (d) { return d.icon; })
         .on('mouseover', function (event, d) {
-          d3.select(this).transition().duration(180).attr('font-size', 30);
-          showTip('Indie Love: ' + d.y.toFixed(1) + '<br>Pitch Zeal: ' + d.x.toFixed(1));
+          showTip('Class ' + (d.cls ? '+1' : '-1') + '<br>x1: ' + d.x.toFixed(2) + '<br>x2: ' + d.y.toFixed(2));
         })
         .on('mousemove', moveTip)
         .on('mouseout', function () {
-          d3.select(this).transition().duration(180).attr('font-size', 22);
           hideTip();
         });
 
+      var normalLine = g.append('line').attr('class', 'la-normal')
+        .attr('stroke', c.accent).attr('stroke-width', 2)
+        .attr('x1', x(5)).attr('y1', y(5));
+      var normalLabel = g.append('text').attr('fill', c.accent)
+        .attr('font-size', 12).attr('font-weight', 600).text('w');
       var handle = g.append('circle')
         .attr('r', 9)
         .attr('fill', c.accent)
@@ -494,20 +518,44 @@
         .on('mouseover', function () { d3.select(this).transition().duration(180).attr('r', 11); })
         .on('mouseout', function () { d3.select(this).transition().duration(180).attr('r', 9); });
 
+      var controls = root.append('div').attr('class', 'widget__bar');
+      controls.append('label').attr('class', 'widget__lbl').attr('for', 'classifier-angle').text('Normal angle');
+      var angleInput = controls.append('input').attr('id', 'classifier-angle').attr('class', 'widget__num')
+        .attr('type', 'number').attr('step', 5).attr('min', -180).attr('max', 180)
+        .on('input', function () { if (Number.isFinite(this.valueAsNumber)) place(this.valueAsNumber * Math.PI / 180); });
+      controls.append('label').attr('class', 'widget__lbl').attr('for', 'classifier-offset').text('Centered intercept');
+      controls.append('input').attr('id', 'classifier-offset').attr('class', 'widget__num')
+        .attr('type', 'number').attr('step', 0.25).attr('min', -8).attr('max', 8).property('value', offset)
+        .on('input', function () {
+          if (!Number.isFinite(this.valueAsNumber)) return;
+          offset = clamp(this.valueAsNumber, -8, 8);
+          this.value = offset;
+          place(angle);
+        });
+      var readout = root.append('p').attr('class', 'widget__note').attr('id', 'classifier-readout').attr('aria-live', 'polite');
+      svg.attr('role', 'img').attr('aria-label', 'Two labeled classes and a linear decision boundary. Circles are class -1; triangles are class +1.');
+
       function place(next) {
-        angle = next;
-        var reach = Math.max(width, height) * 2;
-        var midX = x(5), midY = y(5);
+        angle = Math.atan2(Math.sin(next), Math.cos(next));
+        var wx = Math.cos(angle), wy = Math.sin(angle);
+        var reach = 30;
+        var midX = 5 - offset * wx, midY = 5 - offset * wy;
         line
-          .attr('x1', midX + reach * Math.cos(angle)).attr('y1', midY + reach * Math.sin(angle))
-          .attr('x2', midX - reach * Math.cos(angle)).attr('y2', midY - reach * Math.sin(angle));
+          .attr('x1', x(midX - reach * wy)).attr('y1', y(midY + reach * wx))
+          .attr('x2', x(midX + reach * wy)).attr('y2', y(midY - reach * wx));
         handle
-          .attr('cx', midX + (ih / 3.5) * Math.cos(angle + Math.PI / 2))
-          .attr('cy', midY + (ih / 3.5) * Math.sin(angle + Math.PI / 2));
+          .attr('cx', x(5 + wx)).attr('cy', y(5 + wy));
+        normalLine.attr('x2', x(5 + wx)).attr('y2', y(5 + wy));
+        normalLabel.attr('x', x(5 + wx) + 12).attr('y', y(5 + wy) - 10);
+        var correct = points().filter(function (d) {
+          return ((wx * (d.x - 5) + wy * (d.y - 5) + offset >= 0) ? 1 : 0) === d.cls;
+        }).length;
+        angleInput.property('value', (angle * 180 / Math.PI).toFixed(0));
+        readout.text('w = [' + wx.toFixed(2) + ', ' + wy.toFixed(2) + '], b = ' + (offset - 5 * wx - 5 * wy).toFixed(2) + '. Correct: ' + correct + '/' + points().length + '.');
       }
 
       handle.call(d3.drag().on('drag', function (event) {
-        place(Math.atan2(event.y - y(5), event.x - x(5)) - Math.PI / 2);
+        place(Math.atan2(y.invert(event.y) - 5, x.invert(event.x) - 5));
       }));
 
       place(angle);
@@ -528,14 +576,18 @@
 
     function points() {
       if (cloud) return cloud;
+      var normal = d3.randomNormal.source(d3.randomLcg(0.71))(0, 1);
       cloud = d3.range(150).map(function () {
-        var u = d3.randomNormal(0, SPREAD[0])();
-        var v = d3.randomNormal(0, SPREAD[1])();
+        var u = normal() * SPREAD[0];
+        var v = normal() * SPREAD[1];
         return {
           x: u * Math.cos(TILT) - v * Math.sin(TILT),
           y: u * Math.sin(TILT) + v * Math.cos(TILT)
         };
       });
+      var meanX = d3.mean(cloud, function (d) { return d.x; });
+      var meanY = d3.mean(cloud, function (d) { return d.y; });
+      cloud.forEach(function (d) { d.x -= meanX; d.y -= meanY; });
       return cloud;
     }
 
@@ -570,11 +622,20 @@
       var g = svg.append('g').attr('transform', 'translate(' + margin.left + ',' + margin.top + ')');
 
       var data = points();
-      var spanX = d3.max(data, function (d) { return Math.abs(d.x); }) * 1.08;
-      var spanY = d3.max(data, function (d) { return Math.abs(d.y); }) * 1.15;
-      var x = d3.scaleLinear().domain([-spanX, spanX]).range([0, iw]);
-      var y = d3.scaleLinear().domain([-spanY, spanY]).range([ih, 0]);
+      var xx = d3.sum(data, function (d) { return d.x * d.x; }) / (data.length - 1);
+      var xy = d3.sum(data, function (d) { return d.x * d.y; }) / (data.length - 1);
+      var yy = d3.sum(data, function (d) { return d.y * d.y; }) / (data.length - 1);
+      // Closed-form eigensystem for this symmetric 2 by 2 sample covariance.
+      var gap = Math.hypot(xx - yy, 2 * xy);
+      var lambda1 = (xx + yy + gap) / 2;
+      var lambda2 = Math.max(0, (xx + yy - gap) / 2);
+      var theta = 0.5 * Math.atan2(2 * xy, xx - yy);
+      var span = Math.max(2 * Math.sqrt(lambda1), d3.max(data, function (d) { return Math.max(Math.abs(d.x), Math.abs(d.y)); })) * 1.2;
+      var unit = Math.min(iw, ih) / (2 * span);
+      var x = d3.scaleLinear().domain([-span, span]).range([iw / 2 - span * unit, iw / 2 + span * unit]);
+      var y = d3.scaleLinear().domain([-span, span]).range([ih / 2 + span * unit, ih / 2 - span * unit]);
       var cx = x(0), cy = y(0);
+      svg.attr('role', 'img').attr('aria-label', 'Centered data with orthogonal sample principal-component directions. Arrow lengths are two standard deviations.');
 
       g.append('line').attr('x1', 0).attr('x2', iw).attr('y1', cy).attr('y2', cy)
         .attr('stroke', c.border).attr('stroke-width', 1);
@@ -591,11 +652,9 @@
         .attr('fill', c.steel)
         .attr('opacity', 0.5);
 
-      /* Both components are drawn through the scales, so they stay
-         glued to the cloud whatever the aspect ratio, and their
-         length is proportional to the variance they explain. */
+      /* Equal axis scales preserve orthogonality; each ray is 2 sqrt(lambda). */
       function component(theta, scale, colour, marker, label) {
-        var reach = 2.3 * scale;
+        var reach = 2 * scale;
         var dx = Math.cos(theta) * reach;
         var dy = Math.sin(theta) * reach;
         [1, -1].forEach(function (sign) {
@@ -617,8 +676,11 @@
           .text(label);
       }
 
-      component(TILT, SPREAD[0], c.rose, 'pc1', 'PC1');
-      component(TILT + Math.PI / 2, SPREAD[1], c.blue, 'pc2', 'PC2');
+      component(theta, Math.sqrt(lambda1), c.rose, 'pc1', 'PC1');
+      component(theta + Math.PI / 2, Math.sqrt(lambda2), c.blue, 'pc2', 'PC2');
+      root.append('p').attr('id', 'pca-readout').attr('class', 'widget__note')
+        .attr('data-lambda1', lambda1).attr('data-lambda2', lambda2)
+        .text('Sample eigenvalues: ' + lambda1.toFixed(3) + ' and ' + lambda2.toFixed(3) + '. PC1 retains ' + (100 * lambda1 / (lambda1 + lambda2)).toFixed(1) + '% of sample variance. Arrow lengths: 2 sqrt(lambda), not variance.');
     }
 
     register('pca', draw);
@@ -632,7 +694,7 @@
 
     function draw() {
       var c = palette();
-      var W = 476, H = 176;
+      var W = 476, H = 198;
       var size = 96, top = 26;
 
       var root = d3.select(host);
@@ -642,46 +704,46 @@
         .attr('width', W)
         .attr('height', H)
         .attr('viewBox', '0 0 ' + W + ' ' + H)
-        .attr('preserveAspectRatio', 'xMidYMid meet');
+        .attr('preserveAspectRatio', 'xMidYMid meet')
+        .attr('role', 'img').attr('aria-label', 'Compact singular value decomposition: A, m by n, equals U, m by r, times Sigma, r by r, times V transpose, r by n. Here r is rank A.');
 
       var blocks = [
-        { key: 'A', label: 'A', colour: c.accent, x: 8, sub: 'm × n' },
-        { key: 'U', label: 'U', colour: c.blue, x: 138, sub: 'm × r' },
-        { key: 'S', label: 'Σ', colour: c.sage, x: 250, sub: 'r × r' },
-        { key: 'V', label: 'Vᵀ', colour: c.rose, x: 362, sub: 'r × n' }
+        { key: 'A', label: 'A', colour: c.accent, x: 8, w: 84, h: 96, sub: 'm × n' },
+        { key: 'U', label: 'U', colour: c.blue, x: 154, w: 64, h: 96, sub: 'm × r' },
+        { key: 'S', label: 'Σ', colour: c.sage, x: 266, w: 64, h: 64, sub: 'r × r' },
+        { key: 'V', label: 'Vᵀ', colour: c.rose, x: 362, w: 96, h: 64, sub: 'r × n' }
       ];
 
       blocks.forEach(function (b) {
         svg.append('rect')
-          .attr('x', b.x).attr('y', top)
-          .attr('width', size).attr('height', size).attr('rx', 8)
+          .attr('x', b.x).attr('y', top + (size - b.h) / 2)
+          .attr('width', b.w).attr('height', b.h).attr('rx', 4)
           .attr('fill', b.colour).attr('fill-opacity', 0.12)
           .attr('stroke', b.colour).attr('stroke-width', 1.4);
       });
 
-      /* the singular values themselves, fading as they shrink: keep
-         only the top few and you have the low-rank approximation */
-      var cell = size / 3;
-      [0.8, 0.45, 0.2].forEach(function (weight, i) {
+      /* Symbolic ordering, not measured singular values of a supplied matrix. */
+      var cell = blocks[2].w / 3;
+      ['σ1', '⋱', 'σr'].forEach(function (label, i) {
         var sigma = blocks[2];
         svg.append('rect')
-          .attr('x', sigma.x + i * cell).attr('y', top + i * cell)
+          .attr('x', sigma.x + i * cell).attr('y', top + (size - sigma.h) / 2 + i * cell)
           .attr('width', cell).attr('height', cell)
-          .attr('fill', c.sage).attr('fill-opacity', weight);
+          .attr('fill', c.sage).attr('fill-opacity', 0.35);
         svg.append('text')
           .attr('class', 'widget__mono')
           .attr('x', sigma.x + i * cell + cell / 2)
-          .attr('y', top + i * cell + cell / 2)
+          .attr('y', top + (size - sigma.h) / 2 + i * cell + cell / 2)
           .attr('text-anchor', 'middle')
           .attr('dominant-baseline', 'central')
           .attr('fill', c.text)
           .attr('font-size', 9)
-          .text('σ' + (i + 1));
+          .text(label);
       });
 
       blocks.forEach(function (b) {
         svg.append('text')
-          .attr('x', b.x + size / 2)
+          .attr('x', b.x + b.w / 2)
           .attr('y', b.key === 'S' ? top - 9 : top + size / 2)
           .attr('text-anchor', 'middle')
           .attr('dominant-baseline', b.key === 'S' ? 'auto' : 'central')
@@ -691,7 +753,7 @@
           .text(b.label);
         svg.append('text')
           .attr('class', 'widget__mono')
-          .attr('x', b.x + size / 2)
+          .attr('x', b.x + b.w / 2)
           .attr('y', top + size + 20)
           .attr('text-anchor', 'middle')
           .attr('fill', c.dim)
@@ -709,6 +771,8 @@
           .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
           .attr('fill', c.dim).attr('font-size', 20).text('·');
       });
+      svg.append('text').attr('x', W / 2).attr('y', 180).attr('text-anchor', 'middle')
+        .attr('fill', c.dim).attr('font-size', 10).text('Compact SVD: r = rank(A), σ1 ≥ ... ≥ σr > 0. Schematic, not numerical data.');
     }
 
     register('svd', draw);
@@ -725,6 +789,8 @@
     if (!figures.length) return;
 
     drawAll();
+    window.addEventListener('reader:theme', drawAll);
+    window.addEventListener('reader:resize', drawAll);
 
     /* redraw on a real width change only: mobile browsers fire resize
        when the URL bar slides away, and that must not reshuffle

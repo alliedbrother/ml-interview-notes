@@ -47,9 +47,9 @@ t3 = torch.tensor(a)           # ALWAYS copies (and warns if given a tensor)
 
 | Operation | Returns | Note |
 |---|---|---|
-| `view(shape)` | view | requires contiguous memory; errors otherwise |
+| `view(shape)` | view | requires compatible strides, not global contiguity |
 | `reshape(shape)` | view or copy | works always; copies when it must |
-| `permute(dims)` / `transpose(a,b)` | view | makes the tensor non-contiguous |
+| `permute(dims)` / `transpose(a,b)` | view | changes stride order; may be non-contiguous |
 | `contiguous()` | copy if needed | what `view` complains about |
 | `squeeze` / `unsqueeze(dim)` | view | drop or add a size-1 axis |
 | `expand(shape)` | view, stride 0 | broadcast without copying |
@@ -65,7 +65,8 @@ x.permute(2, 0, 1).reshape(-1)             # fine, copies internally
 ```
 
 The distinction is exactly NumPy's strides story: `permute` rewrites strides,
-`view` requires the strides to describe a contiguous block.
+`view` requires the requested dimensions to be expressible by the existing
+strides. `torch.arange(12)[::2].view(2,3)` succeeds despite noncontiguity.
 
 `expand` vs `repeat` matters for memory: `expand` sets a stride to zero and costs
 nothing; `repeat` materialises. Use `expand` for broadcasting a mask over a
@@ -111,8 +112,9 @@ gradient accumulation and multi-task losses need. It also means forgetting
 optimizer.zero_grad(set_to_none=True)   # set_to_none frees memory and is faster
 ```
 
-**The graph is freed after `backward()`.** Calling it twice raises unless you
-pass `retain_graph=True`. If you need two backward passes over one forward, that
+**Saved intermediates are generally freed after `backward()`.** A second backward
+fails when it needs freed values; trivial graphs needing none can work. Graph
+objects can still exist while references remain. If you need two backward passes over one forward, that
 flag is the answer — but the more common cause of that error is accidentally
 keeping a graph across iterations.
 
@@ -128,9 +130,10 @@ with torch.no_grad():   # nothing inside records history
 building the graph, which saves substantial memory. `torch.inference_mode()` is
 stricter and slightly faster still, and is the right choice for serving.
 
-**Accumulating a Python float, not a tensor.** `total_loss += loss` keeps every
-graph alive and leaks memory until you OOM. Use `total_loss += loss.item()` or
-`loss.detach()`.
+**Accumulate detached summaries.** `total_loss += loss` retains graph references
+and can grow memory. Ordinary backward may already have released saved activations,
+so it does not invariably retain every activation until OOM. Use `.item()` or
+`.detach()` for monitoring that should not be differentiable.
 
 **In-place operations can break autograd.** `x += 1` on a tensor needed for the
 backward pass raises "a variable needed for gradient computation has been
@@ -150,8 +153,10 @@ class StraightThroughRound(torch.autograd.Function):
 ```
 
 This is the straight-through estimator that makes quantisation-aware training
-and discrete latents work. Verify any custom Function with
-`torch.autograd.gradcheck` in `float64`.
+and discrete latents train with a surrogate gradient. It intentionally disagrees
+with the derivative of rounding, so ordinary finite-difference `gradcheck` should
+fail for this example. Use gradcheck on differentiable custom Functions whose
+backward claims to implement the true derivative, not to certify a biased STE.
 
 ## nn.Module
 
@@ -234,29 +239,41 @@ per worker correctly).
 ## The training loop, annotated
 
 ```python
+import math
 model = MLP(d_in, 512, n_classes).to(device)
 opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+steps = epochs * math.ceil(len(train_loader) / accum_steps)
 sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=3e-4, total_steps=steps)
-scaler = torch.amp.GradScaler("cuda")          # fp16 only; unnecessary for bf16
-criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+use_cuda = torch.device(device).type == "cuda"
+scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)  # this path uses fp16
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1, reduction="sum")
 
 for epoch in range(epochs):
     model.train()
-    for xb, yb in train_loader:
+    opt.zero_grad(set_to_none=True)
+    window_samples = 0
+    for step, (xb, yb) in enumerate(train_loader):
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
 
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss = criterion(model(xb), yb) / accum_steps
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_cuda):
+            loss = criterion(model(xb), yb)
+        window_samples += len(yb)
 
         scaler.scale(loss).backward()
 
-        if (step + 1) % accum_steps == 0:
+        if (step + 1) % accum_steps == 0 or step + 1 == len(train_loader):
             scaler.unscale_(opt)                                   # before clipping
+            for parameter in model.parameters():
+                if parameter.grad is not None:
+                    parameter.grad.div_(window_samples)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            previous_scale = scaler.get_scale()
             scaler.step(opt); scaler.update()
             opt.zero_grad(set_to_none=True)
-            sched.step()
+            if scaler.get_scale() >= previous_scale:  # overflow skip: do not advance scheduler
+                sched.step()
+            window_samples = 0
 
     model.eval()
     total, correct = 0, 0
@@ -277,8 +294,10 @@ Points worth stating explicitly:
   numerical stability.
 - **Unscale before clipping.** Clipping scaled gradients clips the wrong
   magnitude.
-- **Divide the loss by `accum_steps`** so the accumulated gradient matches a real
-  large batch.
+- **Normalize by the actual accumulated sample count.** Summed losses and gradient
+  division handle unequal microbatches and the short final window. For masked token
+  losses use the valid-token denominator. BatchNorm and dropout mean microbatch
+  execution need not equal one large forward pass even with correct normalization.
 - **`.item()` synchronises** the GPU. Calling it every step in a tight loop
   serialises host and device; accumulate on-device and sync once per epoch when
   it matters.
@@ -298,12 +317,19 @@ torch.save({
 
 ckpt = torch.load("ckpt.pt", map_location="cpu", weights_only=True)
 model.load_state_dict(ckpt["model"])
+opt.load_state_dict(ckpt["optimizer"])
+sched.load_state_dict(ckpt["scheduler"])
+scaler.load_state_dict(ckpt["scaler"])
+torch.set_rng_state(ckpt["rng"])
 ```
 
 Save the `state_dict`, not the module object — pickling the module ties the file
 to your source layout. Save the optimiser too: resuming without Adam's moments
 is a different training run. `weights_only=True` is the safe load path and is now
-the default in recent versions.
+the default in recent versions. Exact resume additionally needs any Python/NumPy
+and CUDA RNG states, sampler epoch, consumed batches, and deterministic data-worker
+policy. The shown checkpoint alone does not guarantee a mid-epoch distributed
+replay. Restricted loading is not permission to trust arbitrary artifact sources.
 
 ## Mixed precision
 
@@ -333,12 +359,16 @@ the dtypes recorded in the forward.
 
 ```python
 # torchrun --nproc_per_node=8 train.py
+import os
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 dist.init_process_group("nccl")
-rank = int(os.environ["LOCAL_RANK"]); torch.cuda.set_device(rank)
-model = DDP(model.to(rank), device_ids=[rank])
+local_rank = int(os.environ["LOCAL_RANK"])
+rank = dist.get_rank()
+torch.cuda.set_device(local_rank)
+model = DDP(model.to(local_rank), device_ids=[local_rank])
 
 sampler = DistributedSampler(dataset, shuffle=True)
 loader = DataLoader(dataset, sampler=sampler, batch_size=per_gpu_bs)
@@ -351,7 +381,10 @@ for epoch in range(epochs):
 DDP overlaps the gradient all-reduce with the backward pass, which is why it
 scales far better than `DataParallel`'s scatter/gather. Note that the effective
 batch is `per_gpu_bs × world_size`, so scale the learning rate accordingly, and
-that logging should be guarded on `rank == 0`.
+that logging/checkpoints should use global `rank == 0`, not local rank zero on
+every host. Reduce metric numerators and denominators across ranks, account for
+DistributedSampler padding duplicates, and call `dist.destroy_process_group()`
+on clean shutdown. Learning-rate scaling is a heuristic to validate, not a law.
 
 ## torch.compile
 
@@ -365,15 +398,18 @@ speedups are 1.3–2× on training and more on inference-heavy small ops, mostly
 eliminating kernel-launch overhead and memory round-trips through fusion.
 
 What breaks it: data-dependent control flow, `.item()` inside the model, printing
-tensors, and shapes that change every step (each new shape triggers a
-recompilation). Diagnose with `TORCH_LOGS="graph_breaks,recompiles"`.
+tensors, and shape changes that invalidate guards. Dynamic shape generalization
+can avoid compiling every distinct shape. Diagnose with
+`TORCH_LOGS="graph_breaks,recompiles"` rather than assuming each shape recompiles.
 
 ## Memory
 
-Rough training memory per parameter under AdamW with bf16 autocast:
-2 (bf16 weights) + 4 (fp32 master) + 4 + 4 (Adam moments) + 4 (fp32 gradients)
-≈ **18 bytes**, plus activations, which scale with batch size × sequence length ×
-depth and are frequently the dominant term.
+Ordinary bf16 autocast commonly retains FP32 parameters, gradients and Adam
+moments: roughly 16 bytes per parameter for those four FP32 arrays after state
+initialization, plus activations, temporary casts, buffers and optimizer workspace.
+Other mixed-precision implementations use separate low-precision weights and
+master copies. An 18-byte accounting applies only to that specific storage design,
+not every autocast loop. Measure actual tensors and peak allocated memory.
 
 | Technique | Saves | Costs |
 |---|---|---|
@@ -450,6 +486,52 @@ effective debugging step in deep learning.
 | `captum` | attribution and interpretability |
 
 ## Self-check
+
+### Runnable accumulation and derivative checks
+
+This CPU fixture verifies a short final accumulation window against a full-batch
+gradient in a model without dropout or BatchNorm. It also distinguishes the true
+derivative check from an STE. GPU AMP, multi-host DDP and export performance require
+separate hardware tests; these assertions do not claim to execute those paths.
+
+```python runnable
+import copy
+import torch
+torch.manual_seed(4)
+torch.set_num_threads(1)
+X, y = torch.randn(7, 3), torch.randn(7, 1)
+whole = torch.nn.Linear(3, 1)
+micro = copy.deepcopy(whole)
+torch.nn.functional.mse_loss(whole(X), y).backward()
+for start in range(0, len(X), 3):
+    torch.nn.functional.mse_loss(micro(X[start:start+3]), y[start:start+3], reduction="sum").backward()
+for full, small in zip(whole.parameters(), micro.parameters()):
+    small.grad.div_(len(X))
+    torch.testing.assert_close(full.grad, small.grad)
+
+class Cube(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return x ** 3
+    @staticmethod
+    def backward(ctx, gradient):
+        (x,) = ctx.saved_tensors
+        return gradient * 3 * x ** 2
+
+assert torch.autograd.gradcheck(Cube.apply, (torch.tensor([0.4], dtype=torch.double, requires_grad=True),))
+x = torch.tensor(2., requires_grad=True)
+first = torch.autograd.grad(x**3, x, create_graph=True)[0]
+second = torch.autograd.grad(first, x)[0]
+assert second.item() == 12
+assert torch.arange(12)[::2].view(2, 3).shape == (2, 3)
+print("unequal accumulation, true backward, higher derivative, stride checks passed")
+```
+
+The [AMP examples](https://docs.pytorch.org/docs/stable/notes/amp_examples.html)
+specify unscaling and accumulation semantics; the
+[view reference](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.view.html)
+states the actual stride compatibility condition.
 
 1. Why does PyTorch accumulate gradients rather than overwrite them, and what
    does that enable?

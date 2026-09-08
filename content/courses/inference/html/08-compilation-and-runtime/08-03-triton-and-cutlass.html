@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Writing a Triton kernel; CUTLASS at a glance — The Inference Engineering Book</title>
+<title>Writing a Triton kernel; CUTLASS at a glance — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,71 +623,64 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 8 · Compilation and runtime · 08-03</div>
 <h1>Writing a Triton kernel; CUTLASS at a glance</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/</code></li><li><code>csrc/cutlass_extensions/</code></li><li><code>python/sglang/kernels/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/</code></li><li><code>csrc/cutlass_extensions/</code></li><li><code>python/sglang/kernels/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">A fused RMSNorm moves 32 KiB per token. The eager PyTorch version moves 80 KiB.
-On a bandwidth-bound operation that ratio <em>is</em> the speedup, and it is 2.5&times; sitting on the
-floor waiting for someone to pick it up. The CUDA way to pick it up is 371 lines of templated
-kernel with hand-written warp reductions. The Triton way is twenty-six lines. This chapter writes
-those twenty-six lines, proves the bound they are chasing, and then reads enough CUTLASS to know
-when twenty-six lines are not enough.</p></div>
+<div class="prose"><p class="lead">Fused normalization removes intermediate materialization, but a byte
+ratio is not automatically a speedup. This chapter compares CUDA and Triton reductions,
+derives explicit dtype-aware traffic models, and examines CUTLASS/CuTe without treating one
+framework's abstraction as a universal performance boundary.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take the two lines every transformer block runs twice per layer:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
-    <span class="src">PSEUDOCODE — the eager reference every fused norm is checked against</span>
+    <span class="src">PSEUDOCODE - fp32-intermediate residual RMSNorm contract</span>
     <span class="tag tag--pseudo">pseudocode</span>
   </div>
-  <pre class="code-block"><code>s = x + residual                       # pre-norm sum, handed to the next block
-v = s.float().pow(2).mean(dim=-1, keepdim=True)
-out = (s.float() * torch.rsqrt(v + eps) * weight).to(s.dtype)</code></pre>
+  <pre class="code-block"><code>s = x.float() + residual.float()
+v = s.square().mean(dim=-1, keepdim=True)
+out = (s * torch.rsqrt(v + eps)).to(weight.dtype) * weight
+residual_out = s.to(x.dtype)  # preserve the pre-norm residual</code></pre>
 </div>
 
-<p>Eager PyTorch executes that as five kernels and materialises three intermediate tensors. Count
-the HBM traffic in units of one row &mdash; for Llama-3-8B, $d = 4096$ in bf16, that is
-$4096 \times 2 = 8192$ bytes:</p>
+<p>Kernel count and physical HBM traffic need a trace. For bf16 inputs/weights with fp32
+intermediates, the logical materialization accounting follows the explicit reference in
+<a href="08-02-torch-compile.html">§8.2</a>:</p>
 
 <div class="table-wrap">
-  <div class="table-wrap__cap">HBM traffic for one token of RMSNorm-with-residual, $d = 4096$, bf16.
-  <em>Derived</em> by counting compulsory reads and writes; one unit = 8 KiB.</div>
+  <div class="table-wrap__cap">Logical reference bytes per d=4096 row, not measured HBM.
+Weight reads are included. These grouped rows are not a CUDA kernel count.</div>
   <div class="table-scroll">
     <table class="dt">
-      <thead><tr><th>Step</th><th>Reads</th><th>Writes</th><th class="num">Units</th></tr></thead>
+      <thead><tr><th>Step</th><th>Reads</th><th>Writes</th><th>Bytes</th></tr></thead>
       <tbody>
-        <tr><td><code>s = x + residual</code></td><td>x, residual</td><td>s</td><td class="num">3</td></tr>
-        <tr><td><code>s.pow(2)</code></td><td>s</td><td>s&sup2;</td><td class="num">2</td></tr>
-        <tr><td><code>.mean(-1)</code></td><td>s&sup2;</td><td>&mdash;</td><td class="num">1</td></tr>
-        <tr><td><code>s * rsqrt(v)</code></td><td>s</td><td>t</td><td class="num">2</td></tr>
-        <tr><td><code>t * weight</code></td><td>t</td><td>out</td><td class="num">2</td></tr>
-        <tr><td><b>eager total</b></td><td></td><td></td><td class="num"><b>10 &rarr; 80 KiB</b></td></tr>
-        <tr><td><b>fused kernel</b></td><td>x, residual</td><td>s, out</td><td class="num"><b>4 &rarr; 32 KiB</b></td></tr>
+        <tr><td>Two input casts</td><td>bf16 x, residual</td><td>two fp32 rows</td><td>49,152</td></tr>
+        <tr><td>Residual addition and residual output cast</td><td>fp32 rows</td><td>fp32 sum, bf16 residual</td><td>73,728</td></tr>
+        <tr><td>Square, mean, epsilon and rsqrt</td><td>fp32 sum and intermediates</td><td>fp32 square and scalars</td><td>49,172</td></tr>
+        <tr><td>Normalize, cast, weight multiply</td><td>fp32 sum, scalar, bf16 weight</td><td>intermediates and output</td><td>81,924</td></tr>
+        <tr><td><b>Logical reference total</b></td><td></td><td></td><td>253,976</td></tr>
+        <tr><td><b>Fused payload</b></td><td>x, residual, weight</td><td>residual, output</td><td>40,960</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
 <div class="callout callout--note">
-  <span class="callout__k">Two counts, one operation</span>
-  <p>This table charges every intermediate at the bf16 row width, 8&nbsp;KiB, which is the count you
-  want when the question is "how much traffic can a fused kernel remove that is <em>structurally</em>
-  unavoidable in the split form". <a href="08-02-torch-compile.html">&sect;8.2</a> counts the same
-  operation against vLLM's actual PyTorch reference, which promotes to fp32 mid-chain, and gets
-  253,972&nbsp;B eager against 40,960&nbsp;B fused &mdash; 6.2&times; rather than 2.5&times;. Neither
-  is wrong: the extra factor is the fp32 intermediates the reference materialises, which are real
-  traffic on the eager path and vanish in <em>both</em> fused kernels. Use 2.5&times; as the floor on
-  what fusion is worth and 6.2&times; as what it is worth against the specific decomposition Dynamo
-  traces.</p>
+  <span class="callout__k">Match the operation</span>
+  <p>The Gemma kernel below computes normalization with <code>1 + weight</code> and initially
+  has no residual input; the later fused-add variant adds residual semantics. Those are
+  distinct APIs. The logical byte ratio above is about 6.2, not a guaranteed latency ratio.
+  Caches, precision placement and existing eager fusion determine actual savings.</p>
 </div>
 
-<p>At an H100 SXM's 3.35 TB/s, a 2048-token prefill chunk costs $2048 \times 81920 / 3.35\times10^{12}
-= 50.1\ \mu\text{s}$ eager and $20.0\ \mu\text{s}$ fused. Llama-3-8B runs 65 normalisations per
-forward pass (two per layer for 32 layers, plus the final norm), so the gap is
-<b>3.26 ms against 1.30 ms</b> per chunk. Nearly two milliseconds of pure waste, per chunk, forever.</p>
+<p>At 2048 rows, 253,976 logical bytes per row correspond to about 155 microseconds at
+peak 3.35 TB/s, versus about 25 microseconds for the fused payload if each row reloads weight.
+A warm shared weight can reduce HBM traffic. These are conditional payload estimates:
+the final norm lacks residual semantics, and no measured multi-layer saving follows.</p>
 
 <div class="kpis">
-  <div class="kpi kpi--hero"><div class="kpi__n">2.5&times;</div><div class="kpi__l">traffic reduction from fusing — derived</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">6.2&times;</div><div class="kpi__l">logical reference / fused payload</div></div>
   <div class="kpi"><div class="kpi__n">0.625</div><div class="kpi__l">FLOP/byte, arithmetic intensity</div></div>
-  <div class="kpi"><div class="kpi__n">472&times;</div><div class="kpi__l">below the H100 bf16 ridge of 295</div></div>
+  <div class="kpi"><div class="kpi__n">Scalar</div><div class="kpi__l">use the reduction's instruction roofline</div></div>
 </div>
 
 <p>SGLang's answer in CUDA is
@@ -714,13 +707,13 @@ no compiler can make for you. You stop choosing everything below it.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; one RMSNorm row reduction: CUDA threads versus a Triton block.</b>
-  Left is <code>rmsnorm_cta_double</code> at $d = 4096$ (512 threads, 16 warps, 16 elements each);
+  Left is <code>rmsnorm_cta_double</code> at d=4096 (256 threads, 8 warps, 16 elements each);
   right is <code>_gemma_rmsnorm_kernel</code> with <code>BLOCK_N = 4096</code>. Both compute the same
   sum of squares. The shaded band on the right is what the compiler generates.</p>
   <svg viewBox="0 0 880 420" width="100%" role="img" aria-labelledby="f1t f1d" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="f1t">CUDA thread-level code versus Triton block-level code for one RMSNorm row</title>
     <desc id="f1d">Two columns. The left column, labelled CUDA, shows a row of 4096 elements split
-    across 512 threads at 16 elements each, then a warp shuffle reduction, then a shared-memory
+    across 256 threads at 16 elements each, then a warp shuffle reduction, then a shared-memory
     staging step with two syncthreads barriers, then a final warp reduction, all written by hand.
     The right column, labelled Triton, shows the same row as a single block-valued vector, a single
     tl.sum call, and a shaded band beneath indicating that the thread mapping, shuffle tree, shared
@@ -742,12 +735,12 @@ no compiler can make for you. You stop choosing everything below it.</p>
     </g>
     <g>
       <rect x="20" y="106" width="400" height="30" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
-      <text x="220" y="125" font-size="10.5" text-anchor="middle" fill="currentColor">threadIdx.x = 0 .. 511 &middot; 16 elements each &middot; two 16 B loads</text>
+      <text x="220" y="125" font-size="10.5" text-anchor="middle" fill="currentColor">threadIdx.x = 0 .. 255 &middot; 16 elements each &middot; two 16 B loads</text>
     </g>
     <text x="20" y="158" font-size="10.5" fill="currentColor" fill-opacity="0.8">1. per-thread partial: 8 fp32x2 unpacks, hand-unrolled</text>
     <g>
       <rect x="20" y="166" width="400" height="26" fill="none" stroke="currentColor" stroke-opacity="0.35"/>
-      <text x="220" y="183" font-size="10.5" text-anchor="middle" fill="currentColor">warp::reduce_sum &rarr; 16 warp partials</text>
+      <text x="220" y="183" font-size="10.5" text-anchor="middle" fill="currentColor">warp::reduce_sum &rarr; 8 warp partials</text>
     </g>
     <g>
       <rect x="20" y="202" width="400" height="26" fill="var(--plum-dim)" stroke="var(--plum)" stroke-opacity="0.5"/>
@@ -898,7 +891,7 @@ def _gemma_rmsnorm_kernel(
 <p>Nine constructs, in order:</p>
 
 <div class="cards cards--3">
-  <div class="ve-card"><span class="ve-card__k">@triton.jit</span><h4>Not a Python function</h4><p>The body is never executed by CPython. Triton parses the AST and compiles it. Consequences: no Python objects, no <code>print</code>, no data-dependent Python control flow &mdash; only what the language defines.</p></div>
+  <div class="ve-card"><span class="ve-card__k">@triton.jit</span><h4>Compiled kernel language</h4><p>The JIT compiles supported Python-like syntax, not arbitrary Python objects. Triton provides static/device print and assert tools; interpreter mode supports debugging within its documented limits.</p></div>
   <div class="ve-card"><span class="ve-card__k">tl.program_id(0)</span><h4>Which program am I</h4><p>The index of this instance in the launch grid. Here the grid is one-dimensional over rows, so <code>row</code> is the token index. Roughly a thread block, but you never say how many threads.</p></div>
   <div class="ve-card"><span class="ve-card__k">tl.arange</span><h4>A block value</h4><p><code>tl.arange(0, BLOCK_N)</code> is a vector of <code>BLOCK_N</code> integers living in registers across the whole program. Every arithmetic op on it is elementwise over all lanes at once.</p></div>
   <div class="ve-card"><span class="ve-card__k">mask + other</span><h4>The bounds guard</h4><p><code>cols &lt; n_cols</code> is a block of booleans. Masked lanes issue no memory transaction on load and no write on store, and take <code>other=0.0</code> as their value.</p></div>
@@ -1020,7 +1013,7 @@ by <code>n_cols</code>, the true width.</p>
     <text x="36" y="314" font-size="11.5" font-weight="600" fill="var(--plum)">the decode failure mode</text>
     <text x="36" y="336" font-size="10.5" fill="currentColor">batch 1 decode: m = 1  &rarr;  grid = (1,)  &rarr;  ONE program  &rarr;  1 of 132 SMs busy  &rarr;  0.76% of the machine</text>
     <text x="36" y="356" font-size="10.5" fill="currentColor">the bandwidth bound says 9.8 ns for 32 KiB; one SM cannot come near it, and the launch alone costs microseconds</text>
-    <text x="36" y="374" font-size="10.5" fill="currentColor" fill-opacity="0.8">this is why the CUDA kernel uses a grid-stride loop with num_blocks = min(num_tokens, occupancy &times; 132), and why decode runs inside a CUDA graph</text>
+    <text x="36" y="374" font-size="10.5" fill="currentColor">A grid-stride loop schedules multiple rows; num_tokens=1 still launches only one block.</text>
   </svg>
 </div>
 
@@ -1033,35 +1026,34 @@ is never re-read from HBM by a separate kernel.</p></div></section>
 profiler.</p>
 
 <ol>
-<li><b>Count compulsory bytes.</b> Every input element that must be read, every output element that
-must be written, once. For fused RMSNorm-with-residual at $d = 4096$ bf16 that is
-$Q = 4 \times 4096 \times 2 = 32768$ bytes per token. Weight is $8$ KiB per launch and stays in
-L2, so it rounds away.</li>
+<li><b>Count bytes at the relevant memory level.</b> Fused residual RMSNorm reads x, residual
+and weight and writes sum and output: 40,960 logical bytes at d=4096 bf16. If the shared
+weight is warm in L2, the input/output HBM component is 32,768 bytes per row. State which
+assumption applies rather than silently omitting weight.</li>
 <li><b>Count FLOPs.</b> One add for the residual, one multiply and one add for the sum of squares,
 one multiply by <code>rstd</code>, one by the weight: $F \approx 5d = 20480$ FLOP per token.</li>
 <li><b>Divide, and place it on the roofline.</b>
 $I = F/Q = 20480/32768 = 0.625$ FLOP/byte.</li>
 </ol>
 
-<p>The H100 SXM bf16 ridge is $I^{*} = 295$ FLOP/byte
-(<a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>). At
-$0.625$ you are 472&times; to the left of it. There is no version of this kernel where tensor cores,
-<code>tl.dot</code>, or more arithmetic helps. The <em>only</em> lever is bytes, which is why fusion
-&mdash; and nothing else &mdash; is the optimisation.</p>
+<p>This norm uses scalar fp32 arithmetic and reductions, so peak bf16 tensor-core FLOPs
+is the wrong compute ceiling. Low arithmetic intensity motivates minimizing traffic, but
+occupancy, vectorization, reduction layout, launch latency and registers also matter.
+Fusion is one important optimization, not the only possible one.</p>
 
 <div class="math-display">$$t_{\min} = \frac{Q}{\beta} = \frac{32768\ \text{B}}{3.35\times10^{12}\ \text{B/s}} = 9.78\ \text{ns per token}$$</div>
 
-<p>Multiply by the token count for the real bound: $20.0\ \mu\text{s}$ for a 2048-token chunk,
-$0.64\ \mu\text{s}$ for all 65 norms of a batch-1 decode step whose total floor is 4.48 ms. Then
-compare against what you measure. The ratio $t_{\min}/t_{\text{measured}}$ is your achieved fraction
-of peak bandwidth, and it is the only number that matters for a kernel on this side of the ridge.</p>
+<p>This conditional warm-weight payload bound scales to about 20 microseconds for 2048 rows.
+For a valid HBM accounting model, payload divided by measured time gives effective bandwidth;
+if most accesses hit L2, that ratio is not physical HBM bandwidth. Also inspect device counters,
+small-batch latency and end-to-end fraction before deciding optimization is complete.</p>
 
 <div class="callout callout--warn">
   <span class="callout__k">No GPU here</span>
   <p>This book derives bounds; it does not measure achievement. Every figure above is arithmetic
   from the H100 SXM spec sheet and the model shapes &mdash; none of it was run. A real kernel on real
-  silicon will land somewhere below the bound, and how far below depends on grid size, occupancy,
-  L2 behaviour and launch overhead. Measuring that gap is
+   silicon has runtime at or above an applicable minimum-time bound, and bandwidth at or
+   below its applicable ceiling. A faster apparent result signals different traffic/cache assumptions.
   <a href="../LABS.html">the lab's</a> job, with <code>triton.testing.do_bench</code> and Nsight
   Compute. Never quote a bound as a measurement.</p>
 </div>
@@ -1375,7 +1367,8 @@ depends on the block sizes the tuner picked:</p>
 <p>Everything in this kernel maps back to the twenty-six-line norm: <code>program_id</code>,
 <code>arange</code>, masked <code>load</code>/<code>store</code>, <code>constexpr</code>
 specialisation, an fp32 accumulator, and a grid you compute yourself. The only genuinely new
-primitive is <code>tl.dot</code>, which lowers to <code>wgmma</code> on Hopper.</p></div></section>
+primitive is <code>tl.dot</code>; the emitted MMA instruction family depends on dtype, shape,
+layout, hardware and compiler version. Inspect generated PTX/SASS rather than assuming WGMMA.</p></div></section>
 <section class="sec" id="dispatch" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Compiled or Triton: how each engine decides</h2></div><div class="sec__body"><p><a href="../00-foundations/00-03-gpu-architecture.html">&sect;0.3</a> left this pair for here.
 SGLang's split-KV merge exists twice &mdash; a compiled op in the external <code>sgl_kernel</code>
 wheel and a Triton kernel in-tree &mdash; and the wrapper picks:</p>
@@ -1413,13 +1406,10 @@ def _supported_headdim(o: torch.Tensor) -&gt; bool:
         )</code></pre>
 </div>
 
-<p>The CUDA kernel wins on CUDA with an aligned head dim, because it can assume a 16-byte packed
-load. The Triton kernel wins everywhere else, because
-<code>head_mask = head_arange &lt; HEAD_SIZE</code>
-(<code>python/sglang/kernels/ops/attention/merge_state.py:L39-L40</code>) makes alignment somebody
-else's problem and the same source compiles for ROCm. That is the tradeoff in one function:
-<b>hand-written CUDA buys you the last increment of memory-system control on the shapes you
-enumerated; Triton buys you every shape and every backend you did not.</b></p>
+<p>The predicate selects the compiled CUDA path for eligible aligned inputs and Triton
+otherwise. Selection is not proof of universal speed superiority. Both have supported
+shape/dtype/backend limits; Triton does not automatically support every shape or platform.
+Benchmark the eligible alternatives while preserving the operation's numerical contract.</p>
 
 <p>SGLang has generalised this into a registry. <code>python/sglang/kernels/spec.py:L29-L51</code>
 enumerates provenance as an enum &mdash; <code>TORCH</code>, <code>TORCH_COMPILE</code>,
@@ -1431,11 +1421,11 @@ Every operator carries a required <code>forward_native</code>, "the pure-<code>t
 correctness reference every other implementation is checked against"
 (<code>python/sglang/kernels/README.md:L75-L76</code>). If you write a Triton kernel for either
 engine, that is the shape of the contract you are joining.</p></div></section>
-<section class="sec" id="cutlass" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">CUTLASS at a glance</h2></div><div class="sec__body"><p>Triton's abstraction has a ceiling. It gives you a block of elements and a grid; it does not give
-you a warp-specialised producer/consumer pipeline with TMA descriptors, a persistent stream-K tile
-scheduler, and an epilogue that fuses an arbitrary expression tree while writing through the same
-shared-memory buffers the mainloop just drained. On a dense GEMM at large M, those things are the
-last 20%, and 20% of the GEMM is most of prefill. That is CUTLASS's territory.</p>
+<section class="sec" id="cutlass" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">CUTLASS at a glance</h2></div><div class="sec__body"><p>CUTLASS/CuTe expose detailed tile, pipeline and epilogue abstractions.
+These are not exclusive capabilities: <a href="https://triton-lang.org/main/getting-started/tutorials/09-persistent-matmul.html">Triton's official persistent-matmul tutorial</a> includes
+persistent scheduling, TMA, warp specialization and fused epilogues on supported hardware.
+Compare the exact version, kernel, layout control and authoring complexity; no fixed "last
+20%" performance advantage follows from choosing one language.</p>
 
 <p>CUTLASS is a C++ template library, not a compiler. Its organising idea is a <b>hierarchy of
 tiles</b>, each level a template parameter you instantiate rather than a runtime argument you pass.</p>
@@ -1596,11 +1586,10 @@ CUTE_HOST_DEVICE static constexpr auto create_auto_vectorizing_copy() {
   } else if constexpr (bits % 64 == 0) {</code></pre>
 </div>
 
-<p>Read the last function against SGLang's dispatch on <code>headdim % 8 == 0</code>. Same decision
-&mdash; how wide a vector can I legally load &mdash; but resolved by <code>if constexpr</code> at
-compile time from a layout, so the wrong branch does not exist in the binary. That is what "templates
-rather than a JIT" buys: full specialisation with zero runtime dispatch, paid for in compile time and
-binary size.</p>
+<p><code>if constexpr</code> eliminates branches inside each compiled specialization.
+Runtime dispatch can still choose among C++ template instantiations, as the earlier wrapper
+does. Triton JIT also specializes compile-time values. Compare build time, binary size,
+cache misses and supported specializations, not "templates have no runtime dispatch".</p>
 
 <div class="callout callout--unverified">
   <span class="callout__k">Unverified</span>
@@ -1657,8 +1646,8 @@ launcher.</li>
 <code>tl.constexpr</code> values (<code>BLOCK_N=8192</code>), the pointer dtypes (bf16 in, bf16 out,
 fp32 weight), <code>num_warps</code> and <code>num_stages</code>, and divisibility properties of the
 integer arguments &mdash; a stride divisible by 16 licenses wider vector loads than one that is not.
-Two calls that differ only in <code>m</code> share a compiled kernel; two calls that differ in
-hidden size do not.</li>
+Calls with different runtime n_cols may share a specialization when padded BLOCK_N and
+other key properties match. Verify actual JIT keys; hidden size is not always a constexpr.</li>
 <li><b>Cache lookup</b> in <code>TRITON_CACHE_DIR</code>. vLLM redirects this into
 <code>VLLM_CACHE_ROOT</code> when compile caching is on and otherwise Triton uses
 <code>~/.triton/cache</code> (<code>docs/usage/security.md:L376</code>); SGLang sets it under its own
@@ -1701,24 +1690,43 @@ register count per thread, which is what decides how many of your blocks fit con
 The Python object also exposes the same artefacts &mdash; a compiled kernel handle carries an
 <code>asm</code> mapping with <code>"ttir"</code>, <code>"ttgir"</code>, <code>"llir"</code> and
 <code>"ptx"</code> keys &mdash; but the exact attribute names move between Triton releases, so the
-cache directory is the stable interface.</p></div></section>
+cache layouts and handle attributes are both version-dependent inspection aids.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">the classic</span><h4>Dividing by BLOCK_N</h4><p><code>tl.sum(x*x, axis=0) / BLOCK_N</code> instead of <code>/ n_cols</code>. At $d = 4096$ they are equal and every test passes; at $d = 6144$ the variance is 25% low and the model degrades subtly. The masking bug that survives your unit test is the one that hurts.</p></div>
-  <div class="ve-card"><span class="ve-card__k">the silent one</span><h4>Forgetting <code>other=</code></h4><p>A masked <code>tl.load</code> without <code>other</code> leaves those lanes undefined. Elementwise output is fine — the store masks them — but any reduction over the block inherits garbage. Symptom: correct at power-of-two widths, NaN elsewhere.</p></div>
+  <div class="ve-card"><span class="ve-card__k">undefined lanes</span><h4>Forgetting other=</h4><p>Masked loads without an explicit value leave inactive lanes undefined. A reduction can then produce wrong finite values or NaN. Use zero for a sum-of-squares reduction and test non-power-of-two widths.</p></div>
   <div class="ve-card"><span class="ve-card__k">int32 overflow</span><h4>Strides times offsets</h4><p>vLLM casts explicitly: <em>"Cast to int64 to prevent overflow in stride*offset products (e.g. stride_cm * offs_token can exceed int32 for large token counts)"</em> — <code>fused_moe.py:L417-L419</code>. Symptom is a wild-pointer write at large batch that vanishes when you shrink the test.</p></div>
   <div class="ve-card"><span class="ve-card__k">compiler bugs</span><h4>They are real</h4><p><em>"TD gather/load feeding tl.dot with a non-block-aligned K miscompiles (~74% of output elements wrong) on real HW; this is a compiler-codegen issue, not a Python-maskable boundary gap"</em> — <code>fused_moe.py:L847-L859</code>. vLLM guards it and logs a fallback. Always diff against a torch reference on the shape you actually run.</p></div>
   <div class="ve-card"><span class="ve-card__k">latency spikes</span><h4>Compiling during serving</h4><p><code>"Triton kernel JIT compilation during inference: ... This causes a latency spike; consider extending warmup to cover this shape/config."</code> — <code>vllm/utils/jit_monitor.py:L119-L141</code>. A new sequence length reaching an unspecialised kernel stalls a live request.</p></div>
   <div class="ve-card"><span class="ve-card__k">benchmark hygiene</span><h4>L2 lies to you</h4><p>SGLang's norm benchmark sets <code>NUM_LAYERS = 4  # avoid L2 effect</code> (<code>test/registered/kernels/benchmark/layernorm/bench_norm.py:L34</code>) and cycles distinct tensors. Time one 32 KiB tensor in a loop and you will measure L2, not HBM, and beat your own bandwidth bound.</p></div>
 </div>
 
-<p>One more, structural: a one-program-per-row grid is right for prefill and wrong for decode. At
-$m = 1$ the grid is <code>(1,)</code> and 131 of 132 SMs idle. SGLang's CUDA kernel handles it with a
-grid-stride loop and an occupancy-derived block count &mdash;
-<code>const auto num_blocks = std::min&lt;uint32_t&gt;(num_tokens, max_occupancy * kNumSM);</code>
-at <code>python/sglang/kernels/jit/csrc/elementwise/rmsnorm.cuh:L307-L311</code>. The Triton kernel
-does not, because at decode the norm is 0.014% of a 4.48 ms step floor and the launch overhead
-dominates anyway. Knowing which of those two facts applies to <em>your</em> kernel is the judgement
-this chapter is trying to build.</p></div></section>
+<p>A one-program-per-row grid exposes only one block at m=1. The quoted CUDA grid-stride
+loop also uses <code>min(num_tokens, max_occupancy*kNumSM)</code>, which is one block at
+num_tokens=1. It caps/reschedules many rows, not splits one row across SMs. More splitting
+can add synchronization overhead, so choose from measured end-to-end impact.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Match Gemma normalization before testing a GPU kernel</h2></div><div class="sec__body">
+<p>Use a contiguous and a noncontiguous input of non-power-of-two width, check the exact 1+weight Gemma convention, and keep reduction epsilon explicit. A GPU test should then add empty and wide inputs, supported aliases/strides, extreme finite values, NaN/Inf policy and dtype-specific error bounds. This CPU oracle does not test CUDA/Triton code generation or performance.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+rng = np.random.default_rng(4)
+base = rng.normal(size=(3, 14))
+x = base[:, ::2]  # noncontiguous width 7
+w = rng.normal(size=7)
+eps = 1e-6
+assert not x.flags.c_contiguous
+def gemma_norm(value, weight):
+    return value / np.sqrt(np.mean(value**2, axis=-1, keepdims=True) + eps) * (1+weight)
+strided = gemma_norm(x, w)
+contiguous = gemma_norm(np.ascontiguousarray(x), w)
+np.testing.assert_allclose(strided, contiguous)
+padded = np.pad(x, ((0, 0), (0, 1)))
+right_variance = np.sum(padded**2, axis=-1, keepdims=True) / x.shape[-1]
+np.testing.assert_allclose(right_variance, np.mean(x**2, axis=-1, keepdims=True))
+wrong_variance = np.mean(padded**2, axis=-1, keepdims=True)
+assert not np.allclose(right_variance, wrong_variance)
+print("Strided Gemma reference and true-width reduction contract pass.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p><b>1. Check correctness against a torch reference before anything else.</b> SGLang's test for the
 kernel this chapter read is the template:</p>
 
@@ -1762,13 +1770,12 @@ real. Copy this shape set for anything you write.</p>
     <span class="src">shell — run the norm kernel benchmark, then compute achieved bandwidth</span>
     <span class="tag tag--shell">shell</span>
   </div>
-  <pre class="code-block code-block--wrap"><code>cd ~/sglang &amp;&amp; python test/registered/kernels/benchmark/layernorm/bench_norm.py
-# sweeps batch 1..8192 x hidden 1024..8192, prints microseconds per layer
-# achieved GB/s = (4 * batch * hidden * 2) / (us * 1e-6) / 1e9
-# compare against 3350 GB/s; anything above ~80% means stop optimising
+  <pre class="code-block code-block--wrap"><code>python ~/sglang/test/registered/kernels/benchmark/layernorm/bench_norm.py
+# Account for exact residual/Gemma semantics, dtypes, weight reads and cache state.
+# Measure cold/warm data and model-level impact, not only an effective GB/s number.
 
-# vLLM side: tune the MoE configs for your own model and device
-python benchmarks/kernels/benchmark_moe.py --help</code></pre>
+# Separate checkout: run vLLM's own benchmark by absolute path.
+python ~/vllm/benchmarks/kernels/benchmark_moe.py --help</code></pre>
 </div>
 
 <p>Note that <code>run_benchmark</code> in
@@ -1778,10 +1785,11 @@ launch into a graph so the measurement is kernel time, not launch time. Which of
 depends on the question you are asking; <a href="08-01-cuda-graphs.html">&sect;8.1</a> explains the
 difference.</p>
 
-<p><b>3. Flip one flag and watch the cost move.</b> Run a server with
-<code>VLLM_TRITON_FORCE_FIRST_CONFIG=1</code> and compare first-request latency against the default;
-the delta is your autotuning bill. Then delete <code>$TRITON_CACHE_DIR</code> and restart to see what
-<code>TRITON_CACHE_AUTOTUNING=1</code> is buying you.</p></div></section>
+<p><b>3. Separate tuning from execution.</b> Use private TRITON_CACHE_DIR roots and compare
+cold compile/tune time, warm selected-kernel time and end-to-end startup independently.
+Forcing the first config changes both tuning and the chosen kernel; their latency difference
+is not just the tuning bill. Reset mutable outputs between autotune trials and validate
+every candidate before comparing performance.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
 <li><b>Read and answer.</b> Open
 <code>python/sglang/kernels/ops/layernorm/minimax_m3_rmsnorm.py</code>. The store in
@@ -1793,19 +1801,31 @@ would break if a caller passed a non-contiguous <code>out</code>?
 <li><b>Derive.</b> Compute the arithmetic intensity and bandwidth-bound time for a fused
 SiLU-and-multiply over Llama-3-8B's MLP intermediate ($d_{\text{ff}} = 14336$, bf16) for a
 2048-token chunk. Then say whether autotuning <code>BLOCK_SIZE</code> could plausibly give you 2&times;.
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>SiLU-and-mul reads two <code>[T, 14336]</code> halves of the gate/up projection and writes one: $Q = 3 \times 2048 \times 14336 \times 2 = 176.2$ MB. FLOPs are roughly one exp, one add, one divide and two multiplies per output element, call it $6 \times 2048 \times 14336 = 1.76\times10^{8}$, so $I \approx 1.0$ FLOP/byte &mdash; 295&times; left of the ridge, same regime as the norm. $t_{\min} = 176.2\times10^{6}/3.35\times10^{12} = 52.6\ \mu\text{s}$. No block size can give 2&times; unless the kernel is currently below 50% of peak bandwidth, and 2&times; over the <em>bound</em> is impossible. The only structural 2&times; here is fusing the store away entirely, by folding SiLU into the down-projection GEMM's prologue &mdash; which is a CUTLASS-shaped problem, not a Triton one.</p></div></details>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>The bf16 payload is
+3*2048*14336*2 = 176,160,768 bytes, giving 52.6 microseconds at peak HBM under a cold-streaming
+assumption. Exponential/division cost needs the appropriate instruction throughput, not a
+tensor-core FLOP count. A factor-two improvement requires current time at least twice a valid
+lower bound, or changing the bytes/work. Fusion into neighboring GEMMs can be expressed in
+multiple frameworks, including Triton; validate its actual reuse and synchronization cost.</p></div></details>
 </li>
 <li><b>Predict, then verify.</b> <code>_num_warps</code> returns 16 for <code>BLOCK_N &gt;= 4096</code>.
 Predict what happens to correctness and to performance if you force <code>num_warps=1</code> for
 <code>BLOCK_N=8192</code>. Then check your prediction against the Triton IR by dumping
 <code>.ttgir</code> for both.
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>Correctness is unaffected &mdash; <code>num_warps</code> changes the thread mapping, not the semantics, and <code>tl.sum</code> lowers to whatever reduction the layout requires (with one warp there is no cross-warp stage and no <code>__syncthreads</code> at all). Performance collapses: 8192 fp32 elements now live in 32 threads' registers, 256 values each, which is 1024 bytes per thread. That will not fit the register budget, so Triton spills to local memory, which is HBM-backed. Expect an order of magnitude. The <code>.ttgir</code> shows it directly in the <code>#blocked</code> layout attribute, where the per-thread element count jumps by 16&times;; the <code>.json</code> metadata shows the register count and any spill.</p></div></details>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>Changing num_warps
+should preserve mathematical semantics for supported compilations, though reduction order may
+change low bits. One warp increases per-thread work, but liveness, rematerialization and layout
+determine registers and spilling. It may be slower, spill or fail resource limits; no exact
+10x penalty follows. Inspect compiled metadata/generated code, then measure and test tolerances.</p></div></details>
 </li>
 <li><b>Read and answer.</b> In <code>fused_moe_kernel</code>, <code>GROUP_SIZE_M</code> is 64 in the
 tuned config for batch 1 and 1 for batch 4
 (<code>configs/E=8,N=14336,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8.json</code>). Explain the
 reversal.
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>GROUP_SIZE_M</code> controls how many M-tiles are visited before advancing in N, and it exists to keep the working set of concurrent blocks in L2. At batch 1 there are very few M-tiles in total and an enormous number of N-tiles, so a large group means concurrent blocks share the same handful of A rows while sweeping B &mdash; A stays hot. At batch 4 there is enough M work that the naive row-major order already gives reuse, and a group of 1 keeps the N sweep contiguous, which is better for the B stream. The general rule: grouped ordering pays when one of the two dimensions is much smaller than the other.</p></div></details>
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>GROUP_SIZE_M changes
+tile visitation and cache reuse. The two config values show tuner choices, not why they won.
+A/B reuse, scheduling and noise are hypotheses. Hold all other parameters fixed and repeat
+a group-size sweep with warmed kernels and separate cold/warm data to establish causality.</p></div></details>
 </li>
 <li><b>Design.</b> You need a fused kernel that reads the KV cache, dequantises FP8 to bf16, and
 writes a contiguous bf16 buffer for an attention backend that cannot read FP8. Triton or CUTLASS?
@@ -1822,10 +1842,10 @@ trees, shared-memory staging, and both barriers.</li>
 reduction width, not bandwidth. At $d = 6144$ with <code>BLOCK_N = 8192</code> you pay 1.33&times; the
 in-register reduction and 1.00&times; the HBM traffic. Divide by the real width, and always pass
 <code>other=0.0</code> when the block feeds a reduction.</li>
-<li><b>Judge a kernel against a bound you derived, not against its previous version.</b> Compulsory
-bytes over achieved bandwidth is a number you can compute before writing code; for fused
-RMSNorm-with-residual on Llama-3-8B it is 9.78 ns per token, $I = 0.625$ FLOP/byte, and 472&times;
-left of the H100 ridge &mdash; which settles in advance that only fusion can help.</li>
+<li><b>Use a valid memory-level and instruction-level model.</b> Include dtypes and weight
+reads, distinguish logical bytes from HBM/L2 traffic, and compare scalar reductions against
+scalar resources. Runtime lies above a valid minimum-time bound; tuning can improve occupancy,
+launches and layouts as well as fusion.</li>
 <li><b>The three autotuning strategies are all live in these repos and they solve different
 problems.</b> <code>@triton.autotune</code> with a cache key adapts online and stalls on new keys;
 vLLM's 330 checked-in JSON configs adapt offline and never stall; <code>TRITON_CACHE_AUTOTUNING</code>
@@ -1870,7 +1890,7 @@ the Triton you never see because Inductor wrote it.</li>
 </ul></div></section>
 <div class="pager"><a href="08-02-torch-compile.html"><div class="pager__k">← Previous</div><div class="pager__t">torch.compile, Inductor, piecewise capture</div></a><a class="pager__next" href="08-04-weight-loading-and-adding-a-model.html"><div class="pager__k">Next →</div><div class="pager__t">Weight loading, sharded loaders, adding a model</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1887,6 +1907,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#the-map">Which file do I open</a>
 <a href="#worked-trace">Worked trace: from decorator to cubin</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

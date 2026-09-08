@@ -40,9 +40,10 @@ frames per second, so one second becomes 100 timesteps of 80 features instead of
 | **Learned SSL features** | wav2vec 2.0, HuBERT, WavLM — self-supervised, and better than hand-designed features |
 | Discrete audio tokens | EnCodec, SoundStream — enable audio LLMs |
 
-**The mel scale** approximates human pitch perception: we distinguish 200 Hz from
-300 Hz easily and 8,000 Hz from 8,100 Hz not at all. Warping the frequency axis
-accordingly concentrates resolution where perception is sharp.
+**The mel scale** is an empirical approximation to pitch perception, concentrating
+more frequency resolution at lower frequencies. Actual discrimination depends on
+listener, level, duration, and signal context; a frequency difference is not
+universally inaudible simply because it occurs at high frequency.
 
 **Discrete audio tokens are the enabling technology for audio LLMs.** A neural
 codec compresses audio into a sequence of integers, which a transformer can model
@@ -82,27 +83,28 @@ The sum has exponentially many terms and is computed in $O(TU)$ by a
 forward–backward dynamic program, which is what makes the loss differentiable and
 trainable.
 
-**CTC's limitation is its conditional independence assumption**: outputs are
-independent given the input, so the model has no internal language model. That is
-why CTC systems are almost always paired with an external LM at decoding time
-(beam search with shallow fusion).
+**CTC factorises alignment-symbol probabilities given the whole input.** This
+does not forbid its contextual acoustic encoder from learning linguistic
+regularities. CTC lacks an explicit output-history prediction network; an
+external LM can improve decoding but is not required by the loss.
 
 **RNN-Transducer** removes that assumption by adding a prediction network
 conditioned on previous outputs, combining acoustic and language modelling in one
-architecture. It is naturally streaming, and it is what most production
-on-device ASR uses.
+architecture. Streaming requires a causal or bounded-lookahead encoder and
+incremental feature extraction; an RNN-T with a bidirectional full-utterance
+encoder is not streaming merely because its output model is a transducer.
 
 ### Whisper
 
-Trained on 680,000 hours of weakly supervised multilingual audio scraped from the
-web, as a single encoder–decoder model handling transcription, translation,
+The original Whisper release was trained on 680,000 hours of weakly supervised
+audio. Later checkpoints differ in data and language coverage. Its encoder-decoder handles transcription, translation,
 language identification, and timestamps through **special tokens in the decoder
 prompt**.
 
 | Strength | Weakness |
 |---|---|
 | Robust across accents, noise, and domains | not streaming — processes 30-second windows |
-| 99 languages in one model | **hallucinates** on silence and non-speech audio |
+| Original multilingual models support 99 languages; large-v3 adds Cantonese | **hallucinates** on silence and non-speech audio |
 | No fine-tuning needed for most uses | repetition loops on long or unusual audio |
 | Multitask through prompt tokens | no speaker diarisation |
 | Open weights | high latency for real-time use |
@@ -155,8 +157,9 @@ half" or "January second". "$1.5M" is "one point five million dollars".
 Rule-based normalisers handle most cases; neural normalisers handle more and fail
 less predictably.
 
-**Modern TTS is essentially solved for quality** and the interesting problems
-are elsewhere: **voice cloning** from a few seconds of reference audio, **prosody
+**TTS quality remains task- and language-dependent**: intelligibility on unusual
+names, long-form stability, accent coverage, expressive control, and robustness
+still need evaluation. Other important problems include **voice cloning** from a few seconds of reference audio, **prosody
 and emotion control**, **latency** for conversational agents, and **streaming**
 synthesis that starts speaking before the full text is generated.
 
@@ -221,8 +224,9 @@ transformer exactly as with text.
 **Speech-to-speech is the architecturally interesting direction.** The
 conventional pipeline (ASR → LLM → TTS) discards prosody, emotion, and speaker
 characteristics at the first stage and cannot recover them at the last. A model
-operating on audio tokens throughout preserves them, and can also respond much
-faster because it does not wait for a full transcript.
+operating on audio tokens can retain these signals, but preservation depends on
+its representation and training. Lower latency is possible, not guaranteed:
+codec rates, streaming lookahead, endpointing, and generation architecture matter.
 
 ## Evaluation
 
@@ -238,7 +242,7 @@ dominate.
 |---|---|
 | **Normalisation dominates** | casing, punctuation, numbers ("5" vs "five"), contractions — a WER comparison without identical normalisation is meaningless |
 | Not all errors are equal | a wrong digit in an account number matters more than "a" vs "the" |
-| Morphologically rich languages | word-level WER is harsh; use **CER** instead |
+| Morphologically rich or non-space-delimited languages | report tokenisation; CER can supplement WER rather than universally replace it |
 | Speaker-attributed WER | for diarised multi-speaker transcripts |
 
 **Always publish the normalisation.** Whisper ships a text normaliser precisely
@@ -272,7 +276,7 @@ reproducible intelligibility number without human raters.
 | Long audio | chunk with overlap; align and stitch |
 | Latency | streaming models; measure time-to-first-word |
 | Cost | on-device for wake words and simple commands; server for full ASR |
-| Privacy | on-device processing; audio is biometric data under several regulations |
+| Privacy | minimise retention and access; identification-oriented voice processing can raise additional sensitive-data requirements that need jurisdiction-specific review |
 
 **Per-group WER measurement is not optional.** ASR error rates differ
 substantially by accent, dialect, age, and gender, and aggregate WER hides it.
@@ -290,6 +294,62 @@ you cannot fix what you do not measure.
 5. Why does Whisper hallucinate on silence, and what are two mitigations?
 6. Why is a WER comparison meaningless without stated normalisation?
 7. How would you evaluate TTS intelligibility automatically?
+
+### Worked waveform and CTC checks
+
+Frame count depends on boundary handling. With no centring/padding, $N=16000$,
+window $W=400$, and hop $H=160$, there are
+$1+\lfloor(N-W)/H\rfloor=98$ complete frames, not exactly 100. A real FFT
+returns $W/2+1=201$ bins before applying a chosen mel filterbank. Mel and log
+scales are useful perceptual approximations, not exact models of hearing.
+Convert integer PCM with the correct bit depth and signedness, check channel
+layout before averaging, and use anti-alias filtering when downsampling.
+
+```python runnable
+import math
+import torch
+
+torch.set_num_threads(1)
+torch.manual_seed(7)
+rate = 16000
+t = torch.arange(rate) / rate
+wave = 0.2 * torch.sin(2 * math.pi * 440 * t)
+spectrum = torch.stft(wave, n_fft=400, hop_length=160, win_length=400,
+    window=torch.hann_window(400), center=False, return_complex=True)
+assert spectrum.shape == (201, 98)
+assert torch.isfinite(spectrum.abs().square()).all()
+# Target aa needs at least three frames: a, blank, a.
+prob = torch.tensor([[0.1, 0.9], [0.8, 0.2], [0.1, 0.9]])
+logp = prob.log().unsqueeze(1).requires_grad_()  # time, batch, classes
+target = torch.tensor([1, 1])
+ctc = torch.nn.CTCLoss(blank=0, reduction="sum", zero_infinity=False)
+loss = ctc(logp, target, torch.tensor([3]), torch.tensor([2]))
+expected = -math.log(0.9 * 0.8 * 0.9)
+assert abs(loss.item() - expected) < 1e-6
+loss.backward()
+assert torch.isfinite(logp.grad).all()
+impossible = ctc(logp[:2].detach(), target, torch.tensor([2]), torch.tensor([2]))
+assert torch.isinf(impossible)
+print("STFT shape:", tuple(spectrum.shape), "CTC loss:", loss.item())
+```
+
+**Answers and failure diagnosis.** CTC merges consecutive repeated labels before
+removing blanks: `a,a,blank,a` becomes `aa`, but `a,a` becomes `a`. Minimum input
+length is target length plus the count of adjacent repeats. `zero_infinity=True`
+can prevent an impossible example's infinite loss from propagating, but can also
+hide a data/length bug; count these examples explicitly. See
+[PyTorch CTCLoss](https://pytorch.org/docs/stable/generated/torch.nn.CTCLoss.html).
+
+For references with 3 and 30 words and 1 and 3 errors, corpus WER is $4/33$,
+not the unweighted mean of $1/3$ and $3/30$. An empty reference has undefined
+per-utterance WER under the ratio; report false speech/insertions on silence
+separately and specify the implementation convention. DER needs a declared
+collar, overlap policy, and speaker mapping. ASR-based TTS intelligibility also
+inherits the recognizer's errors, so retain human and difficult-entity checks.
+Streaming reports should include first partial latency, finalization latency,
+endpoint delay, real-time factor, and partial-hypothesis revisions, not just WER.
+The [Whisper repository](https://github.com/openai/whisper) documents checkpoint
+and language differences; this CPU lab does not download or evaluate Whisper.
 
 ## Where to go next
 

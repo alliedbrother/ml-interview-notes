@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hybrid SSM / Mamba models and non-KV state — The Inference Engineering Book</title>
+<title>Hybrid SSM / Mamba models and non-KV state — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 7 · Architectures that change the inference story · 07-03</div>
 <h1>Hybrid SSM / Mamba models and non-KV state</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mamba2_attn.py</code></li><li><code>vllm/v1/worker/mamba_utils.py</code></li><li><code>python/sglang/srt/mem_cache/mamba_radix_cache.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mamba2_attn.py</code></li><li><code>vllm/v1/worker/mamba_utils.py</code></li><li><code>python/sglang/srt/mem_cache/mamba_radix_cache.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Load Nemotron-H-8B into vLLM and the log tells you it has set the attention block size to
 1040 tokens. Not 16. The reason is that one Mamba2 layer's recurrent state is 4.06 MiB, an attention page
@@ -695,8 +695,8 @@ therefore not "is it smaller" but "past what context is it smaller".</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; memory per sequence against context.</b>
-    Llama-3-8B's KV grows 128 KiB per token; Nemotron-H-8B's recurrent state is flat. All values are
-    <em>derived</em> arithmetic from the shapes read in &sect;3 &mdash; nothing here is measured.</p>
+     Llama-3-8B KV grows 128 KiB/token; Nemotron-H has both flat recurrent state and
+     16 KiB/token attention KV. The curves are separate components, not total hybrid memory.</p>
   <svg viewBox="0 0 900 380" width="100%" role="img" aria-labelledby="xoverT xoverD" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="xoverT">Memory per sequence versus context length, log-log</title>
     <desc id="xoverD">Llama-3-8B KV rises linearly from about 16 MiB at 128 tokens to 16 GiB at 128k tokens.
@@ -758,10 +758,11 @@ therefore not "is it smaller" but "past what context is it smaller".</p>
   </svg>
 </div>
 
-<p>Two honest readings. The win is real and large at long context &mdash; 16 GiB against 97.4 MiB is a
-factor of 168 at 128k. It is <em>absent</em> at short context, and it is paid at admission rather than as
-the sequence grows: a hybrid deployment sized for batch 256 reserves 24.4 GiB of state up front whatever the
-traffic looks like.</p></div></section>
+<p>At 131,072 tokens, Llama's KV is 16 GiB. The hybrid uses 2 GiB of attention KV
+<strong>plus</strong> about 97.4 MiB of recurrent state, about 2.095 GiB total: roughly 7.64
+times smaller, not 168 times. The 779-token marked crossover compares Llama KV with the state
+component only; the total-hybrid crossover is about 891 tokens. A 256-slot pool reserves about
+24.4 GiB of recurrent state, before its attention cache and other memory.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: two state objects</h2></div><div class="sec__body"><p>vLLM computes Mamba2 state shapes in one function. Read it rather than the paper &mdash; the layout below
 is what actually gets allocated:</p>
 
@@ -841,15 +842,16 @@ The arithmetic, at TP=1:</p>
 </div>
 
 <p>The conv state is 1.4&nbsp;% of the total. The SSM state is everything, and its dtype is the largest
-lever available: <code>--mamba-ssm-cache-dtype bfloat16</code> halves per-sequence memory, at a numerical
+lever available: <code>--mamba-ssm-cache-dtype bfloat16</code> halves temporal-state bytes, not unchanged convolution state or hybrid KV, at a numerical
 risk vLLM flags in one line &mdash; "Only <code>float32</code> is known to have no accuracy issues by
 default."</p>
 
 <p><b>The crossover, derived.</b> Llama-3-8B carries 128 KiB of KV per token
 (<a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>), so 8k context is 1 GiB per
 sequence. Setting $s \cdot 131072 = 102{,}137{,}856$ gives $s = 779$ tokens; with the bf16 override,
-$s = 395$. Past a few hundred tokens the fixed state wins, and the margin compounds: at 128k, 16 GiB against
-97.4 MiB.</p>
+$s = 395$. These compare the recurrent-state component alone. Add the hybrid's four
+attention layers before comparing whole-model memory: at 128k it is about 2.095 GiB
+versus Llama's 16 GiB, as Figure 1's component accounting explains.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Hybrid, not free</span>
@@ -1124,8 +1126,8 @@ SGLang says this in a six-word comment:</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 &mdash; two requests, one shared prefix, two reuse stories.</b>
-    KV is reusable at every page boundary. The recurrent state is reusable only where somebody stored a
-    checkpoint &mdash; splitting a node destroys it (<code>mamba_value = None</code> above).</p>
+     Splitting a radix edge cannot synthesize an intermediate recurrent checkpoint. The new
+     split node has no state; the original child's deeper checkpoint is not thereby destroyed.</p>
   <svg viewBox="0 0 900 340" width="100%" role="img" aria-labelledby="reuseT reuseD" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="reuseT">Prefix reuse for KV versus recurrent state</title>
     <desc id="reuseD">Requests A and B share tokens 0 to 3100 then diverge. The KV row shows twelve
@@ -1253,9 +1255,12 @@ Per cached slot it holds:
   * the conv1d window state at its native dtype (tiny, W-1 tokens; not worth</code></pre>
 </div>
 
-<p>The argument generalises: error entering a recurrence compounds, but a checkpoint is quantised once and
-dequantised once, so the only cost is a single rounding &mdash; a safer place to spend precision than the KV
-quantisation of <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html">&sect;2.5</a>.</p>
+<p>Quantizing once avoids injecting fresh quantization error every recurrent step, but the
+restored error still propagates. With the same subsequent inputs,
+$\Delta S_{t+m}=(A_{t+m}\cdots A_{t+1})\Delta S_t$ in a linear recurrence. Products may contract
+or amplify the initial error; output maps and nonlinear dependencies matter too. Test long
+continuations and state magnitudes. A source comment saying "quality-safe" is not an accuracy
+proof or a blanket advantage over KV quantization.</p>
 
 <h3>vLLM: three modes, and a search that runs right to left</h3>
 
@@ -1395,10 +1400,9 @@ recurrence.</p>
 <p>It also offers the alternative &mdash; keep it, on the host. <code>Req.offload_kv_cache</code> copies both
 pools down: <code>token_to_kv_pool_allocator.get_cpu_copy(token_indices, mamba_indices=self.mamba_pool_idx)</code>
 (<code>python/sglang/srt/managers/schedule_batch.py:L1720-L1731</code>). At this SHA that path is gated on
-<code>disaggregation_mode == "decode"</code>, so ordinary preemption drops the state. That is the whole
-tradeoff in one branch: <b>for SSM state you either keep it (97.4 MiB per victim, over PCIe) or replay the
-whole sequence.</b> There is no cheap middle, which is the opposite of KV, where the prefix cache <em>is</em>
-the cheap middle.</p>
+<code>disaggregation_mode == "decode"</code>. Ordinary preemption may discard active state,
+but a surviving compatible prefix checkpoint provides a middle option: restore it and replay
+only the missing suffix. Full replay is necessary only when no usable checkpoint remains.</p>
 
 <p><b>Chunked prefill is a state handoff.</b> The recurrence must be applied in order, so a chunk boundary is
 a place where $S$ leaves one kernel launch and enters the next. Mamba2's metadata builder carries
@@ -1426,8 +1430,10 @@ is further constrained, because the slot a chunk writes into must correspond to 
 <p>The scheduler is now clipping token budgets to satisfy a kernel's state invariant &mdash; a genuinely
 new coupling. In a pure-attention engine the scheduler picks chunk sizes for latency alone and the kernel
 does not care where they land.</p></div></section>
-<section class="sec" id="kernels" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Two kernels for one recurrence</h2></div><div class="sec__body"><p>The recurrence $S_t = A_t \odot S_{t-1} + B_t x_t^\top$, $y_t = C_t^\top S_t$ has two execution
-regimes, and both engines ship a kernel for each.</p>
+<section class="sec" id="kernels" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Two kernels for one recurrence</h2></div><div class="sec__body"><p>For stored state $S_t\in\mathbb{R}^{d_h\times d_{\mathrm{state}}}$,
+a simplified recurrence is $S_t=A_t\odot S_{t-1}+x_tB_t^\top$ and $y_t=S_tC_t$.
+Mamba's full block also has discretization, convolution, skip and gating operations; this
+equation isolates the scan kernel's state geometry.</p>
 
 <p><b>Prefill</b> processes many tokens at once, so the sequential dependency is the enemy. Mamba2's
 structured-state-space-duality form splits the sequence into chunks, computes each chunk's intra-chunk
@@ -1471,11 +1477,11 @@ batch by slot index:</p>
                 )</code></pre>
 </div>
 
-<p>Note the arithmetic intensity. A decode step reads the whole state (4.06 MiB per layer per sequence),
-does $O(H_m d_h^m d_{\text{state}})$ multiply-adds on it, and writes it back &mdash; roughly 2 FLOPs per
-fp32 element read, about 0.5 FLOP/byte against the H100's ridge of $I^\ast = 295$. SSM decode is as
-memory-bound as attention decode; the difference is that its traffic does not grow with context. That, not
-FLOPs, is the long-context win.</p>
+<p>The state update reads and writes each fp32 state element. Counting only one multiply-add
+gives roughly 2 FLOPs / 8 bytes = 0.25 FLOP/byte, before input injection, output reduction and
+other traffic. Use the scalar instruction roofline, not tensor-core peak, for scalar updates.
+Low intensity suggests memory pressure, but achieved bandwidth and small-batch occupancy
+determine runtime; attention layers still add context-dependent traffic in a hybrid.</p>
 
 <p>Dispatch is a wrapper. SGLang's <code class="c-sglang">HybridLinearAttnBackend</code> holds two backends
 and a set of layer indices, and routes per layer:</p>
@@ -1510,8 +1516,10 @@ other &mdash; is the honest shape of a hybrid: two unrelated operators behind on
 <code>Mamba2AttentionBackend</code> reaches the same place through the layer's <code>get_attn_backend()</code>
 rather than a wrapper.</p></div></section>
 <section class="sec" id="worked-trace" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Worked trace: a second request on a shared prompt</h2></div><div class="sec__body"><p>Nemotron-H-8B on vLLM, prefix caching on, <code>--mamba-cache-mode all</code>, so
-<code>block_size = 1280</code>. Request A has already run a 4000-token system prompt. Request B arrives with
-the same prompt plus 200 private tokens.</p>
+<code>block_size = 1280</code>. Assume request A's 4000-token prompt was processed with
+checkpoints actually saved and retained at 1280, 2560 and 3840. Merely setting all mode and
+finishing a prompt is not evidence every historical boundary is materialized. Request B adds
+200 private tokens to the same prompt.</p>
 
 <ol>
 <li><code>Scheduler.schedule()</code> calls <code>kv_cache_manager.get_computed_blocks(request)</code>, which
@@ -1538,8 +1546,9 @@ tokens at 256-token physical chunk boundaries.</li>
 <code>cache_blocks</code> time, hashed into the pool so request C can find it.</li>
 </ol>
 
-<p>Total replayed work for B: 360 tokens instead of 4000. Change the shared prompt to 900 tokens and step 3
-returns nothing, because there is no block boundary at or below 900 &mdash; B replays all 900.</p></div></section>
+<p>B computes 360 tokens instead of its full 4200-token prompt, reusing 3840. With a
+900-token shared prefix plus 200 private tokens and no checkpoint, it computes all 1100.
+Checkpoint existence, retention and exact prefix identity determine reuse.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card ve-card--hero"><span class="ve-card__k">silent 0%</span><h4>Aligned hit, unaligned prompt</h4>
   <p><a href="https://github.com/vllm-project/vllm/issues/45238">vllm#45238</a>: hybrid prefix caching drops
@@ -1548,8 +1557,9 @@ returns nothing, because there is no block boundary at or below 900 &mdash; B re
 
   <div class="ve-card"><span class="ve-card__k">startup log</span><h4>The block size grew 65&times;</h4>
   <p>"Setting attention block size to %d tokens to ensure that attention page size is &gt;= mamba page size."
-  If you see this and your prompts are shorter than that number, your prefix cache is decorative. Lowering
-  <code>--mamba-ssm-cache-dtype</code> to bf16 halves the page and halves the block.</p></div>
+  If prompts are shorter than the checkpoint spacing, reuse may be limited. BF16 reduces
+  temporal-state bytes, but conv state and alignment remain: in the worked example the
+  aligned block shrinks from 1280 to 768 tokens, not by exactly half.</p></div>
 
   <div class="ve-card"><span class="ve-card__k">assert</span><h4>Chunked prefill is mandatory</h4>
   <p><code>"Chunked prefill is required for mamba cache mode 'align'."</code>
@@ -1571,6 +1581,30 @@ returns nothing, because there is no block boundary at or below 900 &mdash; B re
   <code>num_gpu_blocks + 1</code> to make the scheduler defer the request &mdash; "Mamba can't rely on blocks
   generated by other requests in the current step". A burst of identical prompts serialises.</p></div>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">A one-time checkpoint error still propagates</h2></div><div class="sec__body">
+<p>Affine transitions compose associatively: applying (a1,b1) then (a2,b2) gives (a2*a1, a2*b1+b2). That enables scans without pretending the recurrence has no dependency. A checkpoint perturbation evolves through the product of later transition factors; one-time quantization can therefore contract or amplify. In a real selective block, output maps, convolution state and input-dependent coefficients must also match.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+def compose(first, second):
+    a1, b1 = first
+    a2, b2 = second
+    return a2*a1, a2*b1+b2
+
+steps = [(0.9, 1.0), (0.8, -0.5), (0.7, 2.0)]
+left = compose(compose(steps[0], steps[1]), steps[2])
+right = compose(steps[0], compose(steps[1], steps[2]))
+np.testing.assert_allclose(left, right)
+for factor in (0.9, 1.1):
+    exact, restored = 2.0, 2.01
+    for _ in range(20):
+        exact = factor*exact + 0.1
+        restored = factor*restored + 0.1
+    assert np.isclose(restored-exact, 0.01*factor**20)
+hybrid_mib = 2048 + 97.4
+assert 7.6 &lt; 16384/hybrid_mib &lt; 7.7
+print("Affine scan composition, propagated error and full hybrid memory pass.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Start a hybrid model twice and diff the startup logs. No GPU is needed to read the first two of these
 lines; they are emitted during config verification.</p>
 
@@ -1616,7 +1650,7 @@ replicated, not sharded, exactly as MLA's latent is
 
 <li>Predict, then verify: you set <code>--mamba-ssm-cache-dtype bfloat16</code> on Nemotron-H with
 <code>--mamba-cache-mode all</code>. What happens to <code>block_size</code>?
-<details class="fold"><summary>Answer</summary><div class="fold__body"><p>The page halves to 2,158,592 B, so
+<details class="fold"><summary>Answer</summary><div class="fold__body"><p>The temporal state halves; including unchanged convolution state gives a 2,158,592-byte page, so
 <code>attn_tokens_per_mamba_state</code> = ceil(2158592/4096) = 527, and
 <code>attn_block_size = 256 * ceil(527/256) = 768</code>. Blocks shrink from 1280 to 768 tokens &mdash; a
 better prefix cache as a side effect of a dtype flag. Padding rises to 768&middot;4096/2158592 &minus; 1 =
@@ -1654,16 +1688,12 @@ is by default; SGLang declares <code>uses_mamba_radix_cache</code> for registere
 you pass <code>--disable-radix-cache</code>. Both then match to the nearest checkpoint at or before the
 divergence &mdash; vLLM by scanning its block hashes right to left and padding with null blocks, SGLang by
 tracking the deepest tree node with a <code>mamba_value</code> and truncating the KV hit to match.</li>
-<li>SGLang <em>can</em> store cached checkpoints in int8 and dequantise on hit, on the argument that
-quantisation error outside a recurrence is a single rounding &mdash; but it is opt-in
-(<code>--enable-int8-mamba-checkpoint</code>, default <code>False</code>) and mutually exclusive with
-hierarchical cache. vLLM has no equivalent at this SHA; its lever is the active-state dtype, which is a
-different and riskier trade. The two checkpoint grids also differ by 4&ndash;5&times; in SGLang's favour,
-because SGLang never forced its KV page up to the state page.</li>
-<li>Preemption has no cheap middle. Either the state is offloaded (megabytes over PCIe, and at this SHA only
-on SGLang's disaggregated-decode path) or the sequence replays. Chunked prefill inherits the same ordering
-constraint: chunk boundaries are state handoffs, and vLLM's scheduler now clips token budgets to land on
-them.</li>
+<li>Optional int8 checkpoints inject quantization error once at restoration, not at every step.
+That error still propagates through subsequent transitions. Measure continuation quality;
+neither "single rounding" nor native-dtype active state proves harmlessness.</li>
+<li>Preemption can restore a surviving compatible checkpoint and replay a suffix. Without one,
+it needs a preserved/offloaded active state or full recomputation. Chunked prefill must carry
+the correct state across each chunk and save snapshots according to its explicit policy.</li>
 <li>SSM layers bypass vLLM's entire backend-selection apparatus. <code>MambaAttentionBackendEnum</code> is
 chosen by model architecture, not capability, and <code>get_mamba_attn_backend</code> validates nothing but
 batch invariance.</li>
@@ -1702,7 +1732,7 @@ whose config file supplied every shape in &sect;3.</li>
 </div></div></section>
 <div class="pager"><a href="07-02-mla-in-depth.html"><div class="pager__k">← Previous</div><div class="pager__t">MLA in full detail</div></a><a class="pager__next" href="07-04-multimodal-serving.html"><div class="pager__k">Next →</div><div class="pager__t">Multimodal serving</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1718,6 +1748,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#kernels">Two kernels for one recurrence</a>
 <a href="#worked-trace">Worked trace: a second request on a shared prompt</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

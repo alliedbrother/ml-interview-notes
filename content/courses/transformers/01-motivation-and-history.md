@@ -172,9 +172,9 @@ is entirely about paying that bill.
 | | RNN / LSTM seq2seq | Transformer |
 |---|---|---|
 | Order information | free, structural | must be added back (module 05) |
-| Training over `T` tokens | `O(T)` sequential steps | 1 parallel step |
+| Sequence-dependent depth in one layer | `O(T)` recurrence | no token-to-token recurrence; reductions still cost work |
 | Path length between tokens `i` and `j` | `O(\|i-j\|)` | `O(1)` |
-| Cost per layer | `O(T · d²)` | `O(T² · d)` — quadratic in `T` |
+| Work per full layer, FFN width proportional to `d` | `O(T · d²)` | `O(T · d² + T² · d)` |
 | Scales to huge corpora | poorly | yes |
 
 Note the last two rows: the Transformer trades a *quadratic* cost in sequence
@@ -183,6 +183,36 @@ it. At 256k context it is the central problem of the field — which is what
 modules 09–11 are about.
 
 ## 1.6 Why this mattered more than anyone expected
+
+### Worked dependency and alignment checks
+
+An autoregressive RNN language model factors
+`p(x_1:T)=product_t p(x_t | x_<t)` using
+`h_t=tanh(W_h h_(t-1)+W_x e_(t-1))`. An encoder-decoder instead fits
+`p(y_1:U | x_1:T)=product_u p(y_u | y_<u, x_1:T)`; attention changes how the
+encoder states enter each conditional, not this factorization.
+
+For three recurrent steps the dependency is `h_0 -> h_1 -> h_2 -> h_3` and
+`dh_3/dh_0 = J_3 J_2 J_1`, where
+`J_t=diag(1-h_t**2) W_h`. If every scalar Jacobian equals 0.5, the gradient is
+`0.5**3=0.125`; after 30 steps it is approximately `9.31e-10`. Matrices can
+instead expand or cancel in particular directions. Attention shortens direct
+token paths but does not eliminate layer-depth or numerical optimization issues.
+
+For a Luong dot-product example let decoder state `s=(1,0)`, encoder states
+`h_1=(1,0),h_2=(0,1)`. Scores are `(1,0)`, weights approximately
+`(0.7311,0.2689)`, and context `(0.7311,0.2689)`. Additive attention can use
+`score_i = v^T tanh(W_s s + W_h h_i)`: with identity matrices and `v=(1,0)`,
+scores become `(tanh(2),tanh(1))`, weights approximately `(0.5504,0.4496)`.
+These are different learned scoring families, not alternate implementations
+of the same score.
+
+**Exercise with solution:** doubling T at fixed d approximately doubles an RNN's
+work, quadruples the attention-pair term, and doubles projections/FFN work.
+Doubling layer count doubles work and sequential layer depth in either model.
+Parallelizability is not constant elapsed time on a finite GPU. The original
+[Transformer paper](https://arxiv.org/abs/1706.03762) separates complexity,
+sequential operations and maximum path length for this reason.
 
 The authors built Transformers to win at machine translation. The playlist is
 blunt that they had no idea what they had:

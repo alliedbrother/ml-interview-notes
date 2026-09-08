@@ -9,50 +9,9 @@ production models shipping in 2026.
 You can program. You are comfortable with matrices, `for` loops, and reading
 code. You do **not** need prior deep-learning theory — no assumed knowledge of
 backprop internals, attention, or embeddings. Every concept is built before it
-is used, and nothing in module *N* assumes anything from module *N+1*.
-
-## Source material
-
-This course is built from two primary sources, deliberately chosen because they
-sit at opposite ends of the abstraction ladder:
-
-| Source | What it gives us | Where it dominates |
-|---|---|---|
-| **CampusX, *100 Days of Deep Learning*, videos 71–84** (instructor: Nitesh) — [playlist](https://youtube.com/playlist?list=PLKnIA16_RmvYuZauWaPlRTC54KxSNLtNn) | First-principles derivations. Every mechanism is *re-invented* rather than stated. Rich analogies and worked numeric examples. | Modules 01–08, 16 |
-| **Sebastian Raschka, *The Big LLM Architecture Comparison*** — [article](https://magazine.sebastianraschka.com/p/the-big-llm-architecture-comparison) (living document; the version used here was last updated **April 2026**, covering 23 model families) | What real 2024–2026 production models actually do, with concrete hyperparameters. | Modules 09–15 |
-
-The two sources sometimes use **different terminology for the same thing**, and
-occasionally disagree on emphasis. Every module where this happens carries a
-**"Reconciling the sources"** box. Nothing is silently harmonised.
-
-Everything past module 10 (FlashAttention, PagedAttention, quantization,
-speculative decoding) comes from the primary literature — those topics postdate
-the playlist and sit outside the blog's architecture-only scope. Papers are
-cited inline.
-
-### A note on the playlist videos
-
-Videos 71–84 are exactly the Transformers arc of the CampusX series:
-
-| # | Title |
-|---|---|
-| 71 | Introduction to Transformers |
-| 72 | What is Self Attention |
-| 73 | Self Attention in Transformers (the 14-day video) |
-| 74 | Scaled Dot Product Attention — why do we scale? |
-| 75 | Self Attention Geometric Intuition |
-| 76 | Why is Self Attention called "Self"? |
-| 77 | Multi-head Attention |
-| 78 | Positional Encoding |
-| 79 | Layer Normalization (vs Batch Norm) |
-| 80 | Transformer Architecture Part 1 — Encoder |
-| 81 | Masked Self Attention |
-| 82 | Cross Attention |
-| 83 | Transformer Decoder Architecture |
-| 84 | Transformer Inference |
-
-They are taught in Hindi with English auto-captions; the analogies below are
-reproduced faithfully but the phrasing is rewritten for a technical reader.
+is developed progressively. Some block diagrams preview components taught in
+later modules (notably FFNs in 07 and grouped attention in 09); those previews
+are not prerequisites for the earlier derivation.
 
 ## Module map
 
@@ -120,6 +79,42 @@ flowchart TD
    on. They are written as interview questions, because several of them are.
 
 ## Conventions used throughout
+
+### Preparation and reproducibility
+
+Before implementing the course, check that you can multiply `(T,d) @ (d,h)`,
+differentiate a scalar loss, apply row-wise softmax, and explain broadcasting
+of `(T,T)` over `(B,H,T,T)`. Review the [linear algebra notes](../../notes/math/linear-algebra.md)
+and [calculus notes](../../notes/math/calculus.md) where needed.
+
+The complete reference is [modern_decoder.py](./code/modern_decoder.py), tested
+with Python 3.11 and PyTorch 2.8.0 on CPU. From the repository root:
+
+```sh
+python -m venv .venv-transformers
+.venv-transformers/bin/python -m pip install torch==2.8.0
+.venv-transformers/bin/python content/courses/transformers/code/modern_decoder.py
+.venv-transformers/bin/python site/test_transformer_corrections.py
+```
+
+Individual class/method excerpts are teaching fragments unless they include
+their own imports, inputs and assertions. Fences marked `transformer-check`
+are independent CPU checks exercised by the regression command above. There
+are no pretrained downloads or GPU requirements for those checks.
+
+### Milestones
+
+1. After module 08, produce a masked attention matrix and prove changing a future
+   value leaves earlier outputs unchanged. The worked check in 08 is the oracle.
+2. After modules 09-12, account for persistent KV bytes separately from temporary
+   expansion, reproduce recurrent attention, and diagnose top-1 router gradients.
+   Their worked checks provide reference calculations, not benchmark targets.
+3. After module 16, pass dense/MoE, full/chunked-cache, target-shift and generation
+   edge-case tests. A successful smoke test establishes implementation contracts,
+   not language-model quality. The overfit exercise makes that distinction explicit.
+
+Read 01-08 for concepts, continue through 16 for implementation, and use 09-14
+alongside the [inference course](/courses/inference/) for serving systems.
 
 | Symbol | Meaning |
 |---|---|

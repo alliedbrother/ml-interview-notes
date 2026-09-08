@@ -21,7 +21,9 @@ for $P$ parameters. For $P = 10^9$ that is not a slow algorithm, it is an
 impossible one.
 
 Backpropagation computes all $10^9$ derivatives in **one** backward pass costing
-roughly twice a forward pass.
+often a small multiple of forward cost, depending on required gradients and recomputation.
+
+We use row batches $X\in\mathbb R^{B\times d}$ and weights $W\in\mathbb R^{d\times m}$. For single-vector Jacobians, column differentials obey $df=J_f dx$ and reverse transport is $\bar x=J_f^\top\bar f$. See [calculus](../math/calculus.md) and [linear algebra](../math/linear-algebra.md) for the prerequisite conventions.
 
 ## The chain rule, and the adjoint
 
@@ -40,15 +42,14 @@ that consumer's gradient times the local derivative.*
 **The sum matters enormously.** If a tensor feeds two places — a residual
 connection, a tied embedding matrix, a weight applied at every timestep of an RNN
 or every position of a convolution — gradients from all consumers **add**.
-Overwriting instead of accumulating is the classic hand-rolled-autograd bug, and
-it is why PyTorch's `.grad` accumulates and you must call `zero_grad()`.
+Overwriting instead of summing loses paths. Distinguish this requirement from PyTorch's separate accumulation into leaf `.grad` buffers across backward calls. The latter supports microbatch accumulation; clear buffers at optimizer-update boundaries.
 
 ```mermaid
 flowchart TD
     subgraph F["forward: build the tape"]
-        X["x"] --> Z1["z1 = W1 x + b1"]
+        X["X: B by d"] --> Z1["Z1 = X W1 + b1"]
         Z1 --> H["h = relu of z1"]
-        H --> Z2["z2 = W2 h + b2"]
+        H --> Z2["Z2 = H W2 + b2"]
         Z2 --> P["p = softmax of z2"]
         P --> L["L = cross-entropy of p and y"]
     end
@@ -61,7 +62,7 @@ flowchart TD
 
 ## Forward mode vs reverse mode
 
-Both compute exact derivatives by applying the chain rule numerically. They
+Both apply the chain rule to executed operations, subject to floating-point arithmetic and each operation's derivative convention. They
 differ in the direction of traversal, and that difference decides everything.
 
 | | Forward mode | Reverse mode |
@@ -69,12 +70,11 @@ differ in the direction of traversal, and that difference decides everything.
 | Propagates | derivatives **with** the computation | adjoints **against** it |
 | One pass gives | $\partial(\text{all outputs})/\partial(\text{one input})$ — a Jacobian **column** | $\partial(\text{one output})/\partial(\text{all inputs})$ — a Jacobian **row** |
 | Passes for a full Jacobian | $n$ (inputs) | $m$ (outputs) |
-| Memory | $O(1)$ extra | stores the whole forward tape |
+| Memory | tangents and live primal tensors; not constant in tensor size | saved intermediates or checkpoint recomputation |
 | Best when | few inputs, many outputs | **many inputs, few outputs** |
 
 Neural network training has $n \approx 10^9$ parameters and $m = 1$ scalar loss.
-**Reverse mode wins by nine orders of magnitude.** The asymmetry is not an
-optimisation detail; it is the enabling condition of the field.
+Reverse mode needs one output seed instead of a separate input seed per parameter for the complete gradient. This is a seed-count argument, not a measured billion-fold end-to-end speedup.
 
 The cost of that win is memory: reverse mode must keep the forward activations
 until the backward pass consumes them. That is why training memory scales with
@@ -83,7 +83,7 @@ instead of storing them — is the standard memory/compute trade.
 
 ## Vector–Jacobian products
 
-Frameworks never build Jacobians. A layer mapping 4096 activations to 4096
+Ordinary scalar-loss training does not need full Jacobians, although frameworks expose full-Jacobian APIs when requested. A layer mapping 4096 activations to 4096
 activations has a $4096\times4096$ Jacobian: 16.7M entries per layer per example.
 
 Instead, each operation implements a **VJP**: given the incoming adjoint
@@ -122,7 +122,7 @@ $$\bar{X}_{ij} = \sum_k G_{ik}\frac{\partial Y_{ik}}{\partial X_{ij}} = \sum_k G
 
 $$\bar{\mathbf{b}} = \sum_{i=1}^{B} G_{i,:}$$
 
-**You can recover all three from shapes alone.** $X^\top G$ is the only product
+**Shapes are a strong check, not a complete proof.** $X^\top G$ is the only product
 of a $(B,d_{in})$ and a $(B,d_{out})$ that yields $(d_{in},d_{out})$. Shape
 checking is the practical debugger for hand-derived gradients.
 
@@ -140,9 +140,7 @@ $$\bar{z}_j = \sum_i \left(-\frac{y_i}{p_i}\right)p_i(\delta_{ij}-p_j) = -y_j + 
 
 $$\boxed{\;\bar{\mathbf{z}} = \mathbf{p}-\mathbf{y}\;}$$
 
-All that algebra collapses to a subtraction. This is why every framework fuses
-the two operations: fusing skips the $K\times K$ Jacobian entirely and avoids
-materialising $e^{z_i}$ for large $z_i$.
+For a batch mean, the result is $(P-Y)/B$. Soft targets work too when each target row sums to one. Class weighting and masking require the actual objective's denominator. Log-sum-exp avoids unstable exponentials, and a VJP avoids a full Jacobian even if the operations are not physically fused.
 
 ## A fully worked numeric example
 
@@ -167,9 +165,7 @@ $$\bar{z}_1 = \bar{h}\cdot h(1-h) = -0.0822\times0.6457\times0.3543 = -0.0188$$
 $$\bar{w}_1 = \bar{z}_1\cdot x = -0.0188 \qquad \bar{b}_1 = -0.0188$$
 
 Notice the magnitudes: $\bar{z}_2 = -0.103$ and $\bar{z}_1 = -0.019$. **The
-gradient shrank by a factor of 5.5 across one sigmoid layer.** Ten such layers
-would shrink it by $10^{7}$. That is the vanishing gradient problem, visible in a
-single hand-computed example.
+gradient shrank by a factor of 5.5 across one sigmoid layer.** Repeating that same contraction would shrink it dramatically; actual layers have different weights and operating points. This demonstrates local contraction, not a universal forecast.
 
 ## Vanishing and exploding gradients
 
@@ -177,15 +173,14 @@ Backpropagating through $L$ layers multiplies $L$ Jacobians:
 
 $$\frac{\partial L}{\partial \mathbf{h}^{(0)}} = \frac{\partial L}{\partial\mathbf{h}^{(L)}}\prod_{\ell=L}^{1}\frac{\partial\mathbf{h}^{(\ell)}}{\partial\mathbf{h}^{(\ell-1)}}$$
 
-A product of $L$ terms. If each has magnitude below 1, the product decays
-exponentially; above 1, it grows exponentially.
+A product of $L$ terms. The bound $\|J_L\cdots J_1\|_2\le\prod_\ell\|J_\ell\|_2$ shows how uniform contraction can force decay. Large individual norms permit but do not guarantee explosion: singular-vector alignment and cancellation matter.
 
 | Activation | Max derivative | Effect over 10 layers |
 |---|---|---|
-| Sigmoid | 0.25 | $\le 4^{-10}\approx 10^{-6}$ |
+| Sigmoid | 0.25 | activation-only factor $\le4^{-10}$; weights still matter |
 | Tanh | 1.0 (only at 0) | vanishes once saturated |
-| ReLU | 1.0 (for $x>0$) | preserved on the active path |
-| GELU/SiLU | $\approx 1.1$ | preserved, smooth |
+| ReLU | 1.0 (for $x>0$) | activation preserves active coordinates; weights may contract |
+| GELU/SiLU | slightly above 1 in part of the domain | smooth, not guaranteed gradient preservation |
 
 | Symptom | Diagnosis | Fixes |
 |---|---|---|
@@ -194,11 +189,7 @@ exponentially; above 1, it grows exponentially.
 
 **Residual connections are the structural fix.** With
 $\mathbf{h}^{(\ell)} = \mathbf{h}^{(\ell-1)} + F(\mathbf{h}^{(\ell-1)})$, the
-Jacobian is $I + \partial F/\partial\mathbf{h}$. The identity term gives the
-gradient a path that is multiplied by 1 at every layer, so it cannot vanish
-through depth. That single observation is what made 100+ layer networks
-trainable, and it is why every modern architecture — ResNets, Transformers,
-U-Nets, diffusion backbones — is built from residual blocks.
+Jacobian is $I + \partial F/\partial\mathbf{h}$. A small residual Jacobian makes this close to identity and helps transport. But $F(h)=-h$ gives a zero Jacobian: cancellation is possible. Residual connections are a useful parameterization, not a guarantee against vanishing or explosion.
 
 **Gradient clipping** by global norm caps the magnitude while preserving
 direction:
@@ -235,9 +226,9 @@ def grad_check(f, x, analytic, h=1e-5):
 
 | Relative error | Verdict |
 |---|---|
-| $< 10^{-7}$ | correct (float64) |
-| $10^{-7}$ to $10^{-4}$ | suspicious; fine for float32 |
-| $> 10^{-4}$ | a bug, unless a kink is involved |
+| Small across several step sizes | evidence for the tested inputs and directions |
+| Large near zeros or kinks | inspect absolute error and differentiability |
+| Persistent smooth float64 discrepancy | likely derivative, shape or reduction error |
 
 Practical rules: use `float64`; freeze any stochastic component (dropout masks,
 data augmentation) first; and avoid checking exactly at a ReLU kink, where the
@@ -273,19 +264,21 @@ return one gradient per forward input (or `None` for non-differentiable ones).
 
 ## Memory: the real constraint
 
-Reverse mode must retain forward activations. For a transformer, activation
-memory scales as $O(\text{batch}\times\text{seq}\times\text{layers}\times d)$ and
-frequently exceeds parameter memory.
+Reverse mode saves values needed by local derivatives, unless recomputation or
+another strategy supplies them. Transformer activation terms include
+$O(\text{batch}\times\text{seq}\times\text{layers}\times d)$, while naive
+attention can add quadratic sequence terms. Which component dominates depends
+on shapes, kernels, checkpointing and parameter-state precision.
 
 | Technique | Saves | Costs |
 |---|---|---|
-| **Gradient checkpointing** | most activations | ~30% more compute (recompute forward) |
+| **Gradient checkpointing** | selected saved activations | recomputation and RNG/state bookkeeping |
 | Gradient accumulation | activations (smaller micro-batches) | more steps per update |
 | Mixed precision | ~half of activation bytes | care with fp16 |
-| Freezing layers | activations and gradients for frozen parts | less adaptation |
+| Freezing layers | parameter gradients and optimizer state | activations may remain needed for upstream gradients |
 | LoRA / PEFT | optimiser state for frozen weights | limited expressivity |
-| FlashAttention | the $O(n^2)$ attention matrix | none — it is strictly better |
-| `set_to_none=True` on `zero_grad` | gradient buffers between steps | none |
+| FlashAttention | materialized attention matrices | backend/shape constraints and different reduction ordering |
+| `set_to_none=True` on `zero_grad` | gradient-buffer clearing overhead | `None` can differ from zero in optimizer behavior |
 
 ```python
 from torch.utils.checkpoint import checkpoint
@@ -296,7 +289,7 @@ h = checkpoint(self.block, x, use_reentrant=False)   # recompute in backward
 
 | Symptom | Likely cause | Check |
 |---|---|---|
-| All gradients `None` | tensor detached, or `requires_grad=False` | `param.requires_grad`, `param.grad_fn` |
+| Expected leaf gradients `None` | unused/detached path or disabled gradients | inspect connectivity; a leaf's `grad_fn=None` is normal |
 | Gradients are zero | dead ReLUs, saturated activations, a detached path | histogram of activations |
 | Gradients are `NaN` | `log(0)`, `0/0`, fp16 overflow | `set_detect_anomaly(True)` |
 | Gradient norm grows over training | exploding | clip; lower the LR |
@@ -313,29 +306,289 @@ for n, p in model.named_parameters():
         print(f"{n:40s} |g|={p.grad.norm():.3e}  |w|={p.norm():.3e}  ratio={p.grad.norm()/p.norm():.2e}")
 ```
 
-The **update-to-weight ratio** $\|\eta\,g\|/\|w\|$ should sit around $10^{-3}$.
-Orders of magnitude larger means the learning rate is too high; far smaller means
-that layer is not learning.
+For plain SGD, $\eta\|g\|/\|w\|$ approximates the update ratio. For Adam, momentum or decay, measure the actual parameter change. No universal ratio is correct; compare trends and use absolute changes for near-zero parameter norms.
 
 And the single most effective debugging step in all of deep learning:
 **overfit one batch.** Take 32 examples, train on them repeatedly, and confirm
-the loss goes to near zero. If a model cannot memorise 32 examples, the bug is in
-the model, the loss, or the gradient path — not in the data or the schedule.
+the loss decreases strongly. Disable strong regularization and check capacity and contradictory labels first. Failure narrows the investigation to data contracts, model, gradients and optimization; it does not automatically prove a code bug.
+
+## Shared graphs, directional derivatives, and higher order
+
+### One graph, several paths
+
+Take $u=wx$ and $L=u^2+u+x$, with $x=2,w=3$. Forward gives $u=6$ and $L=44$.
+The square contributes $12$ to $\bar u$, the direct $u$ contributes $1$, so
+$\bar u=13$. Then $\bar w=13x=26$ and $\bar x=13w+1=40$. The last $1$ is the
+direct skip path from $x$ to the loss. Overwriting either accumulation gives a
+plausible-looking but wrong answer.
+
+The same principle explains embeddings and convolutions. An embedding row used
+at five positions receives five contributions; a convolution kernel reused at
+many locations receives a sum over locations and observations. The forward
+program shares storage, and reverse mode accumulates derivatives to that storage.
+Advanced indexing is therefore not generally inverted by assignment: repeated
+indices require scatter-add.
+
+Calling `.backward()` again on a newly constructed graph adds another gradient
+to existing leaf buffers. Calling it again on the same graph may fail because
+saved tensors were released. `retain_graph=True` preserves those tensors, but
+is not the usual solution for a training loop; rebuild the forward graph and
+clear gradients at the appropriate update boundary.
+
+### JVP and VJP on the same function
+
+For $f(x_1,x_2)=(x_1x_2,x_1^2+\sin x_2)$:
+
+$$J_f=\begin{bmatrix}x_2&x_1\\2x_1&\cos x_2\end{bmatrix}.$$
+
+At $(2,3)$, direction $v=(1,-1)$ gives
+$J_fv=(1,4-\cos3)$. Output seed $u=(2,-1)$ gives
+$J_f^\top u=(2,4-\cos3)$. These are different contractions, with different
+interpretations. The JVP asks how all outputs change in one input direction.
+The VJP asks how an output-weighted scalar changes with every input.
+
+They obey the adjoint identity $u^\top(Jv)=(J^\top u)^\top v$. This is a useful
+test for a custom pair of forward/reverse rules, particularly when the full
+Jacobian is too large. It tests consistency of the two rules, not necessarily
+agreement with the actual forward function, so retain finite-difference tests too.
+
+### A complete derivative laboratory
+
+This CPU experiment verifies branching, repeated gathers, JVP/VJP duality,
+an analytic Jacobian and a Hessian-vector product. Each assertion checks a
+different derivative contract; no training convergence is needed to diagnose it.
+
+```python runnable
+import torch
+from torch.func import jacrev, jvp, vjp
+
+torch.set_num_threads(1)
+torch.manual_seed(31)
+dtype = torch.float64
+x = torch.tensor(2.0, dtype=dtype, requires_grad=True)
+w = torch.tensor(3.0, dtype=dtype, requires_grad=True)
+u = w * x
+loss = u.square() + u + x
+loss.backward()
+torch.testing.assert_close(x.grad, torch.tensor(40.0, dtype=dtype))
+torch.testing.assert_close(w.grad, torch.tensor(26.0, dtype=dtype))
+
+embedding = torch.arange(4.0, dtype=dtype, requires_grad=True)
+embedding[torch.tensor([2, 0, 2])].sum().backward()
+torch.testing.assert_close(embedding.grad, torch.tensor([1., 0., 2., 0.], dtype=dtype))
+
+def function(z):
+    return torch.stack((z[0] * z[1], z[0].square() + z[1].sin()))
+
+point = torch.tensor([2., 3.], dtype=dtype)
+direction = torch.tensor([1., -1.], dtype=dtype)
+seed = torch.tensor([2., -1.], dtype=dtype)
+expected_jacobian = torch.tensor([[3., 2.], [4., 0.]], dtype=dtype)
+expected_jacobian[1, 1] = point[1].cos()
+jacobian = jacrev(function)(point)
+_, tangent = jvp(function, (point,), (direction,))
+_, pullback = vjp(function, point)
+adjoint = pullback(seed)[0]
+torch.testing.assert_close(jacobian, expected_jacobian)
+torch.testing.assert_close(tangent, jacobian @ direction)
+torch.testing.assert_close(adjoint, jacobian.T @ seed)
+torch.testing.assert_close(seed @ tangent, adjoint @ direction)
+
+matrix = torch.tensor([[3., 1.], [1., 2.]], dtype=dtype)
+z = point.clone().requires_grad_()
+quadratic = 0.5 * z @ matrix @ z
+gradient, = torch.autograd.grad(quadratic, z, create_graph=True)
+hvp, = torch.autograd.grad(gradient @ direction, z)
+torch.testing.assert_close(hvp, matrix @ direction)
+print("Jacobian:", jacobian.tolist())
+print("JVP:", tangent.tolist(), "VJP:", adjoint.tolist())
+print("Shared paths, scatter-add and Hessian-vector checks passed.")
+```
+
+### Higher derivatives and implicit differentiation
+
+For a smooth scalar loss, differentiating $g(\theta)^\top v$ yields $Hv$ when
+$v$ is held constant. `create_graph=True` records the gradient computation so
+another derivative can traverse it; `retain_graph=True` only preserves saved
+state and does not by itself request differentiable gradient construction.
+Hessian-vector products support curvature diagnostics and iterative Newton-type
+methods without storing a $P\times P$ Hessian.
+
+If $\theta^*(\lambda)$ is defined by a stationarity condition
+$\nabla_\theta L(\theta^*,\lambda)=0$, differentiating that equation gives
+
+$$H\frac{d\theta^*}{d\lambda}
+=-\frac{\partial^2L}{\partial\theta\partial\lambda}.$$
+
+An invertible Hessian and a locally differentiable solution are assumptions,
+not guaranteed features of neural-network training. Solve the linear system
+rather than forming $H^{-1}$. This can differentiate a converged inner problem
+without storing every optimizer step, but differs from differentiating a finite
+training trajectory. See [optimization](../math/optimization.md) for curvature
+and stationary-point conditions.
+
+## A custom derivative that can actually be checked
+
+The straight-through example deliberately uses a surrogate. A smooth custom
+operation should instead match the true derivative and, when promised, support
+second derivatives. Consider $f(x)=x\sigma(x)$, whose derivative is
+$\sigma(x)+x\sigma(x)(1-\sigma(x))$. Saving the original input lets the backward
+computation construct its own differentiable sigmoid, preserving higher-order
+dependence.
+
+The following experiment checks first and second derivatives, sweeps central
+differences, and compares checkpointed with ordinary gradients. It uses smooth
+functions to isolate implementation errors from nondifferentiable points.
+
+```python runnable
+import copy
+import torch
+from torch import nn
+from torch.utils.checkpoint import checkpoint
+
+torch.set_num_threads(1)
+torch.manual_seed(32)
+
+class CheckedSiLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return x * torch.sigmoid(x)
+
+    @staticmethod
+    def backward(ctx, output_gradient):
+        x, = ctx.saved_tensors
+        probability = torch.sigmoid(x)
+        derivative = probability + x * probability * (1 - probability)
+        return output_gradient * derivative
+
+x = torch.randn(6, dtype=torch.float64, requires_grad=True)
+assert torch.autograd.gradcheck(CheckedSiLU.apply, (x,), eps=1e-6, atol=1e-5)
+assert torch.autograd.gradgradcheck(CheckedSiLU.apply, (x,), eps=1e-6, atol=1e-5)
+torch.testing.assert_close(CheckedSiLU.apply(x), nn.functional.silu(x))
+
+point = torch.tensor(0.7, dtype=torch.float64)
+analytic = torch.cos(point)
+errors = []
+for step in (1e-1, 1e-3, 1e-5, 1e-7, 1e-9):
+    numeric = (torch.sin(point + step) - torch.sin(point - step)) / (2 * step)
+    errors.append(abs((numeric - analytic).item()))
+print("Finite-difference absolute errors:", errors)
+assert errors[2] < errors[0] * 1e-4
+
+plain = nn.Sequential(nn.Linear(4, 12), nn.Tanh(), nn.Linear(12, 3)).double()
+recomputed = copy.deepcopy(plain)
+a = torch.randn(7, 4, dtype=torch.float64, requires_grad=True)
+b = a.detach().clone().requires_grad_()
+ordinary_loss = plain(a).square().mean()
+checkpoint_loss = checkpoint(recomputed, b, use_reentrant=False).square().mean()
+ordinary_loss.backward()
+checkpoint_loss.backward()
+torch.testing.assert_close(ordinary_loss, checkpoint_loss)
+torch.testing.assert_close(a.grad, b.grad)
+for original, replayed in zip(plain.parameters(), recomputed.parameters()):
+    torch.testing.assert_close(original.grad, replayed.grad)
+print("First/second derivatives and checkpoint gradient equivalence passed.")
+```
+
+Central differences balance truncation error, typically $O(h^2)$ for a smooth
+function, against cancellation/roundoff that grows roughly like $\epsilon/h$.
+Making $h$ smaller indefinitely does not improve the estimate. Relative error is
+also misleading near an exactly zero derivative, so inspect absolute error and
+use a denominator floor. Directional differences reduce the cost of checking
+large parameter vectors but do not inspect every independent coordinate.
+
+Checkpoint recomputation must reproduce the relevant forward computation.
+Random masks, mutable buffers, data-dependent global state and device movement
+can break naive replay assumptions. The shown block is deterministic and has
+no state updates; a BatchNorm block or custom random operation deserves separate
+checks. Freezing a module is similarly different from wrapping it in `no_grad`:
+the former prevents its parameter gradients, while the latter removes the graph
+needed by upstream trainable inputs.
+
+## Graph boundaries and failure analysis
+
+`.detach()` creates a tensor disconnected from its history, although it may share
+storage. `.item()` produces a Python scalar; using that scalar to build a new
+loss loses the original derivative path. NumPy conversions also leave PyTorch's
+graph unless a custom differentiable bridge is supplied. Ordinary Python control
+flow records the branch actually executed, not derivatives of all hypothetical
+branches.
+
+Non-leaf tensors usually do not populate `.grad` unless `retain_grad()` is
+requested. A leaf parameter having `grad_fn=None` is normal: it is a source of
+the graph, not an operation result. An unused parameter may have `grad=None`;
+that differs from a used parameter whose local derivative happens to be zero.
+Optimizers can treat those cases differently, particularly with momentum or decay.
+
+In-place modification can invalidate a value saved for backward, causing a
+version-counter error. Avoid using `.data` to bypass those checks. Parameter
+updates belong in an optimizer or an explicitly gradient-disabled update block.
+Retaining a loss tensor in an ever-growing list can retain graph history; record
+detached scalars for ordinary logging instead.
+
+When gradients become nonfinite, identify the first invalid operation, not just
+the first parameter with a nonfinite gradient. Masking an invalid division after
+it occurred does not necessarily remove its problematic backward computation.
+Compute safe branches without generating invalid intermediates where possible.
+Anomaly detection is useful diagnostically but adds overhead and should not be
+treated as a production performance setting.
+
+### Derivatives of an executed program
+
+Autodiff differentiates the program that ran. A Python conditional can choose
+different smooth branches on either side of a threshold; away from the boundary,
+the selected branch has a valid local derivative. At the switching boundary,
+the mathematical function may be nondifferentiable. Taking an `argmax` to select
+an index ordinarily supplies no derivative describing how the chosen index
+would change. Differentiating the values gathered at that index is a narrower
+operation and does not repair the missing discrete-selection derivative.
+
+Broadcasting can similarly hide an objective bug while producing perfectly
+correct derivatives of the wrong program. Predictions of shape `(B,1)` minus
+targets `(B,)` produce a `(B,B)` tensor, comparing every prediction with every
+target. Autograd correctly differentiates that unintended pairwise objective.
+Assertions about shapes, units and reduction are therefore as important as
+gradient checks. A gradient checker cannot determine what loss the author meant.
 
 ## Self-check
 
-1. State the adjoint rule and explain why the summation matters for weight tying.
-2. Why does reverse mode dominate forward mode for neural network training?
-3. Derive $\bar{W} = X^\top G$ for a linear layer, then recover it from shapes
-   alone.
-4. Show that softmax + cross-entropy gives $\bar{\mathbf{z}} = \mathbf{p} -
-   \mathbf{y}$.
-5. In the worked example the gradient shrank 5.5× in one layer. Extrapolate to
-   20 layers and name the fix.
-6. Why does a residual connection prevent vanishing gradients? Write the
-   Jacobian.
-7. Your custom kernel's gradient check gives relative error $3\times10^{-3}$ in
-   float32. Is it broken? What would you try first?
+1. **Why must shared-weight gradients sum?** If one parameter changes several
+   consumers, the loss changes through every path. The derivative of a sum of
+   path contributions is their sum, not the contribution encountered last.
+2. **Why reverse mode for training?** A scalar objective needs one reverse seed
+   to obtain derivatives with respect to all parameters. A full gradient from
+   forward mode would require many input-direction seeds. For few inputs and
+   many outputs, that advantage can reverse.
+3. **Derive the linear weight gradient.** Since
+   $Y_{ik}=\sum_jX_{ij}W_{jk}+b_k$, differentiation gives
+   $\bar W_{jk}=\sum_iX_{ij}G_{ik}$. Hence $\bar W=X^\top G$ with the same
+   shape as $W$. Shape compatibility supports, but does not replace, the derivation.
+4. **Where does $p-y$ come from?** Contract the softmax Jacobian
+   $p_i(\delta_{ij}-p_j)$ with $-y_i/p_i$. Target normalization gives
+   $-y_j+p_j\sum_i y_i=p_j-y_j$. A batch mean adds one factor $1/B$.
+5. **Extrapolate a repeated contraction.** If the same magnitude factor $1/5.5$
+   applied twenty times, its product would be about $1.6\times10^{-15}$.
+   Actual Jacobians vary, so measure transport; initialization, normalization and
+   residual parameterization can help, but none follows from this one scalar trace.
+6. **Can a residual block erase gradients?** Yes: $F(x)=-x$ makes
+   $I+J_F=0$. With $\|J_F\|_2<1$, singular values are bounded below by
+   $1-\|J_F\|_2$, which explains why sufficiently small residual branches help
+   locally without giving a depth-independent guarantee.
+7. **Is relative error $0.003$ in float32 proof of a bug?** No. Recheck smooth
+   points in float64, sweep finite-difference step sizes, inspect absolute error
+   and remove randomness. Persistent discrepancies then warrant implementation
+   inspection, especially reduction and broadcasting.
+8. **Why does gathering index 2 twice double its gradient?** Both output entries
+   depend on the same input coordinate. The gather VJP scatters and adds rather
+   than overwriting, exactly like weight sharing.
+9. **Why can frozen layers retain activations?** Their input may depend on an
+   upstream trainable parameter. Computing that parameter's gradient still needs
+   the frozen layer's input derivative, even though its own weight gradient is omitted.
+10. **Should an STE pass finite-difference gradcheck?** Usually not. It deliberately
+    supplies a surrogate backward rule inconsistent with the discrete forward
+    derivative. Validate its intended surrogate separately rather than hiding
+    the discrepancy with permissive tolerances.
 
 ## Where to go next
 
@@ -345,3 +598,9 @@ the model, the loss, or the gradient path — not in the data or the schedule.
   choices that decide whether gradients survive.
 - [Optimization & Training](./optimization-and-training.md) — what to do with
   the gradients once you have them.
+
+Primary implementation references: [autograd mechanics](https://docs.pytorch.org/docs/stable/notes/autograd.html),
+[gradcheck](https://docs.pytorch.org/docs/stable/generated/torch.autograd.gradcheck.html),
+and [checkpointing](https://docs.pytorch.org/docs/stable/checkpoint.html).
+The original [ResNet paper](https://arxiv.org/abs/1512.03385) motivates residual
+learning; it does not establish a universal nonvanishing-gradient theorem.

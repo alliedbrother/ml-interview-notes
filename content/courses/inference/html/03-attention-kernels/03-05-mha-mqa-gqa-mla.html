@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MHA → MQA → GQA → MLA — The Inference Engineering Book</title>
+<title>MHA → MQA → GQA → MLA — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 3 · Attention kernels · 03-05</div>
 <h1>MHA → MQA → GQA → MLA</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mla/</code></li><li><code>vllm/model_executor/layers/</code></li><li><code>python/sglang/srt/layers/radix_attention.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/attention/backends/mla/</code></li><li><code>vllm/model_executor/layers/</code></li><li><code>python/sglang/srt/layers/radix_attention.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Four attention variants, one question: the KV cache is too big and decode is
 bandwidth-bound, so how few bytes per token can you get away with? MHA, MQA and GQA answer by
@@ -634,7 +634,7 @@ the moment you add a second GPU.</p>
 <div class="kpis">
   <div class="kpi kpi--hero"><div class="kpi__n">64&times;</div><div class="kpi__l">KV bytes MQA saves on Llama-3-70B geometry (derived)</div></div>
   <div class="kpi"><div class="kpi__n">8&times;</div><div class="kpi__l">What GQA-8 actually takes — and it raises decode intensity 8&times;</div></div>
-  <div class="kpi"><div class="kpi__n">TP=5</div><div class="kpi__l">Where MLA's cluster KV advantage over GQA-8 runs out (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">TP=8</div><div class="kpi__l">First common valid TP degree beyond the 4.66 crossover (fixed pool)</div></div>
 </div></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take Llama-3-70B's attention geometry — $L = 80$ layers, $h = 64$ query heads, head
 dimension $d_h = 128$ — and store keys and values the way the original Transformer did, one K
@@ -652,8 +652,7 @@ million dollars of hardware.</p>
 
 <p>The shipped Llama-3-70B does not do that. It declares
 <code>num_key_value_heads: 8</code>, and the same arithmetic gives 320&nbsp;KiB per token,
-2.5&nbsp;GiB at 8k, and 162 concurrent requests. Nothing about the FLOPs changed — all 64
-query heads still attend over the full context. What changed is how many <em>distinct</em> K/V
+2.5&nbsp;GiB at 8k, and 162 concurrent requests. The QK and PV attention FLOPs remain unchanged for fixed query heads and dimensions, but K/V projection FLOPs decrease; all 64 query heads still attend over the context. What changed is how many <em>distinct</em> K/V
 vectors have to exist in HBM, and therefore how many bytes the decode kernel drags across the
 memory bus on every single step.</p>
 
@@ -848,8 +847,7 @@ tractable for everyone shipping models.</p>
 <p>The GQA paper's own numbers show the shape of the curve: MHA-XXL takes 1.51&nbsp;s per sample
 at 47.2 average, MQA-XXL takes 0.24&nbsp;s at 46.6, and GQA-8-XXL takes 0.28&nbsp;s at 47.1
 (<a href="https://arxiv.org/abs/2305.13245">Table 1</a>). GQA-8 recovers essentially all of
-MQA's speed and essentially all of MHA's quality. The speed axis has already saturated by
-$g = 8$ because, past that point, KV traffic is no longer what the decode step is waiting
+MQA's speed and essentially all of MHA's quality. In the paper, GQA-8 means eight KV groups, not universally eight queries per group. Its measured speed approaches MQA on that workload because, past that point, KV traffic is no longer what the decode step is waiting
 for — the weights are. Halving KV bytes again when KV is 10% of the step's traffic buys 5%.</p>
 
 <p>But there is a second, purely mechanical reason $h_{kv} = 8$ is the near-universal choice,
@@ -863,7 +861,7 @@ deployment shape.</p>
 <p>The sharpest form of that argument: at TP=8, a GQA-8 model and an MQA model have <em>the same
 per-rank cache</em>. Both give <code>max(1, h_kv // 8) = 1</code> KV head per GPU, and both cost
 40&nbsp;KiB per token per rank on Llama-3-70B's geometry. MQA's entire remaining byte advantage
-over GQA-8 evaporates at the deployment shape everyone actually uses — while its quality cost
+over GQA-8 evaporates at this common eight-way tensor-parallel shape — while its quality cost
 does not. Choosing $h_{kv} = 8$ is choosing the smallest KV cache that TP=8 can still shard.
 §6 makes this quantitative.</p>
 
@@ -958,7 +956,7 @@ over $r_{kv} = 512$ dimensions, while the bytes read are one 576-wide latent per
 <p>Against the H100's ridge of 295, DeepSeek-V3's decode attention at TP=1 sits at 82% of the
 way to compute-bound — a place no GQA model gets near. That is the honest description of MLA:
 it did not find a cheaper way to store attention state, it found a way to <em>pay in FLOPs
-instead of bytes</em>. GQA moves you along the roofline's bandwidth ramp; MLA moves you off it.
+instead of bytes</em>. GQA moves you along the roofline's bandwidth ramp; MLA moves closer to the ridge but 242 FLOP/byte remains below 295; actual tile rereads can move it farther left.
 Which is better depends entirely on which resource you are short of, and — as §6 shows — on how
 many GPUs you have.</p></div></section>
 <section class="sec" id="in-code" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How each variant appears in code</h2></div><div class="sec__body"><p>Neither engine has an "attention variant" enum with four members. MHA, MQA and GQA are all
@@ -1360,10 +1358,7 @@ each rank stores $c / \min(\text{TP}, h_{kv})$ bytes per token, so the cluster h
 
 <div class="math-display">$$N_{\text{GQA}} = \frac{P \cdot \min(\text{TP},\, h_{kv})}{c}, \qquad N_{\text{MLA}} = \frac{P}{c_{\text{MLA}}}$$</div>
 
-<p>The GQA cluster capacity grows linearly in TP until TP reaches $h_{kv}$, then flattens — the
-replication clause in <code>max(1, ...)</code> is exactly this saturation. The MLA cluster
-capacity is a constant. Work it with $P = 40$&nbsp;GiB, Llama-3-70B ($c = 320$&nbsp;KiB,
-$h_{kv} = 8$) against DeepSeek-V3 ($c_{\text{MLA}} = 68.6$&nbsp;KiB):</p>
+<p>Holding the per-rank byte pool P fixed, GQA logical-token capacity grows with min(TP,h_kv), while a replicated MLA latent has fixed capacity. In actual deployment P changes when weights are sharded, so adding ranks can improve either capacity even after KV-cell sharding saturates. The following comparison deliberately fixes P=40 GiB to isolate cache layout, not whole-deployment memory accounting.</p>
 
 <div class="table-wrap">
   <div class="table-wrap__cap">Cluster-wide resident tokens at a fixed 40 GiB KV pool per GPU. All <em>derived</em> from the two formulas above; no measurement, and the two models' weight footprints are deliberately factored out so the KV term is visible on its own.</div>
@@ -1382,10 +1377,7 @@ $h_{kv} = 8$) against DeepSeek-V3 ($c_{\text{MLA}} = 68.6$&nbsp;KiB):</p>
 </div>
 
 <p>MLA's per-token cell is 4.7&times; smaller and it still loses at TP=8. The crossover is where
-$\min(\text{TP}, h_{kv})$ passes $c / c_{\text{MLA}} = 320/68.6 = 4.66$, so <b>MLA's
-cluster-KV advantage over a GQA-8 model is spent by TP=5</b>. Every additional rank you give a
-GQA model buys KV capacity; every additional rank you give an MLA model buys FLOP/s and weight
-room and nothing else.</p>
+$\min(\text{TP}, h_{kv})$ passes $c / c_{\text{MLA}} = 320/68.6 = 4.66$, so <b>the real-valued crossover is TP=4.66; a supported divisor such as TP=8 lies beyond it, while TP=5 is not valid for these head counts</b>. GQA cell-size sharding stops once TP reaches the KV-head count; extra MLA ranks reduce per-rank weights and can thereby free more pool space, although latent bytes per token remain replicated.</p>
 
 <p>The same asymmetry shows up in the intensity. GQA's $I = 2g/b$ is TP-invariant because both
 head counts shard together. MLA's is not: the query heads shard and the latent does not, so
@@ -1449,7 +1441,7 @@ roofline position is a TP=1 property that tensor parallelism spends.</p>
 
 <div class="callout callout--warn">
   <span class="callout__k">The escape hatch</span>
-  <p>Nobody actually deploys DeepSeek-V3 with plain TP attention, and this table is why. The fix
+  <p>Attention data parallelism is an important alternative to replicated-cache TP; deployment choices depend on hardware, batch size, and engine support. The fix
   is data-parallel attention: each rank owns a <em>different</em> sub-batch, so the replicated
   caches are no longer duplicates of each other. SGLang's flag documents the split exactly —
   <em>"Enabling data parallelism for attention and tensor parallelism for FFN"</em>
@@ -1578,8 +1570,7 @@ PY</code></pre>
 </div>
 
 <p>Then watch the TP division move the number. Launch the same model twice and read the KV log
-line; the token count should roughly double from TP=1 to TP=2 for a GQA model, because both the
-weights and the cell size halved:</p>
+line; token capacity can grow by more than two from TP=1 to TP=2, since halving per-rank weights also increases the byte pool while the cell size halves:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1623,7 +1614,7 @@ count will grow by far less than 2&times;.</p></div></section>
 
   <li>Suppose you could retrain Llama-3-70B with any $h_{kv}$, and serve it at TP=1 on a
   hypothetical card large enough to hold it. A decode step at batch 64 and 8k context reads
-  131.4&nbsp;GiB of bf16 weights. Using $c = 2Lh_{kv}d_hb$, compute the fraction of total HBM
+  131.4&nbsp;GiB of bf16 weights in an artificial fixed-weight comparison that isolates KV traffic; retraining h_kv would also change projection parameters. Using $c = 2Lh_{kv}d_hb$, compute the fraction of total HBM
   traffic that is KV at $h_{kv} \in \{64, 8, 1\}$. At which setting does further shrinking stop
   mattering? Then say what happens to the $h_{kv}=1$ answer at TP=8, and why.</li>
 </ol>
@@ -1669,8 +1660,7 @@ count will grow by far less than 2&times;.</p></div></section>
   there is real headroom left, which is why long-context serving keeps reaching for KV
   quantisation and MLA rather than declaring GQA-8 sufficient. At TP=8 the $h_{kv}=1$ answer
   gets worse in a specific way: <code>max(1, 1 // 8) = 1</code>, so every rank holds the same
-  single KV head and the per-rank cell is 40&nbsp;KiB — identical to $h_{kv}=8$. Under tensor
-  parallelism, MQA and GQA-8 are the same deployment.</p>
+  single KV head and the per-rank cell is 40&nbsp;KiB — identical to $h_{kv}=8$. At TP=8 their per-rank KV cell sizes match in this geometry, but weights, quality, and other execution costs still differ.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
@@ -1678,8 +1668,7 @@ count will grow by far less than 2&times;.</p></div></section>
   the KV cell size and multiplies decode arithmetic intensity by exactly the same factor —
   $c = 2Lhd_hb/g$ and $I = 2g/b$ are the same statement written twice.</li>
 
-  <li>$h_{kv} = 8$ is not a quality result, it is a topology result. The GQA paper shows quality
-  is already recovered by $g = 8$; the reason nobody ships $h_{kv} = 4$ is that
+  <li>Choosing $h_{kv}$ trades model quality, cache traffic, projection size, and parallel placement. GQA-8 in the paper denotes eight KV groups and reports a workload-specific quality tradeoff. Models with four KV heads do ship: Qwen2-7B is one example. The placement constraint is that
   <code>max(1, total_num_kv_heads // tensor_parallel_size)</code> saturates, and 8 is the number
   of GPUs in a node.</li>
 
@@ -1734,7 +1723,7 @@ count will grow by far less than 2&times;.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="03-04-flashinfer-and-backends.html"><div class="pager__k">← Previous</div><div class="pager__t">FlashInfer and the attention-backend abstraction</div></a><a class="pager__next" href="03-06-positional-encoding-and-long-context.html"><div class="pager__k">Next →</div><div class="pager__t">RoPE, scaling, sliding window, attention sinks</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

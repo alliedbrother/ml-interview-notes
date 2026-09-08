@@ -46,8 +46,8 @@ BIOES:  B-PER   E-PER  O        B-LOC  I-LOC  E-LOC  O
 organisation. The `B-` prefix marks where a new entity starts.
 
 **Invalid sequences are possible.** `O` followed by `I-PER` is not a legal BIO
-sequence. A per-token classifier can emit it, which is exactly the problem CRFs
-and constrained decoding exist to prevent.
+sequence. A per-token classifier or unconstrained CRF can emit it. Hard start and
+transition masks are required when legality must be guaranteed.
 
 ## The modelling arc
 
@@ -75,9 +75,12 @@ $$\delta_t(j) = \max_i \bigl[\delta_{t-1}(i)\,P(j\mid i)\bigr]\,P(w_t\mid j)$$
 $O(TK^2)$ instead of $O(K^T)$ for brute force. Store backpointers to recover the
 path.
 
-HMMs are limited by their independence assumptions: the emission depends only on
-the current tag, so you cannot use features like "the previous word is
-capitalised" or "this word ends in -tion".
+The simple categorical-emission HMM does not directly use arbitrary overlapping
+whole-input features. Richer emission distributions can model word shape or suffix
+information; the limitation is the chosen generative factorization, not a universal
+ban on suffix features. Initialize Viterbi with start probabilities and terminate
+with any end-state probabilities. Use sums of log probabilities, preserving
+impossible transitions as negative infinity, to avoid product underflow.
 
 ### Conditional random fields
 
@@ -91,8 +94,10 @@ requiring a generative story for it. Classic features: word identity, prefixes
 and suffixes, capitalisation pattern, word shape (`Xxxx`), gazetteer membership,
 and the same features for neighbouring words.
 
-**The essential property**: a CRF models transitions between labels, so it learns
-that `I-PER` cannot follow `O` and that `B-LOC I-LOC` is common. It optimises the
+**The essential property**: a CRF learns preferences over transitions. Finite
+scores do not make an illegal BIO transition impossible. Add hard start/transition
+masks to the forward partition and decoding if the trained distribution must
+exclude illegal paths, or explicitly distinguish decode-only constraints. It optimises the
 whole sequence jointly rather than each token independently. Decoding is Viterbi
 again; training uses forward–backward to compute the partition function $Z$.
 
@@ -118,7 +123,8 @@ remain the right architecture here.
 **Is a CRF layer still worth it?** With a strong encoder the gain shrinks to
 a fraction of a point on well-resourced tasks, because the transformer's context
 already encodes most of the label dependency. It still helps for: low-resource
-settings, long entities, schemes with many types, and guaranteeing valid output.
+settings, long entities and schemes with many types. Validity requires explicit
+constraints, not merely attaching a CRF.
 A cheaper alternative is **constrained decoding** — mask illegal transitions at
 inference — which gets validity without the training cost.
 
@@ -179,11 +185,16 @@ boundaries and the type to be exactly right.
 
 ```python
 from seqeval.metrics import classification_report, f1_score
-print(classification_report(true_tags, pred_tags, digits=4))
+from seqeval.scheme import IOB2
+print(classification_report(true_tags, pred_tags, digits=4, mode="strict", scheme=IOB2))
+assert f1_score([["B-PER", "I-PER"]], [["I-PER", "I-PER"]],
+                mode="strict", scheme=IOB2) == 0.0
 ```
 
-`seqeval` is the standard and it implements the CoNLL scoring rules correctly —
-do not hand-roll this.
+This optional seqeval example explicitly requests strict IOB2; default conlleval
+compatibility can interpret malformed paths permissively. Validate annotation
+schemes separately and use a tested span-scoring library. See
+[seqeval's strict/default examples](https://github.com/chakki-works/seqeval).
 
 | Match criterion | Counts as correct |
 |---|---|
@@ -284,6 +295,50 @@ in one document tend to be related, so disambiguating them jointly beats
 disambiguating each in isolation.
 
 ## Self-check
+
+### Worked partition and Viterbi calculation
+
+For three positions and two labels there are eight paths. The forward recurrence
+uses log-sum-exp over predecessor scores, while Viterbi uses max and stores its
+argmax. Their distinction is the sum of path probability versus the best path,
+not a different emission model. This numerical demonstration verifies both against
+exhaustive enumeration; use a library decoder for production tagging.
+
+```python runnable
+import itertools
+import numpy as np
+emission = np.array([[.2, -.1], [.1, .7], [.4, .0]])
+transition = np.array([[.3, -.2], [-.1, .2]])
+start = np.array([0., -np.inf])  # second label cannot begin a sequence
+forward = start + emission[0]
+best = forward.copy()
+back = []
+for token in emission[1:]:
+    candidates = best[:, None] + transition
+    back.append(candidates.argmax(0))
+    best = candidates.max(0) + token
+    forward = np.logaddexp.reduce(forward[:, None]+transition, axis=0)+token
+paths = list(itertools.product(range(2), repeat=3))
+scores = np.array([start[p[0]] + sum(emission[t, p[t]] for t in range(3))
+                  + sum(transition[p[t-1], p[t]] for t in range(1, 3)) for p in paths])
+assert np.isclose(np.logaddexp.reduce(forward), np.logaddexp.reduce(scores))
+decoded = [int(best.argmax())]
+for pointers in reversed(back):
+    decoded.append(int(pointers[decoded[-1]]))
+decoded.reverse()
+assert tuple(decoded) == paths[int(scores.argmax())]
+assert decoded[0] == 0
+print("best path", decoded, "log partition", np.logaddexp.reduce(forward))
+```
+
+**Why can BIO not express nesting?** A token has only one tag in one layer;
+independently typed `(start,end,type)` spans or layered taggers can retain both
+outer and inner mentions. A span decoder must define overlapping/crossing conflict
+rules and maximum width. **Why do offsets matter after truncation?** Entity spans
+crossing a window boundary need an explicit discard, overlap, or merge policy;
+do not score only the retained fragment as if it were the original entity. Entity
+linking should report candidate recall before disambiguation and evaluate NIL
+thresholds separately. Missing weak labels are unobserved, not reliable `O` labels.
 
 1. Why does BIO tagging need the `B-` prefix? Give a concrete failing example
    for IO.

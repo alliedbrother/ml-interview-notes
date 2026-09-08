@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sampling on the GPU — The Inference Engineering Book</title>
+<title>Sampling on the GPU — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 6 · Decoding algorithms · 06-01</div>
 <h1>Sampling on the GPU</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/sample/sampler.py</code></li><li><code>vllm/v1/sample/ops/</code></li><li><code>python/sglang/srt/layers/sampler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/sample/sampler.py</code></li><li><code>vllm/v1/sample/ops/</code></li><li><code>python/sglang/srt/layers/sampler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">The model's job ends at a tensor of shape <code>[batch, 128256]</code>. Turning that
 into one token per request is arithmetically trivial and architecturally the most awkward part of
@@ -652,11 +652,10 @@ un-capturable as a CUDA graph (<a href="../08-compilation-and-runtime/08-01-cuda
   <div class="kpi"><div class="kpi__n">1.75%</div><div class="kpi__l">of the 4.48 ms step floor, per sweep</div></div>
 </div>
 
-<p>Keep it on the GPU and one full read-modify-write pass over that tensor costs
-$2 \cdot 131.3\,\text{MB} / 3.35\,\text{TB/s} = 78\ \mu\text{s}$ — 1.75% of the step. You can afford
-roughly a dozen such passes before sampling is 20% of decode. That budget is the whole design
-constraint, and it is why every operator below is written as a single fused sweep with per-row
-parameters rather than a branch per request.</p>
+<p>A full FP32 read/write sweep has an ideal HBM floor of about 78 microseconds,
+roughly 1.75% of the cited weight-streaming floor. These are lower-bound traffic models,
+not measured step fractions. Sorting, reductions, RNG, transcendental instructions,
+occupancy and launches also matter; reducing passes is one important design lever.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Provenance</span>
@@ -669,12 +668,11 @@ sampling operator is a <em>row-wise reduction or mask</em> over that matrix. Tem
 row by a scalar. Penalties subtract from selected columns. Top-k and top-p delete all but a prefix
 of the row's sorted order. The multinomial draw reduces each row to one index.</p>
 
-<p>None of these operators has any arithmetic worth speaking of. Temperature is one FLOP per 8 bytes
-of traffic — arithmetic intensity $1/8$, three and a half orders of magnitude below the H100's
-ridge point of 295. On the roofline these operators are pinned to the far-left diagonal: their
-runtime is exactly their byte count divided by bandwidth. The only optimisation available is
-<em>touching the tensor fewer times</em>. That single fact explains every design decision in both
-engines' samplers.</p>
+<p>A temperature sweep has low arithmetic intensity: roughly one scalar operation per eight
+logical bytes for FP32 read/write. Sorting, reductions and random draws have different
+instruction and synchronization costs. Bytes divided by peak bandwidth is a lower bound under
+the assumed traffic, not exact runtime; scalar instructions should not be compared only to a
+tensor-core peak. Fusion, selection algorithms, occupancy and launch reduction all matter.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; the operator pipeline over the logits tensor, batch 64, Llama-3-8B.</b>
@@ -763,9 +761,9 @@ engines' samplers.</p>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the operator algebra</h2></div><div class="sec__body"><p>Let $z \in \mathbb{R}^{V}$ be one row of logits, $V = 128{,}256$ for Llama-3. Define
 $p = \mathrm{softmax}(z)$. The operators, in the order both engines compose them:</p>
 
-<p><strong>Temperature.</strong> $z \leftarrow z / T$ with $T > 0$. Raising $T$ flattens the
-distribution; lowering it sharpens. $T \to 0$ converges to a point mass on $\arg\max z$, which is
-why $T = 0$ is not a division at all but a separate code path (below).</p>
+<p><strong>Temperature.</strong> Divide logits by positive T. Increasing T flattens the
+distribution. As T approaches zero, mass becomes uniform over exactly tied maxima; only a
+unique maximum yields a point mass. The separate greedy path may have a different tie rule.</p>
 
 <p><strong>Penalties.</strong> These are the only operators that read the request's <em>history</em>,
 not just the current step. Let $c_v$ be the count of token $v$ in the generated output so far, and
@@ -1154,9 +1152,9 @@ flowchart TD
 </div></div></section>
 <section class="sec" id="selection" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Sorting, partial selection, and why prefill and decode want different kernels</h2></div><div class="sec__body"><p>Top-p needs an ordering; top-k needs only a threshold. That asymmetry drives everything.</p>
 
-<p>A full <code>torch.sort</code> over the vocabulary dimension moves 4-byte keys plus 8-byte indices
-— 98.5&nbsp;MB at batch 64, per radix pass, read and written. Several passes and you have spent more
-than the entire rest of the pipeline. vLLM's PyTorch fallback does exactly this and the docstring is
+<p>A full <code>torch.sort</code> over the vocabulary moves 4-byte keys plus 8-byte indices:
+98.5&nbsp;MB of payload at batch 64, or about 197&nbsp;MB for a full read plus write.
+Actual radix traffic varies by implementation. vLLM's PyTorch fallback sorts and its docstring is
 candid about it: <em>"If a top-p is used, this function will sort the logits tensor, which can be
 slow for large batches"</em> (<code>vllm/v1/sample/ops/topk_topp_sampler.py:L374-L378</code>).</p>
 
@@ -1494,10 +1492,10 @@ bias, accumulated penalties; <code>python/sglang/srt/model_executor/model_runner
 → <code>Sampler.forward</code>, which runs its own <code>_preprocess_logits</code> (custom logit
 processors, then the env-gated NaN sanitisation above) and then either
 <code>torch.argmax</code>, or <code>logits.div_(temperatures)</code> then
-<code>logits[:] = torch.softmax(logits, dim=-1)</code> in place then
-<code>_sample_from_probs</code> (<code>python/sglang/srt/layers/sampler.py:L207-L215</code>). The
-in-place softmax into the logits buffer is a nice touch: it saves a
-$B \cdot V \cdot 4$-byte allocation, 131&nbsp;MB at batch 256.</p></div></section>
+<code>logits[:] = torch.softmax(logits, dim=-1)</code> assigned back into the buffer, then
+<code>_sample_from_probs</code> (<code>python/sglang/srt/layers/sampler.py:L207-L215</code>).
+The destination is reused, but the right-hand-side softmax ordinarily allocates a result first.
+This syntax alone does not prove removal of a full temporary allocation.</p></div></section>
 <section class="sec" id="beam-and-logprobs" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Beam search, and what logprobs cost</h2></div><div class="sec__body"><h3>Beam search: still present in vLLM, absent from SGLang</h3>
 
 <p>Beam search maintains $w$ candidate sequences per request and expands all of them each step. That
@@ -1567,18 +1565,17 @@ token-id list as a cheaper alternative — a <code>gather</code> instead of a <c
   is <code>EnvBool(False)</code> (<code>python/sglang/srt/environ.py:L1091</code>). On a default
   server the NaN reaches the sampler.</p></div>
 
-  <div class="ve-card"><span class="ve-card__k">Silent fallback</span><h4>Seeds disable the fast sampler</h4>
-  <p>Adding <code>seed</code> to one request in vLLM moves the <em>entire batch</em> off FlashInfer
-  onto the PyTorch path with its per-row Python loop. SGLang is blunter and asserts:
-  <code>"Sampling seed is not supported for flashinfer backend"</code>
-  (<code>python/sglang/srt/layers/sampler.py:L270-L273</code>). If throughput drops when you enable
-  reproducibility, this is why.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Backend-dependent</span><h4>Seeds can change sampler dispatch</h4>
+  <p>Some paths reject explicit seeds or fall back from FlashInfer; others use counter-based
+  GPU RNG. The quoted SGLang branch asserts that sampling seeds are unsupported for its
+  FlashInfer backend. Record the selected runner, backend and kernel before attributing a
+  reproducibility slowdown to a per-row Python loop.</p></div>
 
-  <div class="ve-card"><span class="ve-card__k">Wrong answer</span><h4>min-p plus a seed, in SGLang</h4>
-  <p><code>"With sampling seed, multinomial_with_seed will provide wrong results"</code>
-  (<code>python/sglang/srt/layers/sampler.py:L589-L594</code>) — an assert, because min-p zeroes
-  entries without renormalising and the seeded Gumbel path takes <code>log</code> of the result. The
-  TODO above it says the fix is to renormalise.</p></div>
+  <div class="ve-card"><span class="ve-card__k">Unsupported combination</span><h4>min-p plus a seed, in SGLang</h4>
+  <p>The cited sampler assertion/TODO is an implementation restriction, not a mathematical
+  proof that unnormalized surviving probabilities break Gumbel sampling. Renormalization adds
+  the same constant to every surviving log weight and cannot change argmax. Retain the runtime
+  guard until the exact path is tested; its explanation requires more than that comment.</p></div>
 
   <div class="ve-card"><span class="ve-card__k">Rejected</span><h4>min-p with speculative decoding</h4>
   <p><code>"The min_p and logit_bias sampling parameters are not yet supported with speculative
@@ -1600,11 +1597,34 @@ token-id list as a cheaper alternative — a <code>gather</code> instead of a <c
   computation"</em> (<code>vllm/v1/sample/ops/topk_topp_triton.py:L134-L136</code>). See
   <a href="06-05-structured-decoding.html">§6.5</a>.</p></div>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Nucleus membership changes after renormalization</h2></div><div class="sec__body">
+<p>A mask can change the normalization and therefore the smallest top-p nucleus even when it removes no token from the old nucleus. Here p=0.8 retains the first two tokens before masking; removing the third raises the first token above the threshold. A constant log-normalizer, in contrast, cannot alter Gumbel argmax. This check isolates probability semantics, not a GPU sampler's RNG sequence.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+def nucleus(probs, threshold):
+    order = np.argsort(-probs, kind="stable")
+    count = np.searchsorted(np.cumsum(probs[order]), threshold) + 1
+    return set(order[:count])
+
+p = np.array([0.70, 0.15, 0.15])
+masked = p * np.array([True, True, False])
+masked /= masked.sum()
+assert nucleus(p, 0.8) == {0, 1}
+assert nucleus(masked, 0.8) == {0}
+noise = np.array([0.2, -0.1, 0.5])
+assert np.argmax(np.log(p) + noise) == np.argmax(np.log(p) - 7.0 + noise)
+tied = np.array([2.0, 2.0, 0.0])
+cold = np.exp((tied - tied.max()) / 0.001)
+cold /= cold.sum()
+np.testing.assert_allclose(cold, [0.5, 0.5, 0.0])
+print("Nucleus, normalization and tied-temperature contracts pass.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Price the sampler by toggling its backend, holding everything else fixed.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
-    <span class="src">vLLM: force the PyTorch sort path, then the default</span>
+    <span class="src">vLLM: disable FlashInfer, then inspect the actual fallback</span>
     <span class="tag tag--shell">shell</span>
   </div>
   <pre class="code-block code-block--wrap"><code>VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve meta-llama/Meta-Llama-3-8B-Instruct --max-num-seqs 256
@@ -1614,11 +1634,11 @@ vllm bench serve --model meta-llama/Meta-Llama-3-8B-Instruct \
   --num-prompts 500 --max-concurrency 256</code></pre>
 </div>
 
-<p>Run it three ways and compare TPOT: (1) all requests <code>temperature=0</code>, which takes the
-<code>all_greedy</code> shortcut and skips temperature, top-k, top-p and the draw entirely;
-(2) <code>temperature=1.0, top_p=0.95</code>, which forces the top-p path; (3) the same plus
-<code>seed</code> on every request, which forces the per-row generator loop. The gap between (1) and
-(2) is the sampler's real cost; the gap between (2) and (3) is what reproducibility costs today.</p>
+<p>Compare greedy requests, top-p requests, and identical top-p requests with explicit seeds.
+Record runner V1/V2 and actual kernel names. Disabling FlashInfer does not force a PyTorch sort;
+Triton selection and counter-based V2 sampling are alternatives described above. A seed does
+not universally force a Python generator loop. Keep request/length distributions fixed and
+inspect the trace before attributing a TPOT difference to one sampler operation.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1630,11 +1650,11 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct --enable-deterministic-inference</code></pre>
 </div>
 
-<p>The third command forces <code>pytorch</code> and logs <em>"Sampling backend is set to pytorch for
-deterministic inference."</em> — so it is the same kernel as the second, plus the hashed-seed path.
-The delta between them isolates the hash-per-column cost. Use the profiling recipe from
-<a href="../LABS.html">Lab 10</a> to see the sampler's kernels in a trace; at batch 256 they should be
-a low single-digit percentage of the step, and if they are not, one of the pitfalls above is firing.</p></div></section>
+<p>Run these long-lived servers one at a time, stopping each before reusing the device/port.
+The deterministic-inference mode can change model kernels as well as sampling, so its latency
+versus the PyTorch sampler alone does not isolate hash cost. Record actual dispatch and profile
+with the <a href="../LABS.html">Lab 10</a> methodology; neither a fixed sampler percentage nor
+one expected bottleneck is established by these commands.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
 <li><p><strong>Read the code.</strong> In <code>vllm/v1/worker/gpu_input_batch.py</code>, a request
 with <code>top_k=0</code> is stored as <code>top_k_cpu[i] = vocab_size</code>. Find the two other
@@ -1679,8 +1699,8 @@ Sketch a kernel that removes the loop, and state the one property it must have f
   <p><strong>4.</strong> Not necessarily the same set. vLLM applies min-p to the logits first, so its
   top-p cumsum runs over a softmax that has already renormalised away the min-p-rejected mass and
   reaches 0.9 at a lower rank — vLLM keeps fewer or equal tokens. SGLang computes the top-p prefix
-  against the full distribution and only then applies the min-p threshold. They coincide only when
-  min-p rejects nothing inside the nucleus.</p>
+  against the full distribution and only then applies min-p. Even removing tokens outside
+  the original nucleus can change the earlier cumulative threshold after renormalization.</p>
   <p><strong>5.</strong> Index the noise by <em>(seed, position, token id)</em> — a counter-based hash
   rather than a stateful stream — so the same request/position/token draws the same value regardless
   of batch composition or evaluation order. That is what makes a draft token's noise reproducible at
@@ -1735,7 +1755,7 @@ develops and that motivates SGLang's <code>--enable-deterministic-inference</cod
 </ul></div></section>
 <div class="pager"><a href="../05-parallelism/05-05-worker-orchestration.html"><div class="pager__k">← Previous</div><div class="pager__t">Worker orchestration and multi-node serving</div></a><a class="pager__next" href="06-02-speculative-decoding.html"><div class="pager__k">Next →</div><div class="pager__t">Speculative decoding and the correctness proof</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1750,6 +1770,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#worked-trace">Worked trace: one batch through vLLM's sampler</a>
 <a href="#beam-and-logprobs">Beam search, and what logprobs cost</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

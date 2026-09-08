@@ -171,11 +171,11 @@ def predict(args, shape):
         cap = VLLM_CUSTOM_AR_MAX.get(args.compute_capability, {}).get(p)
         if args.engine == "sglang":
             cap = SGLANG_CUSTOM_AR_MAX
-        cap_tok = f"{cap // per_tok:,} tok" if cap else "n/a"
+        cap_tok = f"{(cap - 1) // per_tok:,} tok" if cap else "n/a"
         rows.append((str(p), f"{ring:.2f}", f"{vol / KIB:,.0f} KiB",
                      f"{t_bw * 1e6:.3f}", f"{pct:.3f}%", cap_tok))
     table(rows, "Part A - bandwidth term (derived). The last column is the "
-                "largest step that still uses the custom all-reduce kernel.")
+                "largest step satisfying this strict size gate, not guaranteed dispatch.")
 
     # Latency term. lambda is swept, not known.
     header = ["TP", "floor"]
@@ -193,8 +193,8 @@ def predict(args, shape):
                 "(derived). lambda is a swept parameter, NOT a measurement.")
 
     print("\nPredict before you measure. At batch 1 the bandwidth term above is a")
-    print("fraction of a percent, so anything you lose is per-collective latency,")
-    print("and the whole sweep reduces to fitting one constant.")
+    print("small contribution in this model. Other residual costs include launch,")
+    print("KV traffic, kernel efficiency, synchronization and rank imbalance.")
     return dict(floor1_s=floor1_s, ncoll=ncoll, per_tok=per_tok)
 
 
@@ -225,9 +225,9 @@ def sglang_cmd(args, tp, out_jsonl):
 
 def read_vllm(out_json, args):
     """vllm/benchmarks/latency.py:L170-L177 writes avg_latency / latencies /
-    percentiles. avg_latency covers one prefill plus output_len decode steps for
-    the whole batch, so the per-step figure needs the prefill removed by hand --
-    keep --input-len small and --output-len large so the residue is negligible."""
+    percentiles. This is full-generation mean latency divided by output tokens,
+    NOT a measured decode-step latency: prefill produces the first token and
+    output_len-1 decode forwards produce the rest."""
     d = json.loads(Path(out_json).read_text())
     return d["avg_latency"] / args.output_len, d
 
@@ -276,9 +276,12 @@ def measure(args):
         reader = read_vllm if args.engine == "vllm" else read_sglang
         step_s, raw = reader(out, args)
         results[p] = step_s
-        print(f"  TP={p}: {step_s * 1e6:.0f} us per decode step")
+        metric = ("generation_mean_seconds_per_output_token" if args.engine == "vllm"
+                  else "median_decode_step_seconds")
+        print(f"  TP={p}: {step_s * 1e6:.0f} us ({metric})")
         (work / f"tp{p}.parsed.json").write_text(
-            json.dumps({"tp": p, "step_s": step_s, "cmd": cmd, "raw": raw}, indent=2))
+            json.dumps({"tp": p, "metric": metric, "value_s": step_s,
+                        "cmd": cmd, "raw": raw}, indent=2))
     return results
 
 
@@ -286,6 +289,12 @@ def measure(args):
 
 
 def attribute(args, model, results):
+    if args.engine == "vllm":
+        table([("TP", "generation mean / output token (us)")]
+              + [(p, f"{t * 1e6:.2f}") for p, t in sorted(results.items()) if t],
+              "Full-generation metric; not comparable to SGLang median decode steps.")
+        print("Decode residual attribution skipped: capture matched decode-only timings first.")
+        return
     ok = {p: t for p, t in results.items() if t}
     if 1 not in ok:
         print("\nNo TP=1 point, so no speedup. Re-run with 1 in --tp, or pass "
@@ -316,8 +325,8 @@ def attribute(args, model, results):
         print(f"\nImplied lambda spans {min(lams) * 1e6:.2f} to {max(lams) * 1e6:.2f} us "
               f"({spread * 100:.0f}% spread).")
         if spread < 0.25:
-            print("One constant explains the whole curve. The shortfall is fixed")
-            print("per-collective latency and nothing size-dependent is happening.")
+            print("One constant approximates this curve, but does not identify its cause.")
+            print("Use matched profiles to distinguish collective and non-collective costs.")
         else:
             print("One constant does NOT explain the curve. Work down this list:")
             for line in [
@@ -376,8 +385,9 @@ def main() -> int:
     g = ap.add_argument_group("machine model - change these for your hardware")
     g.add_argument("--hbm-tb-s", type=float, default=3.35,
                    help="HBM bandwidth in TB/s; H100 SXM = 3.35 (default: 3.35)")
-    g.add_argument("--nvlink-gb-s", type=float, default=900.0,
-                   help="per-GPU interconnect bandwidth in GB/s; H100 NVLink4 = 900")
+    g.add_argument("--nvlink-gb-s", type=float, default=450.0,
+                   help="one-direction per-GPU interconnect GB/s; H100 NVLink4 is "
+                        "900 aggregate bidirectional, 450 one direction; prefer measured bandwidth")
     g.add_argument("--dtype-bytes", type=int, default=2,
                    help="bytes per activation element (default: 2 for bf16)")
     g.add_argument("--streamed-gb", type=float, default=None,
@@ -404,6 +414,11 @@ def main() -> int:
                         "harness verbatim, e.g. --extra-engine-args --enforce-eager")
 
     args = ap.parse_args()
+    if (any(p < 1 for p in args.tp) or args.batch_size < 1 or args.input_len < 1
+            or args.output_len < 2 or args.hbm_tb_s <= 0 or args.nvlink_gb_s <= 0
+            or args.dtype_bytes < 1 or any(x < 0 for x in args.lambda_us)
+            or (args.streamed_gb is not None and args.streamed_gb <= 0)):
+        ap.error("positive sizes/bandwidth, output-len >= 2 and nonnegative latency required")
     shape = dict(PRESETS[args.model_preset])
     if args.streamed_gb is not None:
         shape["streamed_gb"] = args.streamed_gb

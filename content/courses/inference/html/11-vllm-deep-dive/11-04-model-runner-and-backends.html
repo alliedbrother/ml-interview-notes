@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GPUModelRunner, the input batch, the attention backend — The Inference Engineering Book</title>
+<title>GPUModelRunner, the input batch, the attention backend — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 11 · vLLM deep dive · 11-04</div>
 <h1>GPUModelRunner, the input batch, the attention backend</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/worker/gpu_model_runner.py</code></li><li><code>vllm/v1/worker/gpu/model_runner.py</code></li><li><code>vllm/v1/worker/gpu/README.md</code></li><li><code>vllm/v1/worker/gpu_input_batch.py</code></li><li><code>vllm/v1/attention/backend.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/worker/gpu_model_runner.py</code></li><li><code>vllm/v1/worker/gpu/model_runner.py</code></li><li><code>vllm/v1/worker/gpu/README.md</code></li><li><code>vllm/v1/worker/gpu_input_batch.py</code></li><li><code>vllm/v1/attention/backend.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">You set <code>--speculative-config '{"rejection_sample_method": "block", &hellip;}'</code>, restart, and nothing changes. No warning, no error, no acceptance-rate shift. The reason is that vLLM at <code>a556f3f</code> ships <em>two</em> GPU model runners, the flag is implemented in only one of them, and nothing in the log tells you which one you are running. This chapter is a guided read of both.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is what the tree looks like:</p>
@@ -654,7 +654,7 @@ This directory contains the new model runner which is under active development.
 Ping [Woosuk Kwon](https://github.com/WoosukKwon) for any changes.</code></pre>
 </div>
 
-<p>That README is misleading, and the mismatch is the single most useful thing this chapter can tell you. The selection policy in <code>vllm/config/vllm.py</code> defaults to the "experimental" runner for <strong>every dense model</strong>, which includes Llama-3-8B — this book's running example — and every Llama, Qwen-dense, Mistral, and Gemma checkpoint you are likely to be serving. The 8,008-line file is the <em>fallback</em>, reached by MoE architectures not on an opt-in list, by hybrid and attention-free models, and by any configuration that trips one of the V2 feature gates.</p>
+<p>That README is misleading, and the mismatch is the single most useful thing this chapter can tell you. The selection policy in <code>vllm/config/vllm.py</code> defaults to the "experimental" runner for <strong>eligible dense configurations after all guards</strong>, including the reference Llama-3-8B setup. A family name alone does not certify eligibility. The 8,008-line file is the <em>fallback</em>, reached by MoE architectures not on an opt-in list, by hybrid and attention-free models, and by any configuration that trips one of the V2 feature gates.</p>
 
 <p>And the log tells you nothing. There is no line that says which runner was constructed. There are only two <em>negative</em> warnings, emitted when V2 was wanted and refused. Silence means V2 — or means the model was never eligible in the first place. You cannot distinguish those two silences from the log.</p>
 
@@ -695,7 +695,7 @@ flowchart TD
 <p>The two runners differ in <em>where</em> each stage runs. V1 computes stages 2 and 3 largely in NumPy on the CPU, into pinned buffers it then copies to the GPU. V2 computes them in Triton kernels on the GPU, reading persistent GPU-resident state. That single choice cascades into almost every other difference between them.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: two axes, and a slot for every token</h2></div><div class="sec__body"><p>Flatten a ragged batch and you lose two independent pieces of information, and you need both back.</p>
 
-<p><strong>The query axis</strong> — how many tokens of the flat buffer belong to each request. This is <code>query_start_loc</code>, an exclusive-prefix-sum of shape <code>[num_reqs + 1]</code>. Request $i$ owns flat positions <code>query_start_loc[i]</code> through <code>query_start_loc[i+1]</code>.</p>
+<p><strong>The query axis</strong> — how many tokens of the flat buffer belong to each request. This is <code>query_start_loc</code>, an exclusive-prefix-sum of shape <code>[num_reqs + 1]</code>. Request $i$ owns flat positions the half-open interval <code>[query_start_loc[i], query_start_loc[i+1])</code>.</p>
 
 <p><strong>The key axis</strong> — how many keys each request's queries must attend over. This is <code>seq_lens</code>, shape <code>[num_reqs]</code>, equal to <code>num_computed_tokens + num_scheduled_tokens</code>. It is <em>not</em> derivable from <code>query_start_loc</code>: a decoding request contributes one query but attends over two thousand keys.</p>
 
@@ -897,7 +897,7 @@ flowchart TD
 
 <p>The Triton kernel body at <code>vllm/v1/worker/block_table.py:L412-L476</code> is the whole of paged attention's addressing in twenty lines. Strip context parallelism (set <code>TOTAL_CP_WORLD_SIZE = 1</code>) and it reduces to: <code>block_indices = pos // block_size</code>; <code>block_numbers = block_table[req, block_indices]</code>; <code>slot_ids = block_numbers * block_size + pos % block_size</code>. Every token gets one <code>int64</code> naming the physical row of the flat KV cache tensor that its K and V will be written into.</p>
 
-<p>Two details matter. First, the last thread block pads the tail of the buffer with <code>PAD_ID</code> up to <code>max_num_tokens</code>, so a CUDA graph replaying at a larger padded shape writes garbage into a reserved slot instead of into a live request's cache. Second, <code>BLOCKS_PER_KV_BLOCK</code> is where <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>'s <code>kernel_block_size</code> subdivision lands: if the allocator hands out 32-token blocks and the kernel wants 16, <code>BlockTable.__init__</code> at <code>vllm/v1/worker/block_table.py:L89-L110</code> sets <code>blocks_per_kv_block = 2</code> and every allocator block becomes two kernel blocks.</p>
+<p>Two details matter. First, the last thread block pads the tail of the buffer with <code>PAD_ID</code> up to <code>max_num_tokens</code>, so a CUDA graph replaying at a larger padded shape marks padded entries with a negative no-write sentinel; the consuming cache kernel must mask them rather than index a live slot. Second, <code>BLOCKS_PER_KV_BLOCK</code> is where <a href="../02-memory-and-kv-cache/02-02-pagedattention.html">§2.2</a>'s <code>kernel_block_size</code> subdivision lands: if the allocator hands out 32-token blocks and the kernel wants 16, <code>BlockTable.__init__</code> at <code>vllm/v1/worker/block_table.py:L89-L110</code> sets <code>blocks_per_kv_block = 2</code> and every allocator block becomes two kernel blocks.</p>
 
 <h3>Worked arithmetic: batch of 4, Llama-3-8B, block_size 16</h3>
 
@@ -1398,7 +1398,7 @@ flowchart TD
         <tr><td>Redundant mirror</td><td><code>CachedRequestState</code> per request</td><td>none</td></tr>
         <tr><td>Async safety</td><td>barrier around <code>synchronize_input_prep()</code></td><td>race removed by copy-on-write pinning</td></tr>
         <tr><td>Full-graph launch</td><td>implicit, via forward context</td><td>explicit <code>run_fullgraph(desc)</code></td></tr>
-        <tr><td>Feature coverage</td><td>complete</td><td>gated; see the unsupported list</td></tr>
+        <tr><td>Feature coverage</td><td>legacy-specific; not a superset of V2</td><td>gated; see the unsupported list</td></tr>
         <tr><td>Failure mode</td><td>known bugs, known workarounds</td><td>startup raises, or silent config no-ops</td></tr>
       </tbody>
     </table>
@@ -1491,11 +1491,11 @@ flowchart TD
 
 <h3>Silent config no-ops</h3>
 
-<p>The <code>block</code> rejection-sampling case above is the archetype: a config field validated by neither runner, implemented by one. The general rule at this SHA is that <em>V2-only</em> features usually raise or warn (the pooling runner, the config gates), while <em>V1-path gaps in V2-era config fields</em> can be silent. When a speculative or sampling flag appears to do nothing, grep the field name across <code>vllm/</code> and check whether the hits are confined to <code>vllm/v1/worker/gpu/</code>.</p>
+<p>The block-verification example needs end-to-end validation and selection evidence. A field absent from a selected sampler is a useful diagnostic lead; it may also be rejected earlier. Grep the field across configuration and both runners, then record the resolved class and observed behavior. Do not infer that every V1-path feature gap is a silent no-op.</p>
 
 <h3>Padding is not optional</h3>
 
-<p>The failures that are hardest to diagnose come from stale padded rows. Three places in the step explicitly neutralise padding, and all three are load-bearing under full CUDA graphs: <code>query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])</code> (V1 L2135-L2137) so the varlen kernel sees a non-decreasing array; <code>seq_lens[num_reqs:].fill_(0)</code> (V1 L2255) so no padded row claims a length; and the slot-mapping kernel's <code>PAD_ID</code> tail fill (<code>block_table.py:L431-L440</code>) so padded tokens write to a reserved slot. V1 additionally re-fills with <code>-1</code> in <code>_get_slot_mappings</code> (L4250-L4252) with the comment "Needed for <code>reshape_and_cache</code> in full cuda graph mode." Symptom of getting this wrong: correct output at eager, garbage output only at certain batch sizes, only with <code>cudagraph_mode=FULL</code>.</p>
+<p>The failures that are hardest to diagnose come from stale padded rows. Three places in the step explicitly neutralise padding, and all three are load-bearing under full CUDA graphs: <code>query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])</code> (V1 L2135-L2137) so the varlen kernel sees a non-decreasing array; <code>seq_lens[num_reqs:].fill_(0)</code> (V1 L2255) so no padded row claims a length; and the slot-mapping kernel's <code>PAD_ID</code> tail fill (<code>block_table.py:L431-L440</code>) so consuming cache kernels can skip writes for negative sentinel entries. V1 additionally re-fills with <code>-1</code> in <code>_get_slot_mappings</code> (L4250-L4252) with the comment "Needed for <code>reshape_and_cache</code> in full cuda graph mode." Symptom of getting this wrong: correct output at eager, garbage output only at certain batch sizes, only with <code>cudagraph_mode=FULL</code>.</p>
 
 <h3>Two runners, one <code>InputBatch</code> name</h3>
 
@@ -1528,6 +1528,27 @@ print(len(A)); print(sorted(A))
 <p>Then read one method in each runner side by side. The most instructive pair is V1's <code>_prepare_inputs</code> (<code>gpu_model_runner.py:L2019-L2354</code>, 336 lines of NumPy) against V2's <code>prepare_inputs</code> (<code>gpu/model_runner.py:L1110-L1310</code>, 201 lines that mostly launch kernels defined in <code>gpu/input_batch.py:L254-L714</code>). Both compute the same four tensors.</p>
 
 <p>If you have a GPU, the measurement that separates them is CPU-side step time at high batch and small model — the regime where Python input prep, not the forward, is the bottleneck. At batch 1 on H100 the Llama-3-8B decode floor is 4.48 ms (see <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">§0.4</a>), so any input-prep difference is buried. Scale <code>--max-num-seqs</code> up and profile with <code>--enable-layerwise-nvtx-tracing</code>: the NVTX ranges <code>gpu_model_runner: preprocess</code>, <code>: forward</code>, <code>: postprocess</code> and <code>: sample</code> are already emitted by V1's <code>execute_model</code>. I have not run this; treat it as the experiment, not a result.</p></div></section>
+<section class="sec" id="ragged-layout-oracle"><div class="sec__h"><h2 class="sec__t">Independent ragged-layout check</h2></div><div class="sec__body"><p>This CPU oracle includes an empty row, mixed query lengths and padded slots. It checks addressing only; it does not certify any CUDA cache kernel. A negative padding sentinel is filtered <em>before</em> indexing, because NumPy/PyTorch would otherwise interpret -1 as the last element.</p><pre class="code-block"><code>import numpy as np
+query_lengths = np.array([2, 0, 1, 3])
+prefix_lengths = np.array([5, 0, 12, 1])
+starts = np.r_[0, np.cumsum(query_lengths)]
+table = np.array([[2, 3], [4, 5], [6, 7], [8, 9]])
+rows = np.repeat(np.arange(4), query_lengths)
+positions = np.concatenate([
+    np.arange(p, p + n)
+    for p, n in zip(prefix_lengths, query_lengths)
+])
+slots = table[rows, positions // 8] * 8 + positions % 8
+np.testing.assert_array_equal(starts, [0, 2, 2, 3, 6])
+np.testing.assert_array_equal(slots, [21, 22, 60, 65, 66, 67])
+np.testing.assert_array_equal(prefix_lengths + query_lengths, [7, 0, 13, 4])
+padded_slots = np.r_[slots, -1, -1]
+valid = padded_slots &gt;= 0
+cache = np.full(80, -99)
+cache[padded_slots[valid]] = np.arange(8)[valid]
+assert cache[-1] == -99
+assert np.count_nonzero(cache != -99) == 6
+</code></pre><p>After removing or permuting requests, recompute the row map and move every request-associated state consistently. A correct prefix sum cannot compensate for penalties or RNG state attached to the wrong row.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li>Read <code>vllm/config/vllm.py:L648-L700</code> and <code>L725-L743</code>. For each of these, say which runner is selected with no env var set and why: (a) Llama-3-70B, (b) Mixtral-8x7B, (c) DeepSeek-V3, (d) a Jamba hybrid, (e) Llama-3-8B with <code>--speculative-config '{"method":"ngram"}'</code>.
     <details class="fold"><summary>Answer</summary><div class="fold__body"><p>(a) V2 — dense, so <code>not is_moe</code> is true. (b) V1 — MoE and <code>MixtralForCausalLM</code> is not in <code>DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES</code> (L69-L82). (c) V2 — <code>DeepseekV2ForCausalLM</code> is on the allow-list. (d) V1 — <code>is_hybrid</code> and not on the allow-list returns False at L736-L739. (e) V1 — eligible as a dense model, but <code>_get_v2_model_runner_unsupported_features()</code> appends "ngram/ngram_gpu speculative decoding" (L2466-L2468), and L692-L697 warns and falls back.</p></div></details>
@@ -1539,14 +1560,14 @@ print(len(A)); print(sorted(A))
     <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>is_local</code> becomes identically true, <code>virtual_block_size == KV_CACHE_BLOCK_SIZE</code>, and <code>local_block_offsets == virtual_block_offsets</code>. What is left is <code>block_indices = (pos // kv_block_size) * BLOCKS_PER_KV_BLOCK + (pos % kv_block_size) // block_size</code>, <code>block_numbers = block_table[row + block_indices]</code>, <code>slot = block_numbers * block_size + (pos % kv_block_size) % block_size</code>. With <code>BLOCKS_PER_KV_BLOCK == 1</code> and <code>block_size == kv_block_size</code> that collapses to the textbook <code>block_table[pos // B] * B + pos % B</code>. With <code>BLOCKS_PER_KV_BLOCK == 2</code> each allocator block maps to two consecutive kernel-block ids.</p></div></details>
   </li>
   <li>Predict, then verify: you launch a MoE model not on the allow-list with <code>--speculative-config '{"method":"eagle","rejection_sample_method":"block", ...}'</code>. Does the engine start? Does block verification run? What, if anything, is logged?
-    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>The engine starts. <code>SpeculativeConfig.__post_init__</code> (<code>vllm/config/speculative.py:L1380-L1395</code>) validates only the <code>synthetic</code> parameters, so <code>block</code> passes. Selection lands on V1 because the architecture is MoE and off the list — and that path emits no warning, because L682-L683 returns False <em>before</em> reaching either <code>warning_once</code>. V1's rejection sampler (<code>vllm/v1/sample/rejection_sampler.py:L77-L90</code>) never reads the field. Standard rejection sampling runs; nothing is logged; the only observable is an acceptance rate that does not match the block-verification paper.</p></div></details>
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p>The shown local config and sampler branches suggest a possible unsupported legacy-path combination, but they do not certify successful startup of the complete pinned launch. Trace all validation and eligibility gates, inspect the instantiated runner, and verify the selected rejection sampler. A missing local branch supports an implementation-gap warning, not guaranteed silence or a predictable acceptance-rate difference.</p></div></details>
   </li>
   <li>Both runners zero or pad three different tensors for CUDA-graph safety. Name them and the line in each runner, then construct the specific wrong output you would see if the <code>seq_lens</code> zeroing were removed.
-    <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>query_start_loc</code> tail (V1 L2135-L2137; V2 <code>gpu/model_runner.py:L1186</code>), <code>seq_lens</code> tail (V1 L2255; V2 inside <code>_prepare_pos_seq_lens_kernel</code>, <code>gpu/input_batch.py:L342-L349</code>), slot-mapping tail (<code>block_table.py:L431-L440</code>; <code>gpu/block_table.py</code> kernel via <code>PAD_ID</code>). Without the <code>seq_lens</code> zeroing, a padded row keeps a length from an earlier, larger step; the attention kernel for that row walks the current block-table row for that slot — which now belongs to a different request or to nothing — reads freed KV, and writes a hidden-state row that is discarded. Harmless <em>unless</em> the stale length exceeds the current block-table row's valid length, at which point you read block id 0 and, in the worst case, corrupt another request's cache on the write side.</p></div></details>
+    <details class="fold"><summary>Answer</summary><div class="fold__body"><p><code>query_start_loc</code>, <code>seq_lens</code> and slot mappings each neutralize a distinct padded dimension. A stale sequence length can cause extra attention reads, reads beyond the valid block-table extent, invalid outputs or a device fault depending on kernel guards. It does not by itself redirect KV writes: corrupting another request's cache also requires a faulty write slot mapping or another write-path error. The negative vLLM PAD sentinel is a no-write contract, not SGLang's distinct reserved slot-zero convention. Inspect the consuming kernel before claiming either behavior.</p></div></details>
   </li>
 </ol></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li><strong>The default is V2 for dense models.</strong> <code>_is_default_v2_model_runner_model()</code> ends in <code>or not model_config.is_moe</code> (<code>vllm/config/vllm.py:L743</code>). The architecture allow-list at L69-L82 exists to opt ten <em>MoE</em> families in, not to gate dense ones. The 8,008-line file is the fallback path.</li>
+  <li><strong>Eligible dense configurations default to V2 after all guards.</strong> <code>_is_default_v2_model_runner_model()</code> ends in <code>or not model_config.is_moe</code> (<code>vllm/config/vllm.py:L743</code>). The architecture allow-list at L69-L82 exists to opt ten <em>MoE</em> families in, not to gate dense ones. The 8,008-line file is the fallback path.</li>
   <li><strong>There is no positive log line for the selection.</strong> Only two <code>warning_once</code> fallbacks (L685-L699), and neither fires when the model was simply ineligible. Read <code>cfg.use_v2_model_runner</code> from config; do not infer it from logs.</li>
   <li><strong>The runner's whole job is reconstructing two axes and a slot per token.</strong> <code>query_start_loc</code> (who owns which flat tokens) and <code>seq_lens</code> (how many keys each attends over) are independent, and the slot mapping is the one place where Part 2's allocator meets Part 3's kernels: <code>block_table[req, pos // B] * B + pos % B</code>.</li>
   <li><strong>V1's <code>condense()</code> is the price of coupling persistent state to model input.</strong> Because the sampler reads the persistent arrays directly, rows must be dense, so removal must move rows, so every new field is a new correctness obligation. V2 breaks the coupling with a free list plus an <code>idx_mapping</code> gather and deletes <code>CachedRequestState</code> outright.</li>
@@ -1565,7 +1586,7 @@ print(len(A)); print(sorted(A))
 </ul></div></section>
 <div class="pager"><a href="11-03-the-v1-scheduler-in-code.html"><div class="pager__k">← Previous</div><div class="pager__t">The V1 scheduler, in code</div></a><a class="pager__next" href="11-05-vllm-extension-points.html"><div class="pager__k">Next →</div><div class="pager__t">Extension points</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

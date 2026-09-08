@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mixture of Experts — The Inference Engineering Book</title>
+<title>Mixture of Experts — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 7 · Architectures that change the inference story · 07-01</div>
 <h1>Mixture of Experts</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/fused_moe/</code></li><li><code>csrc/libtorch_stable/moe/moe_align_sum_kernels.cu</code></li><li><code>python/sglang/srt/layers/moe/</code></li><li><code>python/sglang/srt/models/deepseek_v2.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/fused_moe/</code></li><li><code>csrc/libtorch_stable/moe/moe_align_sum_kernels.cu</code></li><li><code>python/sglang/srt/layers/moe/</code></li><li><code>python/sglang/srt/models/deepseek_v2.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">DeepSeek-V3 activates 37&nbsp;B of its 671&nbsp;B parameters per token. That buys you a 37&nbsp;B
 model's FLOP bill and a 671&nbsp;B model's HBM bill — but only at batch 1. By the time you are
@@ -802,10 +802,9 @@ distinct experts the <em>batch</em> touched.</p>
 
 <h3>How many experts does a batch touch?</h3>
 
-<p>Assume routing is uniform and independent across tokens — it is not (<a href="#imbalance">§9</a>),
-but the assumption errs in the direction that flatters MoE, so any conclusion drawn from it is
-conservative. An expert is missed by one token with probability $1 - k/E$ and by all $B$ tokens with
-probability $(1-k/E)^B$, so the expected number of distinct experts touched is</p>
+<p>Assume uniform routing and independent tokens. This is a reference model, not a conservative
+bound on all costs: skew may reduce distinct weights read while increasing the busiest expert's
+latency. Under this assumption an expert is missed by a token with probability 1 - k/E, giving:</p>
 
 <div class="math-display">$$E_{\text{touched}}(B) \;=\; E\left(1 - \left(1 - \frac{k}{E}\right)^{B}\right).$$</div>
 
@@ -818,9 +817,9 @@ Qwen3-30B-A3B</b>. You reach 95% of experts at $B = 94$ and $B = 46$ respectivel
 
 <div class="callout callout--note">
   <span class="callout__k">Read that again</span>
-  <p>By batch 94, a DeepSeek-V3 decode step streams 95% of every MoE layer's weights. Every
-  production serving batch is in the stream-everything regime. Sparsity buys you FLOPs; it does not
-  buy you bytes.</p>
+  <p>At batch 94 the uniform independent model touches about 95% of experts in expectation.
+  Small or correlated production batches need not stream every expert. Sparsity's byte savings
+  depend on batch occupancy, weight cache reuse and the kernel's actual reads.</p>
 </div>
 
 <h3>Arithmetic intensity versus batch</h3>
@@ -1028,7 +1027,10 @@ reading carefully:</p>
 <p>Three mechanisms, stacked:</p>
 
 <div class="cards cards--3">
-  <div class="ve-card"><span class="ve-card__k">bias correction</span><h4>Selection is biased, weighting is not</h4><p><code>e_score_correction_bias</code> is a per-expert scalar trained by a control loop rather than by gradient: overloaded experts get pushed down, starved ones up. It shifts <em>which</em> experts win the top-k, but the routing weight is gathered from <code>original_scores</code>, so the forward function is unchanged by the balancing. That is the auxiliary-loss-free strategy — balancing without a loss term fighting the language-modelling objective.</p></div>
+  <div class="ve-card"><span class="ve-card__k">bias correction</span><h4>Selection is biased, scores are not</h4><p>The correction bias changes which experts are selected. Their unadjusted
+scores are gathered for weighting, but changing the selected expert set generally changes the
+forward output and selected-score normalization. Auxiliary-loss-free balancing means no added
+balancing loss, not an unchanged forward function.</p></div>
   <div class="ve-card"><span class="ve-card__k">group limiting</span><h4>Top-4 of 8 groups, then top-8</h4><p>The 256 experts are partitioned into $n_{\text{group}} = 8$ groups of 32. Each group scores as the sum of its <em>top two</em> experts; the best $\text{topk\_group} = 4$ survive and the top-8 is taken within them. At inference this bounds each token to 4 of 8 groups — and under a group-aligned EP placement, to 4 destination ranks.</p></div>
   <div class="ve-card"><span class="ve-card__k">renormalise + scale</span><h4>Weights sum to 1, then to $s$</h4><p><code>renormalize</code> divides by the selected sum; <code>routed_scaling_factor</code> then multiplies (2.5 for V3). SGLang guards the division with an explicit epsilon in fp32, noting it "is not representable in fp16" (<code>python/sglang/srt/layers/moe/topk.py:L1352-L1361</code>).</p></div>
 </div>
@@ -1185,6 +1187,8 @@ understanding MoE kernels, because its docstring works the example:</p>
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.</code></pre>
 </div>
+<p>The upstream example uses labels 1 through 4. Executable zero-based IDs for four experts
+must be 0 through 3: subtract one from each expert ID; assignment indices are unchanged.</p>
 
 <p>SGLang carries a byte-identical docstring at
 <code>python/sglang/srt/layers/moe/moe_runner/triton_utils/moe_align_block_size.py:L60-L73</code> —
@@ -1483,24 +1487,22 @@ layouts by estimating each one's peak bytes against a memory budget
 (<code>python/sglang/srt/layers/moe/moe_runner/deep_gemm.py:L117-L152</code>, landed in
 <a href="https://github.com/sgl-project/sglang/pull/33474">SGLang #33474</a>).</p>
 
-<p>So the honest answer to "what is the capacity factor at inference?" is: <b>there isn't one.</b>
-Serving has none of training's static-shape requirement, and dropping a token would change the
-model's output for a reason that has nothing to do with the model. You get dynamic sizing instead,
-and the engineering problem migrates from accuracy to memory — an OOM you can see, rather than a
-quality regression you cannot.</p></div></section>
+<p>The cited serving paths preserve all routed token assignments rather than using
+training-style token dropping. They still need static allocations during graph capture:
+worst-case/reserved buffers, masks and padding coexist with dynamic logical row counts.
+Overflow must trigger resizing, fallback or explicit failure, not silent token loss.</p></div></section>
 <section class="sec" id="shared-experts" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Shared experts: the part that is never sparse</h2></div><div class="sec__body"><p>DeepSeek-V3 has one always-on expert per MoE layer alongside the 256 routed ones; Qwen3-30B-A3B
 has none (<code>shared_expert_intermediate_size</code> defaults to 0 and the module is skipped,
 <code>vllm/model_executor/models/qwen3_moe.py:L175-L197</code>). The argument is redundancy: without
 one, every routed expert must independently learn the general-purpose transformations all tokens
 need, spending capacity on $E$ copies of the same thing.</p>
 
-<p>The inference arithmetic makes it look cheap. DeepSeek-V3's shared expert is the same
-44.04&nbsp;MB as a routed one, so it adds $1/(k+1) = 11\%$ to expert bytes at batch 1 and
-$1/257 = 0.4\%$ at batch 512, where all 256 routed experts stream anyway. <b>A shared expert is
-nearly free at serving batch sizes</b> — a much better deal than the same parameters spent on a
-257th routed expert. It also removes a sharp edge: under expert parallelism it is the one FFN
-guaranteed resident on every rank, so a token whose eight routed experts all live elsewhere still
-has local work. Both engines <em>can</em> fuse it into the routed path rather than launching it
+<p>At batch 1, one same-size shared expert adds 1/8 = 12.5% to the eight routed experts'
+weight bytes, and accounts for 1/9 = 11.1% of their combined total. When all 256 routed experts
+are touched, it adds 1/256 and contributes 1/257 of the total. These byte fractions do not
+prove negligible latency: shared-expert compute, launches and overlap still matter.
+Placement and fusion decide whether work is local and whether a separate launch is needed.
+Both engines <em>can</em> fuse it into the routed path rather than launching it
 separately, but only one of them does so on NVIDIA by default. SGLang remaps the checkpoint tensor
 into an extra expert slot:</p>
 
@@ -1593,11 +1595,9 @@ and the accuracy side; this chapter only supplies the reason it works.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">A repository as evidence</span>
-  <p>vLLM ships 330 autotuned MoE configs (331 files in the directory, one of which is a README). There is an
-  <code>E=256,N=512</code> file for H100 (DeepSeek-V3 at TP=4) and an <code>E=256,N=256</code> for
-  H200 (TP=8), but no <code>E=256,N=2048</code> for any NVIDIA card — the TP=1 shape from the
-  benchmark table has never been tuned, because nobody has ever run a DeepSeek-V3 MoE layer
-  unsharded on one GPU. The absence of a file is a deployment fact.</p>
+  <p>The pinned config directory contains tuned files for certain TP-sharded shapes but not
+  every unsharded shape. This is evidence of shipped tuning coverage only. It does not establish
+  that nobody benchmarked or deployed an absent shape, nor that fallback tuning is impossible.</p>
 </div></div></section>
 <section class="sec" id="imbalance" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Load imbalance as a kernel problem</h2></div><div class="sec__body"><p><a href="../05-parallelism/05-03-data-and-expert-parallelism.html">§5.3</a> treats imbalance as a
 <em>placement</em> problem: which rank holds which expert, measured as balancedness, fixed by EPLB.
@@ -1608,7 +1608,10 @@ GEMM's geometry.</p>
 
 <div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">contiguous layout</span><h4>Padding, paid per expert</h4><p>Each segment rounds up to $M_{\text{blk}}$. A cold expert with 3 rows costs a full tile; a hot one with 300 costs 3 tiles at $M_{\text{blk}} = 128$. Total work is $\sum_e \lceil m_e/M_{\text{blk}}\rceil M_{\text{blk}}$, so imbalance costs at most one extra tile per expert — bounded, and dominated by the small-batch padding tax of §5.</p></div>
-  <div class="ve-card ve-card--hero"><span class="ve-card__k">masked layout</span><h4>The max sets the cost for everyone</h4><p>The masked GEMM's tensor is $[E,\, m_{\max},\, d]$ and $m_{\max}$ is one number for all experts. By default $m_{\max}$ is the whole chunk rounded to 256; with <code>SGLANG_OPT_DG_MASKED_M_CAP=1</code> set, and outside CUDA-graph capture, it is capped at $\max_e m_e$ rounded to 256 — at which point <b>the hottest expert literally determines the buffer size, the allocation, and the tile count for every other expert</b>. Either way total work is $E \cdot m_{\max}$, not $\sum_e m_e$; the cap only shrinks $m_{\max}$.</p></div>
+  <div class="ve-card ve-card--hero"><span class="ve-card__k">masked layout</span><h4>Capacity is not executed work</h4><p>The allocated tensor has shape [E, m_max, d], so its capacity scales with E*m_max.
+<a href="https://github.com/deepseek-ai/DeepGEMM#grouped-gemms-masked-layout">DeepGEMM's masked interface</a> also receives valid row counts and can skip invalid work. Do not
+equate capacity with executed MMA tiles or HBM bytes. Hot experts affect scheduling and buffer
+capacity, but actual work depends on valid counts, tile rounding and the selected kernel.</p></div>
 </div>
 
 <div class="diagram-shell">
@@ -1619,10 +1622,9 @@ GEMM's geometry.</p>
     $\text{block\_e} = 128$.</p>
   <svg viewBox="0 0 900 350" width="100%" role="img" aria-labelledby="occTitle occDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
     <title id="occTitle">Rows per expert in one grouped GEMM with a straggler expert marked</title>
-    <desc id="occDesc">Twelve bars of token rows per expert, from 32 to 256, mean 128. Seven experts
-    fall under the 128-row alignment block and are charged 128; five are charged 256. The straggler
-    at 256 rows sets m_max for the masked layout once the opt-in cap is enabled, charging all twelve
-    experts 256 rows; without the cap every expert is charged the whole chunk.</desc>
+    <desc id="occDesc">Twelve experts have between 32 and 256 valid rows. Contiguous layout
+rounds each valid count to a tile. Masked layout reserves a common row capacity, but that
+capacity is not a claim that all reserved rows execute matrix multiplication.</desc>
 
     <line x1="90" y1="260" x2="870" y2="260" stroke="currentColor" stroke-opacity="0.25" stroke-width="1"/>
     <line x1="90" y1="160" x2="870" y2="160" stroke="var(--teal)" stroke-opacity="0.65" stroke-width="1" stroke-dasharray="5 4"/>
@@ -1679,8 +1681,8 @@ GEMM's geometry.</p>
 
     <g font-size="10" fill="currentColor" fill-opacity="0.6" text-anchor="middle">
       <text x="470" y="278">12 experts of one DeepSeek-V3 layer, batch 4096</text>
-      <text x="470" y="298">real rows 1,536 &middot; contiguous layout charges 2,176 (1.42&times;) &middot; masked layout charges 12 &times; 256 = 3,072 (2.00&times;)</text>
-      <text x="470" y="316">by default the max-probe cap is off: masked charges 12 &times; 4,352 = 52,224 rows (34&times;) &mdash; the OOM the SGLang comment describes</text>
+      <text x="470" y="298">1,536 real rows; 2,176 contiguous tile rows; capped masked capacity 3,072 rows</text>
+      <text x="470" y="316">Uncapped masked capacity: 52,224 rows; allocated capacity is not executed valid-row work.</text>
     </g>
   </svg>
 </div>
@@ -1776,15 +1778,39 @@ with 64 sequences enters one MoE layer.</p>
   order — vLLM gates it on <code>VLLM_BATCH_INVARIANT</code>
   (<code>grouped_topk_router.py:L133-L134</code>), SGLang on
   <code>num_fused_shared_experts &gt; 0</code> (<code>topk.py:L1331-L1336</code>). With
-  <code>sorted=False</code> the <em>set</em> of $k$ experts is still deterministic, but the order they
-  come back in is not specified, and that order is the order the weighted expert outputs are summed
-  in. Change the batch shape and the same prompt can get a different reduction order and therefore
-  different low bits in its logits. vLLM's comment names the reason exactly — <em>"For batch
-  invariance, use sorted=True to ensure deterministic expert selection"</em>
-  (<code>grouped_topk_router.py:L133</code>) — and <code>VLLM_BATCH_INVARIANT</code> defaults to
+  <code>sorted=False</code> leaves output order unspecified. At equal scores, even selected IDs
+  need not be stable; <code>sorted=True</code> orders returned values but does not supply a general
+  stable tie-breaking contract. Different selected experts or reduction order can change logits.
+  The engine's comment motivates its batch-invariance path, but verify tied-score behavior in
+  the actual backend rather than deriving deterministic selection from this flag alone
   <code>False</code> (<code>vllm/envs.py:L91</code>). If you are chasing a batch-size-dependent
   reproducibility bug in an MoE model, this is the first place to look.</p>
 </div></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Weighted dispatch and bias-dependent output</h2></div><div class="sec__body">
+<p>Selection bias may leave the raw selected scores unchanged while changing the selected expert and therefore the output. For top-1 normalized routing the selected weight becomes one. The example also groups assignments by expert, scatters their weighted outputs back, and compares with a direct per-token reference. Empty experts and allocation capacity do not contribute outputs.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+x = np.array([[1., 2.], [3., 4.], [-1., 1.]])
+weights = np.array([np.eye(2), 2*np.eye(2), -np.eye(2)])
+ids = np.array([[0, 1], [1, 2], [0, 2]])
+routing = np.array([[0.7, 0.3], [0.4, 0.6], [0.5, 0.5]])
+direct = sum(routing[:, j, None] *
+    np.stack([x[t] @ weights[ids[t, j]].T for t in range(len(x))])
+    for j in range(2))
+grouped = np.zeros_like(x)
+for expert in range(len(weights)):
+    tokens, slots = np.where(ids == expert)
+    np.add.at(grouped, tokens,
+              routing[tokens, slots, None] * (x[tokens] @ weights[expert].T))
+np.testing.assert_allclose(grouped, direct)
+scores = np.array([0.6, 0.4])
+before = np.argmax(scores)
+after = np.argmax(scores + np.array([0., 0.3]))
+assert before != after
+assert not np.allclose(x[0] @ weights[before].T, x[0] @ weights[after].T)
+print("Grouped scatter matches direct outputs; selection bias changes the function.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Everything below runs without a GPU except the last item.</p>
 
 <div class="code-file">
@@ -1827,11 +1853,11 @@ CUTLASS on Hopper, which needs <code>flashinfer</code> installed or it falls thr
 additionally needs the external <code>deep_ep</code> package and multiple ranks, and both need
 <code>deep_gemm</code> importable. Measure
 with the standard benchmark harness at fixed input and output lengths, sweeping
-<code>--max-num-seqs</code> across the 8→128 range where the byte curve is steepest. The expected
-shape, from the Qwen3 table in §3: per-token latency should fall by about $6.5\times$ between batch 8
-and batch 128 (436&nbsp;µs to 67.6&nbsp;µs, derived), then flatten. If it keeps falling past 128 you are not bandwidth-bound and something
-else is the constraint. <a href="../10-benchmarking/10-01-workload-characterization.html">§10.1</a> owns the
-methodology.</p></div></section>
+<code>--max-num-seqs</code> and measure actual resident batch sizes. The reference byte model
+predicts amortized cost falling as occupancy grows. Once distinct weight bytes saturate,
+constant step time would mean per-token cost continues falling as 1/B, until compute or other
+work grows. A plateau in per-token cost is not implied by saturated weight traffic.
+<a href="../10-benchmarking/10-01-workload-characterization.html">§10.1</a> owns methodology.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read and answer.</b> Open
   <code>vllm/model_executor/layers/fused_moe/moe_align_block_size.py</code> and find where
@@ -1899,7 +1925,7 @@ methodology.</p></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li><b>Total parameters set capability; active parameters set FLOPs; neither sets bytes.</b> Bytes
   follow $E_{\text{touched}}(B) = E(1 - (1-k/E)^B)$, which passes half of $E$ by batch 22 for
-  DeepSeek-V3 and 95% by batch 94. Every production batch is in the stream-everything regime.</li>
+  DeepSeek-V3 and 95% by batch 94 under uniform independent routing, not every production workload.</li>
 
   <li><b>$I_{\text{MoE}}(B) = 2Bk / (b_w E_{\text{touched}}(B))$ starts exactly where a dense layer
   starts and ends up $E/k$ times flatter.</b> DeepSeek-V3's expert GEMM needs batch 9,456 to reach
@@ -1911,20 +1937,16 @@ methodology.</p></div></section>
   autotuned configs independently rediscover $M_e = Bk/E$, pinning <code>BLOCK_SIZE_M</code> at 16
   through batch 256.</li>
 
-  <li><b>Neither engine has a capacity factor and neither drops tokens.</b> Buffers are sized
-  dynamically — to the padded actual in the contiguous layout, to the measured hottest expert in the
-  masked one. The training literature's framing does not transfer; the memory pressure does, and it
-  surfaces as an OOM rather than a quality loss.</li>
+  <li><b>The cited paths preserve routed tokens.</b> Logical row counts may be dynamic while
+  captured buffers remain statically reserved. Capacity overflow must be handled explicitly;
+  buffer shape is not evidence of either token dropping or full padded compute.</li>
 
-  <li><b>A shared expert costs 11% of expert bytes at batch 1 and 0.4% at batch 512</b> — nearly
-  free at serving batch sizes, and it buys redundancy the routed experts would otherwise each have
-  to learn separately.</li>
-
-  <li><b>Imbalance is a kernel problem before it is a placement problem.</b> In the masked layout
-  total work is $E \cdot m_{\max}$, not $\sum_e m_e$; with SGLang's opt-in
-  <code>SGLANG_OPT_DG_MASKED_M_CAP</code> the hottest expert's row count is what sizes the buffer for
-  all $E$ experts, and without it the whole chunk does. Either way the straggler taxes everyone on one
-  device, with no EPLB lever available.</li>
+  <li><b>Shared-expert fractions need a denominator.</b> One expert adds 12.5% to eight routed
+  experts, or is 11.1% of the combined bytes. At full 256-expert occupancy those become
+  1/256 added and 1/257 of total, without guaranteeing negligible latency.</li>
+  <li><b>Separate allocated capacity from executed work.</b> E*m_max describes masked-buffer
+  rows, not necessarily MMA or HBM work. Inspect valid-row masks, tiling and profiler counters
+  before attributing a slowdown to padding rather than occupancy, imbalance or communication.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
   <li><a href="https://arxiv.org/abs/1701.06538">Shazeer et al., <em>Outrageously Large Neural
@@ -1964,7 +1986,7 @@ methodology.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="../06-decoding-algorithms/06-06-speculative-decoding-zoo.html"><div class="pager__k">← Previous</div><div class="pager__t">The speculative decoding zoo</div></a><a class="pager__next" href="07-02-mla-in-depth.html"><div class="pager__k">Next →</div><div class="pager__t">MLA in full detail</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1981,6 +2003,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#imbalance">Load imbalance as a kernel problem</a>
 <a href="#worked-trace">Worked trace: 64 tokens through vLLM's fused MoE</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

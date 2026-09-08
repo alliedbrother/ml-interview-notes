@@ -11,11 +11,11 @@
 | Situation | Use | Why | Module |
 |---|---|---|---|
 | Learning / small model | **MHA** | simplest, maximum expressiveness | 04 |
-| Default production choice | **GQA** (`H_kv` = 4–8) | 4–8× smaller cache, ~no quality cost | 09 |
-| Frontier scale, cache-dominated | **MLA** | ~50× smaller cache, quality ≥ MHA; hard to implement | 09 |
+| Common production candidate | **GQA** (choose `H_kv` per model) | cache ratio `H/H_kv`; evaluate quality | 09 |
+| Frontier scale, cache-dominated | **MLA** | latent cache can be much smaller; validate accuracy and kernels | 09 |
 | Long context, mostly local deps | **GQA + sliding window** | `O(T·w)` compute, `O(w)` cache | 10 |
-| Very long context, throughput-critical | **linear/SSM hybrid 3:1** | `O(T)`, fixed state — but weak exact recall | 10 |
-| Never | **MQA alone** | quality cost rarely worth it vs GQA | 09 |
+| Very long context, throughput-critical | **linear/SSM hybrid** | recurrent layers have fixed state; global layers still grow | 10 |
+| Tight cache budget | **MQA** | smallest KV head count; validate workload quality | 09 |
 
 ### 1.2 Which positional scheme?
 
@@ -43,7 +43,7 @@
 | Priority | Technique | Gain | Lossy? | Module |
 |---|---|---|---|---|
 | 1 | KV cache | ~`T`× | no | 11 |
-| 2 | FlashAttention (`is_causal=True`) | 2–4× | **no** | 11 |
+| 2 | Eligible FlashAttention with the correct mask | workload-dependent | **no function change** | 11 |
 | 3 | PagedAttention + continuous batching | 2–24× throughput | **no** | 11 |
 | 4 | Prefix caching | huge on shared prefixes | **no** | 11 |
 | 5 | INT8 weight quantization | 2× | negligible | 14 |
@@ -64,9 +64,9 @@ quality.
 | Variant | KV heads | Cache vs MHA | Compute | Quality | Used by |
 |---|---|---|---|---|---|
 | **MHA** | `H` | 1× | `O(T²)` | baseline | OLMo 2, Olmo 3 7B |
-| **MQA** | 1 | `1/H` | `O(T²)` | degrades | rare alone |
-| **GQA** | 4–8 | `1/g` | `O(T²)` | ≈ MHA | Llama, Qwen, Gemma, Mistral, gpt-oss |
-| **MLA** | latent `d_c` | ~1/57 | `O(T²)` + proj | ≥ MHA | DeepSeek, Kimi, Mistral 3 Large, GLM-5 |
+| **MQA** | 1 | `1/H` | `O(T²)` | task-dependent tradeoff | selected compact-cache models |
+| **GQA** | model-specific | `1/g` | `O(T²)` | comparable in cited ablations | Llama, Qwen, Gemma, Mistral, gpt-oss |
+| **MLA** | latent `d_c` | example ~1/57 | `O(T²)` + proj | comparable/better in cited ablations | DeepSeek, Kimi, Mistral 3 Large, GLM-5 |
 | **Sliding window** | any | `O(w)` | `O(T·w)` | ≈ (hybrid) | Gemma, gpt-oss, Olmo 3, MiMo, Trinity |
 | **Sparse (content)** | any | `O(T)` | `O(T·k)` | ≈ | DeepSeek V3.2, GLM-5 |
 | **Linear / DeltaNet** | none | `O(1)` | `O(T)` | weaker recall | Qwen3-Next, Kimi Linear |
@@ -76,9 +76,9 @@ quality.
 
 | | Mean-centered | Bias | Params | Reductions | Used by |
 |---|---|---|---|---|---|
-| **BatchNorm** | yes (across batch) | yes | `2d` | 2 | **never** in Transformers |
+| **BatchNorm** | yes (across batch) | yes | `2d` | implementation-dependent | uncommon in language decoder blocks |
 | **LayerNorm** | yes (across features) | yes | `2d` | 2 | BERT, GPT-2/3 |
-| **RMSNorm** | **no** | **no** | `d` | 1 | everything since ~2023 |
+| **RMSNorm** | **no** | **no** | `d` | 1 conceptual statistic | common modern language decoders |
 
 Placement:
 
@@ -96,25 +96,50 @@ Placement:
 |---|---|---|---|---|
 | ReLU | `max(0,x)` | 2 | `4d` | Transformer 2017 |
 | GELU | `x·Φ(x)` | 2 | `4d` | BERT, GPT-2/3 |
-| **SwiGLU** | `Swish(xW_g) ⊙ xW_u` | **3** | `~8/3·d` | everything modern |
+| **SwiGLU** | `Swish(xW_g) ⊙ xW_u` | **3** | `~8/3·d` for matched parameters | Llama, Qwen, DeepSeek |
+| Gated GELU | `GELU(xW_g) ⊙ xW_u` | 3 | model-specific | Gemma 3 |
 
 ### 2.4 The complexity table
 
 | | Training compute | Inference cache | Exact recall |
 |---|---|---|---|
 | RNN / LSTM | `O(T)` sequential | `O(1)` | no |
-| Full attention | `O(T²)` parallel | `O(T)` | **yes** |
+| Full attention | `O(T²)` parallel | `O(T)` | direct access, not guaranteed recall |
 | Sliding window | `O(T·w)` parallel | `O(w)` | within window |
 | Linear attention | `O(T)` parallel | `O(1)` | lossy |
 | SSM / Mamba | `O(T)` parallel (scan) | `O(1)` | lossy |
 
-The Transformer's whole bet: pay `O(T²)` to get parallel training and exact
-recall. Everything in modules 09–11 is an attempt to reduce that bill without
-losing the bet.
+Full attention retains direct access to all stored keys/values, not a theorem
+of perfect retrieval. These sequence-length complexities hold dimensions fixed;
+hybrids with full-attention layers still have growing caches.
 
 ---
 
 ## Part 3 — Formulas
+
+### Shapes, units and phase costs
+
+`Q:(B,H,T_q,d_k)`, `K:(B,H_kv,T_k,d_k)`, `V:(B,H_kv,T_k,d_v)` before
+grouped-head expansion. SDPA boolean `allowed[i,j]` is true when key j may
+contribute; a cached chunk after P tokens allows `j<=P+i`. An MHA key-padding
+mask reverses that boolean convention. GiB means `2**30` bytes, not `10**9`.
+Residual width, per-head width and FFN inner width are distinct quantities.
+
+Holding layer count and ordinary FFN expansion ratios fixed:
+
+| Phase | New query count | Projection/FFN work | Full-attention pair work | Cache |
+|---|---|---|---|---|
+| Initial prefill | T | `O(B*T*d**2)` | `O(B*H*T**2*d_head)` | grows to T |
+| Cached chunk | C after P cached | `O(B*C*d**2)` | `O(B*H*C*(P+C)*d_head)` | grows to P+C |
+| Single-token decode | 1 | `O(B*d**2)` | `O(B*H*T_k*d_head)` | reads prior K/V |
+
+Local layers replace T_k with the allowed window; global layers in a hybrid
+retain growing caches. GQA reduces cached heads, not query heads. Native grouped
+kernels can reuse KV; explicit expansion is a temporary-memory cost.
+
+Decision and speedup tables above are starting hypotheses, not universal
+rankings or multiplicative guarantees. Compare a fixed workload, quality target,
+hardware and serving objective before choosing architecture changes.
 
 **Scaled dot-product attention** (module 03)
 
@@ -171,7 +196,7 @@ probability `min(1, p(x)/q(x))`; on rejection resample from normalized
 | Cache saves no memory | caching post-expansion K/V | cache before `repeat_interleave` | 09, 16 |
 | MoE: most experts unused | router collapse | expert usage histogram; raise `α` | 12 |
 | MoE: loss plateaus high | `α` too large | lower load-balancing weight | 12 |
-| Attention slower than expected | fell off the FlashAttention path | use `is_causal=True`, not a dense mask | 11 |
+| Attention slower than expected | backend fallback is one hypothesis | inspect dispatch without changing mask semantics | 11 |
 | OOM at long context | KV cache | GQA/MLA, sliding window, quantize cache | 09, 10, 14 |
 | Poor length extrapolation | RoPE at unseen angles | YaRN, partial RoPE, or NoPE layers | 05 |
 | Quantized model much worse | activation outliers | per-group scales; AWQ/GPTQ | 14 |
@@ -190,14 +215,15 @@ to dump probability mass. Evicting them breaks the model. *(10)*
 identified as salient from activation magnitudes before rounding. *(14)*
 
 **Autoregressive** — each output conditioned on previously generated outputs.
-Transformer decoders are autoregressive at inference, non-autoregressive at
-training (teacher forcing). *(08)*
+Transformer decoders fit the same autoregressive factorization with parallel
+teacher forcing and sequential conditional sampling at inference. *(08)*
 
 **BF16** — brain float 16. Same 8-bit exponent as FP32, fewer mantissa bits. The
 training default; needs no loss scaling. *(13)*
 
 **BPE** — Byte Pair Encoding. Builds a subword vocabulary by iteratively merging
-the most frequent adjacent pair. Bottoms out at bytes, so no OOV. *(02)*
+the most frequent adjacent pair. No-OOV needs a complete byte alphabet or
+fallback; character BPE alone does not ensure it. *(02)*
 
 **Capacity factor** — multiplier on each MoE expert's token buffer (1.25–2.0).
 Overflow tokens are dropped through the residual. *(12)*
@@ -212,7 +238,7 @@ equally, ~20 tokens/parameter. Optimises *training* compute only. *(13)*
 bottleneck motivated attention. *(01)*
 
 **Continuous batching** — schedules per decode step, freeing a slot the instant a
-sequence finishes. Depends on PagedAttention. *(11, 14)*
+sequence finishes. Independent of, but complemented by, paging. *(11, 14)*
 
 **Contextual embedding** — a token representation that depends on the whole
 sequence. What self-attention produces. *(02, 03)*
@@ -238,7 +264,8 @@ What the causal mask prevents. *(08)*
 **Expert** — one FFN inside an MoE layer. *(12)*
 
 **FlashAttention** — tiled, fused attention keeping tiles in SRAM with an online
-softmax. Memory `O(T²)→O(T)`, 2–4× faster, and **exact**. *(11)*
+softmax. Avoids quadratic stored scores; speed is workload-dependent and real-
+number attention is unchanged, with floating-point differences. *(11)*
 
 **FlashDecoding** — parallelises over the KV dimension for single-token decode. *(11)*
 
@@ -253,18 +280,20 @@ not-yet-quantized weights using Hessian information. *(14)*
 default. *(09)*
 
 **Gradient checkpointing** — store activations at block boundaries and recompute
-the rest in backward. ~33% more compute for `O(sqrt(L))` memory. *(13)*
+the rest in backward. Per-block checkpoints retain `O(L)` boundaries;
+appropriately segmented chains can achieve `O(sqrt(L))` storage. *(13)*
 
 **Head** — one independent attention computation with its own Q/K/V projections. *(04)*
 
 **KV cache** — stored K/V from previous positions. Makes decode `O(1)` in
 projection work; its size becomes the binding constraint. *(09, 11)*
 
-**LayerNorm** — normalizes across features within each token. Replaced BatchNorm
-because padding zeros poison per-column statistics. *(06)*
+**LayerNorm** — normalizes across features within each token, avoiding other
+tokens' statistics. Attention and loss padding masks are still needed. *(06)*
 
-**Linear attention** — computes `φ(Q)(φ(K)ᵀV)` instead of `softmax(QKᵀ)V`. `O(T)`
-with a fixed state, at the cost of lossy recall. *(10)*
+**Linear attention** — normalized kernel attention has numerator
+`φ(q_i)^T S_i` and denominator `φ(q_i)^T z_i`. Prefix states give `O(T)` work
+at fixed feature dimensions. Sum states and DeltaNet are distinct. *(10)*
 
 **Load-balancing loss** — `α·N·Σ f_i·P_i`. Prevents MoE router collapse by
 coupling non-differentiable usage to differentiable probability. *(12)*
@@ -272,7 +301,8 @@ coupling non-differentiable usage to differentiable probability. *(12)*
 **MHA** — Multi-Head Attention. `H` heads each with own K/V. *(04)*
 
 **MLA** — Multi-Head Latent Attention. Compresses K/V into a low-rank latent
-(~512 dims), cached instead of full K/V. ~57× smaller. *(09)*
+(~512 dims in the example), plus a positional branch. The example's ~57× ratio
+depends on its comparison widths. *(09)*
 
 **MoE** — Mixture of Experts. Replaces one FFN with `N`, routing each token to `k`.
 Total parameters grow; active parameters do not. *(12)*
@@ -280,7 +310,7 @@ Total parameters grow; active parameters do not. *(12)*
 **MQA** — Multi-Query Attention. All query heads share one K/V pair. *(09)*
 
 **MTP** — Multi-Token Prediction. Extra heads predicting `t+1..t+k`. Improves
-training; the heads become a free speculative-decoding draft model. *(13, 14)*
+training in tested recipes; reused draft modules still have compute cost. *(13, 14)*
 
 **NoPE** — No Positional Embedding. Relies on the causal mask alone. Used in
 *some* layers (SmolLM3 1-in-4, Kimi Linear global layers). *(05)*
@@ -297,8 +327,8 @@ Gemma 4 25%. Better long-context extrapolation. *(05)*
 **Pre-norm / post-norm** — normalization before or after the sublayer, relative to
 the residual. Pre-norm is the default. *(06)*
 
-**Prefill / decode** — prompt processing (compute-bound) vs token-by-token
-generation (memory-bandwidth-bound). *(11)*
+**Prefill / decode** — prompt processing versus incremental generation; often
+compute-bound versus bandwidth-bound respectively, depending on workload. *(11)*
 
 **QK-Norm** — RMSNorm on Q and K before RoPE. Bounds score magnitude beyond what
 `sqrt(d_k)` handles. *(06)*
@@ -310,7 +340,7 @@ lets the network skip an unhelpful transformation. *(06)*
 `d_model`. *(06)*
 
 **RMSNorm** — LayerNorm without mean-centering or bias. One reduction, half the
-parameters, same quality. *(06)*
+normalization parameters in standard affine forms; quality is empirical. *(06)*
 
 **RoPE** — Rotary Position Embedding. Rotates Q and K by an angle ∝ position, in
 every layer. Dot products depend only on relative offset. *(05)*
@@ -330,7 +360,8 @@ Modified rejection sampling makes it **exactly lossless**. *(14)*
 
 **SSM / Mamba** — state-space models. Fixed-size state, `O(T)`, parallel via scan. *(10)*
 
-**SwiGLU** — `Swish(xW_gate) ⊙ xW_up`, then `W_down`. Three matrices. Universal. *(07)*
+**SwiGLU** — `Swish(xW_gate) ⊙ xW_up`, then `W_down`. Three matrices; common,
+not universal (Gemma 3 uses gated GELU). *(07)*
 
 **Teacher forcing** — feeding ground-truth previous tokens during training,
 removing the sequential dependency. *(08)*
@@ -372,17 +403,17 @@ probability ≥ `p`. Adapts to model confidence. *(14)*
 ```mermaid
 flowchart TD
     A["Embeddings are STATIC — one vector per word"] --> B["Self-attention makes them CONTEXTUAL<br/>y_i = sum_j softmax(q_i . k_j / sqrt(d_k)) v_j"]
-    B --> C["One head = one perspective<br/>-&gt; MULTI-HEAD, d_head = d_model/H, free"]
+    B --> C["MULTI-HEAD: multiple attention distributions<br/>fixed width does not imply free runtime"]
     C --> D["No recurrence means no order<br/>-&gt; ROPE rotates Q,K by position"]
     D --> E["Wrap in RESIDUAL + RMSNORM, pre-norm<br/>-&gt; the block"]
-    E --> F["Add SWIGLU FFN — two thirds of parameters,<br/>nearly all the nonlinearity"]
+    E --> F["Add positionwise nonlinear FFN<br/>often gated, parameter share varies"]
     F --> G["Stack with a CAUSAL MASK<br/>-&gt; parallel training, no leakage"]
     G --> H["Cache K,V at inference<br/>-&gt; cache size becomes the bottleneck"]
     H --> I["GQA / MLA shrink the cache by a constant"]
     I --> J["Sliding window / linear attention<br/>break the O(T squared) growth"]
     J --> K["FlashAttention / PagedAttention<br/>same math, better hardware use"]
-    K --> L["MoE grows capacity without growing cost"]
-    L --> M["2026 model = this block with<br/>RMSNorm + RoPE + GQA/MLA + SwiGLU + MoE"]
+    K --> L["MoE separates total and active expert parameters<br/>routing and communication still cost work"]
+    L --> M["Modern models combine these choices<br/>with architecture-specific exceptions"]
 ```
 
 ---

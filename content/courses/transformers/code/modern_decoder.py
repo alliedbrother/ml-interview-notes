@@ -38,6 +38,29 @@ class Config:
     max_seq_len: int = 512
     norm_eps: float = 1e-6
 
+    def __post_init__(self):
+        for name in ("vocab_size", "d_model", "n_layers", "n_heads", "n_kv_heads",
+                     "d_head", "d_ff", "d_expert", "max_seq_len"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.n_heads % self.n_kv_heads or self.d_head % 2:
+            raise ValueError("query heads must divide into KV groups; RoPE head width must be even")
+        if not 0 <= self.first_k_dense <= self.n_layers:
+            raise ValueError("first_k_dense must lie between zero and n_layers")
+        for name in ("n_experts", "n_experts_active", "n_shared_experts", "first_k_dense"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an integer")
+        if self.n_experts < 0 or self.n_shared_experts < 0:
+            raise ValueError("expert counts cannot be negative")
+        if self.n_experts and not 1 <= self.n_experts_active <= self.n_experts:
+            raise ValueError("active routed experts must lie between one and n_experts")
+        if not math.isfinite(self.rope_theta) or self.rope_theta <= 0:
+            raise ValueError("rope_theta must be finite and positive")
+        if not math.isfinite(self.norm_eps) or self.norm_eps <= 0:
+            raise ValueError("norm_eps must be finite and positive")
+
 
 # ---------------------------------------------------------------- module 06
 
@@ -87,9 +110,14 @@ class KVCache:
         self.v = None
 
     def update(self, k, v):
+        if k.ndim != 4 or k.shape != v.shape:
+            raise ValueError("cache expects matching (batch, heads, tokens, width) tensors")
         if self.k is None:
             self.k, self.v = k, v
         else:
+            if (k.shape[:2] + k.shape[3:] != self.k.shape[:2] + self.k.shape[3:]
+                    or k.device != self.k.device or k.dtype != self.k.dtype):
+                raise ValueError("cache batch, heads, width, device and dtype must match")
             self.k = torch.cat([self.k, k], dim=2)        # grow along T
             self.v = torch.cat([self.v, v], dim=2)
         return self.k, self.v
@@ -139,8 +167,11 @@ class GroupedQueryAttention(nn.Module):
         k = k.repeat_interleave(self.group_size, dim=1)
         v = v.repeat_interleave(self.group_size, dim=1)
 
-        # causal only when processing >1 query token (module 08)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))
+        # Query i is at absolute cache position past+i, not position i.
+        past = k.shape[2] - T
+        allowed = (torch.arange(k.shape[2], device=x.device)[None, :]
+                   <= past + torch.arange(T, device=x.device)[:, None])
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
         out = out.transpose(1, 2).reshape(B, T, self.H * self.d_head)
         return self.W_o(out)
 
@@ -182,8 +213,8 @@ class MoE(nn.Module):
         flat = x.reshape(-1, D)                           # (B*T, D)
 
         logits = self.gate(flat)                          # (N, n_experts)
-        topk_logits, topk_idx = logits.topk(self.top_k, dim=-1)
-        topk_w = F.softmax(topk_logits, dim=-1)           # over SELECTED only
+        # Full-softmax probabilities retain a task-loss router gradient at k=1.
+        topk_w, topk_idx = F.softmax(logits, dim=-1).topk(self.top_k, dim=-1)
 
         out = torch.zeros_like(flat)
         for e, expert in enumerate(self.experts):
@@ -201,7 +232,7 @@ class MoE(nn.Module):
 def load_balancing_loss(logits, topk_idx, n_experts, alpha=0.01):
     """Module 12: couples non-differentiable usage to differentiable prob."""
     P = F.softmax(logits, dim=-1).mean(dim=0)
-    f = F.one_hot(topk_idx, n_experts).float().sum(dim=1).mean(dim=0)
+    f = F.one_hot(topk_idx, n_experts).float().mean(dim=(0, 1))
     return alpha * n_experts * torch.sum(f * P)
 
 
@@ -216,7 +247,7 @@ class Block(nn.Module):
         self.attn  = GroupedQueryAttention(cfg)
         self.norm2 = RMSNorm(cfg.d_model, cfg.norm_eps)
 
-        self.is_moe = layer_idx >= cfg.first_k_dense      # module 12
+        self.is_moe = cfg.n_experts > 0 and layer_idx >= cfg.first_k_dense
         self.ffn = MoE(cfg) if self.is_moe else SwiGLU(cfg.d_model, cfg.d_ff)
 
     def forward(self, x, cos, sin, cache=None):
@@ -259,7 +290,14 @@ class ModernDecoder(nn.Module):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
     def forward(self, ids, caches=None, pos_offset=0):
+        if ids.ndim != 2 or ids.shape[0] == 0 or ids.shape[1] == 0:
+            raise ValueError("ids must be a nonempty, unpadded (batch, tokens) tensor")
         B, T = ids.shape
+        if not isinstance(pos_offset, int) or pos_offset < 0 or pos_offset + T > self.cfg.max_seq_len:
+            raise ValueError("positions exceed the configured context window")
+        if caches is not None:
+            if len(caches) != len(self.blocks) or any(c.length != pos_offset for c in caches):
+                raise ValueError("one cache per layer is required, each matching pos_offset")
         x = self.embed(ids)                               # (B, T, d_model)
 
         cos = self.cos[pos_offset:pos_offset + T]
@@ -276,8 +314,20 @@ class ModernDecoder(nn.Module):
         return self.lm_head(x), all_router_logits
 
     @torch.no_grad()
-    def generate(self, prompt_ids, max_new_tokens=20, temperature=0.8):
-        """Module 08 + 11: prefill once, then cached single-token decode."""
+    def generate(self, prompt_ids, max_new_tokens=20, temperature=0.8, eos_token_id=None):
+        """Unpadded, equal-length prompts; finished batch rows repeat EOS."""
+        if not isinstance(max_new_tokens, int) or isinstance(max_new_tokens, bool) or max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be a nonnegative integer")
+        if not math.isfinite(temperature) or temperature < 0:
+            raise ValueError("temperature must be finite and nonnegative")
+        if prompt_ids.ndim != 2 or min(prompt_ids.shape) <= 0:
+            raise ValueError("a nonempty (batch, tokens) prompt is required")
+        if prompt_ids.shape[1] + max_new_tokens > self.cfg.max_seq_len:
+            raise ValueError("prompt plus requested output exceeds max_seq_len")
+        if eos_token_id is not None and not 0 <= eos_token_id < self.cfg.vocab_size:
+            raise ValueError("eos_token_id must be a valid vocabulary ID")
+        if max_new_tokens == 0:
+            return prompt_ids.clone()
         self.eval()
         caches = [KVCache() for _ in self.blocks]
 
@@ -286,15 +336,17 @@ class ModernDecoder(nn.Module):
         pos = prompt_ids.shape[1]
         out = [prompt_ids]
 
-        next_id = self._sample(logits[:, -1], temperature)  # ONLY last position
-        out.append(next_id)
-
-        # --- DECODE: one token at a time, reading the cache ---
-        for _ in range(max_new_tokens - 1):
+        finished = torch.zeros(prompt_ids.shape[0], 1, dtype=torch.bool, device=prompt_ids.device)
+        for step in range(max_new_tokens):
+            next_id = self._sample(logits[:, -1], temperature)
+            if eos_token_id is not None:
+                next_id = torch.where(finished, eos_token_id, next_id)
+                finished |= next_id == eos_token_id
+            out.append(next_id)
+            if finished.all() or step == max_new_tokens - 1:
+                break
             logits, _ = self.forward(next_id, caches, pos_offset=pos)
             pos += 1
-            next_id = self._sample(logits[:, -1], temperature)
-            out.append(next_id)
 
         return torch.cat(out, dim=1)
 
@@ -302,7 +354,8 @@ class ModernDecoder(nn.Module):
     def _sample(logits, temperature):
         if temperature == 0:
             return logits.argmax(-1, keepdim=True)
-        probs = F.softmax(logits / temperature, dim=-1)
+        logits = logits.double()
+        probs = F.softmax((logits - logits.amax(-1, keepdim=True)) / temperature, dim=-1)
         return torch.multinomial(probs, 1)
 
 
@@ -318,9 +371,9 @@ def _report(cfg, model):
         p.numel() for n, p in model.named_parameters()
         if ".ffn.shared." in n
     )
-    n_moe_layers = cfg.n_layers - cfg.first_k_dense
+    n_moe_layers = sum(block.is_moe for block in model.blocks)
     per_layer_experts = expert_params / max(n_moe_layers, 1)
-    active_experts = per_layer_experts * cfg.n_experts_active / cfg.n_experts
+    active_experts = per_layer_experts * cfg.n_experts_active / max(cfg.n_experts, 1)
     active = total - expert_params + active_experts * n_moe_layers
 
     print(f"  total parameters   : {total:,}")
@@ -331,6 +384,7 @@ def _report(cfg, model):
 
 if __name__ == "__main__":
     torch.manual_seed(0)
+    torch.set_num_threads(1)
     cfg = Config()
     model = ModernDecoder(cfg)
 
@@ -347,15 +401,17 @@ if __name__ == "__main__":
     assert len(router_logits) == cfg.n_layers - cfg.first_k_dense
 
     print("\n=== training step ===")
-    targets = torch.randint(0, cfg.vocab_size, (2, 16))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    optimizer.zero_grad(set_to_none=True)
     ce = F.cross_entropy(logits[:, :-1].reshape(-1, cfg.vocab_size),
-                         targets[:, 1:].reshape(-1))
+                         ids[:, 1:].reshape(-1))
     aux = sum(
         load_balancing_loss(rl, rl.topk(cfg.n_experts_active, -1).indices, cfg.n_experts)
         for rl in router_logits
     )
     (ce + aux).backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
     print(f"  cross-entropy {ce.item():.4f}  (expected approx ln(V) = "
           f"{math.log(cfg.vocab_size):.4f} at init)")
     print(f"  aux loss {aux.item():.4f}   grad-norm {grad_norm:.3f}")

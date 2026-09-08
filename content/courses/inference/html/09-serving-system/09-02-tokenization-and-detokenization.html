@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tokenization and incremental detokenization — The Inference Engineering Book</title>
+<title>Tokenization and incremental detokenization — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 9 · The serving system around the engine · 09-02</div>
 <h1>Tokenization and incremental detokenization</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/detokenizer.py</code></li><li><code>vllm/tokenizers/detokenizer_utils.py</code></li><li><code>vllm/tokenizers/hf.py</code></li><li><code>python/sglang/srt/managers/detokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/async_dynamic_batch_tokenizer.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/engine/detokenizer.py</code></li><li><code>vllm/tokenizers/detokenizer_utils.py</code></li><li><code>vllm/tokenizers/hf.py</code></li><li><code>python/sglang/srt/managers/detokenizer_manager.py</code></li><li><code>python/sglang/srt/managers/async_dynamic_batch_tokenizer.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">The model emitted a perfectly good chilli-pepper emoji. Your user saw <code>&#65533;&#65533;</code>. Nothing in the engine logged an error, the token ids in the trace are correct, and the same request replayed with <code>stream=false</code> returns the right string. This chapter is about the gap between those two facts, and it is almost entirely a host-side problem &mdash; the GPU never sees a character.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Three bug reports, all from the same root cause.</p>
@@ -793,7 +793,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5</code></pre>
   </svg>
 </div>
 
-<p>Note what the hold costs: the window from $p$ grows while the latch is held. In practice it holds for at most three steps (the longest UTF-8 sequence is four bytes). A model emitting a genuinely invalid byte would grow it forever &mdash; which is why the guard is <code>new_text.endswith</code> and not <code>"&#65533;" in new_text</code>. A replacement character in the <em>middle</em> is treated as a real invalid id and emitted; only a trailing one is treated as incomplete. That distinction is the comment on lines 261&ndash;264, and it is load-bearing.</p>
+<p>Note what the hold costs: the window from $p$ grows while the latch is held. With one valid UTF-8 byte per token and no intervening empty or special tokens, an incomplete character needs at most three further bytes. This is not a universal bound in decode steps. A guard rejecting any replacement character anywhere could hold an invalid prefix indefinitely; the displayed guard is <code>new_text.endswith</code> and not <code>"&#65533;" in new_text</code>. A replacement character in the <em>middle</em> is treated as a real invalid id and emitted; only a trailing one is treated as incomplete. That distinction is the comment on lines 261&ndash;264, and it is load-bearing.</p>
 
 <p>The initial offsets come from the prompt, and only its tail is converted &mdash; you do not stringify 8,000 prompt tokens to stream the 8,001st:</p>
 
@@ -813,7 +813,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5</code></pre>
 </div>
 
 <p>Seven tokens of prompt tail, five of them prefix context. For Llama-3-8B with its <b>128,256</b>-entry vocabulary that is seven <code>convert_ids_to_tokens</code> lookups per request at admission, not $n$.</p></div></section>
-<section class="sec" id="partial-utf8" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The partial-UTF-8 decision: replace, or buffer</h2></div><div class="sec__body"><p>A UTF-8 decoder handed <code>F0 9F</code> has two honest options. <b>Replace</b>: substitute U+FFFD and move on, which is what <code>bytes.decode("utf-8", "replace")</code> does and what every naive per-token decode does implicitly. <b>Buffer</b>: hold the incomplete bytes and wait, as Python's <code>codecs.getincrementaldecoder("utf-8")</code> does. For streaming only buffering is defensible, because replacement is <em>lossy and irreversible</em> &mdash; once U+FFFD is on the wire, the bytes that would have completed the character have nowhere to go. Holding costs latency on at most three decode steps; replacing costs correctness forever.</p>
+<section class="sec" id="partial-utf8" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">The partial-UTF-8 decision: replace, or buffer</h2></div><div class="sec__body"><p>A UTF-8 decoder handed <code>F0 9F</code> has two honest options. <b>Replace</b>: substitute U+FFFD and move on, which is what <code>bytes.decode("utf-8", "replace")</code> does and what every naive per-token decode does implicitly. <b>Buffer</b>: hold the incomplete bytes and wait, as Python's <code>codecs.getincrementaldecoder("utf-8")</code> does. For streaming only buffering is defensible, because replacement is <em>lossy and irreversible</em> &mdash; once U+FFFD is on the wire, the bytes that would have completed the character have nowhere to go. For one valid byte per token, completing a character needs at most three further bytes; empty, special, or invalid tokens invalidate a general three-step bound.</p>
 
 <p>Both engines buffer by refusing to advance state. vLLM's is the <code>endswith("&#65533;")</code> latch above; SGLang adds a refinement, emitting the <em>printable prefix</em> of the held text rather than nothing:</p>
 
@@ -875,7 +875,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5</code></pre>
 </code></pre>
 </div>
 
-<p>The last branch truncates at the final space, so a held chunk with no space emits nothing &mdash; the same behaviour as vLLM's latch. The CJK branches exist because Chinese has no spaces and would otherwise never flush. The comment admits this is a heuristic, and it is: a held chunk in a script with neither spaces nor CJK codepoints (Thai, Burmese, Lao) falls through to <code>rfind(" ")</code> and emits nothing until a space arrives. That is why the Burmese fixture keeps appearing in bug reports.</p></div></section>
+<p>The last branch truncates at the final space, so a held chunk with no space emits nothing &mdash; the same behaviour as vLLM's latch. The CJK branches exist because Chinese has no spaces and would otherwise never flush. The comment admits this is a heuristic, and it is: a held chunk in a script with neither spaces nor CJK codepoints (Thai, Burmese, Lao) falls through to <code>rfind(" ")</code> and may emit nothing during the incomplete-text hold. Once clean text reaches the commit branch, whitespace is not required; do not infer a full-request no-space stall from this helper alone.</p></div></section>
 <section class="sec" id="where-it-runs" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Where detokenisation runs, and why the two answers differ</h2></div><div class="sec__body"><p>Neither engine detokenises on the GPU or inside the model-forward step. Both put it downstream of a process boundary &mdash; different boundaries, different consequences.</p>
 
 <div class="diagram-shell">
@@ -1253,7 +1253,7 @@ flowchart TD
 
 <p>Three readings. (1) A slow tokenizer at batch 256 costs more host time than the GPU step costs GPU time &mdash; hence SGLang's blunt "Using a slow tokenizer. This might cause a significant slowdown" (<code>python/sglang/srt/utils/hf_transformers/tokenizer.py:L432-L435</code>). (2) Neither engine detokenises inside the step loop, so below $B^*$ the work hides behind GPU time. The failure mode is not "the step got slower" but "detokenisation stopped keeping up and the output queue grew" &mdash; rising ITL against a flat GPU utilisation graph. (3) The one piece that <em>is</em> on the critical path is SGLang's scheduler-side <code>tail_str</code>: at $B = 256$ with stop strings and streaming, up to 512 decodes &times; 10 &micro;s = 5.12 ms of scheduler Python per step, comparable to the step itself. Stop strings are not free in SGLang &mdash; though the no-stop-strings case is exactly zero.</p>
 
-<p>The mitigation follows the arithmetic. vLLM's <code>stream_interval</code> (default 1, <code>vllm/config/scheduler.py:L153-L157</code>) and SGLang's identically-named server arg (default 1, <code>python/sglang/srt/server_args.py:L1480-L1483</code>) amortise per-chunk overhead across $k$ tokens: "a larger value (e.g., 10) reduces host overhead and may increase throughput by batching multiple tokens before sending". Raising it divides emission cost by $k$ and multiplies ITL granularity by $k$ &mdash; see <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>.</p></div></section>
+<p>The mitigation follows the arithmetic. vLLM's <code>stream_interval</code> (default 1, <code>vllm/config/scheduler.py:L153-L157</code>) and SGLang's identically-named server arg (default 1, <code>python/sglang/srt/server_args.py:L1480-L1483</code>) amortise per-chunk overhead across $k$ tokens: "a larger value (e.g., 10) reduces host overhead and may increase throughput by batching multiple tokens before sending". Raising it can amortise network emission over $k$ tokens, but does not necessarily eliminate internal per-step detokenization; observed ITL granularity changes with frame formation &mdash; see <a href="../01-the-core-loop/01-02-latency-metrics-and-slos.html">&sect;1.2</a>.</p></div></section>
 <section class="sec" id="tokenizing-in" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">The way in: fast vs slow, special tokens, and tokenizing twice</h2></div><div class="sec__body"><p>Encoding is easier than decoding but has sharper edges.</p>
 
 <p><b>Fast vs slow.</b> "Fast" is the Rust <code>tokenizers</code> backend; "slow" is a pure-Python <code>PreTrainedTokenizer</code>. SGLang exposes the choice as <code>--tokenizer-mode</code> and refuses the contradictory combination:</p>
@@ -1388,7 +1388,7 @@ flowchart TD
 <p>SGLang's path has one more hop and one more tokenizer: <code>Req.update_finish_state</code> in the scheduler decodes a tail window and sets <code>finished_reason = FINISH_MATCHED_STR(matched=stop_str)</code> (<code>python/sglang/srt/managers/schedule_batch.py:L1552-L1560</code>); <code>OutputStreamer.accept</code> gathers <code>init_incremental_detokenize()</code> windows into a <code>BatchTokenIDOutput</code> (<code>python/sglang/srt/managers/scheduler_components/output_streamer.py:L412-L423</code>); the DetokenizerManager decodes and trims; the TokenizerManager formats SSE. No backwards abort &mdash; the scheduler decided.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Replacement characters only at high load</h4><p>Under spec decoding or <code>stream_interval &gt; 1</code>, several tokens land per <code>update()</code>. A custom client that decodes <code>delta.token_ids</code> itself instead of using <code>delta.text</code> has reimplemented the naive algorithm from Figure 1. Use the text the engine gives you.</p></div>
-  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Concatenated deltas &ne; final text</h4><p>Expected in two cases: the hold-back means the final chunk carries characters no earlier chunk did, and stop-string truncation retroactively shortens <code>output_text</code>. Compare against the <code>finished=True</code> output, never a running concatenation.</p></div>
+  <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Concatenated deltas &ne; final text</h4><p>Temporary withholding alone is not a reason for final mismatch. Stable deltas plus the final flush should reconstruct final output under the declared stop policy. Compare after completion and investigate any mismatch, distinguishing cumulative snapshots from deltas and documenting any revision protocol.</p></div>
   <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Latency floor scaling with stop-string length</h4><p><code>stop=["\n\nHuman:"]</code> keeps 7 characters permanently in flight. On short answers the client can see nothing until the request finishes. Shorten the stop string or set <code>include_stop_str_in_output=True</code>.</p></div>
   <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>RuntimeError: Decode status not found</h4><p>SGLang only. More than 65,536 live detokeniser states, so LRU eviction hit a streaming request. Raise <code>SGLANG_DETOKENIZER_MAX_STATES</code>, or find the leak &mdash; states are removed on finish, so an unbounded count means requests that never finished.</p></div>
   <div class="ve-card"><span class="ve-card__k">SYMPTOM</span><h4>Quality dropped after a client refactor</h4><p>Double BOS. Someone moved from <code>/v1/chat/completions</code> to applying the template client-side and posting to <code>/v1/completions</code>, where <code>add_special_tokens</code> defaults to <code>True</code>. Diff the token ids, not the text.</p></div>
@@ -1443,7 +1443,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 </code></pre>
 </div>
 
-<p>The empty-delta count in the first command is the hold latch. It should be non-zero for CJK output on a byte-fallback tokenizer and zero for pure ASCII.</p></div></section>
+<p>The empty-delta count in the first command is the hold latch. It can be nonzero when tokens split multibyte characters; complete-character tokens need no hold. Exclude empty role, terminal, and usage frames before interpreting empty content deltas.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li>Read <code>vllm/tokenizers/detokenizer_utils.py:L260-L268</code>. The guard is <code>new_text.endswith("&#65533;")</code>, not <code>"&#65533;" in new_text</code>. Construct a token sequence for which the two guards give different output, and say which output is correct.</li>
   <li>vLLM sets <code>stop_buffer_length = max(len(s) for s in self.stop) - 1</code>. Prove that this is exactly tight: exhibit a case where holding one fewer character leaks, and argue no case requires holding one more.</li>
@@ -1457,7 +1457,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
   <div class="fold__body">
   <p><b>1.</b> Any sequence where the model emits a genuinely invalid byte early and valid text after. With <code>in</code>, the latch holds forever &mdash; the mid-string U+FFFD never disappears, the window grows without bound, the request streams nothing. With <code>endswith</code>, the invalid byte is emitted as U+FFFD once and the stream continues. The source comment at L262-L264 says exactly this.</p>
   <p><b>2.</b> Leak: stop <code>"END"</code> (buffer 2), output ends <code>"...EN"</code>. Holding 1 character emits <code>"...E"</code>; if the next token completes <code>"END"</code> the <code>E</code> is already gone. Sufficiency: any unsafe unsent suffix must be a <em>proper</em> prefix of some stop string, since a full match would have been truncated in the same <code>update()</code>. The longest proper prefix has length $|s|-1$.</p>
-  <p><b>3.</b> <code>find_printable_text</code> falls through the <code>\n</code> and CJK branches (Burmese is not in <code>_is_chinese_char</code>'s ranges) to <code>text[:text.rfind(" ")+1]</code>; with no spaces <code>rfind</code> returns &minus;1 and it emits <code>""</code>. SGLang streams nothing until a space arrives. vLLM's latch also emits <code>""</code> during the hold but commits on the character's last byte, so it emits one character per three steps. On space-free scripts vLLM streams more smoothly; SGLang's heuristic buys word-boundary aesthetics at the cost of latency on scripts it does not recognise.</p>
+  <p><b>3.</b> During an incomplete-byte hold, <code>find_printable_text</code> may emit no Burmese prefix without spaces. But once <code>new_text</code> is clean, the displayed commit branch advances and emits it without requiring whitespace. Under the specified three-byte tokenization, completed characters can therefore emerge every three steps in both implementations; do not apply the partial-text helper to the clean-text branch.</p>
   <p><b>4.</b> <code>"\n\nHuman:"</code> is 8 characters but 3&ndash;4 tokens on a Llama-3-class tokenizer, and <code>_stop_match_tail_len</code> uses <code>stop_str_max_len + 1</code> &asymp; 5 tokens &asymp; 15&ndash;20 characters decoded per request per step. At batch 128 with the assumed $c=10\ \mu$s that is 1.28 ms per step in the scheduler, doubled on streaming steps by <code>check_match_stop_str_prefix</code>. Derived, not measured.</p>
   <p><b>5.</b> Stop list <code>["BB", "A"]</code>, one accepted run producing <code>"xABBy"</code>. In list order the matcher returns <code>"BB"</code> at index 2 (end 4); one token at a time would have stopped at <code>"A"</code>, index 1 (end 2). vLLM's <code>best_end</code> comparison picks <code>"A"</code>. Assert <code>stop_reason == "A"</code> and <code>text == "x"</code>: fails on a naive in-order matcher, passes on the shipped one.</p>
   </div>
@@ -1481,7 +1481,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 </ul></div></section>
 <div class="pager"><a href="09-01-openai-api-surface.html"><div class="pager__k">← Previous</div><div class="pager__t">The OpenAI-compatible API surface</div></a><a class="pager__next" href="09-03-request-lifecycle.html"><div class="pager__k">Next →</div><div class="pager__t">Streaming and the end-to-end request lifecycle</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

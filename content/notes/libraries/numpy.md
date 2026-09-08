@@ -78,8 +78,10 @@ a.T.flags        # F_CONTIGUOUS: True, C_CONTIGUOUS: False
 ```
 
 That is why `a.T` is $O(1)$ and why `a.T.reshape(-1)` is *not* — reshaping a
-non-contiguous array must materialise a copy. `np.ascontiguousarray` makes the
-copy explicit; `.ravel()` copies only if needed, `.flatten()` always copies.
+non-contiguous array may need a copy, depending on stride compatibility. For
+example, `np.arange(12)[::2].reshape(2, 3)` still shares memory. The displayed
+transpose-flatten operation copies in its default C order. `np.ascontiguousarray`
+copies only when needed; `.ravel()` may copy and `.flatten()` always copies.
 
 ### dtypes, and the memory they cost
 
@@ -104,13 +106,14 @@ X = np.asarray(data, dtype=np.float32)
 
 And `dtype=object` arrays give you none of NumPy's benefits — they store
 pointers to Python objects and every operation falls back to the interpreter.
-A pandas column of strings is exactly this, which is why string operations in
-pandas are slow.
+Some pandas string columns use object storage, but pandas 3 infers a dedicated
+string dtype and may use Arrow-backed storage. Storage and operation determine
+performance; pandas strings are not universally arrays of Python objects.
 
 **Integer overflow is silent.** NumPy does not promote to bignum:
 
 ```python
-np.array([2**62], dtype=np.int64) * 4   # negative — wrapped around, no warning
+np.array([2**62], dtype=np.int64) * 2   # [-9223372036854775808]: signed overflow
 ```
 
 ## Broadcasting
@@ -146,8 +149,9 @@ D2 = ((A[:, None, :] - B[None, :, :]) ** 2).sum(-1)     # (500, 800)
 ```
 
 **The trap in that last example**: `A[:, None, :] - B[None, :, :]` materialises a
-`(500, 800, 3)` intermediate — 9.6 MB here, but 96 GB for 50k × 50k points. The
-algebraic identity avoids it entirely:
+`(500, 800, 3)` intermediate: 9.6 MB here, but 60 GB for 50k by 50k float64
+three-dimensional points. The identity avoids the three-dimensional temporary,
+not the 20 GB quadratic output or every other temporary:
 
 $$\|a-b\|^2 = \|a\|^2 - 2a\cdot b + \|b\|^2$$
 
@@ -221,12 +225,12 @@ This single distinction causes more NumPy bugs than anything else.
 | Indexing style | Example | Returns |
 |---|---|---|
 | Basic slicing | `a[1:5, ::2]` | **view** — shares memory |
-| Integer scalar | `a[3]` | view (of the sub-array) |
+| Integer scalar | `a[3]` | sub-array view if dimensions remain; NumPy scalar for a 1-D array |
 | Boolean mask | `a[a > 0]` | **copy** |
 | Integer array (fancy) | `a[[0, 2, 4]]` | **copy** |
 | `np.ix_`, mixed advanced | `a[np.ix_(r, c)]` | copy |
 | `.reshape` on contiguous | `a.reshape(2, 6)` | view |
-| `.reshape` on non-contiguous | `a.T.reshape(-1)` | copy |
+| `.reshape` on non-contiguous | `a.T.reshape(-1)` | view or copy depending on strides; this displayed example copies |
 | `.T`, `.transpose`, `swapaxes` | `a.T` | view |
 | `.copy()` | `a.copy()` | copy, always |
 
@@ -241,8 +245,9 @@ m[0] = -1
 a                 # unchanged
 ```
 
-Use `arr.base` to ask whether something is a view (`None` means it owns its
-data), and `np.shares_memory(a, b)` to check overlap. When a function takes an
+Use `np.shares_memory(a, b)` to check overlap with the particular source array.
+`.base` can point to an intermediate copy, so it does not prove aliasing with the
+original input. When a function takes an
 array it may mutate, take a defensive `.copy()`.
 
 ### Fancy indexing patterns worth knowing
@@ -255,7 +260,9 @@ onehot = np.eye(n_classes, dtype=np.float32)[labels]         # (N, C)
 p_true = probs[np.arange(len(labels)), labels]               # (N,)
 
 # top-k indices per row, unsorted (O(n)) then sorted within the k
-idx = np.argpartition(-scores, k, axis=1)[:, :k]
+assert 0 <= k <= scores.shape[1]
+idx = (np.argpartition(-scores, k - 1, axis=1)[:, :k] if k
+       else np.empty((len(scores), 0), dtype=int))
 idx = np.take_along_axis(idx, np.argsort(-np.take_along_axis(scores, idx, 1), 1), 1)
 
 # shuffle features and labels together
@@ -296,8 +303,10 @@ probs = e / e.sum(axis=-1, keepdims=True)
 **The `ddof` mismatch** between NumPy (0) and pandas (1) silently changes your
 reported standard deviation. Be explicit if the number matters.
 
-**`NaN` propagates through every ordinary reduction.** One `NaN` in a column
-makes the mean `NaN`. Use the `nan*` family, or find them first:
+Arithmetic reductions such as `mean`, `sum`, and `max` commonly propagate NaN.
+This is not true of every reduction: `any`/`all` treat NaN as truthy, and
+arg-reductions return indices. Define a finite-value policy; `nanmean` on an
+all-NaN slice remains undefined and emits a warning. Find invalid values first:
 
 ```python
 np.isnan(X).any(0)          # which columns contain NaN
@@ -322,10 +331,11 @@ np.trace(A), np.linalg.det(A), np.linalg.slogdet(A)
 
 Three rules that come straight from numerical analysis:
 
-1. **Never form an inverse to solve a system.** `solve` is faster and
-   numerically far better conditioned than `inv(A) @ b`.
-2. **Never form $(X^\top X)^{-1}$ for least squares.** It squares the condition
-   number. Use `lstsq`.
+1. Prefer `solve` to explicitly forming an inverse for a linear solve. It avoids
+   unnecessary work and rounding operations; it does not improve the underlying
+   system's conditioning.
+2. Prefer `lstsq` to normal equations. Forming $X^TX$ squares the spectral condition
+   number for full-column-rank $X$; inversion is not what causes that squaring.
 3. **Use `slogdet` instead of `log(det(A))`.** Determinants of large matrices
    overflow or underflow; `slogdet` returns the sign and the log magnitude
    separately.
@@ -362,14 +372,15 @@ rng = np.random.default_rng(42)
 rng.random((3, 4))                 # uniform [0,1)
 rng.standard_normal((3, 4))        # N(0,1)
 rng.normal(loc=0, scale=2, size=5)
-rng.integers(0, 10, size=5)        # note: high is EXCLUSIVE, unlike old randint
+rng.integers(0, 10, size=5)        # high exclusive, also true of np.random.randint
 rng.choice(n, size=k, replace=False)
 rng.permutation(n)
 rng.shuffle(a)                     # in place
 ```
 
 Generators are independent objects, so parallel workers each get their own
-stream — `rng.spawn(n)` produces provably independent children. That is the
+stream: `rng.spawn(n)` constructs well-separated streams with extremely high
+probability, not a proof of mathematical independence. That is a useful
 correct pattern for dataloader workers, and it fixes the classic bug where every
 forked worker produces identical "random" augmentations.
 
@@ -391,7 +402,7 @@ forked worker produces identical "random" augmentations.
 # the shape of a memory bug
 N, D = 100_000, 512
 print(f"{N * D * 4 / 1e9:.1f} GB")        # 0.2 GB, fine
-print(f"{N * N * 4 / 1e12:.1f} TB")       # 40 TB — an accidental pairwise matrix
+print(f"{N * N * 4 / 1e9:.1f} GB")        # 40.0 GB: an accidental pairwise matrix
 ```
 
 **`np.memmap`** lets you work with arrays larger than RAM by mapping a file:
@@ -412,12 +423,14 @@ b = t.numpy()                # also shares (CPU tensors only)
 c = t.cpu().numpy().copy()   # explicit copy when you want independence
 ```
 
-The zero-copy bridge works because both use the buffer protocol / DLPack. It
-only applies to CPU tensors with a compatible dtype and stride layout; a CUDA
-tensor must be moved to the host first.
+`from_numpy` is a specific shared-storage bridge, distinct from the DLPack APIs.
+It requires supported CPU dtypes and strides; negative-stride arrays need a copy.
+Do not mutate through a tensor backed by a read-only array. For tensors requiring
+gradients, explicitly detach before NumPy conversion when abandoning autograd is
+intended; a CUDA tensor must also move to the host.
 
-Similarly, `df.to_numpy()` on a pandas DataFrame is zero-copy when all columns
-share a dtype and a copy otherwise, and `scipy.sparse` matrices interoperate via
+Similarly, homogeneous pandas dtypes do not guarantee zero-copy `to_numpy()`:
+block layout, extension arrays, requested dtype and CoW matter. `scipy.sparse` matrices interoperate via
 `.toarray()` — which materialises the dense form, so check the size first.
 
 ## Common bugs
@@ -435,6 +448,48 @@ share a dtype and a copy otherwise, and `scipy.sparse` matrices interoperate via
 | Different results across runs | global RNG state, forked workers | use `default_rng` and `spawn` |
 
 ## Self-check
+
+### Worked CPU invariants
+
+The fixture distinguishes ownership from overlap, handles constant-column scaling,
+and computes stable softmax. NumPy 2 promotion can preserve a low-precision array
+dtype when adding Python scalars; never infer accumulator precision from the
+literal alone. Use explicit dtypes and `astype(casting="safe")` when rejecting
+lossy conversion is the intended contract. The
+[copies guide](https://numpy.org/doc/stable/user/basics.copies.html) and
+[promotion rules](https://numpy.org/doc/stable/reference/arrays.promotion.html)
+describe these version-sensitive semantics.
+
+```python runnable
+import numpy as np
+a = np.arange(12)
+strided = a[::2].reshape(2, 3)
+assert np.shares_memory(a, strided)
+assert not np.shares_memory(a, a.reshape(3, 4).T.reshape(-1))
+assert np.isscalar(a[3]) and np.shares_memory(a, a[3:4])
+counts = np.zeros(3, dtype=int)
+np.add.at(counts, [1, 1, 2], 1)
+assert counts.tolist() == [0, 2, 1]
+assert (np.array([2**62], dtype=np.int64) * 4).item() == 0
+assert 50_000 * 50_000 * 3 * 8 == 60_000_000_000
+X = np.array([[1., 2.], [1., 4.]])
+std = X.std(0)
+normalized = np.divide(X-X.mean(0), std, out=np.zeros_like(X), where=std!=0)
+assert np.allclose(normalized, [[0, -1], [0, 1]])
+logits = np.array([[1000., 1001., 999.]])
+exp = np.exp(logits-logits.max(-1, keepdims=True))
+prob = exp/exp.sum(-1, keepdims=True)
+assert np.isfinite(prob).all() and np.allclose(prob.sum(-1), 1)
+print("aliasing, overflow, allocation, normalization, softmax checks passed")
+```
+
+**Why is the `out=` initialization important?** A ufunc's false `where` positions
+retain the existing output; an uninitialized output would contain arbitrary values.
+**Why can Gram distances be inaccurate?** Large nearly equal norm and dot-product
+terms cancel; clamping negative results does not recover lost significant digits.
+For nearest neighbors, process bounded blocks and retain only current top-k results
+instead of allocating the entire quadratic output. Benchmark repeated runs with
+matched dtypes, warmup, thread counts, and peak memory, not one illustrative timing.
 
 1. Why is `a.T` free but `a.T.reshape(-1)` not?
 2. Given `A` of shape `(1000, 3)` and `B` of shape `(2000, 3)`, write pairwise

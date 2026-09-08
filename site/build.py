@@ -39,6 +39,8 @@ from pathlib import Path
 import yaml
 from markdown_it import MarkdownIt
 from mdit_py_plugins.dollarmath import dollarmath_plugin
+from presentation import enhance_site
+from curriculum_examples import example_from_fence
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTENT = ROOT / "content"
@@ -114,12 +116,21 @@ def build_md() -> MarkdownIt:
             src = re.sub(r"</(script)", r"<\\/\1", content, flags=re.I)
             return DIAGRAM_SHELL.format(src=src)
         label = info if info else "text"
+        download = ""
+        example = example_from_fence(info, tok.content, len(env.get("examples", [])) + 1)
+        if example is not None:
+            env.setdefault("examples", []).append(example)
+            label = "Python / CPU example" + (" / boosters" if example.extras else "")
+            href = env["page_url"] + "examples/" + example.filename
+            download = (f'<a class="icon-button code-download" href="{html.escape(href, quote=True)}" '
+                        'download title="Download Python example" aria-label="Download Python example">'
+                        '<i data-lucide="download" aria-hidden="true"></i></a>')
         # long single-line output benefits from wrapping; code does not
         wrap = " code-block--wrap" if info in ("", "text") and max(
             (len(l) for l in content.split("\n")), default=0) > 100 else ""
         return (
             f'<div class="code-file">'
-            f'<div class="code-file__hd">{html.escape(label)}</div>'
+            f'<div class="code-file__hd">{html.escape(label)}{download}</div>'
             f'<pre class="code-block{wrap}"><code>{html.escape(content, quote=False)}</code></pre>'
             f"</div>\n"
         )
@@ -160,6 +171,12 @@ def build_md() -> MarkdownIt:
                     tok.attrSet("href", url + (f"#{frag}" if frag else ""))
                 else:
                     env.setdefault("broken", []).append(href)
+        elif href.startswith("./code/"):
+            src_dir = env.get("src_dir")
+            if src_dir is not None:
+                target = (src_dir / href).resolve()
+                if target.is_file() and target.is_relative_to(CONTENT):
+                    tok.attrSet("href", "/" + target.relative_to(CONTENT).as_posix())
         return self.renderToken(tokens, idx, options, env)
 
     md.add_render_rule("fence", r_fence)
@@ -408,8 +425,12 @@ def topbar(site: Site, active: str = "") -> str:
     )
     return f"""<header class="topbar">
   <div class="topbar__in">
-    <a class="topbar__brand" href="/">{html.escape(site.title)}</a>
-    <nav class="topbar__nav">{links}</nav>
+    <a class="topbar__brand" href="/"><span class="brand-mark" aria-hidden="true">ml<span>.</span></span>{html.escape(site.title)}</a>
+    <nav class="topbar__nav" aria-label="Main navigation">{links}</nav>
+    <div class="topbar__tools">
+      <button class="search-trigger" type="button" data-open-search title="Search the library"><i data-lucide="search"></i><span>Search</span></button>
+      <button class="icon-button" type="button" data-open-settings title="Reading preferences" aria-label="Reading preferences"><i data-lucide="settings-2"></i></button>
+    </div>
   </div>
 </header>"""
 
@@ -450,7 +471,7 @@ MATH_SCRIPTS = """<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/
 
 def render_module(site: Site, course: Course, page: Page, md: MarkdownIt,
                   urls: dict[Path, str]) -> tuple[str, dict]:
-    env = {"src_dir": page.src_dir, "urls": urls, "broken": [], "diagrams": []}
+    env = {"src_dir": page.src_dir, "urls": urls, "broken": [], "diagrams": [], "page_url": page.url}
     sections, rendered, toc = split_sections(page.body), [], []
     intro_html = ""
     i = 0
@@ -539,7 +560,7 @@ def render_module(site: Site, course: Course, page: Page, md: MarkdownIt,
       {next_html}
     </nav>
 
-    <footer class="foot">{course.footer_html}</footer>
+    {f'<footer class="foot">{course.footer_html}</footer>' if course.footer_html else ''}
   </main>
 
   {toc_html}
@@ -554,8 +575,8 @@ def render_module(site: Site, course: Course, page: Page, md: MarkdownIt,
 
 
 def render_note(site: Site, page: Page, md: MarkdownIt, urls: dict[Path, str]) -> tuple[str, dict]:
-    env = {"src_dir": page.src_dir, "urls": urls, "broken": [], "diagrams": []}
-    body_html = md.render(page.body, env)
+    env = {"src_dir": page.src_dir, "urls": urls, "broken": [], "diagrams": [], "page_url": page.url}
+    body_html = (f'<div class="prereq">{md.render(page.prereq, env)}</div>' if page.prereq else "") + md.render(page.body, env)
 
     # A topic links back to the category it belongs to.
     crumb = (
@@ -595,12 +616,18 @@ def course_meta(c: "Course") -> str:
 
 def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
     meta_html = f'<div class="card__meta">{html.escape(meta)}</div>' if meta else ""
+    slug = href.strip("/").split("/")[-1]
+    cover = (f'<div class="course-cover course-cover--{slug}"><img src="/assets/covers/{slug}.webp" '
+             f'alt="{html.escape(title)} diagram" width="1000" height="480" loading="lazy"></div>'
+             if slug in ("transformers", "inference") else "")
+    icons = {"math": "sigma", "libraries": "blocks", "ml": "chart-no-axes-combined", "deep-learning": "network", "nlp": "messages-square"}
+    symbol = f'<span class="category-symbol category-symbol--{slug}"><i data-lucide="{icons[slug]}"></i></span>' if slug in icons else ""
     return (
-        f'<a class="card" href="{href}">'
+        f'<a class="card {"course-card" if cover else "category-row"}" href="{href}">{cover}{symbol}<div class="card__content">'
         f'<div class="card__k">{html.escape(kicker)}</div>'
         f'<div class="card__t">{html.escape(title)}</div>'
         f'<p class="card__b">{html.escape(blurb)}</p>'
-        f"{meta_html}</a>"
+        f'{meta_html}</div><i class="card__arrow" data-lucide="arrow-up-right"></i></a>'
     )
 
 
@@ -759,6 +786,9 @@ def render_landing(site: Site, *, active: str, kicker: str, title: str, lede: st
         for h, c in sections
     )
     hero_cls = " hd--hero" if hero else ""
+    lab_count = sum(len(read_labs(c.html_dir)) for c in site.courses if c.prebuilt) if hero else 0
+    stats = (f'<div class="library-stats"><span><strong>{len(site.courses)}</strong> courses</span>'
+             f'<span><strong>{len(site.note_topics)}</strong> topic guides</span><span><strong>{lab_count}</strong> hands-on labs</span></div>' if hero else "")
     body = f"""{topbar(site, active)}
 <div class="shell shell--plain">
   <main class="main main--wide">
@@ -766,7 +796,9 @@ def render_landing(site: Site, *, active: str, kicker: str, title: str, lede: st
       <div class="hd__k">{html.escape(kicker)}</div>
       <h1>{html.escape(title)}</h1>
       <p class="lede">{html.escape(lede)}</p>
+      {stats}
     </header>
+    {('<section id="continue-reading" hidden></section>' if hero else '')}
     {blocks}
   </main>
 </div>"""
@@ -775,6 +807,12 @@ def render_landing(site: Site, *, active: str, kicker: str, title: str, lede: st
 
 
 # ---------------------------------------------------------------- main
+
+def write_examples(page: Page, env: dict) -> None:
+    for example in env.get("examples", []):
+        write(page.out_path.parent / "examples" / example.filename,
+              example.download(page.path.relative_to(ROOT).as_posix()))
+
 
 def build() -> int:
     if OUT.exists():
@@ -798,6 +836,7 @@ def build() -> int:
         for page in course.pages:
             doc, env = render_module(site, course, page, md, urls)
             write(page.out_path, doc)
+            write_examples(page, env)
             broken += [f"{page.path.name}: {b}" for b in env["broken"]]
             diagrams += doc.count('class="diagram-shell"')
             pages_written += 1
@@ -811,6 +850,7 @@ def build() -> int:
     for page in site.notes + site.note_topics:
         doc, env = render_note(site, page, md, urls)
         write(page.out_path, doc)
+        write_examples(page, env)
         broken += [f"{page.path.name}: {b}" for b in env["broken"]]
         pages_written += 1
 
@@ -853,12 +893,12 @@ def build() -> int:
         home_sections.append(("Notes", f'<div class="cards">{note_cards}</div>'))
     home_sections.append((
         "Contributing",
-        '<p class="lp__p">Every page on this site is a Markdown file in the repository. '
-        f'Add or improve one and open a pull request: <a href="{site.repo}" target="_blank" '
-        f'rel="noopener">{html.escape(site.repo)}</a>.</p>',
+        '<p class="lp__p">An open collection, built by people who care about understanding. '
+        f'<a href="{site.repo}" target="_blank" rel="noopener">Contribute to the library <i data-lucide="arrow-up-right"></i></a></p>',
     ))
     write(OUT / "index.html", render_landing(
-        site, active="/", kicker="Open source", title=site.title, lede=site.tagline,
+        site, active="/", kicker="The learning library", title=site.title,
+        lede=f"{site.tagline}. From first principles to the systems that put them to work.",
         sections=home_sections, hero=True,
     ))
     pages_written += 1
@@ -869,11 +909,16 @@ def build() -> int:
     # style.css is concatenated from every *.css in the theme, base first, so
     # separate concerns can live in separate files without an @import round trip.
     css_files = [THEME / "style.css"] + sorted(
-        f for f in THEME.glob("*.css") if f.name != "style.css")
+        f for f in THEME.glob("*.css") if f.name not in ("style.css", "reader.css"))
     (assets / "style.css").write_text(
         "\n".join(f.read_text(encoding="utf-8") for f in css_files), encoding="utf-8")
     for name in ("page.js", "mermaid.js", "katex-init.js", "favicon.svg", "rail-scroll.js"):
         shutil.copyfile(THEME / name, assets / name)
+    example_assets = assets / "examples"
+    example_assets.mkdir()
+    for source, name in (("requirements-examples.txt", "requirements.txt"),
+                         ("requirements-boosters.txt", "requirements-boosters.txt")):
+        shutil.copyfile(ROOT / "site" / source, example_assets / name)
     page_assets = CONTENT / "notes" / "_assets"
     if page_assets.is_dir():
         dest = assets / "pages"
@@ -887,6 +932,8 @@ def build() -> int:
 
     (OUT / "CNAME").write_text(site.domain + "\n", encoding="utf-8")
     (OUT / ".nojekyll").write_text("", encoding="utf-8")
+
+    enhance_site(OUT, THEME, site)
 
     print(f"\n{pages_written} pages, {diagrams} diagrams -> {OUT}")
     if broken:

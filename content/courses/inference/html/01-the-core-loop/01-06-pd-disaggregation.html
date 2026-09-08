@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Prefill–decode disaggregation — The Inference Engineering Book</title>
+<title>Prefill–decode disaggregation — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,10 +623,10 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 1 · The core serving loop · 01-06</div>
 <h1>Prefill–decode disaggregation</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>python/sglang/srt/disaggregation/prefill.py</code></li><li><code>python/sglang/srt/disaggregation/decode.py</code></li><li><code>python/sglang/srt/disaggregation/mooncake/</code></li><li><code>python/sglang/srt/disaggregation/nixl/</code></li><li><code>vllm/distributed/kv_transfer/</code></li><li><code>vllm/v1/core/sched/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>python/sglang/srt/disaggregation/prefill.py</code></li><li><code>python/sglang/srt/disaggregation/decode.py</code></li><li><code>python/sglang/srt/disaggregation/mooncake/</code></li><li><code>python/sglang/srt/disaggregation/nixl/</code></li><li><code>vllm/distributed/kv_transfer/</code></li><li><code>vllm/v1/core/sched/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Chunked prefill made the interference survivable. It did not make it go away: every chunk you admit still steals a decode step from every sequence in the running batch. Disaggregation is the structural answer — put prefill on one set of machines, decode on another, and pay for it by shipping the whole KV cache across a network. This chapter derives what that shipment costs, and reads the two very different subsystems vLLM and SGLang built to move it.</p></div>
-<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take a single H100 SXM serving Llama-3-8B in bf16, 64 sequences decoding, chunked prefill on with <code>max_num_batched_tokens = 2048</code>. A request arrives with an 8,192-token prompt. Four prefill chunks get interleaved into the decode stream. What does each one cost the sequences already in flight?</p>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Take a single H100 SXM serving Llama-3-8B in bf16, 64 sequences decoding, chunked prefill on with <code>max_num_batched_tokens = 2048</code>. A request arrives with an 8,192-token prompt. Five prefill chunks (four of 1984 tokens and a 256-token remainder) get interleaved into the decode stream. What does each one cost the sequences already in flight?</p>
 
 <p>A decode step at batch 64 is weight-bound: it reads 16 GB of bf16 weights out of HBM at 3.35 TB/s, so the floor is $16 / 3.35 \times 10^3 \approx 4.8$ ms &mdash; the round figure; <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a> tightens it to 4.48 ms by excluding the gathered embedding table, which moves nothing in the comparison below. A 2,048-token prefill chunk is compute-bound: $2NS = 2 \times 8\times10^9 \times 2048 = 3.28 \times 10^{13}$ FLOPs, and at 50&nbsp;% MFU against the H100's 989 TFLOP/s dense bf16 that is 66 ms. The chunk does not replace the decode step, it is <em>added</em> to it.</p>
 
@@ -636,7 +636,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
   <div class="kpi"><div class="kpi__n">66 ms</div><div class="kpi__l">one 2048-token prefill chunk</div></div>
 </div>
 
-<p>Shrink the chunk and the spike shrinks with it — but TTFT grows linearly, and per-chunk kernel-launch and attention-metadata overhead starts to dominate. That is the whole of the chunked-prefill tuning problem from <a href="01-05-chunked-prefill.html">&sect;1.5</a>: one knob, two objectives pulling opposite ways.</p>
+<p>Shrink the chunk and the spike shrinks with it — but TTFT can grow from repeated weight reads, poorer efficiency, and launch overhead; it is not generally linear in inverse chunk size, and per-chunk kernel-launch and attention-metadata overhead starts to dominate. That is the whole of the chunked-prefill tuning problem from <a href="01-05-chunked-prefill.html">&sect;1.5</a>: one knob, two objectives pulling opposite ways.</p>
 
 <p>The deeper problem is that the two phases do not merely want different batch sizes, they want different <em>machines</em>. Take the roofline from <a href="../00-foundations/00-04-roofline-and-arithmetic-intensity.html">&sect;0.4</a>. The H100 SXM's ridge point is</p>
 
@@ -754,7 +754,7 @@ flowchart TD
   </div>
 </div>
 
-<p>The fourth column is the one that decides whether disaggregation is a good idea. Under tensor parallelism each rank holds only its shard of the KV heads. Llama-3-70B has $h_\text{kv} = 8$, so at TP=8 each rank owns exactly one KV head and therefore $2.68 / 8 = 0.335$ GB of the transfer — and every rank has its own NIC and sends concurrently. The transfer does not serialize across the fabric; it fans out across it. This is why the per-GPU InfiniBand device is a first-class configuration knob (<code>--disaggregation-ib-device</code>, which accepts a per-GPU JSON mapping in <code>python/sglang/srt/server_args.py:L3155-L3159</code>).</p>
+<p>The fourth column is the one that decides whether disaggregation is a good idea. Under tensor parallelism each rank holds only its shard of the KV heads. Llama-3-70B has $h_\text{kv} = 8$, so at TP=8 each rank owns exactly one KV head and therefore $2.68 / 8 = 0.335$ GB of the transfer — if the deployment provides independent NIC bandwidth per rank, transfers can proceed concurrently. Shared NICs, PCIe paths, and fabric contention invalidate an assumed TP-fold speedup. The transfer does not serialize across the fabric; it fans out across it. This is why the per-GPU InfiniBand device is a first-class configuration knob (<code>--disaggregation-ib-device</code>, which accepts a per-GPU JSON mapping in <code>python/sglang/srt/server_args.py:L3155-L3159</code>).</p>
 
 <p>Compare against the TTFT budget. Prefill of 8,192 tokens on Llama-3-8B, one H100 at 50&nbsp;% MFU, is $2 \times 8\times 10^9 \times 8192 / (0.5 \times 989\times10^{12}) = 265$ ms. For Llama-3-70B on 8&times;H100 at 40&nbsp;% MFU it is $2 \times 70\times10^9 \times 8192 / (0.4 \times 8 \times 989\times10^{12}) = 362$ ms. So:</p>
 
@@ -764,7 +764,7 @@ flowchart TD
   <div class="ve-card ve-card--recessed"><span class="ve-card__k">absurd</span><h4>100 GbE, short prompts</h4><p>512-token prompt on 8B: prefill is 16.6 ms, transfer is 5.4 ms &mdash; <b>32&nbsp;%</b> again, but now on an absolute budget so small that the handshake round trips dominate. Colocate.</p></div>
 </div>
 
-<p>The ratio $\beta_\text{tok} S / \text{BW}$ over $2NS / (\text{MFU} \cdot F)$ is independent of $S$ — the $S$ cancels. Disaggregation viability is a property of the <em>model and the fabric</em>, not of the prompt length:</p>
+<p>In the simplified projection-only model, both transfer bytes and prefill work grow linearly with prompt length S, so S cancels from their ratio below. Real viability remains length-dependent: prefill attention adds quadratic work, small transfers pay startup/handshake latency, achieved compute varies with shape, prefix hits change bytes, and queues or overlapping transfers alter end-to-end latency.</p>
 
 <div class="math-display">$$ \frac{t_\text{xfer}}{t_\text{prefill}} = \frac{2 L h_\text{kv} d_h b}{\text{BW}} \cdot \frac{\text{MFU} \cdot F}{2N} $$</div>
 
@@ -1282,7 +1282,7 @@ flowchart TD
   <span class="callout__k">Not this chapter</span>
   <p><b>KV offload</b> moves a KV cache from GPU to CPU or disk on the <em>same</em> machine to survive eviction &mdash; in vLLM it shares the connector interface (<code>vllm/v1/kv_offload/</code>, <code>OffloadingConnector</code>), which is why the two get conflated. It is a capacity mechanism, not a topology; <a href="../02-memory-and-kv-cache/02-06-offload-and-vram-budget.html">&sect;2.6</a> owns it. <b>KV-aware routing</b> picks <em>which replica</em> should serve a request based on whose prefix cache already holds the prompt; it is orthogonal to P/D and is owned by <a href="../09-serving-system/09-04-routers-and-load-balancing.html">&sect;9.4</a>. Disaggregation is about splitting <em>one</em> request across two machines, every time.</p>
 </div></div></section>
-<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>You can exercise both event loops with no RDMA fabric and no second GPU by using the <code>fake</code> backend, which reports every transfer as instantly successful.</p>
+<section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>The commands below use the real Mooncake backend, not fake transfer. They require two suitable GPUs (one selected for each server), installed compatible engine/transport packages, model access, and a working supported transport. A fake backend can exercise some control paths but does not transfer valid KV or establish generated-output correctness; it is not a substitute for this end-to-end experiment.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1290,12 +1290,12 @@ flowchart TD
     <span class="tag tag--shell">shell</span>
   </div>
   <pre class="code-block code-block--wrap"><code># terminal 1 - prefill server, owns the bootstrap HTTP server on 8998
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
   --port 30000 --disaggregation-mode prefill \
   --disaggregation-transfer-backend mooncake --disaggregation-bootstrap-port 8998
 
 # terminal 2 - decode server
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
   --port 30001 --disaggregation-mode decode \
   --disaggregation-transfer-backend mooncake
 
@@ -1329,7 +1329,7 @@ python -m sglang_router.launch_router --pd-disaggregation \
   <summary>Answers</summary>
   <div class="fold__body">
     <p><b>1.</b> Only <code>KVPoll.WaitingForInput</code> takes the normal path, and only after <code>finalize_bootstrap(req)</code> returns <code>True</code> — if no metadata buffer slot is free, the loop <code>continue</code>s and the request stays queued. With <code>optimistic_prefill_attempts == 0</code>, a <code>Bootstrapping</code> poll falls through the guard <code>req.prefill_attempt_count &lt; server_args.optimistic_prefill_attempts</code> and the request simply remains in the queue for the next iteration. See <code>python/sglang/srt/disaggregation/prefill.py:L438-L466</code>.</p>
-    <p><b>2.</b> MLA stores one compressed latent per token per layer, not K and V per head: $576 \times 61 \times 2 = 70{,}272$ bytes/token, so 16,384 tokens is 1.15 GB — <em>less</em> than Llama-3-70B at half the length. At 50 GB/s that is 23 ms. Because $N$ is huge (671 B total parameters) while $\beta_\text{tok}$ is small, the ratio in the section-3 formula is tiny: MLA models are the best case for disaggregation, and that is not a coincidence — Mooncake and DeepSeek's own serving stack were designed together.</p>
+    <p><b>2.</b> The cache has $576\cdot61\cdot2=70,272$ bytes/token. A 16,384-token prompt transfers 1,151,336,448 bytes, about 1.15 GB, requiring an ideal 23.0 ms at 50 GB/s before startup and contention. To compare with prefill, use activated MoE projection work plus attention and routing costs, not all 671B resident parameters as if every expert were evaluated. MLA lowers transfer bytes, but these shapes alone do not establish an end-to-end ratio. Mooncake originated as the Kimi serving system; no joint-design claim with DeepSeek follows from that paper.</p>
     <p><b>3.</b> Bytes transferred drop by roughly 60&nbsp;%, because D matches the preamble in its own radix cache before preallocating and reports the match length back. The variable is <code>decode_prefix_len</code>, returned by <code>req.disagg_kv_sender.pop_decode_prefix_len()</code>; it becomes <code>req.start_send_idx</code>, so P's first chunk send starts past the shared prefix.</p>
     <p><b>4.</b> No. A prefill-side RDMA write may still be targeting those exact pages. <code>_defer_release</code> parks the request until P acknowledges that its in-flight writes have drained (the <code>ABORT</code> / <code>ABORT_ACK</code> ZMQ exchange), or until a timeout fires. Releasing early is a silent cross-request KV corruption, not a crash.</p>
     <p><b>5.</b> Pull is easier when the <em>producer</em> dies: the consumer initiated the transfer, so it observes the failure directly and can abort locally — vLLM's D-side simply never gets <code>finished_recving</code>. Push is easier for admission control: because the consumer must publish destination pages before the producer starts, a full decode pool exerts backpressure for free, which is exactly the <code>Bootstrapping</code> &rarr; <code>WaitingForInput</code> gate in SGLang. vLLM has to reconstruct that with an external proxy's routing decisions.</p>
@@ -1337,8 +1337,8 @@ python -m sglang_router.launch_router --pd-disaggregation \
 </details></div></section>
 <section class="sec sec--takeaways" id="key-takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
 <li>The colocation penalty is quantifiable and large: one 2,048-token prefill chunk adds ~66 ms to a ~4.8 ms decode step on an H100 running Llama-3-8B. Chunking spreads that cost; it does not remove it. Disaggregation removes it.</li>
-<li>Whether disaggregation is viable does not depend on prompt length — the $S$ cancels. It depends on $2Lh_\text{kv}d_hb$ over bandwidth, versus $2N$ over device FLOP/s. Fat-KV, small-parameter models are the bad case; MLA models are the good one.</li>
-<li>Tensor parallelism fans the transfer out across ranks and NICs. Llama-3-70B's 2.68 GB at 8k tokens becomes 335 MB per rank at TP=8, turning a 54 ms serialized transfer into a 6.7 ms parallel one. Never quote the aggregate figure without saying what TP degree it assumes.</li>
+<li>Prompt length cancels only in a linear projection-only compute model with constant achieved rates and negligible startup cost. It depends on $2Lh_\text{kv}d_hb$ over bandwidth, versus $2N$ over device FLOP/s. Fat-KV, small-parameter models are the bad case; MLA models are the good one.</li>
+<li>Tensor parallelism fans the transfer out across ranks and NICs. Llama-3-70B's 2.68 GB at 8k tokens becomes 335 MB per rank at TP=8, giving an ideal 6.7 ms per-rank transfer only with sufficient independent links instead of one shared 50 GB/s bottleneck. Never quote the aggregate figure without saying what TP degree it assumes.</li>
 <li>SGLang's push design makes backpressure structural: the decode worker preallocates and publishes destination pages <em>before</em> the prefill worker is allowed to start, so a saturated decode pool costs zero wasted prefill FLOPs. vLLM's pull design gets generality instead — the same connector interface carries P/D, CPU offload, and remote KV stores — and pays for it by pushing admission control out to an external proxy.</li>
 <li>Overlap happens on different axes: vLLM exposes per-layer <code>save_kv_layer</code> hooks inside the attention layer, but only MoRIIO in WRITE mode uses them; SGLang overlaps per prefill chunk, which hides the transfer inside compute for every chunk but the last.</li>
 <li>The dangerous failure is not a dropped transfer, it is an aborted one: pages the consumer wants to reuse may still be the target of an in-flight remote write. Both engines need an explicit drain acknowledgement, and both have one.</li>
@@ -1353,7 +1353,7 @@ python -m sglang_router.launch_router --pd-disaggregation \
 </ul></div></section>
 <div class="pager"><a href="01-05-chunked-prefill.html"><div class="pager__k">← Previous</div><div class="pager__t">Chunked prefill</div></a><a class="pager__next" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><div class="pager__k">Next →</div><div class="pager__t">The KV cache size formula</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

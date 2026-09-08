@@ -85,9 +85,7 @@ there. Differentiable implies continuous; the converse is false.
 $\mathrm{ReLU}(x) = \max(0, x)$ is continuous everywhere but not differentiable
 at $x = 0$ — the slope jumps from $0$ to $1$. Frameworks paper over this with a
 **subgradient**: PyTorch and TensorFlow both define $\mathrm{ReLU}'(0) = 0$.
-This is a convention, not a theorem, and it is harmless because the event
-$x = 0$ has measure zero in floating point. Interviewers love this question; the
-answer is "subgradient, and the framework picks one by fiat."
+This is a convention, not an ordinary derivative. Floating-point values are discrete: exact zeros occur through initialization, cancellation and nonlinearities, so there is no floating-point measure-zero justification. Check the selected derivative when implementing a nonsmooth operator; see [PyTorch's rules](https://docs.pytorch.org/docs/stable/notes/autograd.html).
 
 ### The rules, and why they are true
 
@@ -127,10 +125,7 @@ Now the classic rearrangement. Note $\dfrac{e^{-x}}{1+e^{-x}} = 1 - \sigma(x)$, 
 $$\sigma'(x) = \sigma(x)\bigl(1 - \sigma(x)\bigr)$$
 
 This is why sigmoid was popular: the derivative costs nothing extra once you
-have the forward value. It is also why sigmoid *died*: $\sigma' \le 0.25$
-everywhere, so ten stacked sigmoid layers shrink the gradient by at least
-$4^{-10} \approx 10^{-6}$. That is the vanishing-gradient problem, and it falls
-straight out of this one line of calculus.
+have the forward value. The bound $\sigma'\le0.25$ explains one source of vanishing gradients: ten activation Jacobians have norm at most $4^{-10}$. Full layer Jacobians also include weight matrices, giving the bound $4^{-10}\prod_l\|W_l\|_2$; weights can offset or amplify the effect. Sigmoid remains useful for output probabilities and gates.
 
 ## Going multivariate
 
@@ -194,11 +189,11 @@ map $\mathbf{f}(\mathbf{x}) = W\mathbf{x}$ is just $W$ — linear functions are
 their own derivative, which is precisely why linear algebra and calculus fit
 together so cleanly in a neural network.
 
-Crucially, **frameworks never build the Jacobian**. A layer mapping 4096
+Crucially, **ordinary scalar-loss backprop avoids building the full Jacobian**. A layer mapping 4096
 activations to 4096 activations has a $4096 \times 4096$ Jacobian — 16.7M
 entries per layer per example. Autodiff computes *vector–Jacobian products*
 $\mathbf{v}^\top J$ instead, which cost the same as one forward pass. Hold that
-thought for the autodiff section.
+thought for the autodiff section. Explicit Jacobian APIs also exist when the full matrix is needed.
 
 ### The Hessian
 
@@ -207,7 +202,7 @@ Second derivatives of a scalar function, arranged in a matrix:
 $$H_{ij} = \frac{\partial^2 f}{\partial x_i \, \partial x_j}, \qquad H \in \mathbb{R}^{n \times n}$$
 
 By Schwarz's theorem $H$ is symmetric for any function with continuous second
-partials, which every loss you will meet is. The Hessian describes **curvature**
+partials. ReLU and hinge losses are nonsmooth exceptions at their kinks. The Hessian describes **curvature**
 — how the gradient itself changes as you move.
 
 | Hessian at a stationary point | Eigenvalues | Meaning |
@@ -215,15 +210,11 @@ partials, which every loss you will meet is. The Hessian describes **curvature**
 | Positive definite | all $> 0$ | local minimum — bowl |
 | Negative definite | all $< 0$ | local maximum — dome |
 | Indefinite | mixed signs | **saddle point** |
-| Singular | some $= 0$ | flat direction; test inconclusive |
+| Semidefinite and singular | some $= 0$, no mixed signs | second-order test inconclusive; mixed signs still prove a saddle even with zeros |
 
-In high dimensions, saddle points vastly outnumber local minima. For a random
-symmetric matrix, all $n$ eigenvalues being positive is exponentially unlikely,
-so a random stationary point of a large network is almost surely a saddle. This
-reframes a common misconception: deep-learning optimisation is not usually
-trapped by bad local minima, it is *slowed* by saddles and plateaus.
+Saddles and plateaus can slow high-dimensional optimization, but a random-matrix heuristic does not prove that stationary points of an arbitrary network are almost surely saddles. Their distribution depends on the objective, data and parameterization.
 
-The **condition number** $\kappa = \lambda_{\max}/\lambda_{\min}$ of the Hessian
+For an SPD Hessian, the **condition number** $\kappa = \lambda_{\max}/\lambda_{\min}$
 predicts how badly gradient descent will zig-zag. A ravine that is 1000 times
 steeper across than along has $\kappa = 1000$, and plain gradient descent needs
 roughly $\kappa$ iterations to make progress along the ravine floor. Momentum,
@@ -243,13 +234,9 @@ Every optimiser is a decision about how much of this expansion to use.
 | Gradient descent | first order only | $-\eta \nabla f$ | $O(n)$ |
 | Newton's method | full second order | $-H^{-1}\nabla f$ | $O(n^3)$ solve |
 | Quasi-Newton (L-BFGS) | approximate $H^{-1}$ | $-B \nabla f$ | $O(nm)$ |
-| Adam / RMSProp | diagonal curvature proxy | $-\eta \, \hat{m}/(\sqrt{\hat{v}} + \epsilon)$ | $O(n)$ |
+| Adam / RMSProp | diagonal gradient-moment scaling | $-\eta \, \hat{m}/(\sqrt{\hat{v}} + \epsilon)$ | $O(n)$ |
 
-Newton's method converges quadratically — it can solve a quadratic in a single
-step — but $H^{-1}$ for $n = 10^9$ parameters is not a thing anyone will ever
-compute. Adam's $\sqrt{v}$ term is best understood as a cheap, diagonal, rolling
-estimate of curvature: parameters with historically large gradients get smaller
-effective steps.
+Newton has local quadratic convergence near a nondegenerate solution under suitable Hessian regularity, and one step solves an unconstrained SPD quadratic in exact arithmetic. Use a solve, not an explicit inverse. Adam's second moment is a gradient-scale statistic, not generally a Hessian estimate.
 
 **Derive Newton's step yourself.** Minimise the quadratic model over $\Delta$:
 set its gradient to zero.
@@ -263,22 +250,18 @@ or above the graph:
 
 $$f(\lambda \mathbf{x} + (1-\lambda)\mathbf{y}) \le \lambda f(\mathbf{x}) + (1-\lambda) f(\mathbf{y}), \quad \lambda \in [0,1]$$
 
-The calculus test: $f$ is convex iff its Hessian is positive semi-definite
-everywhere. In one dimension, iff $f'' \ge 0$.
+For twice differentiable $f$ on an open convex domain, $f$ is convex iff its Hessian is PSD everywhere. In one dimension the domain must be an interval and the criterion is $f''\ge0$.
 
 Why it matters: **for a convex function every local minimum is global.** Linear
 regression, logistic regression, and SVMs with convex losses have this
-guarantee. Neural networks do not — a network with hidden layers is non-convex
-even with convex loss and convex activations, because composing convex functions
-does not preserve convexity, and because permuting hidden units gives you a
-combinatorial number of equivalent minima.
+guarantee. Typical jointly trained neural-network objectives are nonconvex. Convexity of the scalar loss or activation does not establish convexity in all parameters. Permutation symmetry explains nonunique representations, but symmetry alone is not a proof of nonconvexity.
 
 | Loss | Convex in parameters? | Consequence |
 |---|---|---|
-| MSE for linear regression | yes | closed form exists; any optimiser finds the optimum |
-| Log-loss for logistic regression | yes | unique optimum (if not separable) |
+| MSE for linear regression | yes | a least-squares minimizer exists; algorithm and step conditions still matter |
+| Log-loss for logistic regression | yes | finite attainment and uniqueness need additional conditions, including identifiability; nonseparation alone is insufficient |
 | Hinge loss for linear SVM | yes (not smooth) | subgradient methods |
-| Any loss for a 2-layer MLP | no | initialisation and schedule matter |
+| Typical jointly trained 2-layer MLP objective | generally no | initialisation and schedule matter |
 
 ## Matrix calculus: deriving a backward pass by hand
 
@@ -308,7 +291,7 @@ often recover the right expression from shapes alone.
 | $\lVert\mathbf{x}\rVert_2^2 = \mathbf{x}^\top\mathbf{x}$ | $2\mathbf{x}$ |
 | $\lVert A\mathbf{x} - \mathbf{b}\rVert_2^2$ | $2A^\top(A\mathbf{x} - \mathbf{b})$ |
 | $\mathrm{tr}(A^\top B)$ w.r.t. $A$ | $B$ |
-| $\log \det X$ w.r.t. $X$ | $X^{-\top}$ |
+| $\log \det X$ w.r.t. real $X$ with positive determinant | $X^{-\top}$ |
 
 ### Worked derivation 1 — linear regression normal equations
 
@@ -323,15 +306,15 @@ Differentiate term by term using the table ($X^\top X$ is symmetric):
 
 $$\nabla_{\mathbf{w}} L = 2X^\top X \mathbf{w} - 2X^\top \mathbf{y}$$
 
-Set to zero:
+Set to zero. If $X$ has full column rank:
 
-$$\boxed{\;\mathbf{w}^\star = (X^\top X)^{-1} X^\top \mathbf{y}\;}$$
+$\boxed{\;\mathbf{w}^\star = (X^\top X)^{-1} X^\top \mathbf{y}\;}$$
 
 Four lines of matrix calculus produce the normal equations. Add L2
 regularisation $\lambda\|\mathbf{w}\|^2$ and the gradient gains $2\lambda
 \mathbf{w}$, giving ridge regression
 $\mathbf{w}^\star = (X^\top X + \lambda I)^{-1}X^\top \mathbf{y}$ — and now the
-matrix is invertible even when $X^\top X$ is singular. That is the entire
+matrix is invertible for $\lambda>0$ even when $X^\top X$ is singular. At zero penalty use a rank-aware [least-squares solver](./linear-algebra.md#18-pseudoinverses-minimum-norm-and-ridge-regression). That is the entire
 mathematical content of "regularisation stabilises the solution".
 
 ### Worked derivation 2 — a linear layer's backward pass
@@ -343,7 +326,7 @@ Given the incoming gradient $G = \partial L/\partial Y \in \mathbb{R}^{B \times 
 
 $$\frac{\partial L}{\partial W} = X^\top G \in \mathbb{R}^{d_{in}\times d_{out}}, \qquad \frac{\partial L}{\partial X} = G W^\top \in \mathbb{R}^{B \times d_{in}}, \qquad \frac{\partial L}{\partial \mathbf{b}} = \sum_{i=1}^{B} G_{i,:}$$
 
-Every one of these is forced by shape. $X^\top G$ is the only way to get
+The chain rule establishes these expressions; shapes are a necessary check, not a proof. $X^\top G$ is the only way to get
 $(d_{in}, d_{out})$ from a $(B, d_{in})$ and a $(B, d_{out})$. The bias
 gradient sums over the batch because the bias was *broadcast* over the batch in
 the forward pass — and the rule is general: **the backward of a broadcast is a
@@ -426,7 +409,7 @@ deep learning is computationally possible at all.
 | | Forward mode | Reverse mode |
 |---|---|---|
 | Best when | few inputs, many outputs | many inputs, few outputs |
-| Memory | $O(1)$ extra | stores the whole forward tape |
+| Memory | propagates a tangent with each live primal; no reverse tape required | stores or recomputes needed forward values |
 | Passes for full Jacobian | $n$ | $m$ |
 | Used for | Jacobian-vector products, some ODE/sensitivity work | all of deep learning |
 
@@ -474,12 +457,12 @@ y = (x * w).relu()
 L = y ** 2
 
 L.backward()                 # reverse-mode sweep, seeded with dL/dL = 1
-print(x.grad, w.grad)        # tensor([72.]) tensor([48.])
-# check by hand: L = (xw)^2 = 36x^2 -> dL/dx = 72x = ... wait, dL/dx = 2(xw)(w) = 2*6*3 = 36
+assert x.grad.item() == 36.0
+assert w.grad.item() == 24.0
+print(x.grad, w.grad)        # tensor([36.]) tensor([24.])
 ```
 
-Run that and you will find `x.grad = 36`, not 72 — the comment is deliberately
-wrong so you check rather than trust. $L = (xw)^2$, so
+The assertions agree with the direct calculation. $L = (xw)^2$, so
 $\partial L/\partial x = 2xw \cdot w = 2 \cdot 6 \cdot 3 = 36$ and
 $\partial L/\partial w = 2xw \cdot x = 2 \cdot 6 \cdot 2 = 24$. Always verify a
 gradient you did not derive.
@@ -494,15 +477,19 @@ $$\frac{\partial f}{\partial x_i} \approx \frac{f(\mathbf{x} + h\mathbf{e}_i) - 
 
 ```python
 def grad_check(f, x, analytic_grad, h=1e-5):
-    """Relative error should be < 1e-7 in float64, < 1e-4 in float32."""
+    """Central-difference diagnostic; choose tolerance for scale and dtype."""
     numeric = np.zeros_like(x)
     it = np.nditer(x, flags=['multi_index'])
     while not it.finished:
         i = it.multi_index
         old = x[i]
-        x[i] = old + h; f_plus  = f(x)
-        x[i] = old - h; f_minus = f(x)
-        x[i] = old
+        try:
+            x[i] = old + h
+            f_plus = f(x)
+            x[i] = old - h
+            f_minus = f(x)
+        finally:
+            x[i] = old
         numeric[i] = (f_plus - f_minus) / (2 * h)
         it.iternext()
     denom = np.maximum(np.abs(numeric) + np.abs(analytic_grad), 1e-8)
@@ -542,6 +529,124 @@ constant input and $\partial z/\partial \mu = 1$, $\partial z/\partial \sigma =
 \epsilon$ flow normally. This single substitution is what makes VAEs trainable
 by ordinary autodiff.
 
+## Worked extensions: differentiability, integration and stochastic gradients
+
+### Partial derivatives need not form a local linear approximation
+
+Set $f(x,y)=xy/\sqrt{x^2+y^2}$ away from zero and $f(0,0)=0$.
+Both coordinate partials at zero vanish. Along $(t,t)$, however,
+$f(t,t)=|t|/\sqrt2$, and $|f(t,t)|/\|(t,t)\|=1/2$ does not approach zero.
+The candidate zero Jacobian is therefore not a total derivative. Total
+differentiability requires $f(x+h)=f(x)+Jh+o(\|h\|)$ uniformly over directions.
+Continuous first partials in a neighborhood are a sufficient condition.
+
+"Steepest" also depends on geometry. Under $\|u\|_2=1$ it is the normalized
+Euclidean gradient. Under $u^\top Mu=1$ for SPD $M$, maximizing $g^\top u$
+instead gives $u\propto M^{-1}g$. The derivative is unchanged; the meaning
+of a unit step changed.
+
+### Three integration techniques, actually evaluated
+
+The fundamental theorem says that for continuous $f$,
+$F(x)=\int_a^x f(t)\,dt$ satisfies $F'=f$, and
+$\int_a^b F'(x)\,dx=F(b)-F(a)$ when the requisite regularity holds.
+Thus $\int_0^1 x^2\,dx=[x^3/3]_0^1=1/3$.
+
+Substitution is the chain rule backwards:
+$\int_0^1 2x e^{x^2}\,dx=\int_0^1 e^u\,du=e-1$, with $u=x^2$.
+Change the integration limits as well as the integrand.
+Integration by parts is the product rule backwards:
+$\int u\,dv=uv-\int v\,du$. For exponential rate $\lambda>0$,
+
+$$
+\mathbb E[X]=\int_0^\infty x\lambda e^{-\lambda x}\,dx
+=[-xe^{-\lambda x}]_0^\infty+\int_0^\infty e^{-\lambda x}\,dx
+=1/\lambda.
+$$
+
+For a joint density $f(x,y)=2$ on $0<y<x<1$, marginalization must respect
+the triangular support: $f_X(x)=\int_0^x2\,dy=2x$ and
+$\mathbb E[X]=\int_0^1 2x^2\,dx=2/3$. Integrating $y$ from zero to one
+for every $x$ would count points outside the support.
+
+### When a derivative can pass through an expectation
+
+A sufficient local condition is an almost-everywhere parameter derivative
+dominated by an integrable envelope on a neighborhood, with a fixed integration
+domain. Differentiation under the integral then follows from dominated
+convergence. Boundary-moving distributions need boundary terms or a careful
+change of variables; formal symbol manipulation is not enough.
+
+For $Z=g_\theta(\epsilon)$ with parameter-independent noise,
+
+$$
+\nabla_\theta\mathbb E[h_\theta(Z)]
+=\mathbb E[\partial_\theta h_\theta(g_\theta(\epsilon))
+J_{g_\theta}^\top\nabla_z h_\theta(g_\theta(\epsilon))].
+$$
+
+Alternatively, differentiating a density on fixed support gives the
+score-function identity
+
+$$
+\nabla_\theta\mathbb E_{p_\theta}[h_\theta(Z)]
+=\mathbb E[\partial_\theta h_\theta(Z)
+h_\theta(Z)\nabla_\theta\log p_\theta(Z)].
+$$
+
+For $Z\sim N(\mu,1)$ and $h(Z)=Z^2$, both yield derivative $2\mu$:
+pathwise uses $\mathbb E[2Z]$, while the score form uses
+$\mathbb E[Z^2(Z-\mu)]$. Subtracting a parameter-independent baseline from
+$h$ in the score term preserves expectation because the score has zero mean
+under those regularity conditions. It can reduce variance. For uniform
+$Z\sim U(0,\theta)$, omitting the moving endpoint gives an incorrect result;
+using $Z=\theta U$ correctly gives $\partial_\theta\mathbb E[Z]=1/2$.
+
+### A branched graph with JVP and VJP checks
+
+Let $u=xw$, $L=u^2+u$. At $(x,w)=(2,3)$, $u=6$ and the two branches
+contribute $\bar u=12+1=13$, hence $(\bar x,\bar w)=(39,26)$.
+For the vector output $F=(xw,x+w)$, its Jacobian there is
+$J=\begin{bmatrix}3&2\\1&1\end{bmatrix}$.
+With $v=(1,-1)$ and $a=(2,3)$, $Jv=(1,0)$ and $J^\top a=(9,7)$.
+
+```python runnable
+import numpy as np
+import torch
+
+torch.manual_seed(31)
+torch.set_num_threads(1)
+z = torch.tensor([2., 3.], dtype=torch.float64, requires_grad=True)
+def fun(t):
+    return torch.stack((t[0]*t[1], t.sum()))
+v = torch.tensor([1., -1.], dtype=torch.float64)
+a = torch.tensor([2., 3.], dtype=torch.float64)
+J = torch.autograd.functional.jacobian(fun, z)
+_, jvp = torch.autograd.functional.jvp(fun, z, v)
+_, vjp = torch.autograd.functional.vjp(fun, z, a)
+torch.testing.assert_close(jvp, J @ v)
+torch.testing.assert_close(vjp, J.T @ a)
+u = z[0]*z[1]
+grad = torch.autograd.grad(u*u+u, z)[0]
+torch.testing.assert_close(grad, torch.tensor([39., 26.], dtype=z.dtype))
+
+# Smooth derivative: truncation dominates large h, roundoff eventually dominates.
+x = .7
+steps = 10.**np.arange(-1, -15, -1)
+errors = [abs((np.sin(x+h)-np.sin(x-h))/(2*h)-np.cos(x)) for h in steps]
+assert min(errors) < 1e-9
+assert errors[0] > min(errors) and errors[-1] > min(errors)
+zero = torch.tensor(0., requires_grad=True)
+zero.relu().backward()
+assert zero.grad.item() == 0.
+assert (max(0., 1e-6)-max(0., -1e-6))/(2e-6) == .5
+print("JVP:", jvp.tolist(), "VJP:", vjp.tolist(), "best error:", min(errors))
+```
+
+The central difference at the ReLU kink is $1/2$, while PyTorch selects zero.
+Neither is evidence that the smooth derivative checker is broken: no ordinary
+derivative exists at that point.
+
 ## Where calculus quietly fails you
 
 | Symptom | Calculus cause | Standard fix |
@@ -566,13 +671,11 @@ and `inf`. Every exponent is now $\le 0$, so nothing overflows.
 **Why do we minimise the loss instead of maximising accuracy directly?**
 Accuracy is piecewise constant — its gradient is zero almost everywhere and
 undefined at the jumps. Cross-entropy is a differentiable surrogate that is
-monotonically related to what we want. This is the single most common "why" in
+useful for learning probabilities, but lowering it does not monotonically improve finite-dataset accuracy. This is the single most common "why" in
 ML and the answer is purely calculus.
 
 **What is the gradient of $\|\mathbf{w}\|_1$?** $\mathrm{sign}(\mathbf{w})$,
-undefined at zero. The constant magnitude regardless of $|w_i|$ is exactly why
-L1 drives weights to *exactly* zero and produces sparsity, whereas L2's gradient
-$2\mathbf{w}$ shrinks proportionally and never quite reaches zero.
+with the subgradient interval $[-1,1]$ at zero. Exact zeros arise naturally from the L1 optimality condition and proximal soft-thresholding; ordinary finite gradient steps need not land on zero. L2 shrinks smoothly and does not generally induce sparse optima.
 
 **Why divide attention scores by $\sqrt{d_k}$?** For independent
 zero-mean unit-variance components, $\mathbf{q}\cdot\mathbf{k}$ has variance
@@ -582,13 +685,13 @@ Dividing by $\sqrt{d_k}$ restores unit variance.
 
 **Can you have a zero gradient at a point that is not a minimum?** Yes: maxima,
 saddle points, and flat plateaus. Check the Hessian's eigenvalues to tell them
-apart.
+apart when the second-order test is decisive; a zero Hessian is inconclusive.
 
 **Why is the gradient of the loss w.r.t. a shared weight a sum?** Because the
 adjoint rule sums over every consumer of a node. Weight tying, convolution
 (one kernel applied at every position), and recurrence (one $W_{hh}$ applied at
 every timestep) all produce summed gradients — and that summation over $T$
-timesteps is precisely why RNN gradients explode.
+timesteps includes repeated state-Jacobian products; their amplification is the central explosion mechanism, not summation alone.
 
 ## Self-check
 
@@ -605,6 +708,28 @@ timesteps is precisely why RNN gradients explode.
    distinct calculus-level explanations and the diagnostic for each.
 6. Given $H$ with eigenvalues $\{100, 1, 0.01\}$ at a stationary point, classify
    the point and estimate how badly plain gradient descent will behave.
+
+## Worked self-check answers
+
+1. Differentiating $(1+e^{-x})^{-1}$ gives
+   $e^{-x}/(1+e^{-x})^2=\sigma(1-\sigma)$. Its maximum is $1/4$.
+   The full depth bound also contains every weight operator norm.
+2. With $G:(32,128)$, $X^\top G:(512,128)$ and
+   $GW^\top:(32,512)$. Shapes reject mistakes, while the chain rule proves
+   these particular products.
+3. Local backward rules need operands such as $X$ in $X^\top G$.
+   Checkpointing recomputes selected forward values, trading arithmetic for memory.
+4. Sum $(-y_i/p_i)p_i(\delta_{ij}-p_j)$ over $i$ and use
+   $\sum_i y_i=1$ to obtain $p_j-y_j$.
+5. Inspect the first nonfinite tensor: large exponentials suggest unstable
+   logits; invalid logarithm/division suggests a domain error; rapidly growing
+   Jacobian products suggest unstable updates. Lower LR is a diagnostic, not
+   proof that no implementation bug exists.
+6. All three eigenvalues are positive, so under the local smoothness assumptions
+   this is a strict local minimum. The local quadratic has $\kappa=10^4$ and
+   stability requires $0<\eta<.02$. At $\eta=.01$, the flat coordinate
+   contracts by $.9999$ per step, needing roughly 10,000 steps for an
+   $e^{-1}$ reduction in its magnitude.
 
 ## Where to go next
 

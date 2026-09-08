@@ -6,10 +6,9 @@ meta: Deep Learning · foundations
 
 # Activations and Initialization
 
-Two choices that look like details and are not. The activation function decides
-whether gradients survive depth; the initialisation decides whether the forward
-signal survives depth. Get either wrong and a network that is architecturally
-perfect will not train.
+Activations and initialization jointly determine the scale, geometry and local derivatives of a network at the start of training. Neither acts alone: width, residual paths, normalization and optimizer settings also affect signal transport. This chapter derives the useful approximations, tests them on finite networks and explains when they fail.
+
+Prerequisites are [probability and moments](../math/probability.md), [matrix norms](../math/linear-algebra.md) and [backpropagation](./backpropagation-and-autodiff.md). Distinguish a tensor's mean, centered variance and uncentered second moment throughout; they are not interchangeable.
 
 ## Why a non-linearity is required
 
@@ -17,7 +16,7 @@ Without one, a stack of affine maps collapses:
 
 $$W_3(W_2(W_1\mathbf{x})) = (W_3W_2W_1)\mathbf{x} = W'\mathbf{x}$$
 
-A hundred layers becomes one. Depth buys nothing. The activation is what makes
+With biases included the result is affine. Depth adds no nonlinear expressivity, although a linear factorization can alter rank constraints and optimization. The activation is what makes
 composition expressive.
 
 ## The activation functions
@@ -26,19 +25,13 @@ composition expressive.
 
 $$\sigma(x) = \frac{1}{1+e^{-x}}, \qquad \sigma'(x) = \sigma(x)(1-\sigma(x))$$
 
-Squashes to $(0,1)$, so it reads as a probability. Historically dominant, now
-used only in output layers and gates.
+Squashes to $(0,1)$, so it reads as a probability. Historically common in hidden layers, it remains especially useful in output parameterizations and gates.
 
-**Three fatal problems for hidden layers:**
+**Three considerations for hidden layers:**
 
-1. **$\sigma' \le 0.25$ everywhere.** Ten stacked sigmoids shrink the gradient by
-   at least $4^{-10}\approx10^{-6}$. Vanishing gradients, guaranteed by
-   arithmetic.
-2. **Saturation.** For $|x|>5$ the derivative is essentially zero. A saturated
-   unit stops learning entirely.
-3. **Not zero-centred.** Outputs are always positive, so all gradients with
-   respect to a layer's weights share a sign, forcing a zig-zag optimisation
-   path.
+1. **$\sigma' \le 0.25$ everywhere.** The activation-only derivative product is at most $4^{-10}$ over ten layers; the complete Jacobian also includes weights. This encourages contraction but does not prove every sigmoid network vanishes.
+2. **Saturation.** For $|x|>5$ the derivative is essentially zero. A saturated unit can learn very slowly, and finite precision may round an already small derivative to zero.
+3. **Not zero-centred.** For one example and one output unit, positive inputs make incoming-weight gradient signs follow the same upstream scalar. Batch summation, different units and later layers invalidate a blanket same-sign claim; centering can still improve conditioning.
 
 Still correct where it belongs: a binary classification output, and the gates
 inside an LSTM or GRU, where "a number in $(0,1)$ that multiplies something" is
@@ -48,8 +41,7 @@ exactly what is wanted.
 
 $$\tanh(x) = \frac{e^x-e^{-x}}{e^x+e^{-x}} = 2\sigma(2x)-1, \qquad \tanh'(x) = 1-\tanh^2(x)$$
 
-Zero-centred, range $(-1,1)$, maximum derivative 1. Strictly better than sigmoid
-for hidden layers, and still saturating. Used in LSTM cell candidates and in
+Zero-centred, range $(-1,1)$, maximum derivative 1. Often easier to center than sigmoid for hidden layers, but still saturating and not universally better. Used in LSTM cell candidates and in
 small recurrent networks.
 
 ### ReLU
@@ -67,31 +59,28 @@ The change that made deep networks trainable.
 
 | Problem | Detail |
 |---|---|
-| **Dying ReLU** | a unit whose pre-activation is negative for every input has zero gradient forever, and can never recover |
+| **Dying ReLU** | a unit inactive on all observed inputs gets no task gradient through this activation |
 | Not zero-centred | outputs are non-negative |
 | Non-differentiable at 0 | frameworks define $\mathrm{ReLU}'(0)=0$ by convention |
 | Unbounded above | can produce very large activations |
 
 **The dying ReLU deserves a precise account.** A large gradient step can push a
 unit's bias so negative that $\mathbf{w}^\top\mathbf{x}+b < 0$ for the entire
-data distribution. Then the output is 0, the gradient is 0, and no update will
-ever change it. The unit is permanently dead. In badly configured networks —
-usually too high a learning rate — 40% or more of units can die. Diagnose it by
-logging the fraction of zero activations per layer.
+data distribution. Then its output and local task gradient are zero. With fixed inputs, plain gradient descent and no other update sources, it cannot recover through that path. Upstream representation changes, momentum, regularization or new examples may reactivate it. Diagnose persistent per-unit inactivity across representative examples, not the overall fraction of zeros.
 
 ### The ReLU family
 
 | Function | Formula | Fixes |
 |---|---|---|
-| **Leaky ReLU** | $\max(\alpha x, x)$, $\alpha=0.01$ | non-zero gradient when negative — no dying units |
+| **Leaky ReLU** | $\max(\alpha x, x)$, $\alpha=0.01$ | nonzero negative-side derivative when alpha is positive |
 | **PReLU** | same, $\alpha$ learned | lets the network choose the slope |
-| **ELU** | $x$ if $x>0$, else $\alpha(e^x-1)$ | smooth, negative saturation, closer to zero-centred |
-| **SELU** | scaled ELU with specific constants | self-normalising: activations converge to zero mean, unit variance |
+| **ELU** | $x$ if $x>0$, else $\alpha(e^x-1)$ | negative saturation; differentiable at zero only when alpha=1 |
+| **SELU** | scaled ELU with specific constants | self-normalizing under architectural and initialization assumptions |
 | **GELU** | $x\,\Phi(x)$ | smooth, non-monotonic; the transformer default |
 | **SiLU / Swish** | $x\,\sigma(x)$ | smooth, non-monotonic; very similar to GELU |
 | **Mish** | $x\tanh(\mathrm{softplus}(x))$ | smoother still; more expensive |
 | **SwiGLU** | $\mathrm{Swish}(xW)\odot(xV)$ | gated; used in Llama, PaLM, most modern LLMs |
-| **Softplus** | $\log(1+e^x)$ | smooth ReLU; rarely worth the cost |
+| **Softplus** | $\log(1+e^x)$ | smooth positive map, useful for positive parameterizations |
 | **Maxout** | $\max_k(\mathbf{w}_k^\top\mathbf{x}+b_k)$ | learns the activation; multiplies parameters |
 
 **GELU** is the default in transformers:
@@ -111,7 +100,8 @@ $$\mathrm{FFN}(x) = \bigl(\mathrm{Swish}(xW_1)\odot xW_3\bigr)W_2$$
 
 Because it uses three matrices instead of two, implementations shrink the hidden
 dimension to $\frac{2}{3}\cdot 4d$ to keep the parameter count matched. The
-gating consistently buys a small but real quality gain at equal parameters.
+gating improved quality in the cited matched experiments; it is not a universal
+guarantee across datasets, training budgets or implementations.
 
 ### Output activations
 
@@ -137,13 +127,10 @@ common source of "my model trains but badly".
 | Many dead units observed | LeakyReLU or GELU |
 | Very deep network without normalisation | SELU (with LeCun init and AlphaDropout) |
 | Recurrent gates | sigmoid (gates) and tanh (candidates) |
-| Need a smooth, differentiable everywhere | GELU, SiLU, ELU |
+| Need a smooth, differentiable everywhere | GELU, SiLU, or ELU with alpha=1 |
 | Extreme efficiency (edge, quantised) | ReLU or ReLU6 — quantises cleanly |
 
-The honest summary: **ReLU and GELU cover almost everything.** The differences
-between the modern smooth activations are small (fractions of a percent), and
-architecture, data, and schedule matter far more. Do not spend a week on this
-choice.
+Use an activation compatible with the architecture and training recipe, then change it in a controlled comparison. A pretrained model's activation is part of its function: replacing it without retraining is not an innocuous inference optimization.
 
 ## Initialization
 
@@ -152,7 +139,7 @@ choice.
 If every weight is zero, every neuron in a layer computes the same thing,
 receives the same gradient, and updates identically. The layer collapses to a
 single unit and never recovers. This is the **symmetry breaking** problem, and
-it is why weights must be random.
+it is why hidden units need symmetry breaking. Randomness is convenient, not logically necessary; a deterministic asymmetric construction can also work.
 
 **Biases can be zero** — the weights already break symmetry.
 
@@ -190,23 +177,20 @@ $$\mathrm{Var}(w) = \frac{2}{n_{in}+n_{out}}$$
 This assumes the activation is roughly linear near zero and symmetric — true for
 tanh, false for ReLU.
 
-**He/Kaiming initialisation** corrects for ReLU. ReLU zeroes half the inputs, so
-it halves the variance:
+**He/Kaiming initialization** tracks the second moment through ReLU. If $z$ has a symmetric distribution, $E[\operatorname{ReLU}(z)^2]=E[z^2]/2$. It does not halve centered variance. Independent zero-mean weights make the next preactivation variance depend on this uncentered input moment, leading to
 
-$$\mathrm{Var}(w) = \frac{2}{n_{in}}$$
+$\operatorname{Var}(w)=\frac{2}{n_{in}}.$
 
-The factor of 2 compensates exactly for that halving. Using Xavier with ReLU in a
-30-layer network causes activations to decay by $2^{-15}$ — an entirely
-predictable failure.
+For equal-width layers, the idealized second-moment recurrence under Xavier instead multiplies by about $1/2$ per ReLU layer; RMS magnitude multiplies by about $1/\sqrt2$. Finite width, correlations, biases and normalization can change that prediction.
 
 ### The table
 
 | Scheme | Variance | Use with |
 |---|---|---|
-| **He / Kaiming normal** | $2/n_{in}$ | ReLU, LeakyReLU, GELU, SiLU |
+| **He / Kaiming normal** | $2/n_{in}$ for ReLU | use the slope-adjusted gain for LeakyReLU; smooth gates need their own analysis |
 | **Xavier / Glorot** | $2/(n_{in}+n_{out})$ | tanh, sigmoid, linear |
 | **LeCun** | $1/n_{in}$ | SELU (required for self-normalisation) |
-| **Orthogonal** | orthonormal columns | RNNs, very deep networks |
+| **Orthogonal** | orthonormal rows or columns depending on shape, times gain | recurrent/deep networks; nonlinear masks still change singular values |
 | **Truncated normal, std 0.02** | fixed | transformers (GPT/BERT convention) |
 | **Zeros** | — | biases, and the last layer of a residual block |
 | **Identity/near-identity** | — | recurrent state matrices |
@@ -215,23 +199,25 @@ predictable failure.
 for m in model.modules():
     if isinstance(m, nn.Linear):
         nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-        nn.init.zeros_(m.bias)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
     elif isinstance(m, nn.Conv2d):
         nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
     elif isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
-        nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
+        if m.weight is not None:
+            nn.init.ones_(m.weight)
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
 ```
 
 ### Initialisation tricks that matter in practice
 
 **Zero-init the last layer of each residual block.** If the block's final
 convolution or its normalisation gain starts at zero, the block initially
-computes the identity: $\mathbf{h} = \mathbf{h} + 0$. The network begins as a
-shallow one and deepens as training progresses. This measurably stabilises very
+computes the identity: $\mathbf{h} = \mathbf{h} + 0$. The block begins at identity when the skip is identity. The final zero factor initially blocks gradients to some earlier branch parameters, so the exact placement matters. This measurably stabilises very
 deep ResNets and transformers, and it is nearly free.
 
-**Scale residual-branch outputs by $1/\sqrt{2L}$** (GPT-2's convention) so that
-the variance added by $L$ residual branches does not accumulate through depth.
+**Scale selected residual output-projection initialization by $1/\sqrt{2L}$** in a GPT-2-style two-branch-per-block recipe. This controls approximate accumulated branch variance; it is not a universal instruction to rescale every activation.
 
 **Initialise forget-gate biases to 1** in an LSTM. It starts the cell in a
 "remember by default" state, which substantially improves learning of long
@@ -262,8 +248,8 @@ For transformers specifically, the interaction is well studied:
 
 | Setup | Behaviour |
 |---|---|
-| Post-LN (original Transformer) | needs warmup; gradients at the last layer are much larger at init |
-| **Pre-LN** (modern default) | far more stable; trains without warmup, though warmup still helps |
+| Post-LN (original Transformer) | used warmup in the original recipe; large final-layer gradients at initialization can motivate it, depending on parameterization |
+| **Pre-LN** | often easier to optimize; warmup requirements still depend on scale and recipe |
 | RMSNorm | cheaper than LayerNorm, no re-centring; used in Llama-family models |
 | DeepNorm / scaled residuals | enables 1000-layer transformers |
 
@@ -283,26 +269,282 @@ for name, mod in model.named_modules():
 |---|---|---|
 | Activation std shrinks toward zero with depth | init too small, or Xavier with ReLU | He init |
 | Activation std grows with depth | init too large | He init, or scale residual branches |
-| >30% of ReLU outputs are exactly zero after a few steps | dying ReLU | LeakyReLU/GELU, lower LR |
-| Tanh/sigmoid activations pinned at ±1 | saturation | rescale init, add normalisation |
-| Loss is exactly $\log K$ and does not move | output layer saturated or LR ~0 | check the output bias and the LR |
+| Many units are inactive for every representative example over time | potentially dying ReLU | inspect per-unit maxima and upstream changes; test LR or activation |
+| Tanh near -1/+1, sigmoid near 0/1 | saturation | inspect preactivations, input scale and initialization |
+| Loss remains near $\log K$ | near-uniform predictions or averaging effects | inspect logits, labels, gradients and actual updates |
 | Gradient norms differ by $10^6$ across layers | init or architecture problem | per-layer norms, add normalisation |
 
-**A well-initialised classifier starts at loss $\approx \log K$** — the entropy
-of a uniform prediction over $K$ classes. For 10 classes that is 2.303. If your
-initial loss is far from that, something is wrong before training has begun, and
-that is a two-second check worth doing every time.
+Uniform logits give loss $\log K$; for ten classes this is about 2.303. This is a useful reference, not a mandatory initial loss. Random nonuniform logits can produce larger expected cross-entropy; class-prior biases intentionally produce a different baseline. Inspect the predicted distribution before diagnosing a bug.
+
+## Moments, gains, and finite-width effects
+
+### A Gaussian ReLU calculation
+
+Let $z\sim\mathcal N(0,q)$ and $h=\max(0,z)$. Symmetry gives
+
+$$E[h^2]=q/2,\qquad E[h]=\sqrt{q/(2\pi)},\qquad
+\operatorname{Var}(h)=q\left(\frac12-\frac1{2\pi}\right).$$
+
+For $q=1$, the mean is about $0.3989$, second moment $0.5$, and centered
+variance $0.3408$. ReLU outputs are not zero-centered. Saying that it halves
+variance loses the mean-square contribution and obscures the actual argument
+behind Kaiming initialization.
+
+Now let $z_i=\sum_{j=1}^n w_{ji}h_j$, with independent zero-mean weights of
+variance $\sigma_w^2$, independent of the inputs. Averaging over these random
+weights makes cross terms vanish:
+
+$$E[z_i^2]=n\sigma_w^2E[h_j^2].$$
+
+The previous activations do not need zero mean for this step. Choosing
+$\sigma_w^2=2/n$ compensates for the ReLU second-moment factor. In a single
+finite sampled network, unit means and correlations fluctuate; this ensemble
+calculation is an approximation to typical propagation, not an exact identity
+for every realized layer.
+
+For LeakyReLU with negative slope $a$, symmetry gives
+
+$$E[\phi(z)^2]=\frac{1+a^2}{2}E[z^2],\qquad
+\sigma_w^2=\frac{2}{(1+a^2)n}.$$
+
+At $a=0.2$ and fan-in $100$, variance is $2/104\approx0.01923$, standard
+deviation about $0.13868$. Using variance as the normal distribution's standard
+deviation would shrink scale drastically. Check whether an API expects `std`,
+variance or a uniform bound before translating a formula.
+
+### Forward and backward objectives need not coincide
+
+For a linear layer, fan-in preservation asks for variance $1/n_{in}$ while
+backward preservation asks for $1/n_{out}$. Rectangular layers cannot satisfy
+both exactly unless the widths agree. Xavier's $2/(n_{in}+n_{out})$ is a
+compromise, not an equality satisfying both equations. Gains account for the
+chosen nonlinearity under a specified approximation.
+
+A uniform variable on $[-a,a]$ has variance $a^2/3$. Consequently Xavier uniform
+uses $a=\sqrt{6/(n_{in}+n_{out})}$ before an optional gain; ReLU fan-in uniform
+uses $a=\sqrt{6/n_{in}}$. Normal and uniform variants can match second moments
+while differing in tails, which matters for extreme activations and quantization.
+
+For GELU or SiLU, $E[\phi(\sqrt q Z)^2]$ and
+$E[\phi'(\sqrt q Z)^2]$ depend on the operating variance $q$. A ReLU gain is a
+reasonable recipe in some networks, not an exact preservation theorem for all
+smooth activations. Gated FFNs multiply two projections, introducing additional
+moments and correlations; simply assigning one scalar gain to the gate cannot
+fully characterize their dynamics.
+
+### Fan axes and parameter conventions
+
+PyTorch linear weights are `(out_features,in_features)`. Applying a fan-based
+initializer to a custom matrix intended for `x @ W` requires attention to that
+transpose convention. A grouped convolution stores
+`(C_out,C_in/groups,kH,kW)`, so a filter's fan-in is
+$(C_{in}/g)k_Hk_W$, not $C_{in}k_Hk_W$. Verify the library's fan-out convention
+when requesting backward preservation for grouped operators.
+
+Rectangular orthogonal initialization can make columns orthonormal when there
+are enough rows, or rows orthonormal in the opposite case. It cannot make both
+$W^\top W$ and $WW^\top$ identities for a nonsquare matrix. Even a square
+orthogonal weight followed by a ReLU mask has rank loss whenever coordinates are
+inactive. Scalar variance preservation is therefore weaker than preserving all
+singular values of the input-output Jacobian, sometimes called dynamical isometry.
+
+### Symmetry-breaking exceptions
+
+Initializing every hidden unit identically creates an invariant symmetry: equal
+units receive equal updates on the same data. Random asymmetric weights break
+it conveniently; deterministic distinct directions also can. Zero biases do
+not reintroduce the symmetry when weight rows already differ.
+
+Zeroing only a final residual projection is different from zeroing every layer.
+For $F(x)=W_2\phi(W_1x)$ with $W_2=0$, the block output initially equals its
+skip input. $W_2$ can receive a nonzero gradient because $\phi(W_1x)$ is not
+zero, while $W_1$ initially receives zero gradient through that product. After
+$W_2$ changes, earlier parameters can learn. If both matrices and hidden features
+are zero, the same escape path may be blocked.
+
+Class-prior bias initialization is another deliberate asymmetry. A Bernoulli
+prior $\pi$ corresponds to bias $\log(\pi/(1-\pi))$ when initial feature logits
+are near zero. For $\pi=0.01$, bias is approximately $-4.5951$ and expected
+cross-entropy of the prior predictor is its entropy, about $0.0560$ nats, not
+$\log2$. Estimate that prior only from training labels and reconsider it if
+sampling or class weighting changes the effective training distribution.
+
+## Experiment: measure signal rather than trusting a label
+
+The experiment measures Gaussian moments, compares depth propagation for three
+weight scales, records input-gradient norms, and diagnoses persistent inactivity
+separately from ordinary ReLU sparsity. It uses fixed shapes and finite samples:
+the numerical tolerances test the intended phenomenon without claiming exact
+ensemble identities for every random seed.
+
+```python runnable
+import math
+import torch
+from torch import nn
+
+torch.set_num_threads(1)
+torch.manual_seed(41)
+z = torch.randn(200000, dtype=torch.float64)
+h = z.relu()
+expected_mean = 1 / math.sqrt(2 * math.pi)
+expected_variance = 0.5 - 1 / (2 * math.pi)
+assert abs(h.mean().item() - expected_mean) < 0.006
+assert abs(h.square().mean().item() - 0.5) < 0.009
+assert abs(h.var(unbiased=False).item() - expected_variance) < 0.009
+print("ReLU mean, variance, second moment:", h.mean().item(),
+      h.var(unbiased=False).item(), h.square().mean().item())
+
+def propagation(weight_variance_factor):
+    torch.manual_seed(42)
+    width, depth = 128, 18
+    layers = nn.ModuleList([nn.Linear(width, width, bias=False) for _ in range(depth)])
+    for layer in layers:
+        nn.init.normal_(layer.weight, std=math.sqrt(weight_variance_factor / width))
+    x = torch.randn(96, width, requires_grad=True)
+    value = x
+    records = []
+    for index, layer in enumerate(layers):
+        value = layer(value).relu()
+        records.append((index + 1, value.mean().item(),
+                        value.var(unbiased=False).item(),
+                        value.square().mean().item(),
+                        (value == 0).float().mean().item()))
+    value.sum().backward()
+    return records, x.grad.norm().item()
+
+small, small_gradient = propagation(0.2)
+xavier, xavier_gradient = propagation(1.0)
+he, he_gradient = propagation(2.0)
+for name, records, gradient in (("small", small, small_gradient),
+                                 ("Xavier", xavier, xavier_gradient),
+                                 ("He", he, he_gradient)):
+    print(name, "last layer (depth,mean,var,second moment,zero fraction)",
+          records[-1], "input gradient norm", gradient)
+assert small[-1][3] < xavier[-1][3] * 1e-8
+assert he[-1][3] > xavier[-1][3] * 1000
+assert all(math.isfinite(row[3]) for row in he)
+
+torch.manual_seed(43)
+features = torch.randn(2000, 8)
+healthy = nn.Linear(8, 16)
+nn.init.zeros_(healthy.bias)
+with torch.no_grad():
+    activations = healthy(features).relu()
+    ordinary_zero_fraction = (activations == 0).float().mean().item()
+    inactive_units = (activations.amax(dim=0) == 0).sum().item()
+    unhealthy = nn.Linear(8, 16)
+    unhealthy.weight.copy_(healthy.weight)
+    unhealthy.bias.fill_(-100)
+    dead_count = (unhealthy(features).relu().amax(dim=0) == 0).sum().item()
+assert 0.4 < ordinary_zero_fraction < 0.6
+assert inactive_units == 0 and dead_count == 16
+print("Healthy zero fraction:", ordinary_zero_fraction,
+      "persistently inactive:", inactive_units, "constructed inactive:", dead_count)
+```
+
+The constructed inactive layer is inactive on this finite input sample, not a
+proof about every point of an unbounded Gaussian distribution. In production,
+aggregate per-unit maxima or activation frequencies across representative batches
+and over time. Fifty percent zero entries is compatible with every neuron being
+useful on some observations.
+
+For visual inspection, plot the measured second moment against depth on a log
+axis, and plot activation value and derivative against preactivation on common
+axes. The curves distinguish saturation from scale drift: sigmoid derivatives
+approach zero at either extreme, ReLU has a zero negative branch, and SiLU/GELU
+have smooth nonmonotonic negative regions. Do not infer derivative behavior from
+an activation curve alone when a tiny slope matters numerically.
+
+## Initialization in a complete training decision
+
+Start by measuring inputs: large feature-unit differences can undo a carefully
+chosen weight scale. Standardize continuous tabular features using training-only
+statistics, use preprocessing matching a pretrained image model, and inspect
+embedding magnitudes rather than applying a dense fan-in formula to lookup tables.
+
+Then measure preactivation mean/std, activation second moment, saturation or
+inactivity rates and gradient norms on the first few batches. Hooks should be
+removed when diagnostics finish; detach scalar statistics rather than storing
+entire graph-connected tensors. Distinguish a healthy but narrow bottleneck from
+unintended collapse by checking the representation covariance rank.
+
+Normalization can reduce sensitivity to input scale but cannot restore
+information already destroyed by a saturated or rank-deficient transformation.
+Its epsilon breaks exact scale invariance near zero, and learned gains, optimizer
+moments and residual placement still affect gradients. Pre-norm often makes
+transformers easier to optimize, but whether warmup can be omitted must be
+validated for the particular size and initialization, not inferred from the name.
+
+SELU's self-normalizing analysis assumes a compatible feedforward architecture,
+initialization and moment regime. Ordinary dropout changes those moments; use
+AlphaDropout when following that recipe. Arbitrary residual branches,
+normalization layers or correlated inputs can move the network outside the
+analysis. For LSTMs, a positive forget-gate bias initially favors retention,
+but library implementations may split biases across input and recurrent terms;
+the effective summed bias is what controls the gate.
+
+Finally compare alternatives with the same data order and reasonable optimizer
+tuning. A larger activation variance can look beneficial merely because it
+changes effective update scale. Record the initial function, not only the
+initializer's name, and retain the architecture's intended residual scaling when
+loading a pretrained checkpoint.
+
+### Smoothness, clipping, and bounded outputs
+
+Smooth activations are useful when the objective itself differentiates model
+outputs, as in derivative matching or some physics-informed losses. ReLU's
+second derivative is zero almost everywhere and undefined at its kink; a model
+can represent a piecewise-linear function accurately yet be a poor choice for
+matching a smooth second derivative. Conversely, a smooth activation does not
+automatically make its numerical derivatives well-conditioned at saturation.
+
+ReLU6 clips at six as well as zero. That bounded range can simplify activation
+quantization, but values beyond six have zero local derivative and the clipping
+threshold becomes part of the learned function. Hard-sigmoid or hard-swish
+approximations also trade smoothness for implementation properties. Replacing a
+trained smooth gate with a hard approximation changes outputs; evaluate or
+retrain rather than assuming mathematical equivalence.
+
+For a positive scale, `softplus(raw) + epsilon` can prevent an invalid negative
+parameter while avoiding the extreme growth of `exp(raw)`. But it introduces a
+minimum scale and a particular derivative profile. Choose that minimum from the
+modeled quantity's units and numerical requirements, not a universal epsilon
+copied between unrelated tasks.
 
 ## Self-check
 
-1. Why can weights not be initialised to zero, but biases can?
-2. Derive $\mathrm{Var}(w) = 1/n_{in}$ from the variance of a weighted sum.
-3. Why does He initialisation have a factor of 2 that Xavier does not?
-4. Explain the dying ReLU precisely: what makes it permanent?
-5. Your 10-class classifier starts at loss 7.0. What does that tell you?
-6. Why is zero-initialising the last layer of a residual block helpful?
-7. What is the practical reason to set the output bias to the log-odds of the
-   base rate?
+1. **Why can biases be zero?** Distinct weight vectors already break hidden-unit
+   symmetry. Identical weights and biases preserve equal-unit dynamics, while
+   deterministic asymmetric weights can break the symmetry without randomness.
+2. **Derive fan-in scaling.** With independent zero-mean weights,
+   $E[z_i^2]=n\sigma_w^2E[x_j^2]$. Preserving a linear signal asks for
+   $\sigma_w^2=1/n$; a ReLU before the next map contributes a factor one-half
+   to the second moment under symmetry.
+3. **Does ReLU halve variance?** No. For standard Gaussian input, second moment
+   is $0.5$, mean is $1/\sqrt{2\pi}$, and variance is
+   $0.5-1/(2\pi)\approx0.3408$. The He derivation tracks the first of these.
+4. **What makes a ReLU locally dead?** All relevant observed preactivations are
+   negative, so task gradients through that unit are zero. It remains dead under
+   fixed inputs and updates solely from that gradient, but momentum or changing
+   upstream features can reactivate it.
+5. **A ten-class classifier starts at loss seven. Is it broken?** It is much worse
+   than uniform predictions, so inspect logit scale, label indices and class-prior
+   assumptions. Random overconfident logits can cause it without a software bug.
+6. **Why zero a residual's final projection?** The residual starts at zero while
+   its nonzero hidden features allow the final projection to learn. Earlier
+   branch layers can begin receiving gradients once that projection moves.
+7. **Why use prior log-odds?** With nearly zero feature contribution, sigmoid of
+   the bias equals the training prior. For one percent positives, the bias is
+   approximately $-4.595$, avoiding an initially fifty-percent positive predictor.
+8. **Compute LeakyReLU scale.** For slope $0.2$ and fan-in $100$, variance is
+   $2/(1.04\cdot100)$ and standard deviation about $0.13868$. A normal sampler
+   expects the standard deviation, not that variance.
+9. **Are fifty-percent zeros a failure?** Not by themselves. A healthy neuron can
+   activate on half the examples. Count neurons inactive across the dataset and
+   inspect the pattern over training, not just the aggregate zero fraction.
+10. **Does an orthogonal matrix guarantee gradient preservation?** Only for the
+    appropriate linear map and subspace before nonlinearities. ReLU masks,
+    rectangular bottlenecks and residual sums change the complete Jacobian.
 
 ## Where to go next
 
@@ -312,3 +554,9 @@ that is a two-second check worth doing every time.
   layers that make initialisation less fragile.
 - [Optimization & Training](./optimization-and-training.md) — learning rates,
   schedules, and warmup.
+
+Primary references: [Glorot and Bengio](https://proceedings.mlr.press/v9/glorot10a.html),
+[He et al., rectifier initialization](https://openaccess.thecvf.com/content_iccv_2015/html/He_Delving_Deep_into_ICCV_2015_paper.html),
+[self-normalizing networks](https://arxiv.org/abs/1706.02515),
+[GLU variants](https://arxiv.org/abs/2002.05202), and
+[PyTorch initialization conventions](https://docs.pytorch.org/docs/stable/nn.init.html).

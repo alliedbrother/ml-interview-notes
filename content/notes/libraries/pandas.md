@@ -82,7 +82,7 @@ def shrink(df):
             out[c] = pd.to_numeric(col, downcast="integer")
         elif pd.api.types.is_float_dtype(col):
             out[c] = pd.to_numeric(col, downcast="float")
-        elif col.dtype == object and col.nunique() / max(len(col), 1) < 0.5:
+        elif (pd.api.types.is_object_dtype(col) or pd.api.types.is_string_dtype(col)) and col.nunique() / max(len(col), 1) < 0.5:
             out[c] = col.astype("category")
     return out
 
@@ -95,7 +95,9 @@ pointer and hides the actual strings.
 **PyArrow backing** (`dtype_backend="pyarrow"`, pandas 2.0+) is worth adopting
 for string-heavy data: it stores strings contiguously, supports genuine missing
 values across all types, and interoperates with Parquet and Polars without
-conversion.
+unnecessary Python-object conversion in compatible operations. Zero-copy transfer
+still depends on schema and operation. Check error tolerances before float
+downcasting; smaller storage is not worth erasing meaningful differences.
 
 ## Selection: `[]`, `.loc`, `.iloc`, and the ones to avoid
 
@@ -193,7 +195,8 @@ big = g.filter(lambda d: len(d) >= 10)
 
 **Performance notes that actually matter:**
 
-- `observed=True` when grouping on categoricals. Without it, pandas produces the
+- Set `observed=True` explicitly for categorical grouping across versions (it is
+  the pandas 3 default). With `observed=False`, pandas can produce the
   full Cartesian product of category levels — a real memory bomb with multiple
   categorical keys.
 - `sort=False` skips sorting the group keys when you do not need ordered output.
@@ -205,6 +208,12 @@ big = g.filter(lambda d: len(d) >= 10)
   Look for an `agg`/`transform` equivalent first.
 
 ### The window functions people reimplement badly
+
+For chronological features, first sort by user and event timestamp, then rebuild
+`g = df.groupby("user", observed=True, sort=False)`. Grouping itself does not
+sort each user's observations. The following `rolling(7)` means seven rows, not
+seven days, and includes the current observation; choose strict-past semantics
+explicitly when the feature must describe only earlier events.
 
 ```python
 df["rank_in_user"]  = g["value"].rank(method="dense", ascending=False)
@@ -256,9 +265,10 @@ Other joining tools:
 - `pd.concat([a, b], axis=0)` — stack rows; `axis=1` aligns on index.
 - `pd.merge_asof(left, right, on="time", by="id", direction="backward")` — the
   **as-of join**: for each left row, take the most recent right row at or before
-  its timestamp. This is the correct primitive for building point-in-time
-  correct features, and it is what prevents look-ahead leakage in time-series
-  feature stores.
+  its timestamp. Both inputs must be sorted by the merge-time key. For historical
+  correctness, join on when the value became available, not just its event date;
+  use `tolerance` for freshness and `allow_exact_matches=False` when ties must be
+  excluded. A backward join alone does not prove absence of leakage.
 
 ## Reshaping
 
@@ -292,10 +302,10 @@ df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601")
 df = df.set_index("ts").sort_index()
 
 df.resample("1D").agg({"value": "sum", "user": "nunique"})
-df.rolling("7D").mean()             # time-based window, not row-based
+df["value"].rolling("7D", closed="left").mean()  # value-only, strict-past window
 df.between_time("09:00", "17:00")
 df.tz_convert("America/New_York")
-df.asfreq("1H").ffill()             # regularise an irregular series
+df.asfreq("1h").ffill()             # lowercase hourly alias; unique index required
 ```
 
 The `.dt` accessor gives calendar features in one line:
@@ -310,9 +320,12 @@ df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
 ```
 
 **Timezones are where correctness lives.** Store UTC, convert for display, and
-be aware that `rolling("7D")` on a naive index across a DST boundary silently
-gives you a 7-day-and-one-hour window. Always parse with `utc=True` unless you
-have a reason not to.
+distinguish local wall time from an absolute instant. A naive index has no DST
+knowledge. Parsing a naive local time with `utc=True` interprets it as UTC; it
+does not recover the intended timezone. Localize first with `tz_localize(zone,
+ambiguous=..., nonexistent=...)`, then convert to UTC. Duration windows and local
+calendar-day windows differ around clock changes. See the
+[time-series guide](https://pandas.pydata.org/docs/user_guide/timeseries.html).
 
 **Never shuffle a time series into a random train/test split.** Use
 `TimeSeriesSplit` or an explicit date cutoff; a random split lets the model see
@@ -325,7 +338,7 @@ the future.
 | Vectorised column ops | fastest | always try first |
 | `.map()` on a Series with a dict | fast | value lookups |
 | `np.where` / `np.select` | fast | conditionals |
-| `.apply(axis=0)` on a Series | medium | per-column Python |
+| `DataFrame.apply(axis=0)` | medium | per-column Python; `Series.apply` is a different one-dimensional API |
 | `.apply(axis=1)` on a DataFrame | **very slow** | almost never — it builds a Series per row |
 | `.itertuples()` | slow but 10× faster than `iterrows` | when you truly need row loops |
 | `.iterrows()` | slowest | avoid — it boxes every row as a Series |
@@ -357,7 +370,7 @@ Other levers:
 |---|---|
 | Data exceeds RAM | Polars (streaming), DuckDB, Dask |
 | Heavy SQL-style analytics | DuckDB — query Parquet directly, often faster than pandas |
-| Need multicore | Polars, Dask, DuckDB — pandas is single-threaded |
+| Need multicore | compare Polars, Dask, DuckDB; pandas parallelism depends on engine and operation |
 | Interchange with Spark/Arrow | PyArrow tables, `pandas.ArrowDtype` |
 | GPU dataframes | cuDF (mostly pandas-compatible API) |
 
@@ -395,6 +408,49 @@ larger-than-memory query and hands you back a DataFrame.
 | `df.x` returns a method not a column | column named like an attribute (`count`, `max`) | use `df["x"]` |
 
 ## Self-check
+
+### Worked ingestion and temporal checks
+
+Pandas merges match null keys to null keys, unlike ordinary SQL equality joins.
+Decide whether that is meaningful before joining. A failed `validate` should lead
+to a documented duplicate-resolution rule, not arbitrary `drop_duplicates` merely
+to silence the exception. A left anti-join can be obtained from a validated left
+merge's `left_only` indicator rows.
+
+```python runnable
+from io import StringIO
+import numpy as np
+import pandas as pd
+raw = "user,value\na,10\nb,4\na,20\nb,6\n"
+parts = [chunk.groupby("user")["value"].agg(["sum", "count"])
+         for chunk in pd.read_csv(StringIO(raw), dtype={"user": "string", "value": "int64"}, chunksize=2)]
+totals = pd.concat(parts).groupby(level=0).sum()
+assert totals.loc["a", "sum"] == 30 and totals.loc["b", "count"] == 2
+assert pd.isna(pd.Series([True, pd.NA], dtype="boolean").iloc[1])
+assert (pd.NA & False) is False
+local = pd.DatetimeIndex(["2025-03-09 01:30", "2025-03-09 03:30"])
+utc = local.tz_localize("America/New_York", ambiguous="raise", nonexistent="raise").tz_convert("UTC")
+assert utc[1] - utc[0] == pd.Timedelta("1h")
+events = pd.DataFrame({"user": ["a", "a"], "time": pd.to_datetime(["2025-01-10", "2025-01-03"], utc=True)})
+prices = pd.DataFrame({"user": ["a"], "available": pd.to_datetime(["2025-01-02"], utc=True), "price": [10.]})
+joined = pd.merge_asof(events.sort_values("time"), prices.sort_values("available"),
+    left_on="time", right_on="available", by="user", direction="backward", tolerance=pd.Timedelta("3D"))
+assert len(joined) == len(events)
+assert joined.price.iloc[0] == 10 and pd.isna(joined.price.iloc[1])
+left = pd.DataFrame({"key": [1., np.nan]})
+right = pd.DataFrame({"key": [np.nan], "value": [7]})
+assert left.merge(right, on="key", how="left", validate="many_to_one").value.iloc[1] == 7
+print("schema, chunk aggregation, nullable logic, DST, freshness, null-key checks passed")
+```
+
+**Why sum counts rather than average chunk means?** Unequal chunk/group sizes
+make the unweighted mean of means wrong; retain mergeable sufficient statistics.
+For variance, use a stable count/mean/centered-sum-of-squares combination rather
+than subtracting huge nearly equal raw moments. **Why retain unavailable rows?**
+Dropping stale unmatched rows can silently change the evaluation population;
+represent unavailable features explicitly and test the model's missing-data policy.
+The [merge API](https://pandas.pydata.org/docs/reference/api/pandas.merge.html)
+documents null matching and cardinality validation.
 
 1. `a + b` on two Series of the same length gives `NaN`s. Give the cause and two
    fixes.

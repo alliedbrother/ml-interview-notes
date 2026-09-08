@@ -25,9 +25,10 @@ The consequence, in the playlist's example:
 "Nitesh killed lion"     and     "Lion killed Nitesh"
 ```
 
-To a self-attention module these are **the same input**. The same three
-embeddings arrive; the same nine dot products come out. Opposite meanings,
-identical representation.
+Without positions or a causal mask, these inputs differ by a row permutation.
+Self-attention is **permutation-equivariant**: permuting input rows permutes
+output rows, rather than leaving the output matrix identical. A permutation-
+invariant pooling operation would then erase that distinction entirely.
 
 This is the bill from module 01. An RNN gets order for free because it *is*
 sequential. The Transformer traded that away for parallelism, and now has to
@@ -48,8 +49,8 @@ Append the position index as an extra dimension: `1, 2, 3, 4, ...`
 
 **Problem A — unbounded.** A 500-page book has ~1,000,000 words, so the last
 token carries the value 1,000,000. Neural networks trained by backpropagation
-want inputs roughly in `[-1, 1]`. Huge values cause exploding gradients and
-unstable training.
+often benefit from controlled input scale. Large raw indices can dominate
+token features; this is a conditioning concern, not a universal `[-1,1]` rule.
 
 ### Attempt 2: normalise by sentence length
 
@@ -70,18 +71,17 @@ The network cannot learn a consistent notion of "second word."
 
 ### Attempt 3: still discrete
 
-Even fixing the above, `1, 2, 3, 4` are **discrete jumps**. Networks prefer
-smooth, continuous inputs — discreteness hurts gradient flow.
-
-**Requirement 2: continuous.**
+Positions are discrete indices, and need not receive gradients. A learned
+embedding table works perfectly well with integer indices: gradients update
+the selected rows. Smooth functions are a useful design choice for evaluating
+new positions, not a requirement for backpropagation.
 
 ### Attempt 4: relative position is unreachable
 
-Counting gives each token a unique **absolute** position. But it does not
-express **relative** position — how far apart two tokens are. "The model knows
-`the` came after `Nitesh`, but not by how much," in a form it can compute with.
-Subtracting discrete indices does not give a differentiable signal the attention
-mechanism can exploit.
+Counting does express relative distance through subtraction. The design question
+is how conveniently the chosen attention projections can use that relation.
+Sinusoidal pairs offer a particularly useful linear transformation for offsets,
+derived below; they are not the only representation of distance.
 
 **Requirement 3: relative offsets should be expressible.**
 
@@ -90,20 +90,21 @@ mechanism can exploit.
 | Requirement | Why |
 |---|---|
 | **Bounded** | large values destabilise training |
-| **Continuous** | smooth gradients |
+| **Evaluable at new positions** | supports testing beyond training indices |
 | **Periodic** | periodic functions let relative offsets be recovered |
 
-A bounded, continuous, periodic function. That is a **sine wave**.
+A sine/cosine basis satisfies these design preferences. They do not uniquely
+derive sinusoids; learned positions, relative biases and other bases are valid.
 
 ```mermaid
 flowchart TD
     A1["Attempt 1: count 1,2,3,4"] -->|unbounded| P1["exploding gradients"]
     P1 --> A2["Attempt 2: divide by length"]
     A2 -->|inconsistent across sentences| P2["pos 2 means 1.0 here, 0.5 there"]
-    P2 --> A3["Attempt 3: still discrete"]
-    A3 -->|not smooth| P3["poor gradient flow"]
-    P3 --> A4["Attempt 4: no relative distance"]
-    A4 --> REQ["Need: bounded + continuous + periodic"]
+    P2 --> A3["Discrete indices are valid"]
+    A3 --> P3["Choose features evaluable at new positions"]
+    P3 --> A4["Make relative offsets convenient"]
+    A4 --> REQ["One useful design: paired periodic features"]
     REQ --> SIN["sine and cosine"]
 ```
 
@@ -111,17 +112,18 @@ flowchart TD
 
 Use `PE(pos) = sin(pos)`. Bounded to `[-1, 1]`, continuous, periodic. 
 
-But periodic means **it repeats**. `sin(2) ≈ sin(2 + 2π)`. Two tokens at
-different positions receive the same encoding, so the model believes they are at
-the same place. Fatal.
+Over real-valued positions it repeats: `sin(2)=sin(2+2*pi)`. Those are not both
+integer token indices, so that equality alone is not an exact collision proof
+on integer positions. The practical problem is ambiguity and near-collisions
+at finite precision, especially as position ranges grow.
 
 **Requirement 4: every position must get a unique encoding.**
 
 ### Attempt 6: sine *and* cosine — a vector, not a scalar
 
 Use a **pair**: `(sin(pos), cos(pos))`. Now each position is a 2-D point on the
-unit circle, and collisions become far less likely — both coordinates must
-coincide.
+unit circle. It still repeats every `2*pi` over real inputs, but the paired
+features resolve the sine-only phase ambiguity and support linear offset updates.
 
 ### Attempt 7: many pairs at decreasing frequencies
 
@@ -176,10 +178,11 @@ Video 78's best observation. Look at binary numbers 0–15:
 ...
 ```
 
-Each successive bit has **half the frequency** of the one before. Positional
-encoding is exactly this pattern — **binary counting in the domain of continuous
-numbers.** Binary encoding would work positionally, but discrete values are bad
-for neural networks, so sinusoids provide a smooth version of the same idea.
+Each successive bit has **half the frequency** of the one before. The analogy
+is multiple timescales, not identical frequencies: neighboring sinusoidal pairs
+have frequency ratio `10000**(-2/d_model)`, generally not one half. Discrete
+binary features are trainable inputs too; paired sinusoids additionally give the
+linear offset identity below.
 
 This also explains the classic heatmap: for short sequences, only low dimensions
 vary while high dimensions look constant. Their wavelengths are simply longer
@@ -195,12 +198,14 @@ x = token_embedding(ids) + positional_encoding(positions)   # both (T, d_model)
 ```
 
 Why not concatenate? Concatenation of two `d_model` vectors gives `2·d_model`,
-which doubles the width of every downstream matrix — doubling parameters and
-roughly doubling training time. Addition keeps `d_model` fixed and costs nothing.
+which doubles the residual width if carried forward. A square projection then
+has `(2d)^2 = 4d^2` weights rather than `d^2`; if only the input of one projection
+is doubled, that projection doubles instead. Addition preserves width and has
+an elementwise addition cost.
 
 That is a real interview question, and the answer is exactly that: **concatenation
-doubles the dimension and hence the parameter count and training time; addition
-does not.**
+increases width unless followed by a projection; parameter and runtime changes
+depend on which downstream dimensions grow.**
 
 *(The deeper reason addition works: `d_model` is large enough that embeddings and
 positional signals can occupy roughly independent subspaces, so the network can
@@ -333,7 +338,10 @@ flowchart TD
   whom*, not the content retrieved.
 - Applied in **every layer**, so positional signal never washes out.
 - **Zero parameters.**
-- Naturally decays: distant tokens get systematically weaker scores.
+- Relative rotations induce distance-dependent scores, not monotonic decay.
+  For a two-dimensional head with `q=k=(1,0)`, the score is `cos(n-m)`:
+  it increases again between distances 3 and 6. Any aggregate decay tendency
+  requires assumptions about frequencies and content.
 - Extends to longer contexts via rescaling tricks (**YaRN**, position
   interpolation) — Raschka notes Olmo 3 uses YaRN for 64k context, and Qwen3 uses
   it optionally to go from 32k to 131k.
@@ -519,18 +527,58 @@ RoPE". Same technique: rotate a fraction of dimensions.
 
 ---
 
+## Worked equivariance, rotations and cache positions
+
+Let P permute token rows. Without position features or an unchanged external
+mask, `(PXW_Q)(PXW_K).T=P(QK.T)P.T`. Row-wise softmax commutes with the same
+row/column permutation, so `Attention(PX)=P Attention(X)`. A causal mask breaks
+this symmetry because the allowed predecessors are tied to sequence order.
+
+For column vectors define `R(a)=[[cos(a),-sin(a)],[sin(a),cos(a)]]`.
+Orthogonality and angle addition give `R(m).T R(n)=R(n-m)`, hence the rotated
+dot product is `q.T R(n-m) k`. This isolates **positional dependence** for fixed
+content q,k; it does not say complete contextual scores depend only on distance.
+
+```python transformer-check
+import torch
+import torch.nn.functional as F
+torch.manual_seed(5)
+x = torch.randn(4, 3, dtype=torch.float64)
+perm = torch.tensor([2, 0, 3, 1])
+torch.testing.assert_close(F.scaled_dot_product_attention(x[perm], x[perm], x[perm]),
+                           F.scaled_dot_product_attention(x, x, x)[perm])
+def rotation(a):
+    a = torch.tensor(float(a), dtype=torch.float64)
+    return torch.stack((torch.stack((a.cos(), -a.sin())),
+                        torch.stack((a.sin(), a.cos()))))
+torch.testing.assert_close(rotation(5).T @ rotation(8), rotation(3))
+q = torch.tensor([1., 0.], dtype=torch.float64)
+assert q @ rotation(6) @ q > q @ rotation(3) @ q
+print("Equivariance and relative rotation hold; monotonic score decay does not.")
+```
+
+**Cache contract:** a chunk appended after P tokens must rotate positions
+`P,...,P+T-1`, not restart at zero. The corresponding causal limit is `P+i` for
+query i. Packed documents may restart positions only together with document
+attention isolation; resetting indices alone does not block cross-document
+attention. Left padding requires valid-token position IDs, not blindly taking
+the physical column number. Compute long-context angles with adequate precision
+before casting cos/sin; low-precision position rounding can collapse distinct
+positions. Measure extrapolation on lengths below and beyond training, with
+retrieval difficulty and distractors controlled. A larger configured cache is
+not evidence that a checkpoint learned to use that range.
+
 ## Key takeaways
 
-- Self-attention is permutation-invariant. Without positional information,
-  "Nitesh killed lion" and "Lion killed Nitesh" are identical inputs.
-- Sinusoidal encoding is derived, not guessed: counting is unbounded;
-  normalising is inconsistent across sentences; integers are discrete; none give
-  relative distance. Bounded + continuous + periodic ⟹ sinusoids.
+- Unmasked self-attention without position features is permutation-equivariant:
+  input row permutations produce the same output row permutations.
+- Sinusoidal encoding is one design with controlled scale and a useful linear
+  offset identity. Integer position indices do not obstruct gradient flow.
 - Multiple sine/cosine pairs at geometrically decreasing frequencies prevent
-  collisions. This is **binary counting in continuous space** — each pair is a
-  bit flipping at half the previous rate.
-- PE is **added**, not concatenated: concatenation doubles `d_model`, doubling
-  parameters and training time.
+  practical ambiguity over the intended range. Multiple timescales resemble a
+  counter, but adjacent frequency ratios are `10000**(-2/d_model)`.
+- Addition preserves residual width; concatenation followed by wider square
+  projections can quadruple their parameter counts.
 - Sine and cosine must be **paired** so that a fixed offset `k` corresponds to a
   fixed rotation `M_k` — that is what makes relative position recoverable.
 - **RoPE** rotates Q and K by angle ∝ position, in every layer. Their dot product

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LoRA serving, embeddings, rerankers, pooling — The Inference Engineering Book</title>
+<title>LoRA serving, embeddings, rerankers, pooling — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 7 · Architectures that change the inference story · 07-05</div>
 <h1>LoRA serving, embeddings, rerankers, pooling</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/lora/</code></li><li><code>vllm/v1/pool/</code></li><li><code>python/sglang/srt/lora/</code></li><li><code>python/sglang/srt/layers/pooler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/lora/</code></li><li><code>vllm/v1/pool/</code></li><li><code>python/sglang/srt/lora/</code></li><li><code>python/sglang/srt/layers/pooler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Two workloads that look nothing like the decode loop this book has spent six parts optimising, and both of which land on the same engine. Fifty fine-tunes of one base model, served from one process. And embedding models, which have no decode loop at all. The LoRA half is where the batching machinery gets genuinely hard; the pooling half is where it gets suspiciously easy.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You have fifty customer-specific fine-tunes of Llama-3-8B. Each is a rank-16 LoRA adapter: 41.9 M trainable parameters against the base model's 8.03 B. Fifty of them together are 4.2 GB in bf16 — a quarter of the 16.06 GB base checkpoint. Serving fifty separate vLLM processes would need fifty copies of those 16.06 GB and fifty H100s. Obviously you serve them from one process.</p>
@@ -653,10 +653,17 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
             self.add_adapter(lora)</code></pre>
 </div>
 
-<p>The second is quiet, and much worse. On the single-tenant version of this deployment the 2,048-token system prompt was a cache hit on every request after the first, so almost all of each request's prefill was free. Turn on fifty tenants and that goes to nothing: every request re-prefills the shared prompt. Nothing errors, and no counter goes red except the prefix-cache hit rate. The arithmetic of what that costs is worked out below &mdash; 33.2 ms of extra device work per request at the H100's bf16 peak, more once you derate for MFU. The reason it happens is that <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> established: the adapter name is part of the block hash's extra keys, so <b>identical prompts under different adapters cannot share a single KV block</b>. Fifty tenants means fifty private copies of the same system prompt's KV.</p>
+<p>Different adapters partition prefix-cache identity, so fifty adapters can require fifty
+copies of a common prompt's KV. That does not make every request cold: each adapter can reuse
+its own retained prefix. Miss rate depends on working-set size, reuse distance, routing and
+eviction. At fifty 2048-token copies the illustrated footprint is 13.4 GB, not a proof of zero hits.</p>
 
 <p>This chapter is about both halves of multi-tenant LoRA serving — the kernel that makes mixed-adapter batching possible, and the cache partitioning that makes it expensive — and then about the opposite problem: pooling models, where there is no decode loop, no KV growth, and the hard parts of this book simply do not apply.</p></div></section>
-<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>LoRA replaces a weight update with a low-rank factorisation: $W' = W + \frac{\alpha}{r} B A$, with $A \in \mathbb{R}^{r \times d_\text{in}}$, $B \in \mathbb{R}^{d_\text{out} \times r}$, and $r \ll d_\text{in}, d_\text{out}$. At inference you could fold $BA$ into $W$ and serve a normal model — but then you have one model per adapter and you are back to fifty GPUs. So you keep them separate and compute $xW + \frac{\alpha}{r}(xA^\top)B^\top$ at runtime.</p>
+<section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p>With stored $W\in\mathbb{R}^{d_{\mathrm{out}}\times d_{\mathrm{in}}}$,
+$A\in\mathbb{R}^{r\times d_{\mathrm{in}}}$ and $B\in\mathbb{R}^{d_{\mathrm{out}}\times r}$,
+$W'=W+(\alpha/r)BA$. Row-vector inputs use $xW^\top+(\alpha/r)(xA^\top)B^\top$.
+Merged adapters can share hardware through ordinary scheduling but require separate merged
+weights. Unmerged serving shares the base matrix and applies each row's low-rank update.</p>
 
 <p>The naive way to batch that is to group the batch by adapter and run one GEMM per group. With eight adapters in a batch of 64 you get eight GEMMs of 8 rows each — every one of them latency-bound, and the whole point of continuous batching (<a href="../01-the-core-loop/01-03-continuous-batching.html">&sect;1.3</a>) evaporates.</p>
 
@@ -679,7 +686,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
   <script type="text/plain" class="diagram-source">
 flowchart TD
     XIN["x  [12, 4096]<br/>token_lora_mapping = A A A A A  B B B B  -1 -1 -1"]
-    XIN --> BASE["BASE GEMM, run ONCE<br/>x @ W_q  where W_q is [4096, 4096]<br/>2 x 12 x 4096 x 4096 = 402.7 MFLOP"]
+    XIN --> BASE["BASE GEMM, run ONCE<br/>x @ W_q.T; stored W_q is [out,in]<br/>2 x 12 x 4096 x 4096 = 402.7 MFLOP"]
     XIN --> META["LoRAKernelMeta.prepare_tensors<br/>torch.sort tokens by adapter id<br/>num_tokens_per_lora = [3, 5, 4]<br/>lora_token_start_loc = [0, 3, 8, 12]"]
     META --> SHRINK["SHRINK  lora_shrink<br/>gather rows, then per-row<br/>[12, 4096] x A_stacked[id] [4096, 16]<br/>buffer [1, 12, 16] fp32<br/>2 x 12 x 4096 x 16 = 1.57 MFLOP"]
     SHRINK --> EXPAND["EXPAND  lora_expand<br/>per-row [12, 16] x B_stacked[id] [16, 4096]<br/>2 x 12 x 16 x 4096 = 1.57 MFLOP"]
@@ -722,7 +729,10 @@ flowchart TD
 
 <h3>What the correction costs, in both regimes</h3>
 
-<p>The LoRA path has <b>the same arithmetic intensity as the base path</b> — both are "stream a weight matrix once, reuse it across the batch" — so the correction's relative cost takes the same form in both regimes. The two ratios are <em>not</em> the same number, though, because the denominators differ, and getting that wrong understates decode by 7%. Prefill divides by FLOPs per token, $2 N_\text{base}$ with $N_\text{base} = 8.03$ B (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>'s $2PS$ convention):</p>
+<p>Adapter work and base work need not have the same arithmetic intensity: a base matrix
+is reused across the whole batch, while an adapter may serve only a few rows. Rank, segmentation,
+padding and intermediate traffic matter. The following are FLOP and ideal weight-byte ratios,
+not latency predictions. Using the stated prefill parameter convention gives:</p>
 
 <div class="math-display">$$\rho_\text{pre} = \frac{2 P(r)}{2 N_\text{base}} = \frac{r \cdot 2{,}621{,}440}{8.03 \times 10^9} = r \cdot 3.264\times 10^{-4}$$</div>
 
@@ -753,11 +763,17 @@ flowchart TD
   </div>
 </div>
 
-<p>The rule to remember: <b>LoRA stops being free when $k \cdot r$ exceeds about 290</b> — that is the point where the correction is 10% of a Llama-3-8B decode step ($0.10 / 3.493\times10^{-4} = 286$). Eight adapters at rank 16 is comfortably free. Thirty-two adapters at rank 64 is a 70% tax on every decode step, and no amount of kernel engineering fixes it, because it is weight bandwidth, not arithmetic.</p>
+<p>In this one-stream-per-active-adapter byte model, k*r about 286 adds 10% of the base
+weight traffic. It is not a free-operation threshold: launches, per-adapter reuse, caching,
+padded ranks and achieved bandwidth can dominate well below it. The table does not prove
+that a particular latency tax is unavoidable or that kernel engineering cannot improve it.</p>
 
 <div class="callout callout--note">
   <span class="callout__k">Why <code>max_loras</code> is not "how many adapters you can serve"</span>
-  <p>Both engines distinguish <em>registered</em> adapters (held in CPU memory, unbounded-ish) from <em>active slots</em> (resident in preallocated GPU buffers, small). The $k$ in the table above is the slot count, not the tenant count. You can serve 500 tenants through 8 slots — you just pay eviction and reload traffic when the working set exceeds 8.</p>
+  <p>Registered adapters, resident GPU slot capacity and distinct adapters used in the
+  current batch are different counts. The table's k is the last one, assuming those weights
+  are streamed. Resident but unused slots consume capacity without necessarily being read.
+  Serving a larger working set than available slots adds eviction/reload pressure.</p>
 </div></div></section>
 <section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>vLLM: preallocated stacked buffers plus a Punica-style Triton kernel</h3>
 
@@ -1371,22 +1387,30 @@ flowchart TD
   </div>
 </div>
 
-<p>Past roughly 50 tenants on this configuration, the shared system prompt stops behaving like a cached prefix and starts behaving like a cold prefill on every request. Derived cost of that miss: a 2,048-token prefill is 32.9 TFLOP, 33.2 ms at the H100's 989.4 TFLOP/s bf16 peak. Nobody achieves peak; derate at 40–65% MFU and it is 51–83 ms ($33.2/0.65$ to $33.2/0.40$) of extra TTFT per request, forever, for text the engine has already computed 200 times. That MFU band is an assumption, not a measurement — substitute your own, measured the way <a href="../10-benchmarking/10-03-honest-benchmarking.html">&sect;10.3</a> insists on.</p>
+<p>A miss on the common 2048-token prompt has the stated approximate compute cost, but
+fifty tenants do not imply misses on every request. Estimate saved work as hit probability
+times avoided prefill cost, accounting for partial hits and retained last-token computation.
+Measure reuse distance and evictions rather than inferring an exact TTFT penalty from footprint.</p>
 
 <p>Two mitigations, both real:</p>
 
 <div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">Route</span><h4>Adapter-aware routing</h4><p>Send all traffic for one adapter to one replica. Then each replica has a small tenant set and each tenant's prefix chain survives in LRU. This is a router concern, covered in &sect;9.4.</p></div>
-  <div class="ve-card"><span class="ve-card__k">Shrink</span><h4>Adapt fewer layers</h4><p>If an adapter targets only <code>gate/up/down</code> and leaves <code>q,k,v</code> alone, K and V are <em>unchanged</em> from the base model. The prefix cache could in principle be shared. Neither engine exploits this — the hash key is the adapter name, not the set of KV-affecting modules.</p></div>
+  <div class="ve-card"><span class="ve-card__k">dependency</span><h4>Adapt fewer layers carefully</h4><p>MLP-only adapters generally change hidden states consumed by later attention layers,
+so their later K/V differs even when all K/V projection weights are unchanged. Only a proven
+unaffected prefix of the computation can share state; module-name classification alone
+cannot justify whole-model KV reuse.</p></div>
 </div>
 
 <div class="callout callout--unverified">
   <span class="callout__k">Unverified</span>
   <p>I could not find any mechanism in either engine that invalidates prefix-cache blocks when an adapter is reloaded in place under the same name. vLLM's <code>LoRARequest.load_inplace</code> (<code>vllm/lora/request.py:L30</code>) "replaces the existing adapter in-place", and the block-hash key is <code>lora_request.lora_name</code> — so blocks hashed under that name and computed with the <em>old</em> weights appear still valid. A repo-wide grep for <code>load_inplace</code> returns 8 hits, none of which touch the KV cache. SGLang avoids the class of bug structurally by keying on a fresh <code>uuid4</code> <code>lora_id</code> per registration (<code>python/sglang/srt/lora/lora_registry.py:L37</code>), so a reloaded adapter gets new cache keys. A reader depending on hot-swap should check <code>vllm/v1/core/kv_cache_manager.py</code> and the <code>/v1/load_lora_adapter</code> handler before trusting in-place reload with prefix caching enabled.</p>
 </div></div></section>
-<section class="sec" id="pooling" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Part B: pooling and non-generative models</h2></div><div class="sec__body"><p>Now the easy problem. An embedding model, a reranker, a classifier, and a reward model all share one shape: <b>one forward pass, output is a vector or a scalar, no next token.</b> No autoregression means no decode loop, no KV cache that grows, no per-step scheduling decision, no preemption, no eviction. The entire second half of this book's difficulty comes from the fact that generation is a sequential loop over a memory-bound step. Delete the loop and what remains is a batched matrix multiply.</p>
-
-<p>Concretely: the request is pure prefill, so it sits at arithmetic intensity well above the H100's ridge point of $I^* = 295$ FLOP/byte and runs compute-bound at whatever MFU your kernels achieve. Batching is trivial because every request finishes in the same single step — there is no ragged completion, no continuous-batching admission problem, and the batch can be sized purely by activation memory.</p>
+<section class="sec" id="pooling" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Part B: pooling and non-generative models</h2></div><div class="sec__body"><p>Embedding, classification and reranking typically finish after one sequence forward.
+They avoid the autoregressive decode loop, but still have ragged lengths, queueing, padding,
+activation limits, cancellation and admission decisions. Short inputs or small batches can
+be launch- or bandwidth-bound; long bidirectional attention can dominate compute and memory.
+One-pass completion does not make batching trivial or prove tensor-core saturation.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 3 &mdash; generative vs pooling request lifecycle.</b> Same tokenizer, same paged allocator, same API server; the right-hand path has no loop.
@@ -1481,7 +1505,12 @@ class LastPool(SequencePoolingMethod):
     </code></pre>
 </div>
 
-<p>The choice is <b>not the server's to make</b>, and this is worth being firm about: pooling type is a property of how the model was trained. A BERT-family encoder trained with a <code>[CLS]</code> objective produces a meaningful <code>[CLS]</code> vector and garbage under mean pooling. A decoder-LM embedder trained with a trailing <code>&lt;|endoftext|&gt;</code> produces a meaningful last-token vector and garbage under CLS. Both engines therefore let the model class own the choice, and they differ on whether the operator can override it at all. vLLM can: <code>PoolerConfig.seq_pooling_type</code> defaults to <code>None</code> and is filled in from the model class at <code>vllm/config/model.py:L728-L731</code>; the class-level fallback when a model declares nothing is <code>default_seq_pooling_type: ClassVar[SequencePoolingType] = "LAST"</code> (<code>vllm/model_executor/models/interfaces_base.py:L160</code>), which is right for decoder-LM embedders and wrong for BERT-family ones, so BERT-family classes override it. SGLang offers no such knob: the type is a constructor argument the model hard-codes — <code>Pooler(pooling_type=PoolingType.LAST, normalize=True)</code> for most CausalLM embedders (<code>python/sglang/srt/models/arcee.py:L411</code>), <code>PoolingType.MEAN</code> for Gemma-3 (<code>python/sglang/srt/models/gemma3_causal.py:L975</code>), and, for BERT, <code>PoolingType.CLS if get_model().is_embedding else PoolingType.LAST</code> feeding either a dedicated <code>BertPooler</code> or the generic one (<code>python/sglang/srt/models/bert.py:L368-L373</code>). Where the override exists, using it does not error. It silently returns embeddings with wrong geometry, and your recall metric drops by a number you will spend a week explaining.</p>
+<p>Pooling should match the checkpoint's training and documented inference contract.
+BERT-family models are not universally CLS-only: <a href="https://arxiv.org/abs/1908.10084">Sentence-BERT</a> variants explicitly train
+mean-pooled sentence embeddings. An arbitrary replacement can degrade retrieval, but "garbage"
+is not a theorem. Check special tokens, attention masks, normalization and classification heads,
+then evaluate recall/ranking metrics. The engine's model defaults and override controls must
+be interpreted against that model-specific contract.</p>
 
 <p>How you land on the pooling path at all is a separate decision. vLLM's <code>--runner</code> defaults to <code>"auto"</code> and resolves through the model registry (<code>ModelConfig._get_runner_type</code>, <code>vllm/config/model.py:L1169-L1191</code>); a generative checkpoint is turned into an embedder with <code>--convert embed</code> or <code>--convert classify</code>, which forces <code>runner_type = "pooling"</code>. SGLang's equivalent is the single boolean <code>--is-embedding</code>, "Whether to use a CausalLM as an embedding model", default <code>False</code> (<code>python/sglang/srt/server_args.py:L600-L602</code>). Neither is a separate runner class: pooling branches inside the same <code>GPUModelRunner</code> / <code>ModelRunner</code>, on the presence of <code>PoolingParams</code>.</p>
 
@@ -1633,7 +1662,10 @@ SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
 <ul>
   <li><b>Sequences are short and uniform.</b> A rerank of the top-50 candidates for one query is 50 sequences of maybe 256–512 tokens. Compare that to an embedding workload where a document can be 8k tokens.</li>
   <li><b>Fan-out is per query, not per request.</b> One user query becomes 50 forward-pass rows. The natural batch is the candidate list, and it arrives as a unit — so a rerank endpoint has a batching opportunity that a generic embedding endpoint does not.</li>
-  <li><b>Query tokens are recomputed 50 times.</b> The query prefix is identical across all 50 pairs, but it is the <em>prefix</em>, so prefix caching does help — one query, 50 documents, all sharing the leading blocks.</li>
+  <li><b>Bidirectional query representations depend on the document.</b> In a BERT-style
+  cross-encoder, an identical text query does not yield reusable higher-layer query KV across
+  different documents. Causal rerankers have a different dependency structure; inspect the
+  actual attention mask before assuming prefix reuse.</li>
 </ul>
 
 <p>SGLang's cross-encoder pooler is deliberately simple, and it does the per-sequence slicing in a Python loop before a single batched classifier call — see <code>CrossEncodingPooler.forward</code> at <code>python/sglang/srt/layers/pooler.py:L233-L263</code>. Its multi-item scoring path (<code>pool_at_delimiter_positions</code>, <code>python/sglang/srt/layers/pooler.py:L77-L113</code>) goes further: pack many documents into <em>one</em> sequence separated by a delimiter token, then extract hidden states at the pre-delimiter positions and score only those. The comment at the call site says it plainly &mdash; "Pool hidden states at pre-delimiter positions, score only those &mdash; avoids wasting compute on tokens that never contribute to the output" (<code>score_and_pool</code>, <code>python/sglang/srt/layers/pooler.py:L135-L146</code>). Note the two conditions on that branch: it is taken only when <code>forward_batch.multi_item_delimiter_indices is not None</code> <em>and</em> <code>forward_batch.is_prefill_only</code>, so it is a scoring-endpoint optimisation, not something a generic embedding request gets.</p>
@@ -1642,9 +1674,13 @@ SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
 
 <p>Because the machinery is already there and it is 90% of the work. Paged allocation, the tokenizer service, continuous batching, tensor parallelism, CUDA graph capture, the OpenAI-compatible HTTP surface, Prometheus metrics, request cancellation — none of that is generation-specific, and rewriting it for an embedding server is how you end up with two systems that fail differently at 3 a.m. And a RAG deployment needs an embedder, a reranker, and a generator; running all three on the same engine binary means one set of flags, one set of dashboards, and one place to look when latency moves.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:7"><div class="sec__h"><span class="sec__n">§8</span><h2 class="sec__t">Pitfalls and war stories</h2></div><div class="sec__body"><div class="cards cards--2">
-  <div class="ve-card"><span class="ve-card__k">Loud</span><h4><code>Number of requested LoRAs (N) is greater than the number of GPU LoRA slots (M)</code></h4><p>vLLM, <code>worker_manager.py:L280</code>. Raised when a single scheduled batch names more distinct adapters than <code>--max-loras</code>. Because vLLM defaults <code>max_loras=1</code>, the very first two-tenant batch trips this. Fix is <code>--max-loras</code>, but remember the $k \cdot r$ table before setting it to 64.</p></div>
-  <div class="ve-card"><span class="ve-card__k">Loud</span><h4><code>No available buffer slots found. Please ensure the number of active (pinned) loras is less than max_loras_per_batch.</code></h4><p>SGLang, <code>mem_pool.py:L778</code>. The pinning trap: if you pin 8 adapters with <code>--max-loras-per-batch 8</code>, there is no evictable slot left and a request for a ninth adapter kills the batch rather than waiting.</p></div>
-  <div class="ve-card"><span class="ve-card__k">Loud</span><h4><code>RuntimeError: partial prefill is not supported with MEAN pooling</code></h4><p>vLLM, <code>seqwise/methods.py:L68</code>. Chunked prefill (<a href="../01-the-core-loop/01-05-chunked-prefill.html">&sect;1.5</a>) and mean/CLS pooling are fundamentally incompatible: you cannot average over a sequence you have only half computed. You should not reach this by accident: the engine turns chunked prefill off for exactly these configurations, as Part B shows. You reach it by passing <code>--enable-chunked-prefill</code> explicitly on a pooling model, past a warning that says the model does not support it.</p></div>
+  <div class="ve-card"><span class="ve-card__k">capacity</span><h4>Adapter slots and admission</h4><p>The quoted low-level functions raise when a batch exceeds available slots or cannot
+evict a pinned adapter. That does not prove a second tenant or ninth adapter necessarily
+crashes a normally scheduled server: trace the scheduler's deferral/admission and pinning policy.</p></div>
+  <div class="ve-card"><span class="ve-card__k">pooling</span><h4>Partial pooling needs retained state</h4><p>The cited MEAN pooler rejects partial prefill. That is an implementation constraint,
+not a mathematical incompatibility: causal mean pooling can keep a running sum and count;
+causal CLS can retain its hidden state. Bidirectional encoder states, by contrast, depend
+on later tokens. Do not force an unsupported mode without the needed state contract.</p></div>
   <div class="ve-card"><span class="ve-card__k">Loud</span><h4><code>AssertionError: Either all or none of the requests in a batch must be pooling request</code></h4><p>vLLM, <code>gpu_model_runner.py:L3536</code>. You cannot mix generation and pooling in one batch, which means you cannot serve an embedder and a chat model from one engine process even if they share a base checkpoint.</p></div>
 </div>
 
@@ -1671,6 +1707,29 @@ SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
 <p><b>Silent: int32 overflow at long context.</b> The row-gather index in the shrink kernel is a token index into a flattened <code>[num_tokens, hidden]</code> tensor. Multiply by <code>input_d0_stride = 4096</code> and a 600k-token batch overflows int32. The fix is the explicit cast you can see in <code>vllm/lora/ops/triton_ops/kernel_utils.py:L296-L297</code>: <code># int64 to keep the row offset from overflowing at long context lengths</code> (<a href="https://github.com/vllm-project/vllm/pull/53034">PR&nbsp;#53034</a>). Before it, long-context LoRA silently read from the wrong rows.</p>
 
 <p><b>Debugging method.</b> For any "adapter seems to be ignored" report: set <code>VLLM_LOGGING_LEVEL=DEBUG</code> and look for <code>Activating LoRA. int id: %d, slot index: %d</code> from <code>model_manager.py:L334-L335</code>. If the slot index churns every step, your working set exceeds <code>--max-loras</code> and you are thrashing the buffers. For "embeddings look wrong", print <code>model.pooler</code> — vLLM's <code>SequencePooler.extra_repr</code> prints <code>pooling=&lt;method&gt;, head=&lt;head&gt;</code>, which tells you in one line whether you are getting CLS when the model wants LAST.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">Merged LoRA parity and downstream KV changes</h2></div><div class="sec__body">
+<p>The row-vector formula must agree with merging the stored [out,in] weight. The second half changes an upstream hidden state through an MLP-shaped residual update, while holding the later K projection fixed; the resulting K changes. This is the dependency missed by the claim that adapting only gate/up/down leaves the full KV cache unchanged. For pooling, additionally test masks, empty inputs, left/right padding, normalization and the trained pooling head.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import numpy as np
+
+rng = np.random.default_rng(5)
+x = rng.normal(size=(3, 4))
+w = rng.normal(size=(6, 4))
+a = rng.normal(size=(2, 4))
+b = rng.normal(size=(6, 2))
+scale = 0.5
+unmerged = x @ w.T + scale * (x @ a.T) @ b.T
+merged = x @ (w + scale*b@a).T
+np.testing.assert_allclose(unmerged, merged, atol=1e-12)
+wk = rng.normal(size=(2, 4))
+mlp_delta = np.array([0.5, 0., 0., 0.])
+base_k = x @ wk.T
+adapted_k = (x + mlp_delta) @ wk.T
+assert not np.allclose(base_k, adapted_k)
+np.testing.assert_allclose(adapted_k-base_k,
+                           np.broadcast_to(mlp_delta@wk.T, base_k.shape))
+print("Merged LoRA parity passes; upstream MLP changes later keys.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Serve three adapters on one base model and watch the slot machinery move. No lab exists for this chapter yet; these are the commands.</p>
 
 <div class="code-file">
@@ -1686,12 +1745,21 @@ SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
   --enable-prefix-caching \
   --lora-modules legal=/adapters/legal medical=/adapters/medical finance=/adapters/finance
 
-# then, against the same prompt, alternate adapters and watch the cache metrics:
-for a in legal medical finance legal; do
-  curl -s localhost:8000/v1/completions -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$a\",\"prompt\":\"$(cat 2k_system_prompt.txt)\",\"max_tokens\":8}" &gt; /dev/null
-  curl -s localhost:8000/metrics | grep -E 'prefix_cache_(queries|hits)_total'
-done</code></pre>
+# Run this client in a second terminal after the server is ready:
+python - &lt;&lt;'PY'
+import json
+import urllib.request
+from pathlib import Path
+prompt = Path("2k_system_prompt.txt").read_text()
+for adapter in ("legal", "medical", "finance", "legal"):
+    payload = json.dumps({"model": adapter, "prompt": prompt, "max_tokens": 8}).encode()
+    req = urllib.request.Request("http://localhost:8000/v1/completions",
+        data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as response:
+        result = json.load(response)
+    assert result["choices"]
+    print(adapter, result.get("usage"))
+PY</code></pre>
 </div>
 
 <p>The fourth request reuses <code>legal</code> and should show hits; the second and third should show none, despite sending byte-identical prompts. That is Figure 2, measured.</p>
@@ -1741,7 +1809,10 @@ curl -s localhost:8000/metrics | grep -E 'gpu_cache_usage|kv_cache'</code></pre>
 
   <li><b>Read and compare.</b> Read <code>python/sglang/kernels/ops/gemm/chunked_sgmv_shrink.py:L69-L79</code> and <code>vllm/lora/ops/triton_ops/lora_shrink_op.py:L196-L198</code>. Both kernels launch a grid whose N dimension is <code>cdiv(N, BLOCK_N)</code> with <code>N</code> the padded rank. So what exactly does SGLang's <code>cur_n</code> mask save, and what does it not save?</li>
 
-  <li><b>Design.</b> An adapter that targets only <code>gate_proj</code>, <code>up_proj</code>, <code>down_proj</code> leaves K and V bit-identical to the base model. Sketch the change to <code>_gen_lora_extra_hash_keys</code> that would let such adapters share prefix-cache blocks with the base model and with each other. What information would the function need that it does not currently receive, and what is the failure mode if you get it wrong?</li>
+  <li><b>Design.</b> Build a two-layer counterexample showing how an MLP-only adapter changes
+  the next layer's KV despite unchanged K/V weights. What restricted adapter location could
+  leave every cached K/V unchanged? Explain why conservative versioned adapter identity is
+  safer than classifying only names containing <code>k_proj</code> or <code>v_proj</code>.</li>
 </ol>
 
 <details class="fold">
@@ -1755,16 +1826,23 @@ curl -s localhost:8000/metrics | grep -E 'gpu_cache_usage|kv_cache'</code></pre>
 
     <p><b>4.</b> The mask is on <code>tl.load</code>, so it saves the actual memory transactions for the columns beyond the true rank — the bandwidth, which is what matters at decode. It does <em>not</em> save CTA launches: the grid is still <code>cdiv(padded_N, BLOCK_N)</code> segments wide, so blocks entirely past <code>cur_n</code> still launch, compute a zero <code>tl.dot</code>, and store nothing. On a badly over-padded configuration you therefore pay launch overhead but not bandwidth.</p>
 
-    <p><b>5.</b> The function receives only the <code>Request</code>. It would need the set of LoRA-adapted module names — available on the <code>LoRAModel</code> in the worker's manager, not in the scheduler process where hashing happens — and it would need to classify each name as KV-affecting (<code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code>, <code>qkv_proj</code>, plus MLA's <code>kv_a_proj_with_mqa</code>/<code>kv_b_proj</code>, plus <code>embed_tokens</code> and anything upstream of attention, which is to say almost everything). The right key is a hash of the KV-affecting subset, so all non-KV-affecting adapters collapse to the base model's key. Failure mode: get the classification wrong by one module and you serve one tenant's KV to another — silently, with plausible-looking output. That risk asymmetry is presumably why neither engine has done it.</p>
+    <p><b>5.</b> Let the first layer emit h, and an MLP adapter add delta. The next key is
+    (h + delta)*W_K.T, differing by delta*W_K.T in general. An update strictly after the last
+    cached attention computation can leave KV unchanged, but this requires full dependency
+    analysis, including normalization and positions. Wrong reuse silently mixes model states;
+    versioned adapter keys preserve the conservative correctness boundary.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>The batching problem has one answer in both engines: base GEMM once for the whole batch, then a per-row indexed shrink-and-expand through the rank-$r$ bottleneck. The correction is <code>[tokens, r]</code>-shaped in the middle, never $d \times d$, which is why rank-16 costs 0.78% of a square projection.</li>
   <li>LoRA's cost splits cleanly by regime and the split is the thing to internalise. Prefill: $+r \cdot 3.26\times10^{-4}$ FLOPs per token, <em>independent of adapter count</em>. Decode: $+k \cdot r \cdot 3.49\times10^{-4}$ bytes, scaling with the number of <em>distinct active adapters</em>, because it is weight bandwidth. The coefficients differ because the decode floor streams 15.01 GB, not the full 16.06 GB of parameters. On Llama-3-8B, $k \cdot r \lesssim 290$ keeps it under 10%.</li>
   <li>vLLM computes every adapter at the padded <code>max_lora_rank</code>; SGLang masks to the adapter's true rank (<code>cur_n = tl.minimum(N, rank * NUM_SLICES)</code>). For a fleet of mixed ranks that is a real, measurable difference in decode-step bandwidth, not a stylistic one.</li>
-  <li>Per-adapter block hashing makes the prefix cache a set of disjoint partitions. On the 52.32 GiB / 428,569-token Llama-3-8B KV pool of <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a>, fifty tenants sharing one 2,048-token system prompt burn 24% of the pool on redundant copies; two hundred burn 96%, and at 209 the cache stops working entirely. Adapter-aware routing is not an optimisation, it is the fix.</li>
-  <li>Pooling models are the easy case for a structural reason: no autoregression means pure prefill, compute-bound above the ridge point, uniform completion, and no KV growth (<code>EncoderOnlyAttentionSpec.max_memory_usage_bytes</code> literally returns 0). The engine changes needed are a bidirectional attention flag, a pooler, and a tensor-shaped output path.</li>
-  <li>Pooling type belongs to the model, never the operator. Overriding it does not error — it returns embeddings with the wrong geometry and a quietly broken retrieval system.</li>
+  <li>Fifty 2048-token adapter-private prefixes use about 24% of the illustrated pool;
+  two hundred use about 96%. These are capacity fractions, not deterministic hit rates.</li>
+  <li>Adapter-private prefixes remain reusable within an adapter while retained. Capacity
+  pressure is not an exact miss-rate threshold; route and size caches from measured locality.</li>
+  <li>Pooling avoids autoregressive growth but still needs workload-aware batching and memory
+  budgeting. Use the pooling, masking and normalization contract the checkpoint was trained for.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
   <li><a href="https://arxiv.org/abs/2106.09685">Hu et al., <i>LoRA: Low-Rank Adaptation of Large Language Models</i></a> (arXiv 2106.09685) — the factorisation itself, and the empirical claim that $r$ as low as 1–4 suffices for many tasks.</li>
@@ -1778,7 +1856,7 @@ curl -s localhost:8000/metrics | grep -E 'gpu_cache_usage|kv_cache'</code></pre>
 </ul></div></section>
 <div class="pager"><a href="07-04-multimodal-serving.html"><div class="pager__k">← Previous</div><div class="pager__t">Multimodal serving</div></a><a class="pager__next" href="../08-compilation-and-runtime/08-01-cuda-graphs.html"><div class="pager__k">Next →</div><div class="pager__t">CUDA graphs and kernel-launch overhead</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1792,6 +1870,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#cache-partition">The per-adapter prefix cache partition</a>
 <a href="#pooling">Part B: pooling and non-generative models</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

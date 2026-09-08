@@ -7,10 +7,9 @@ meta: Libraries · tabular
 # Boosting Libraries: XGBoost, LightGBM, CatBoost
 
 If your data is a table, a gradient-boosted tree ensemble is the model to beat.
-That has been true since 2015 and, despite a decade of attempts, remains true:
-controlled benchmarks on medium-sized tabular data consistently find boosted
-trees matching or beating deep tabular architectures while training in a
-fraction of the time and needing far less tuning.
+It is a strong baseline, not a universal winner. Rankings depend on dataset size,
+feature types, pretrained representations, tuning budget, hardware, and metric.
+Compare complete pipelines under the same evaluation protocol.
 
 This page explains why the algorithm works, then what the three major
 implementations actually do differently.
@@ -67,8 +66,9 @@ Three things fall out of this formula and are worth reading off it directly:
 - **$\gamma$ is a minimum gain threshold.** A split whose improvement is below
   $\gamma$ is not made, which is pre-pruning by cost.
 - **Second-order information adapts the step size per leaf.** $H$ in the
-  denominator means confident regions take smaller steps, which is why XGBoost
-  needs less learning-rate tuning than first-order boosting.
+  denominator shrinks a fixed-gradient update when curvature is larger. For
+  logistic loss, $h=p(1-p)$ is largest near 0.5, not near confident 0/1 predictions.
+  This does not eliminate learning-rate tuning or protect against tiny Hessians.
 
 ### Boosting vs bagging
 
@@ -126,11 +126,11 @@ strategy.
 - **Leaf-wise growth**: always split the leaf with the highest gain, anywhere in
   the tree. This reaches a lower loss for the same number of leaves, but produces
   deep, unbalanced trees that overfit small datasets. Control with
-  `num_leaves` (the primary complexity knob) and `min_data_in_leaf`, not
-  `max_depth`.
+  `num_leaves`, `min_data_in_leaf`, and the supported `max_depth` bound.
 - **GOSS** (Gradient-based One-Side Sampling): keep all large-gradient examples
   and randomly sample the small-gradient ones, reweighting to stay unbiased.
-  Fewer examples per split evaluation, same information.
+  This is an optional sampling strategy, not active in the displayed ordinary
+  bagging configuration; subsampling adds estimation variance, not identical information.
 - **EFB** (Exclusive Feature Bundling): bundle mutually exclusive sparse features
   (they are rarely non-zero simultaneously) into single features, shrinking the
   effective feature count on one-hot-heavy data.
@@ -165,16 +165,16 @@ algorithm.
 - **Ordered target statistics.** Naive target encoding uses a category's mean
   target computed from all rows *including the current one*, which leaks. CatBoost
   processes examples in a random permutation and computes each row's encoding
-  using only rows that precede it — an out-of-time estimate that is unbiased by
-  construction.
+  using preceding rows in that permutation. This reduces self-target leakage but
+  is not a chronological out-of-time estimate or a universal unbiasedness claim.
 - **Ordered boosting.** The same leak exists in gradient estimation: the residual
   for a training row is computed from a model that was fit on that row. CatBoost
   maintains models trained on prefixes of a permutation to remove this
   "prediction shift".
 - **Oblivious (symmetric) trees.** Every node at a given depth uses the *same*
   split. That is a strong regulariser and makes inference extremely fast — a tree
-  becomes a bit-index into a lookup table, which is why CatBoost has the best CPU
-  inference latency of the three.
+  becomes a bit-index into a lookup table. Whether this gives the lowest CPU
+  latency depends on model size, batch size, implementation and hardware.
 - **Native categorical and text features**, plus automatic combinations of
   categorical features.
 
@@ -198,12 +198,12 @@ clf.fit(train_pool, eval_set=val_pool)
 |---|---|---|---|
 | Tree growth | level-wise (leaf-wise available) | **leaf-wise** | **oblivious/symmetric** |
 | Main complexity knob | `max_depth` | `num_leaves` | `depth` |
-| Speed on large data | fast | **fastest** | moderate |
-| Small-data robustness | good | overfits more easily | **best** |
+| Speed on large data | benchmark on target hardware | benchmark on target hardware | benchmark on target hardware |
+| Small-data robustness | tune regularization | constrain leaf growth | test ordered/symmetric-tree choices |
 | Categorical handling | one-hot or `enable_categorical` | integer codes, native | **ordered target statistics** |
 | Missing values | learned default direction | native | native |
 | Default hyperparameters | need tuning | need tuning | **often good as-is** |
-| Inference latency | good | good | **best** (symmetric trees) |
+| Inference latency | model/batch-dependent | model/batch-dependent | symmetric trees can help |
 | Text features | no | no | yes |
 | GPU training | mature | mature | mature |
 | Overfitting protection | $\gamma$, $\lambda$, `min_child_weight` | `min_data_in_leaf`, `num_leaves` | ordered boosting, symmetric trees |
@@ -212,8 +212,8 @@ clf.fit(train_pool, eval_set=val_pool)
 iterating quickly; CatBoost when categoricals dominate or data is small;
 XGBoost when you want the most predictable, best-documented behaviour or you are
 matching an existing production model. On most problems all three land within
-noise of each other after tuning, and an average of their predictions beats any
-one of them.
+noise of each other after tuning; this must be measured, and averaging does not
+guarantee improvement. The row-count suggestions are pilot choices, not cutoffs.
 
 ## Hyperparameters that matter, in order
 
@@ -239,6 +239,10 @@ then drop to 0.02–0.03 with early stopping for the final model.
 
 ```python
 import optuna
+import numpy as np
+import lightgbm as lgb
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import average_precision_score
 
 def objective(trial):
     params = dict(
@@ -253,11 +257,14 @@ def objective(trial):
         n_estimators     = 5000,
     )
     scores = []
-    for tr, va in StratifiedKFold(5, shuffle=True, random_state=0).split(X, y):
-        m = lgb.LGBMClassifier(**params)
+    for fold, (tr, va) in enumerate(StratifiedKFold(5, shuffle=True, random_state=0).split(X, y)):
+        m = lgb.LGBMClassifier(**params, metric="average_precision", random_state=0)
         m.fit(X.iloc[tr], y[tr], eval_set=[(X.iloc[va], y[va])],
               callbacks=[lgb.early_stopping(100, verbose=False)])
         scores.append(average_precision_score(y[va], m.predict_proba(X.iloc[va])[:, 1]))
+        trial.report(float(np.mean(scores)), step=fold)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
     return np.mean(scores)
 
 study = optuna.create_study(direction="maximize",
@@ -265,11 +272,24 @@ study = optuna.create_study(direction="maximize",
 study.optimize(objective, n_trials=100)
 ```
 
-Two details make this correct rather than merely plausible: the learning rate is
-**fixed** so trials are comparable and early stopping does the tree-count search,
-and the objective is cross-validated so a lucky single split cannot win.
+This optional fragment assumes a numeric/categorical-compatible DataFrame `X`
+and NumPy labels `y`; LightGBM and Optuna are additional dependencies. Pruning
+reports completed folds only, with no iteration callback sharing step numbers.
+These validation folds also select stopping iterations, so this remains a
+development objective. Evaluate the whole search on outer folds or an untouched
+test set, and predeclare the final refit duration. Fixed learning rate narrows the
+search; it does not itself make comparisons statistically valid.
 
 ## Categorical features
+
+Native numeric missing-value support does not remove schema preparation. CatBoost
+categorical inputs need consistent strings or integers; convert missing categories
+to an explicit string sentinel rather than passing floating NaN. Preserve
+train/validation vocabulary metadata for categorical XGBoost/LightGBM columns,
+and test unseen values, column names and ordering. A random ordered-statistics
+permutation cannot substitute for a temporal evaluation cutoff. See the
+[CatBoost FAQ](https://catboost.ai/docs/en/concepts/faq) and
+[LightGBM parameters](https://lightgbm.readthedocs.io/en/latest/Parameters.html).
 
 | Approach | Cardinality | Note |
 |---|---|---|
@@ -317,7 +337,7 @@ explainer = shap.TreeExplainer(model)
 sv = explainer(X_val)
 shap.summary_plot(sv, X_val)                # global: which features, which direction
 shap.plots.waterfall(sv[0])                 # local: this prediction, explained
-shap.plots.dependence("age", sv, X_val)     # interaction with the strongest partner
+shap.plots.scatter(sv[:, "age"], color=sv)  # dependence-colored scatter, Explanation API
 ```
 
 **TreeSHAP is exact and fast** for tree ensembles — polynomial rather than
@@ -341,21 +361,22 @@ unexpected feature is a signal to investigate leakage, not to celebrate.
 
 ## Why trees still beat deep learning on tabular data
 
-Reproducible benchmark findings, in the order they matter:
+Reasons axis-aligned trees can be strong baselines, to verify on your data:
 
-1. **Rotational invariance is the wrong inductive bias.** Neural networks treat
-   all directions in feature space alike; tabular features are individually
-   meaningful and axis-aligned splits exploit that.
-2. **Robustness to uninformative features.** Trees simply never split on them;
-   MLPs must learn to ignore them, and often do so imperfectly.
-3. **Irregular target functions.** Real tabular targets are full of thresholds
-   and non-smooth jumps. Trees model those exactly; smooth networks approximate
-   them poorly.
-4. **No preprocessing requirements.** Monotone feature transforms do not change a
-   tree's splits, missing values are handled natively, and mixed scales are
-   irrelevant.
-5. **Vastly less tuning.** A default LightGBM is usually within a few percent of
-   its tuned self. A default MLP is often unusable.
+1. **Coordinate-specific structure.** Axis-aligned splits exploit individually
+   meaningful columns. Neural training procedures are not universally rotationally
+   invariant; architecture, initialization, regularization, and optimizer matter.
+2. **Uninformative features.** Split selection can ignore many weak columns, but
+   finite-sample chance correlations can still select noise. Compare against
+   shuffled features and held-out performance rather than assuming immunity.
+3. **Threshold-like targets.** Trees represent piecewise-constant partitions
+   naturally. Neural networks can also approximate sharp changes; generalization
+   depends on data, capacity, and training, not a blanket inability.
+4. **Less need for numerical scaling.** Exact axis-aligned training partitions
+   are invariant to strictly monotone transforms, with histogram/rounding caveats.
+   Schema, categorical missingness, leakage and feature availability still matter.
+5. **Different tuning needs.** Boosters can be strong with modest search, but
+   no universal percentage gap or unusable-MLP claim applies across datasets.
 
 Deep tabular models (TabNet, FT-Transformer, SAINT, TabPFN) close the gap in
 specific regimes — very large datasets, heavy multi-modality, transfer across
@@ -374,17 +395,60 @@ model.save_model("model.cbm")              # CatBoost: native binary
   upgrades; pickles frequently do not.
 - **Pin the library version** with the artefact anyway; split thresholds and
   histogram binning can change between versions.
-- **Record `best_iteration`** and use it at inference (`num_iteration=` /
-  `ntree_limit=`) — otherwise you serve the overfitted full ensemble.
+- **Record `best_iteration` and prediction semantics.** XGBoost's sklearn wrapper
+  automatically uses the best iteration after early stopping. Native Booster
+  prediction uses its own defaults; specify `iteration_range=(0, best_iteration+1)`
+  when required. `ntree_limit` is a legacy API, not the current prescription.
 - **Freeze the feature order and names.** All three libraries index by position
   internally; a reordered frame silently produces garbage.
-- **For latency**, CatBoost's symmetric trees are fastest; alternatively compile
+- **For latency**, benchmark symmetric trees and alternatives; optionally compile
   the ensemble with Treelite/`lleaves` for a large single-row speedup.
 - **Monitor feature drift**, not just prediction drift. Trees extrapolate
   terribly — a feature moving outside its training range gets clipped to the
   outermost leaf, which fails silently rather than loudly.
 
 ## Self-check
+
+### Worked Newton split and CPU fit
+
+At initial binary probabilities 0.5, labels $(0,0,1,1)$ give gradients
+$(0.5,0.5,-0.5,-0.5)$ and Hessians all 0.25. A split separating the labels has
+$G_L=1,G_R=-1,H_L=H_R=0.5$. With $\lambda=1,\gamma=0.1$, gain is
+$\tfrac12(1/1.5+1/1.5)-0.1\approx0.567$ and leaf values are $-2/3,+2/3$ before
+learning-rate shrinkage. Raising $\gamma$ above $2/3$ rejects this split.
+
+```python runnable
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from xgboost import XGBClassifier
+g = np.array([.5, .5, -.5, -.5])
+h = np.full(4, .25)
+gain = .5*(g[:2].sum()**2/(h[:2].sum()+1)+g[2:].sum()**2/(h[2:].sum()+1))-.1
+assert np.isclose(gain, 17/30)
+X, y = make_classification(n_samples=240, n_features=6, n_informative=4, random_state=8)
+train, valid, yt, yv = train_test_split(X, y, test_size=.25, stratify=y, random_state=2)
+model = XGBClassifier(n_estimators=60, max_depth=3, learning_rate=.1,
+    tree_method="hist", device="cpu", n_jobs=1, random_state=0,
+    eval_metric="logloss", early_stopping_rounds=5)
+model.fit(train, yt, eval_set=[(valid, yv)], verbose=False)
+automatic = model.predict_proba(valid)
+explicit = model.predict_proba(valid, iteration_range=(0, model.best_iteration+1))
+np.testing.assert_allclose(automatic, explicit)
+assert roc_auc_score(yv, automatic[:, 1]) > .75
+print("gain", gain, "best iteration", model.best_iteration, "wrapper parity passed")
+```
+
+This validation set selects stopping and is not an untouched final quality estimate.
+The fixture tests CPU XGBoost, not GPU kernels or the optional LightGBM/CatBoost
+snippets. For custom objectives, state whether inputs are raw margins or transformed
+probabilities and supply compatible gradient/Hessian shapes. Count, quantile,
+multiclass and ranking losses have different output/group contracts; do not reuse
+a binary metric blindly. The [prediction guide](https://xgboost.readthedocs.io/en/stable/prediction.html)
+documents best-iteration behavior, and the
+[SHAP scatter API](https://shap.readthedocs.io/en/stable/generated/shap.plots.scatter.html)
+documents the corrected plotting call.
 
 1. Write the gradient boosting update, and say what $h_m$ is fit to.
 2. Read $\gamma$ and $\lambda$ off the XGBoost gain formula and say what each

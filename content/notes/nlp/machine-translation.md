@@ -8,9 +8,9 @@ meta: NLP · tasks
 
 Machine translation drove more architectural innovation than any other NLP task.
 Attention was invented for it. The transformer paper is a translation paper.
-BLEU, back-translation, subword tokenization, and beam search all came from MT
-and then spread everywhere. Understanding its arc is understanding how modern NLP
-was built.
+BLEU and many influential attention/back-translation applications grew from MT;
+beam search and subword/compression methods also have histories outside translation.
+Its architectural arc is central to understanding modern NLP.
 
 ## The arc
 
@@ -51,7 +51,8 @@ enormous phrase table, and no ability to generalise beyond observed phrases.
 An encoder RNN compresses the source into a vector; a decoder RNN generates the
 target from it. Elegant, end-to-end, and limited by one thing: **everything the
 decoder knows about the source passes through a single fixed-size vector.**
-Translation quality fell off sharply beyond roughly 20 tokens.
+Longer sentences exposed this bottleneck in early experiments; twenty tokens is
+not a universal architectural failure boundary.
 
 ### Attention
 
@@ -76,8 +77,9 @@ introduced remains the reference architecture for dedicated MT systems.
 
 The decoder has **two** attention mechanisms: masked self-attention over the
 target generated so far, and **cross-attention** over the encoder output. That
-separation — self-attention for target fluency, cross-attention for source
-fidelity — is the architectural expression of the noisy-channel decomposition.
+separation provides target-context and source-conditioned computation. Both are
+jointly trained inside $P(e\mid f)$; they are not separate factors $P(e)$ and
+$P(f\mid e)$ from the noisy-channel model.
 
 ## Data
 
@@ -175,7 +177,7 @@ Use sacreBLEU, always, and report the signature.
 
 | Metric | Type | Note |
 |---|---|---|
-| **chrF / chrF++** | character n-gram F-score | better for morphologically rich languages; no tokenisation dependence |
+| **chrF / chrF++** | character F-score; chrF++ adds word n-grams | character matching reduces tokenization sensitivity; chrF++ word segmentation still matters |
 | TER | edit distance to the reference | interpretable as post-editing effort |
 | METEOR | unigram matching with stems and synonyms | better sentence-level correlation |
 | **BERTScore** | contextual embedding similarity | credits paraphrase |
@@ -184,8 +186,8 @@ Use sacreBLEU, always, and report the signature.
 | BLEURT | trained regression metric | similar family to COMET |
 | Human evaluation | direct assessment, MQM error annotation | the ground truth |
 
-**COMET is the metric to use in 2026** for system comparison, and reference-free
-quality estimation is the one that changes practice: it lets you score live
+COMET-family metrics can support system comparisons, but specify checkpoint,
+language/domain coverage and human validation. Reference-free quality estimation scores live
 production translations, route low-confidence outputs to human review, and detect
 degradation without maintaining a reference set.
 
@@ -204,17 +206,17 @@ holistic score, which is far more reliable and more actionable.
 | Minimum Bayes risk | pick the candidate most similar to other candidates under a metric |
 | Sampling | for diversity; generally worse for translation |
 
-**The beam search curse** is a genuinely surprising empirical fact: increasing
-the beam beyond about 5 makes translations *worse* by BLEU, even though it finds
-higher-probability sequences. The model's probability distribution and
+**The beam search curse** describes experiments where increasing beam width
+worsened translation metrics despite finding higher-probability sequences. Five
+is not a universal threshold. The model's probability distribution and
 translation quality diverge — larger beams find degenerate high-probability
 outputs, typically too short or overly generic. It is a clean example of a model
 whose objective and whose goal are not the same function.
 
 **MBR decoding** attacks this directly: instead of maximising probability,
 sample many candidates and pick the one with the highest average similarity to
-the others under a metric like COMET. It consistently beats beam search when you
-can afford the compute.
+the others under a chosen utility metric. Gains depend on candidate diversity,
+the utility's validity and budget; it does not consistently win every comparison.
 
 ## Practical deployment
 
@@ -263,6 +265,61 @@ improvement, because a fluent unfaithful summary is worse than a clumsy faithful
 one.
 
 ## Self-check
+
+### Worked alignment and tiny encoder-decoder contract
+
+In IBM Model 1, suppose a source word has candidate target alignments to `house`
+and `home` with lexical scores .6 and .3, ignoring NULL for this small example.
+The posterior responsibilities are $2/3$ and $1/3$. Add those fractional counts
+across sentence pairs, then normalize lexical counts for each conditioning word
+in the M-step. The alignment is latent: choosing only the maximum would be hard
+assignment, not this EM update.
+
+Attention with scores $(0,\log2)$ gives weights $(1/3,2/3)$; encoder states
+$(1,0)$ and $(0,3)$ then produce context $(1/3,2)$. This is conditional feature
+aggregation, not a standalone noisy-channel translation factor.
+
+```python runnable
+import os
+os.environ["USE_TF"] = "0"  # select the PyTorch backend before importing Transformers
+import torch
+from transformers import T5Config, T5ForConditionalGeneration
+torch.manual_seed(3)
+torch.set_num_threads(1)
+config = T5Config(vocab_size=16, d_model=16, d_ff=24, num_layers=1,
+    num_decoder_layers=1, num_heads=2, d_kv=8, dropout_rate=0.,
+    decoder_start_token_id=0, pad_token_id=0, eos_token_id=1)
+model = T5ForConditionalGeneration(config)
+source = torch.tensor([[3, 4, 1, 0], [5, 6, 7, 1]])
+labels = torch.tensor([[8, 9, 1, -100], [10, 11, 12, 1]])
+decoder_input = model.prepare_decoder_input_ids_from_labels(labels)
+assert decoder_input.tolist() == [[0, 8, 9, 1], [0, 10, 11, 12]]
+optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+output = model(input_ids=source, attention_mask=source.ne(0), labels=labels)
+assert output.logits.shape == (2, 4, 16) and torch.isfinite(output.loss)
+output.loss.backward()
+assert model.shared.weight.grad is not None
+optimizer.step()
+expected = torch.softmax(torch.tensor([0., torch.log(torch.tensor(2.)).item()]), 0)
+assert torch.allclose(expected, torch.tensor([1/3, 2/3]))
+print("shifted targets, padding mask, seq2seq update and attention calculation passed")
+```
+
+The random tiny T5 tests architecture and loss plumbing, not translation quality.
+A real checkpoint experiment must pin tokenizer/model revisions, language tags,
+license, hardware, and train/development/test domains. Keep genuine source/target
+pairs separate from back-translated data, filter and deduplicate before mixing,
+and compare on an untouched real-domain test set.
+
+**How is corpus BLEU aggregated?** Sum clipped matching counts and candidate counts
+for each n-gram order over the corpus, then take precision ratios and the geometric
+mean with corpus candidate/reference lengths. Do not average sentence BLEUs.
+Zero matching counts require a stated smoothing/effective-order policy; an empty
+candidate needs defined behavior. Use [sacreBLEU](https://github.com/mjpost/sacrebleu)
+and record its signature for actual comparisons. A fluent output changing `15 mg`
+to `50 mg` can retain most n-grams while failing a critical numeric check. Add
+placeholder, entity, number and terminology assertions and human error categories
+instead of relying on one metric.
 
 1. What was the seq2seq bottleneck, and how did attention remove it?
 2. Why does the transformer decoder need two attention mechanisms?

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>torch.compile, Inductor, piecewise capture — The Inference Engineering Book</title>
+<title>torch.compile, Inductor, piecewise capture — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,13 +623,12 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 8 · Compilation and runtime · 08-02</div>
 <h1>torch.compile, Inductor, piecewise capture</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/compilation/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/compilation/</code></li><li><code>python/sglang/srt/compilation/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">A Llama-3-8B decode step at batch 1 has 4.48 ms of weight traffic to hide and about a
-thousand kernel launches to hide it behind. Eager PyTorch spends that budget on Python dispatch and
-on writing fp32 intermediates to HBM that nothing outside the next kernel will ever read. The
-compiler's job is to delete both. The interesting part is that neither vLLM nor SGLang compiles the
-model — they compile the <em>gaps between the attention calls</em>.</p></div>
+<div class="prose"><p class="lead">Compilation reduces Python overhead and can fuse tensor operations.
+The actual benefit depends on the eager baseline, selected custom kernels and graph boundaries.
+Both whole-forward and partitioned paths exist; an opaque attention operator can remain in an
+FX graph even when its internals are not lowered or fused by Inductor.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Start a vLLM server and watch the log. Somewhere between weight loading and the first token you
 get a line that costs you real money:</p>
 
@@ -712,9 +711,9 @@ def fused_add_rms_norm(
     return x.to(orig_dtype), x_residual</code></pre>
 </div>
 
-<p>Ten tensor operations. Run eagerly, every one of them is a separate CUDA kernel with a separate
-Python dispatch, and every one materialises its output in HBM. Llama-3-8B calls this 64 times per
-forward pass. That is the bottleneck the compiler exists to remove, and §3 prices it exactly.</p></div></section>
+<p>This is a reference tensor decomposition, not an exact kernel trace. Casts may be no-ops,
+reductions may launch multiple kernels, and caches can retain intermediates. The production
+eager baseline already has a fused norm, so this decomposition is not its launch count.</p></div></section>
 <section class="sec" id="mental-model" style="--i:1"><div class="sec__h"><span class="sec__n">§2</span><h2 class="sec__t">Mental model</h2></div><div class="sec__body"><p><code>torch.compile</code> is three programs wearing one name. <b>Dynamo</b> is a bytecode
 interpreter: it runs your Python frame symbolically and emits an FX graph of tensor operations plus
 a set of <b>guards</b> &mdash; predicates on the inputs that must hold for the graph to be reused.
@@ -763,12 +762,11 @@ capture <em>freezes the pieces</em>. They are separate mechanisms with separate 
 the reason they are usually discussed together is that the split points serve both.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: pricing one fusion</h2></div><div class="sec__body"><p>Take one <code>fused_add_rms_norm</code> call on Llama-3-8B, hidden size $d = 4096$, activations
 in bf16, at one token. Write $b_{16} = 2d = 8{,}192$ bytes for a bf16 row and $b_{32} = 4d = 16{,}384$
-bytes for an fp32 row. Every eager op reads its inputs from HBM and writes its output back.</p>
-
+bytes for an fp32 row. Count logical tensor traffic, assuming materialized intermediates.</p>
 <div class="table-wrap">
-  <div class="table-wrap__cap">HBM traffic for the eager decomposition of one <code>fused_add_rms_norm</code>,
-    d=4096, bf16 activations, one token. <b>Derived</b> by counting the tensor ops in
-    <code>vllm/ir/ops/layernorm.py:L43-L62</code> and multiplying by element sizes. Not measured.</div>
+  <div class="table-wrap__cap">Logical tensor traffic for the unfused reference decomposition,
+not measured HBM traffic. Weight dtype is bf16; scalar epsilon is a constant. Actual caches,
+allocation reuse and kernel decomposition can change physical traffic and launches.</div>
   <div class="table-scroll">
     <table class="dt">
       <thead><tr><th>Tensor op</th><th>Reads (B)</th><th>Writes (B)</th><th>Total (B)</th></tr></thead>
@@ -779,60 +777,56 @@ bytes for an fp32 row. Every eager op reads its inputs from HBM and writes its o
         <tr><td><code>x.to(bf16)</code> &rarr; residual out</td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
         <tr><td><code>x.pow(2)</code></td><td class="num">16,384</td><td class="num">16,384</td><td class="num">32,768</td></tr>
         <tr><td><code>.mean(dim=-1)</code></td><td class="num">16,384</td><td class="num">4</td><td class="num">16,388</td></tr>
-        <tr><td><code>rsqrt(var + eps)</code></td><td class="num">8</td><td class="num">4</td><td class="num">12</td></tr>
+        <tr><td><code>variance + epsilon</code></td><td class="num">4</td><td class="num">4</td><td class="num">8</td></tr>
+        <tr><td><code>rsqrt</code></td><td class="num">4</td><td class="num">4</td><td class="num">8</td></tr>
         <tr><td><code>x * rsqrt</code></td><td class="num">16,388</td><td class="num">16,384</td><td class="num">32,772</td></tr>
         <tr><td><code>x.to(bf16)</code></td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
         <tr><td><code>x * weight</code></td><td class="num">16,384</td><td class="num">8,192</td><td class="num">24,576</td></tr>
-        <tr><td><b>Eager total</b></td><td class="num">147,468</td><td class="num">106,504</td><td class="num"><b>253,972</b></td></tr>
+        <tr><td><b>Logical total</b></td><td class="num">147,468</td><td class="num">106,508</td><td class="num"><b>253,976</b></td></tr>
         <tr><td><b>One fused kernel</b> (x, residual, weight in; normed, residual out)</td><td class="num">24,576</td><td class="num">16,384</td><td class="num"><b>40,960</b></td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
-<p>Fusing the chain into a single Triton kernel removes 213,012 bytes per call &mdash; a 6.2&times;
-reduction in traffic for that operation, all of it intermediates that never leave the fused region.
-Llama-3-8B has two of these per decoder layer (pre-attention and pre-MLP), so 64 per forward pass:</p>
-
-<div class="math-display">$$ \Delta B_{\text{norm}} = 64 \times 213{,}012\ \text{B} = 13.63\ \text{MB per token} $$</div>
+<p>The fused input/output payload is 40,960 bytes, about 6.2 times smaller than the
+253,976-byte logical reference traffic. Across 64 illustrative call sites, the difference
+is about 13.63 MB. This is not a measured HBM saving or a production compile speedup:</p>
+<div class="math-display">$$ \Delta B_{\text{norm}} = 64 \times 213{,}016\ \text{B} = 13.63\ \text{MB per token} $$</div>
 
 <p>Now the punchline, which is not the one you expect. The book's H100 constant is 3.35 TB/s of HBM
 bandwidth and a 4.48 ms Llama-3-8B decode-step floor at batch 1 &mdash; that floor is 15.0 GB of weight
 traffic. At batch 1:</p>
 
 <div class="kpis">
-  <div class="kpi"><div class="kpi__n">4.07 &micro;s</div><div class="kpi__l">HBM time saved, batch 1 (derived)</div></div>
+  <div class="kpi"><div class="kpi__n">4.07 &micro;s</div><div class="kpi__l">logical-byte difference / peak bandwidth</div></div>
   <div class="kpi"><div class="kpi__n">0.09%</div><div class="kpi__l">of the 4.48 ms decode floor</div></div>
-  <div class="kpi kpi--hero"><div class="kpi__n">~576</div><div class="kpi__l">kernel launches removed per step</div></div>
+  <div class="kpi kpi--hero"><div class="kpi__n">Profile</div><div class="kpi__l">actual launch count depends on baseline</div></div>
 </div>
 
-<p>At batch 1 the <em>bytes</em> saved are noise. Nine of the ten ops collapse into one at each of 64
-sites, so roughly 576 kernel launches disappear from the step &mdash; and <em>that</em> is the batch-1
-win. It is a launch-overhead win, not a bandwidth win, which is precisely why compilation alone does
-not fix small-batch decode and why <a href="08-01-cuda-graphs.html">§8.1</a> exists: CUDA graphs remove
-the residual per-launch CPU cost of the launches that remain.</p>
-
+<p>The launch count must come from a trace: this reference contains eleven materializing
+operations under the stated dtype, not an exact ten-kernel decomposition. A fused eager norm
+may already use one launch. Compilation can still move fusion boundaries or remove framework
+overhead, while CUDA graphs separately reduce repeated submission work.</p>
 <p>Scale the batch and the arithmetic inverts. Elementwise traffic is proportional to token count;
 weight traffic is not. At 256 tokens in flight:</p>
 
 <div class="math-display">$$ 256 \times 13.63\ \text{MB} = 3.49\ \text{GB} \quad\Longrightarrow\quad 1.04\ \text{ms at }3.35\ \text{TB/s} $$</div>
 
-<p>against the same 15.0 GB of weights. Leaving those norms unfused would add <b>23%</b> to the step's
-bandwidth floor. So compilation's bandwidth payoff is a large-batch phenomenon and its launch payoff
-is a small-batch phenomenon, and a chapter that claims one number for "the speedup from
-<code>torch.compile</code>" is lying about at least one of them.</p>
+<p>At 256 tokens the reference's extra logical bytes are about 23% of the base weight bytes.
+Converting that ratio to HBM time assumes all intermediates reach HBM at the stated bandwidth.
+It is an explanatory traffic model, not evidence for a 23% production speedup.</p>
 
 <div class="diagram-shell">
-  <p class="diagram-shell__cap"><b>Figure 2 &mdash; eager chain vs. fused kernel for one <code>fused_add_rms_norm</code>
-    at d=4096, bf16, one token.</b> Each eager arrow crossing the HBM line is a real round trip.
-    Bytes are <em>derived</em> from the op count in <code>vllm/ir/ops/layernorm.py:L43-L62</code>.</p>
+  <p class="diagram-shell__cap"><b>Figure 2 &mdash; reference materialization versus fused payload.</b>
+  Arrows denote logical intermediates, not confirmed HBM round trips. The schematic groups
+  scalar add/rsqrt; actual eager kernels and the production baseline require tracing.</p>
   <svg viewBox="0 0 900 400" width="100%" role="img" aria-labelledby="fuseTitle fuseDesc" font-family="IBM Plex Mono, SF Mono, Consolas, monospace">
-    <title id="fuseTitle">Eager versus fused HBM traffic for fused add RMS norm</title>
-    <desc id="fuseDesc">Top half shows ten separate kernels, each reading from and writing to HBM,
-    totalling 253,972 bytes. Bottom half shows a single fused Triton kernel that reads three tensors
-    and writes two, totalling 40,960 bytes, a 6.2 times reduction.</desc>
+    <title id="fuseTitle">Reference versus fused logical tensor traffic</title>
+    <desc id="fuseDesc">The unfused logical reference totals 253976 bytes, compared with a
+40960-byte fused payload. This is not a count of physical HBM transactions or production launches.</desc>
 
-    <text x="20" y="24" font-size="13" fill="currentColor" font-weight="600">EAGER &mdash; 10 kernels, 10 dispatches, 253,972 B</text>
+    <text x="20" y="24" font-size="13" fill="currentColor" font-weight="600">REFERENCE &mdash; grouped operations, 253,976 logical bytes</text>
     <line x1="20" y1="40" x2="880" y2="40" stroke="currentColor" stroke-opacity="0.18"/>
     <text x="20" y="56" font-size="10" fill="currentColor" fill-opacity="0.6">HBM</text>
 
@@ -883,7 +877,7 @@ is a small-batch phenomenon, and a chapter that claims one number for "the speed
       <text x="546" y="248">res 8,192</text>
     </g>
 
-    <text x="300" y="352" font-size="12" fill="currentColor" font-weight="600">213,012 B removed per call &middot; 6.2&times; less traffic &middot; 9 fewer launches</text>
+    <text x="300" y="352" font-size="12" fill="currentColor" font-weight="600">213,016 fewer logical bytes per call; actual launches require tracing</text>
     <text x="300" y="372" font-size="10" fill="currentColor" fill-opacity="0.7">&times; 64 call sites = 13.63 MB per token on Llama-3-8B</text>
   </svg>
 </div>
@@ -898,7 +892,7 @@ is a small-batch phenomenon, and a chapter that claims one number for "the speed
   <code>enable_norm_fusion</code> turns on the explicit norm+quant pattern-matching pass only when a
   custom op is active, on the comment "otherwise Inductor handles fusion".</p>
 </div></div></section>
-<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>Why attention cannot be in the graph</h3>
+<section class="sec" id="production" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">How production systems do it</h2></div><div class="sec__body"><h3>Opaque attention and explicit partition boundaries</h3>
 
 <p>vLLM registers attention as an opaque custom operator. Dynamo does not trace into custom
 operators, by design:</p>
@@ -951,8 +945,9 @@ loads across it.</p>
 
 <h3>Splitting the graph</h3>
 
-<p>Given an opaque op you cannot compile, the choice is between compiling nothing and compiling
-around it. Both engines chose the second. vLLM enumerates the split ops centrally:</p>
+<p>An opaque custom op can be an FX node, including in fullgraph compilation, with registered
+schema, mutation/alias contracts and fake/meta behavior. It need not cause a Dynamo graph break.
+The engine may deliberately split around it for lowering or capture. vLLM lists split ops here:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1190,12 +1185,11 @@ first batch size it sees, and since a serving batch changes every step you would
                     options["guard_filter_fn"] = lambda x: [False for _ in x]</code></pre>
 </div>
 
-<p>and compiles with <code>fullgraph=True, dynamic=False</code>
-(<code>vllm/compilation/wrapper.py:L147-L154</code>). Together those define the contract: a graph break
-is a hard error, and the single compiled artefact is reused for every shape without checking. The cost
-is in <code>docs/design/debug_vllm_compile.md:L148-L176</code> &mdash; if model code branches on the
-token count you get "silent incorrectness, loud errors, or CUDA illegal memory accesses", and the
-prescribed fix is to hide the branch inside a custom operator.</p>
+<p>In this path <code>fullgraph=True</code> makes Dynamo graph breaks errors. Trace-once and
+guard-dropping assumptions do not imply one backend artifact for every shape: pieces and
+compile ranges can have separate Inductor artifacts. Shape-dependent Python branches are
+unsafe unless represented correctly or guarded; explicit custom-op boundaries can keep
+runtime choices out of tracing. The debug evaluate-guards path is an important exception.</p>
 
 <h3>SGLang: the same skeleton, a narrower deployment</h3>
 
@@ -1318,7 +1312,7 @@ fall back above it.</p>
         <tr><td>Default</td><td><code>-O2</code>; <code>mode=VLLM_COMPILE</code>, <code>cudagraph_mode=FULL_AND_PIECEWISE</code></td><td>prefill <code>breakable</code> on CUDA; <code>tc_compiler="eager"</code>; <code>enable_torch_compile=False</code></td></tr>
         <tr><td>Is Inductor on by default?</td><td><span class="pill pill--verified">yes</span></td><td><span class="pill pill--blocked">no</span></td></tr>
         <tr><td>Split-op registry</td><td>central list, <code>CompilationConfig._attention_ops</code></td><td>decorator at definition, <code>@register_split_op()</code></td></tr>
-        <tr><td>Guards</td><td>dropped entirely unless <code>mode=1</code></td><td>kept (stock <code>torch.compile</code> semantics)</td></tr>
+        <tr><td>Guards</td><td>normally filtered in engine trace-once paths; stock mode and compatible evaluate_guards diagnostics differ</td><td>stock guards in the cited torch.compile path</td></tr>
         <tr><td>Custom FX passes</td><td>25 concrete pass classes wired into <code>PostGradPassManager</code> (<code>vllm/compilation/passes/pass_manager.py:L155-L232</code>)</td><td><code>FixFunctionalizationPass</code> only &mdash; <code>self.passes</code> starts empty and nothing adds to it (<code>python/sglang/srt/compilation/pass_manager.py:L36-L52</code>)</td></tr>
       </tbody>
     </table>
@@ -1406,8 +1400,8 @@ whole-graph rewriting want opposite things; the Inductor-partition mode exists t
 
 <h3>Caching, and what invalidates it</h3>
 
-<p>Compiling 33 subgraphs across several compile ranges takes minutes, so artefacts go on disk under
-a directory named by a hash of everything that could change the generated code:</p>
+<p>Compilation time varies with graph, shapes and cache state. The engine uses several
+outer hash factors to organize artifacts; this alone is not proof that every dependency is covered:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1452,14 +1446,11 @@ a directory named by a hash of everything that could change the generated code:<
     whole fleet's artefacts.</p></div>
 </div>
 
-<p>The operational consequence: a rolling deploy that changes any of those four does not restart
-pods, it recompiles them, serially, at the moment you are adding capacity. Bake the cache into the
-image or mount it, and make sure the mount key covers all four factors &mdash; that is the plumbing
-<a href="../09-serving-system/09-04-routers-and-load-balancing.html">§9.4</a> has to route around.
-SGLang's version is one factor, not four: <code>SGLangBackend.__call__</code> names the directory from
-<code>self.compiler_manager.compute_hash()</code> alone
-(<code>python/sglang/srt/compilation/backend.py:L404-L418</code>) &mdash; cheaper to reason about,
-correspondingly easier to make stale.</p></div></section>
+<p>A cache miss can delay readiness, but rolling deployments do not inherently compile
+serially. Prewarm compatible artifacts and measure startup coverage. SGLang's outer directory
+uses a compiler-manager hash; compare complete inner compiler/JIT keys and validation before
+claiming greater staleness risk from the number of outer factors. Use private, access-controlled
+cache roots and a toolchain/model/shape manifest for reproducible comparisons.</p></div></section>
 <section class="sec" id="worked-trace" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Worked trace: one Llama forward, cold</h2></div><div class="sec__body"><p>Follow the very first <code>LlamaModel.__call__</code> on a cold cache, naming functions in order.</p>
 
 <div class="diagram-shell">
@@ -1560,8 +1551,10 @@ makes startup slower and steady-state latency more predictable; SGLang's lazines
   <code>if data.size[0] % 128 == 0:</code>. Diagnose with <code>TORCH_TRACE=~/trace_dir</code> plus
   <code>tlparse</code> and read <code>compilation_metrics</code>; any symbolic constraint on the batch
   dimension is a bug. Fix by moving the branch into a custom operator. To make the failure loud
-  instead, set <code>-cc.dynamic_shapes_config.evaluate_guards=True</code>, which keeps shape guards
-  and fails on any recompile one causes.</p>
+  instead, use the compatible evaluate-guards diagnostic path. The shown wrapper requires
+  <code>VLLM_USE_BYTECODE_HOOK=0</code> and a shape mode other than UNBACKED, in addition to
+  <code>-cc.dynamic_shapes_config.evaluate_guards=True</code>. Shape guards are then retained;
+  verify the supported configuration rather than assuming that flag alone enables checks.</p>
 </div>
 
 <div class="callout callout--warn">
@@ -1586,14 +1579,11 @@ makes startup slower and steady-state latency more predictable; SGLang's lazines
   suspect a stale artefact before you suspect the flag.</p>
 </div>
 
-<p>Two more honest limits. Compiled code is not steppable: the Triton kernel that replaced ten aten
-ops has no Python frame to break on, and a numerical bug in it surfaces as a wrong tensor with no
-intermediate to inspect. <code>-cc.debug_dump_path=...</code> makes vLLM run the whole compilation
-under <code>depyf</code> (<code>vllm/compilation/monitor.py:L31-L39</code>), writing readable Python
-for the transformed bytecode and each graph. And fusion changes numerics: reassociating a reduction or
-holding an accumulator at a different width gives different bits than the eager chain, so a compiled
-server and an eager server will not agree token-for-token &mdash;
-<a href="../10-benchmarking/10-04-batch-invariance.html">§10.4</a>'s subject.</p>
+<p>Compiled kernels do not expose the original Python frames, but FX/generated code,
+compiler dumps and backend bisection remain useful. Compare eager, tracing-only backend,
+AOT processing and Inductor to localize the first divergent tensor. Fusion may change floating-point
+bits, and sometimes tokens, but it does not guarantee token differences. Test numerical
+tolerances separately from deterministic token equality and sampling randomness.</p>
 
 <h3>Ahead-of-time kernel compilation is a different animal</h3>
 
@@ -1603,8 +1593,39 @@ server and an eager server will not agree token-for-token &mdash;
 sends one four-token request through it, waits, and exits
 (<code>python/sglang/compile_deep_gemm.py:L31-L37</code>, <code>L58-L90</code>). DeepGEMM JIT-compiles
 a kernel per problem shape on first use, so on a live server the first request at each new shape pays
-a compile. Running the script beforehand populates the kernel cache so production never does &mdash;
-the same operational idea as the FX cache, applied at individual kernels rather than graphs.</p></div></section>
+a compile. Prewarming covers only specializations exercised by the script or its explicit
+shape sweep. A four-token request alone proves no coverage of all future model/dtype/backend
+shapes; log later JIT misses and maintain a prewarm manifest.</p></div></section>
+<section class="sec" id="reference-contract"><div class="sec__h"><h2 class="sec__t">An opaque operator inside a full FX graph</h2></div><div class="sec__body">
+<p>This CPU example registers a functional operator, supplies fake-tensor shape behavior, checks its schema, and captures it as an opaque node in a full graph. The inspection backend executes that FX graph without claiming Inductor fusion or speedup. A mutating production operator must additionally declare every mutated argument and compatible aliases; hidden cache writes cannot be omitted. Shape-dependent branching and fake stride errors deserve negative tests before removing guards. See <a href="https://docs.pytorch.org/tutorials/advanced/python_custom_ops.html">PyTorch's custom-operator contracts</a>.</p>
+<div class="code-file"><div class="code-file__hd"><span class="src">Independent CPU reference; not an engine or GPU benchmark</span></div>
+<pre class="code-block"><code data-cpu-check="inference-06-08">import torch
+
+torch.set_num_threads(1)
+torch.manual_seed(2)
+@torch.library.custom_op("curriculum_runtime::scaled_sine", mutates_args=())
+def scaled_sine(x: torch.Tensor) -&gt; torch.Tensor:
+    return 2 * torch.sin(x)
+
+@scaled_sine.register_fake
+def _(x):
+    return torch.empty_like(x)
+
+x = torch.randn(3, 5)
+torch.library.opcheck(scaled_sine, (x,), test_utils=("test_schema", "test_faketensor"))
+seen = []
+def inspect_backend(graph, inputs):
+    seen.extend(str(node.target) for node in graph.graph.nodes if node.op == "call_function")
+    return graph.forward
+
+def model(value):
+    return scaled_sine(value) + 1
+
+compiled = torch.compile(model, backend=inspect_backend, fullgraph=True)
+torch.testing.assert_close(compiled(x), model(x))
+assert any("curriculum_runtime.scaled_sine" in target for target in seen)
+print("Opaque custom op remains an FX node under fullgraph=True.")
+</code></pre></div></div></section>
 <section class="sec" id="hands-on" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Everything below is CPU-cheap except the server launches, which need a GPU. Numbers you get are
 yours, not the book's.</p>
 
@@ -1615,14 +1636,14 @@ yours, not the book's.</p>
   </div>
   <pre class="code-block code-block--wrap"><code># 1. Cold compile. Watch for "Dynamo bytecode transform time" and
 #    "torch.compile took N s in total".
-rm -rf ~/.cache/vllm
+export VLLM_CACHE_ROOT="$(mktemp -d)"  # private cold trial; retain it for warm restart
 vllm serve meta-llama/Meta-Llama-3-8B-Instruct 2&gt;&amp;1 | grep -E "Dynamo|torch.compile took|cache directory"
 
-# 2. Warm restart. Same command, no rm. The delta is what the cache buys.
+# 2. Stop the first server, then restart with the same private cache and configuration.
 
 # 3. Read the split graph vLLM wrote for you. This file is the answer to
 #    "how many pieces did it make", printed as Python.
-find ~/.cache/vllm/torch_compile_cache -name computation_graph.py | head -1 | xargs grep -c "submod_"
+find "$VLLM_CACHE_ROOT" -name computation_graph.py  # inspect call_module nodes, not grep line counts
 
 # 4. Turn compilation off, keep CUDA graphs, and compare.
 vllm serve meta-llama/Meta-Llama-3-8B-Instruct -cc.mode=0
@@ -1746,37 +1767,31 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 <details class="fold">
   <summary>Answer &mdash; 5</summary>
   <div class="fold__body">
-    <p>SP shortens the residual to $1/\text{TP}$ of its rows between the reduce-scatter and the
-    all-gather. In an MoE layer the routing happens inside that window and the all-to-all dispatch
-    expects full-length token indices, so a rank holding only its slice cannot build a correct expert
-    assignment without another collective. Safety would mean routing before the reduce-scatter, or an
-    a2a that works on sharded rows. Nothing in <code>split_graph</code> would change &mdash; SP already
-    requires <code>use_inductor_graph_partition=True</code> or empty <code>splitting_ops</code>. What
+    <p>SP shortens residual rows between collectives. Whether MoE routing is compatible
+    depends on the specific dispatch/permutation contract: routing can operate on local rows
+    with suitable all-to-all metadata. Do not infer a universal incompatibility from one
+    pass guard. Inspect the selected model forward, communication layout and engine pass.
+    The cited FX splitting restrictions remain implementation-specific. What
     changes is the pattern set: the current patterns match
     <code>all_reduce &rarr; fused_add_rms_norm</code>, and an MoE block interposes the a2a between
     them.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>Fusing one <code>fused_add_rms_norm</code> on Llama-3-8B removes 213,012 of 253,972 bytes, a
-  6.2&times; cut &mdash; but at batch 1 the 64 call sites total only 13.63 MB, 0.09% of the 4.48 ms
-  decode floor. The batch-1 win is ~576 fewer kernel launches; the bandwidth win only appears at
-  scale, where it reaches 23% of the step's bytes at 256 tokens. Any single claimed speedup for
-  <code>torch.compile</code> is hiding one of those two regimes.</li>
-
-  <li>Attention is excluded because it is a custom op that reads its metadata from a global forward
-  context and dispatches into an external backend. Everything about "piecewise" &mdash; the split
-  scan, the 33-plus-32 subgraph structure, the per-piece CUDA graph wrapping &mdash; is downstream of
-  that single fact.</li>
+  <li>The unfused reference has about 6.2 times the logical payload of a fused norm.
+  This does not predict compile-versus-production speedup because the eager production path
+  can already use a fused norm and intermediate traffic need not reach HBM.</li>
+  <li>Opaque custom operators can remain in compiled graphs. Opacity to fusion, a chosen
+  partition boundary, and a Dynamo graph break are three distinct concepts.</li>
 
   <li>Piecewise splitting and whole-graph rewriting are mutually exclusive at the FX level.
   <code>SequenceParallelismPass</code> changes the residual's row count, which cannot cross a fixed
   subgraph boundary, so vLLM needs <code>use_inductor_graph_partition=True</code> &mdash; partitioning
   after codegen &mdash; to run both.</li>
 
-  <li>vLLM drops all Dynamo guards and compiles <code>fullgraph=True</code>. That converts two
-  familiar failure modes: graph breaks become hard errors, and shape-dependent branches become silent
-  wrong answers instead of recompilations.</li>
+  <li>Engine trace-once paths deliberately filter guards, with stock/debug exceptions.
+  Fullgraph rejects Dynamo graph breaks; backend artifacts can still specialize by piece
+  and shape range. Validate every removed guard's assumption.</li>
 
   <li>The compile cache key is four hashes &mdash; env vars, the full config, the bytes of every
   traced source file, and the PyTorch/Inductor build. Warm starts survive a restart; they do not
@@ -1815,7 +1830,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 </ul></div></section>
 <div class="pager"><a href="08-01-cuda-graphs.html"><div class="pager__k">← Previous</div><div class="pager__t">CUDA graphs and kernel-launch overhead</div></a><a class="pager__next" href="08-03-triton-and-cutlass.html"><div class="pager__k">Next →</div><div class="pager__t">Writing a Triton kernel; CUTLASS at a glance</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
@@ -1827,6 +1842,7 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#production">How production systems do it</a>
 <a href="#worked-trace">Worked trace: one Llama forward, cold</a>
 <a href="#pitfalls">Pitfalls and war stories</a>
+<a href="#reference-contract">CPU reference contract</a>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>

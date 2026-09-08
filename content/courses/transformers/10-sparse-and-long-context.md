@@ -185,9 +185,10 @@ probability mass when a head has nothing useful to attend to (softmax must sum t
 Consequence: naively evicting early tokens from the cache destroys quality.
 StreamingLLM keeps the first few tokens permanently.
 
-Raschka finds explicit `sinks` parameters in **gpt-oss**: "attention sinks are
-special 'always-attended' tokens placed at the start of the sequence to stabilize
-attention." **Arcee Trinity Large** attacks the phenomenon from the other side —
+The [gpt-oss implementation](https://raw.githubusercontent.com/openai/gpt-oss/main/gpt_oss/torch/model.py)
+instead adds one learned sink **logit per head** to the softmax denominator and
+discards its probability before multiplying by values. It is a zero-value
+softmax slot, not a cached token at position zero. **Arcee Trinity Large** attacks the phenomenon from the other side —
 its elementwise attention gating "reduces attention sinks and improves
 long-sequence generalization."
 
@@ -201,11 +202,16 @@ Standard attention:
 
 $$\text{Attention}(Q,K,V) = \operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V$$
 
-The softmax is what forces you to materialise `QKᵀ` — you cannot reassociate
-across a nonlinearity. Replace it with a kernel feature map `φ` and the
-associativity is restored:
+Softmax prevents this simple reassociation, but does **not** require materializing
+the entire matrix: tiled exact attention is module 11. Replacing its similarity
+with a nonnegative finite-dimensional kernel allows a different computation:
 
-$$\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}\right)V \;\approx\; \phi(Q)\big(\phi(K)^\top V\big)$$
+$$y_i = \frac{\phi(q_i)^\top\sum_j\phi(k_j)v_j^\top}
+{\phi(q_i)^\top\sum_j\phi(k_j)}.$$
+
+The denominator is essential for normalized kernel attention. An arbitrary
+feature map is a different attention rule, not necessarily an approximation of
+the softmax kernel. See the [original linear-attention derivation](https://arxiv.org/html/2006.16236v3).
 
 Raschka's *Transformers are RNNs* (2020) reference uses `φ(x) = elu(x) + 1`.
 
@@ -219,7 +225,8 @@ linear:     Q (K^T V)     ->  d x d  intermediate   ->  O(n d^2)
 ```
 
 `O(n²)` becomes `O(n)`. And because `KᵀV` is a fixed-size running state, decoding
-becomes **cache-free** — you keep a `d × d` state instead of a growing cache. That
+has **fixed-size recurrent state**: an `r × d_v` numerator and an `r`-vector
+normalizer for feature width `r`, rather than a growing token cache. That
 is why the 2020 paper is titled *Transformers are RNNs*.
 
 ```mermaid
@@ -232,7 +239,7 @@ flowchart TD
     end
     subgraph LIN["Linear attention"]
         L1["phi(K)_transpose V<br/>d x d — SIZE INDEPENDENT OF n"] --> L2["phi(Q) x that"]
-        L2 --> L3["O(n d squared)"]
+        L2 --> L3["divide by phi(Q) sum(phi(K))<br/>O(n d squared) for equal widths"]
     end
 ```
 
@@ -243,9 +250,10 @@ the model accuracy, and I have never really seen one of these variants applied i
 an open-weight state-of-the-art LLM."
 
 The reason is capacity. A fixed `d × d` state cannot store arbitrary detail about
-an arbitrarily long sequence. Full attention keeps *every* token exactly; linear
-attention keeps a lossy summary. For precise recall — "what was the variable name
-on line 400?" — that loss is fatal.
+an arbitrarily long sequence at fixed precision. Full attention retains direct
+access to per-token keys/values; recurrent attention compresses history into a
+fixed state. This can impair precise retrieval, but neither guarantees perfect
+recall or failure on a particular task without an empirical test.
 
 ## 10.5 The 2025–26 linear attention revival
 
@@ -364,7 +372,9 @@ y_t = C h_t
 
 Linear in sequence length, constant memory, and (because the recurrence is
 linear) parallelisable over the sequence during training via a scan. **Mamba**
-(2023) made `A`, `B`, `C` input-dependent — "selective" — which gave it the
+(2023) makes step size `Delta` and `B,C` input-dependent. Continuous-time `A`
+remains learned but token-independent; discretized `A_bar_t=exp(Delta_t A)`
+therefore varies with the token. This selection mechanism gave it the
 content-awareness earlier SSMs lacked. **Mamba-2** refined the formulation.
 
 The core tradeoff is the same as linear attention:
@@ -423,16 +433,16 @@ flowchart TD
 
 | Method | Compute | State | Exact recall | 2026 status |
 |---|---|---|---|---|
-| Full attention | `O(T²)` | `O(T)` | yes | still the quality baseline |
+| Full attention | `O(T²)` | `O(T)` | direct access, not guaranteed recall | quality baseline |
 | Sliding window | `O(T·w)` | `O(w)` | within window | **widely shipped** |
 | Sparse (content) | `O(T·k)` | `O(T)` | selected pairs | DeepSeek V3.2, GLM-5 |
 | Linear / DeltaNet | `O(T)` | `O(1)` | lossy | shipping, contested |
 | SSM / Mamba | `O(T)` | `O(1)` | lossy | shipping in hybrids |
 
-**The single most important takeaway: nobody removes full attention entirely.**
-Every production long-context model keeps some full-attention layers — 1 in 6
-(Gemma), 1 in 4 (Qwen3-Next, Kimi Linear, Olmo 3), or a handful (Nemotron). Exact
-retrieval is worth paying for somewhere.
+**The compared hybrids retain some full-attention layers:** 1 in 6 for the
+discussed Gemma pattern, 1 in 4 for Qwen3-Next/Kimi Linear/Olmo 3, or a handful
+for the discussed Nemotron variants. This is a recurring design choice, not a
+claim that all sequence models require full attention or guarantee exact recall.
 
 ---
 
@@ -456,6 +466,50 @@ success. Raschka reports both without adjudicating, and so does this module. Tre
 confident claims here with suspicion.
 
 ---
+
+## Worked causal recurrence and hybrid memory
+
+For positive kernel features of width r, initialize `S_0=0` with shape
+`(r,d_v)` and `z_0=0` with shape `(r,)`. At each token:
+
+$$S_t=S_{t-1}+\phi(k_t)v_t^\top,\qquad z_t=z_{t-1}+\phi(k_t),\qquad
+y_t=\frac{\phi(q_t)^\top S_t}{\phi(q_t)^\top z_t}.$$
+
+Including the current token matches a causal mask with its diagonal allowed.
+For positive features the denominator is positive for every nonempty prefix.
+A numerical clamp protects finite precision but slightly changes behavior near
+zero; it is not a substitute for stating the normalizer.
+
+```python transformer-check
+import torch
+import torch.nn.functional as F
+torch.manual_seed(10)
+q, k = [F.elu(torch.randn(6, 3, dtype=torch.float64)) + 1 for _ in range(2)]
+v = torch.randn(6, 2, dtype=torch.float64)
+weights = (q @ k.T).tril()
+parallel = (weights @ v) / weights.sum(-1, keepdim=True)
+s, z, rows = torch.zeros(3, 2, dtype=torch.float64), torch.zeros(3, dtype=torch.float64), []
+for qt, kt, vt in zip(q, k, v):
+    s = s + kt[:, None] * vt[None, :]
+    z = z + kt
+    rows.append((qt @ s) / (qt @ z))
+torch.testing.assert_close(torch.stack(rows), parallel)
+print("Causal kernel matrix and normalized recurrent state agree at every token.")
+```
+
+Delta-rule memory is different. With `M:(d_v,d_k)`, key `k:(d_k,)`, and target
+value `v:(d_v,)`, update `M_new=M+beta*(v-Mk)k.T`. For a unit-norm k and
+`beta=1`, `M_new k=v`: the current association is corrected rather than merely
+added. Other keys can still interfere. A scalar decay variant first forms
+`M_bar=alpha*M`, then corrects its residual; channel-wise gates generalize this.
+
+**Hybrid accounting exercise:** 32 layers with eight global GQA layers and
+24 recurrent layers have state bytes
+`B*s*(8*T*H_kv*(d_k+d_v)+24*state_elements_per_layer)`.
+The global term still grows with T. Full attention gives direct access to past
+keys/values, not guaranteed perfect recall; evaluate distractors and retrieval
+accuracy instead of inferring capability from the asymptotic cache table.
+Original selective-state details are in [Mamba](https://arxiv.org/html/2312.00752v2).
 
 ## Key takeaways
 

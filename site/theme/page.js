@@ -2,7 +2,7 @@
 (function () {
   const toc = document.getElementById('toc');
   if (toc) {
-    const links = [...toc.querySelectorAll('a')];
+    const links = [...toc.querySelectorAll('a')].filter(l => !l.closest('.toc__end'));
     const sections = links
       .map(l => ({ link: l, el: document.getElementById(l.getAttribute('href').slice(1)) }))
       .filter(s => s.el);
@@ -23,7 +23,9 @@
   if (nav && btn) {
     btn.addEventListener('click', () => {
       const open = nav.classList.toggle('is-open');
-      btn.textContent = open ? 'Close' : 'Modules';
+      const label = btn.querySelector('span');
+      if (label) label.textContent = open ? 'Close' : 'Contents';
+      else btn.textContent = open ? 'Close' : 'Contents';
       btn.setAttribute('aria-expanded', String(open));
     });
   }

@@ -19,7 +19,7 @@ flowchart TD
     R["raw text"] --> U["Unicode normalisation<br/>NFC or NFKC"]
     U --> C["cleaning:<br/>strip markup, control chars,<br/>fix mojibake, dedupe"]
     C --> D{"classical or<br/>neural pipeline?"}
-    D -->|"classical:<br/>TF-IDF, naive Bayes,<br/>linear models"| CL["lowercase, remove stopwords,<br/>strip punctuation,<br/>stem or lemmatise,<br/>then whitespace tokenise"]
+    D -->|"classical:<br/>TF-IDF, naive Bayes,<br/>linear models"| CL["evaluate task-specific normalization,<br/>word or character features;<br/>preserve negation and meaningful symbols"]
     D -->|"neural:<br/>transformers"| NE["subword tokenise<br/>with the MODEL'S tokenizer<br/>and almost nothing else"]
     CL --> V["vocabulary and vectorisation"]
     NE --> V
@@ -31,7 +31,7 @@ the model was pretrained with. Removing stopwords destroys syntax. Stemming
 produces strings absent from the tokenizer's vocabulary. Use the model's own
 tokenizer and leave the text alone.
 
-Classical preprocessing is still correct for classical models — TF-IDF plus a
+Classical preprocessing choices still deserve task-specific ablations: TF-IDF plus a
 linear classifier remains a strong, fast baseline — so the distinction is
 between pipelines, not between old and new.
 
@@ -41,21 +41,20 @@ between pipelines, not between old and new.
 |---|---|---|
 | Multiple encodings of one glyph | "é" as U+00E9, or "e" + U+0301 | NFC normalisation |
 | Compatibility variants | "ﬁ" ligature, full-width "Ａ" | NFKC (lossier) |
-| Invisible characters | zero-width joiner, soft hyphen, BOM | strip explicitly |
+| Invisible characters | zero-width joiner, soft hyphen, BOM | preserve meaningful joiners; handle specific unwanted controls explicitly |
 | Homoglyphs | Cyrillic "а" vs Latin "a" | confusable detection; a real spam-evasion vector |
 | Mojibake | "â€™" from UTF-8 read as Latin-1 | `ftfy`, or fix the ingestion |
 | Emoji and skin-tone modifiers | multi-codepoint grapheme clusters | do not split graphemes |
-| Right-to-left and bidi controls | Arabic, Hebrew, bidi override attacks | strip bidi control characters |
+| Right-to-left and bidi controls | Arabic, Hebrew, bidi override attacks | retain raw text; audit and handle according to task and display/security policy |
 
 ```python
-import unicodedata, ftfy, re
+import unicodedata
 
 def clean(text):
-    text = ftfy.fix_text(text)                      # repair mojibake
-    text = unicodedata.normalize("NFKC", text)      # canonical + compatibility
-    text = "".join(ch for ch in text
-                   if unicodedata.category(ch)[0] != "C" or ch in "\n\t")
-    return re.sub(r"[ \t]+", " ", text).strip()
+    # Retain the original separately; normalization can change offsets.
+    if "\x00" in text:
+        raise ValueError("NUL requires an explicit ingestion policy")
+    return unicodedata.normalize("NFC", text)
 ```
 
 **NFC or NFKC?** NFC composes canonical equivalents and is lossless for meaning.
@@ -163,9 +162,10 @@ different segmentation each epoch as data augmentation. This measurably helps
 low-resource translation.
 
 **SentencePiece** treats input as a raw stream including spaces, encoding them as
-`▁`. That makes it fully reversible — detokenisation is exact string
-concatenation — and language-agnostic, since it needs no pre-tokenizer and works
-for Chinese and Japanese without modification.
+`▁`. Reconstruction is relative to the tokenizer's normalized text, not necessarily
+the raw string: default normalization can alter compatibility characters and
+whitespace. Preserve raw text and offset mappings when exact source reconstruction
+matters. See [SentencePiece normalization/options](https://github.com/google/sentencepiece/blob/master/doc/options.md).
 
 ## Practical tokenization facts
 
@@ -180,14 +180,16 @@ for Chinese and Japanese without modification.
 **The arithmetic tokenization problem** is a good illustration of tokenizer
 consequences. If `1234` tokenises as `12`+`34` and `5678` as `567`+`8`, digit
 positions do not align, and the model must learn arithmetic over inconsistent
-groupings. Llama 3 and several other models tokenise each digit separately for
-exactly this reason, and it measurably improves arithmetic.
+groupings. Some tokenizer families use individual digits, but Llama 3's official
+pattern groups one to three digits. Do not transfer an earlier Llama tokenizer
+rule to every successor. See [Llama 3's tokenizer](https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py).
 
 **Trailing whitespace is a real bug source.** A prompt ending in a space
 tokenises differently from one that does not, because most tokenizers attach a
 leading space to the following word (`" the"` is a different token from `"the"`).
-The result is a prompt slightly off the model's training distribution, which
-degrades output for no visible reason.
+Whether trimming helps is task-dependent: code indentation, completion prefixes
+and exact-format tasks may require that whitespace. Test the actual token IDs
+rather than stripping it universally.
 
 **Special tokens** must be handled deliberately: `[CLS]`, `[SEP]`, `[MASK]`,
 BOS/EOS, padding, and chat control tokens. Use `apply_chat_template` rather than
@@ -196,15 +198,18 @@ degrades quality substantially while looking fine.
 
 ```python
 tok = AutoTokenizer.from_pretrained(model_name)     # ALWAYS from the same checkpoint
-
-enc = tok(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
 tok.padding_side = "left"        # required for batched generation with a causal LM
+if tok.pad_token_id is None:
+    if tok.eos_token_id is None:
+        raise ValueError("Choose a model-specific pad-token policy")
+    tok.pad_token = tok.eos_token
+enc = tok(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
 prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 ```
 
 ## Classical preprocessing
 
-Still correct when you are building a TF-IDF or bag-of-words pipeline.
+Candidate transformations for a TF-IDF or bag-of-words pipeline, not mandatory defaults.
 
 ### Stopword removal
 
@@ -225,7 +230,7 @@ redundant. **Never remove stopwords for a transformer.**
 | | Stemming | Lemmatization |
 |---|---|---|
 | Method | rule-based suffix chopping | dictionary + morphological analysis |
-| Output | may not be a real word (`studies` → `studi`) | always a valid lemma (`studies` → `study`) |
+| Output | may not be a real word (`studies` → `studi`) | aims for a valid contextual lemma; dictionary coverage and disambiguation can fail |
 | Needs POS | no | yes, for accuracy (`meeting` as noun vs verb) |
 | Speed | very fast | slower |
 | Algorithms | Porter, Snowball, Lancaster | WordNet, spaCy, Stanza |
@@ -282,11 +287,51 @@ carries context the chunk text alone does not.
 | Ignoring `max_length` truncation | silently dropping the end of every long document |
 | Right padding for causal generation | the model generates from a pad position |
 | Assuming 1 token = 1 word | context and cost estimates off by ~30% |
-| Not stripping trailing whitespace from prompts | off-distribution tokenization |
+| Changing trailing whitespace without checking the task | changes token boundaries and may damage code/completion prefixes |
 | Skipping deduplication in a pretraining corpus | memorisation and contaminated evaluation |
 | Normalising away emoji or casing in sentiment tasks | both carry signal |
 
 ## Self-check
+
+### Runnable normalization and tokenizer round trip
+
+This trains a tiny local byte-level BPE with the Hugging Face `tokenizers` library,
+without files or downloads. The normalization example uses a combining character
+and a joiner: character count, UTF-8 byte count and visible grapheme count are
+different quantities. Model offsets must be related to the retained raw source,
+especially after normalization or redaction.
+
+```python runnable
+import unicodedata
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+raw = "Cafe\u0301 and x\u200dy"
+normalized = unicodedata.normalize("NFC", raw)
+assert "\u200d" in normalized and normalized != raw
+assert len(raw.encode("utf-8")) > len(raw)
+tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
+tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+tokenizer.decoder = decoders.ByteLevel()
+trainer = trainers.BpeTrainer(vocab_size=280, special_tokens=["[UNK]"],
+    initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
+tokenizer.train_from_iterator(["low lower newest widest", normalized, "x = 1234\n"], trainer)
+restored = Tokenizer.from_str(tokenizer.to_str())
+for text in [normalized, "unknown symbol: \u03a9", "  indented\n", "1234567"]:
+    encoding = restored.encode(text)
+    assert "[UNK]" not in encoding.tokens
+    assert restored.decode(encoding.ids) == text
+    assert all(0 <= start <= stop <= len(text) for start, stop in encoding.offsets)
+print("joiner preservation, byte coverage and in-memory tokenizer reload passed")
+```
+
+**How does a Unigram model score alternatives?** Multiply token probabilities
+within a segmentation, then sum over alternative segmentations for the string's
+likelihood. With tokens `a`, `b`, `ab` having probabilities .4, .3, .3, the
+two segmentations of `ab` contribute .12 and .3, totaling .42 before conditioning
+on any additional boundary convention. **What is the WordPiece ratio?** The
+pair-frequency/marginal-frequency ratio is a common pedagogical reconstruction,
+not a complete specification of every original WordPiece trainer. **How should
+duplicates be split?** Group related documents before partition assignment, then
+fit tokenizers/vectorizers only on training data and record the grouping policy.
 
 1. Run three BPE merge steps on the corpus `low`×5, `lowest`×2, `newer`×6.
 2. Why does byte-level BPE never produce an `[UNK]` token, and what does it cost?

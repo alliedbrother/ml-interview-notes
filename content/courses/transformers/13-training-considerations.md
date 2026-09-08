@@ -164,30 +164,32 @@ underflow. **BF16 is the default for training in 2026.**
 ```python
 from torch.amp import autocast, GradScaler
 
-scaler = GradScaler()                       # only needed for fp16, not bf16
+use_fp16 = False
+scaler = GradScaler('cuda', enabled=use_fp16)
 
 for batch in loader:
     optimizer.zero_grad()
-    with autocast(device_type='cuda', dtype=torch.bfloat16):
-        loss = model(batch)                 # forward in bf16
-    scaler.scale(loss).backward()           # gradients in bf16
-    scaler.step(optimizer)                  # master weights updated in fp32
+    with autocast(device_type='cuda', dtype=torch.float16 if use_fp16 else torch.bfloat16):
+        loss = model(batch)                 # assumes model returns a scalar loss
+    scaler.scale(loss).backward()           # FP32 parameter -> FP32 .grad
+    scaler.unscale_(optimizer)              # required BEFORE clipping scaled grads
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer)                  # ordinary FP32 parameters updated here
     scaler.update()
 ```
 
 Three components:
 
-1. **Half-precision forward/backward** — 2× less memory, 2× more throughput on
-   tensor cores.
-2. **FP32 master weights** — the optimizer keeps full-precision copies, because
-   accumulating tiny updates into bf16 loses them entirely.
+1. **Autocast chooses operation dtypes**; eligible matmuls use reduced precision.
+   This does not halve all training memory or guarantee a fixed speedup.
+2. **FP32 parameters and gradients** remain FP32 in this native-autocast recipe.
+   Other recipes maintain low-precision parameters plus separate master weights.
 3. **Loss scaling** — multiply the loss before backward to push small gradients
    above the representable minimum, then unscale before the step. Required for
    fp16; **unnecessary for bf16**, whose range already covers it.
 
-Certain operations always run in fp32 regardless: softmax, layer/RMS norm
-reductions, and loss computation. Module 06's RMSNorm upcast is an instance of
-this rule.
+Reduction and loss dtypes follow the backend/autocast policy or explicit casts,
+not an unconditional rule for every call. Module 06 explicitly upcasts RMSNorm.
 
 ### FP8 and below
 
@@ -197,7 +199,7 @@ routine. NVFP4 appears in Nemotron 3 deployment.
 
 ## 13.4 The memory budget
 
-Training memory for a model with `N` parameters, bf16 + Adam:
+One explicit low-precision-parameter recipe with FP32 master weights has:
 
 | Component | Bytes per parameter |
 |---|---|
@@ -236,10 +238,15 @@ class CheckpointedStack(nn.Module):
 
 | | Activation memory | Compute |
 |---|---|---|
-| Standard | `O(L)` | 1× forward |
-| Checkpointing | `O(sqrt(L))` with optimal placement | ~1.33× forward |
+| Standard | `O(L)` block internals and boundaries | `F+B` |
+| Each block checkpointed, as above | `O(L)` boundaries plus one block's recomputed internals | approximately `2F+B` |
+| Segment checkpoints spaced about `sqrt(L)` apart | `O(sqrt(L))` boundary/segment storage under equal-size assumptions | recomputation-dependent |
 
-Roughly 30% more compute for a large memory reduction — and the same principle as
+If backward costs `B≈2F`, an extra forward costs `F/(F+B)≈1/3` more than an
+ordinary **training step**, not 1.33 times forward alone. Native FP32 AdamW with
+autocast typically also has 16 parameter-state bytes (`4+4+4+4`) without a
+separate master copy; activation and temporary storage still depend on dtype.
+This is the same principle as
 FlashAttention's backward recomputation (module 11): **recompute is cheaper than
 remember** when you are memory-bound.
 
@@ -353,6 +360,76 @@ module 14.
 
 ---
 
+## Worked scaling and real optimizer-step contracts
+
+Suppose fitted validation loss is `E + A*N**(-alpha) + B*D**(-beta)` and
+training compute is `C≈6ND`. Substitute `D=C/(6N)` and differentiate with
+respect to N: `alpha*A*N**(-alpha)=beta*B*(6N/C)**beta` at the optimum.
+Thus `N_opt` scales as `C**(beta/(alpha+beta))` and D with the complementary
+exponent. Equal growth follows only when the fitted exponents are similar;
+20 tokens per parameter is a regime-dependent fit, not a physical constant.
+
+Here is an offline next-token **training-contract** example. The synthetic
+documents are distinct rows, so no cross-document attention exists. BOS/EOS
+are ordinary IDs here and PAD is excluded from the loss. The tiny GRU is used
+only to keep this optimizer/dtype example independent of the course decoder;
+module 16 applies the same shift to the actual Transformer.
+
+```python transformer-check
+import copy
+import torch
+import torch.nn.functional as F
+torch.manual_seed(13)
+class TinyLM(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = torch.nn.Embedding(8, 8, padding_idx=0)
+        self.rnn = torch.nn.GRU(8, 12, batch_first=True)
+        self.head = torch.nn.Linear(12, 8)
+    def forward(self, ids):
+        h, _ = self.rnn(self.embed(ids))
+        return self.head(h)
+model = TinyLM()
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+docs = torch.tensor([[1, 3, 4, 2, 0], [1, 5, 6, 7, 2]])
+targets = docs[:, 1:].clone()
+targets[targets == 0] = -100
+before = model.head.weight.detach().clone()
+optimizer.zero_grad(set_to_none=True)
+valid_total = (targets != -100).sum()
+for row in range(2):
+    logits = model(docs[row:row+1, :-1])
+    loss = F.cross_entropy(logits.reshape(-1, 8), targets[row].reshape(-1),
+                           ignore_index=-100, reduction='sum') / valid_total
+    loss.backward()
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()
+assert not torch.equal(before, model.head.weight)
+assert all(p.grad is None or p.grad.dtype == p.dtype for p in model.parameters())
+state = copy.deepcopy({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                       'rng': torch.get_rng_state(), 'step': 1})
+restored = TinyLM()
+restored.load_state_dict(state['model'])
+restored_optimizer = torch.optim.AdamW(restored.parameters(), lr=0.01)
+restored_optimizer.load_state_dict(state['optimizer'])
+torch.set_rng_state(state['rng'])
+torch.testing.assert_close(model(docs[:, :-1]), restored(docs[:, :-1]))
+print("Shifted targets, valid-token accumulation and in-memory state restoration verified.")
+```
+
+Token-summed losses divided by the accumulation window's total valid-token count
+match a token-mean objective even when microbatches have unequal padding. For
+FP16, scale each microbatch loss and unscale **once after accumulation**, before
+clipping. Durable resume additionally saves scheduler/scaler state, data cursor,
+device RNGs and distributed sampler state; this in-memory check does not claim
+crash recovery or bitwise distributed reproducibility.
+
+Generic independent future-token heads and DeepSeek-V3's sequential MTP modules
+are different architectures. The latter combine previous module representations
+with future-token embeddings; both incur additional computation. Deduplicate
+and split documents before packing, and keep held-out evaluation text out of
+tokenizer/model selection to avoid contamination.
+
 ## Key takeaways
 
 - Causal LM predicts the next token, is self-supervised, and trains **every
@@ -365,12 +442,12 @@ module 14.
   because Chinchilla optimises training compute and ignores inference cost.
 - **BF16 over FP16**: same 8-bit exponent as FP32, so the same dynamic range.
   Range beats precision for gradients. BF16 needs no loss scaling.
-- Mixed precision = half-precision compute + **fp32 master weights** + (for fp16)
-  loss scaling. Softmax, norms, and loss stay fp32.
+- Native autocast uses eligible reduced-precision operations while ordinary
+  FP32 parameters and their gradients remain FP32; master-copy recipes differ.
 - Training state is **~16 bytes per parameter** with bf16 + Adam. A 7B model needs
   ~112 GB before activations.
-- **Gradient checkpointing** trades ~33% extra compute for `O(sqrt(L))`
-  activation memory — the same recompute-over-remember logic as FlashAttention.
+- **Per-block checkpointing** retains `O(L)` block boundaries but avoids storing
+  all block internals. `O(sqrt(L))` needs a different segment placement strategy.
 - **Muon** (Kimi K2, 1T params) is the first non-AdamW optimizer at production
   frontier scale. Its loss curve is notable for how it *decays*, not for
   smoothness.

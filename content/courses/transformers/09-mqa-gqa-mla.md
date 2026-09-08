@@ -45,8 +45,8 @@ $$\text{KV cache bytes} = 2 \times B \times T \times L \times H_{kv} \times d_{h
 | `d_head` | per-head dimension |
 | bytes | 2 for bf16/fp16 |
 
-Every term except `H_kv` is fixed by the model or the workload. `H_kv` is the one
-you can design.
+Holding other model dimensions and the workload fixed, `H_kv` is the design
+variable studied here. Depth, head width and precision are also design choices.
 
 ### How bad is it?
 
@@ -55,12 +55,13 @@ bf16 — serving a single 32,768-token request:
 
 | Variant | `H_kv` | Per token | Cache at 32k | vs MHA |
 |---|---|---|---|---|
-| **MHA** (hypothetical) | 64 | 2560 KB | **80.00 GB** | 1× |
-| **GQA** (what it ships with) | 8 | 320 KB | **10.00 GB** | 8× smaller |
-| **MQA** | 1 | 40 KB | **1.25 GB** | 64× smaller |
+| **MHA** (hypothetical) | 64 | 2560 KiB | **80.00 GiB** | 1× |
+| **GQA** (what it ships with) | 8 | 320 KiB | **10.00 GiB** | 8× smaller |
+| **MQA** | 1 | 40 KiB | **1.25 GiB** | 64× smaller |
 
-80 GB for **one** user's context. An H100 has 80 GB total, and the model weights
-alone need ~140 GB. Full MHA at long context is simply not servable.
+80 GiB for one user's hypothetical MHA context, before roughly 140 decimal GB
+of BF16 model weights. This does not fit on one 80-GB-class accelerator; serving
+requires sharding, offload, reduced precision or a smaller memory requirement.
 
 *(Llama 3 70B actually uses GQA with 8 KV heads — the MHA row shows what it would
 cost without it.)*
@@ -69,14 +70,15 @@ cost without it.)*
 flowchart TD
     P["Decoding is slow:<br/>recompute all K,V every step"] --> C["Fix: KV cache"]
     C --> W["Now compute is cheap..."]
-    W --> M["...but cache is 80 GB at 32k context"]
+    W --> M["...but hypothetical MHA cache is 80 GiB at 32k"]
     M --> S1["MQA: 1 shared KV head"]
     M --> S2["GQA: KV heads shared in groups"]
     M --> S3["MLA: compress KV to a latent"]
 ```
 
-There is a second, subtler cost: decoding is **memory-bandwidth-bound**, not
-compute-bound. Generating one token requires reading the entire cache from HBM.
+There is a second cost: small-batch decoding is often **memory-bandwidth-bound**.
+Full attention reads the relevant cache, though locality and implementation
+affect where those bytes are served from.
 Smaller cache means fewer bytes read means faster tokens/sec — the saving is
 speed as well as capacity.
 
@@ -197,18 +199,22 @@ class GroupedQueryAttention(nn.Module):
         if kv_cache is not None:                    # cache the SMALL tensors
             k, v = kv_cache.update(k, v)
 
-        # expand K,V to match query heads — this is a VIEW, not a copy
+        # Explicit teaching expansion allocates copies; native GQA may avoid it.
         k = k.repeat_interleave(self.group_size, dim=1)   # (B, H, T, d_head)
         v = v.repeat_interleave(self.group_size, dim=1)
 
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        past = k.shape[2] - T
+        allowed = (torch.arange(k.shape[2], device=x.device)[None, :]
+                   <= past + torch.arange(T, device=x.device)[:, None])
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
         out = out.transpose(1, 2).reshape(B, T, -1)
         return self.W_O(out)
 ```
 
 The saving is real because **only the pre-expansion tensors are cached**. The
-`repeat_interleave` happens on the fly, per step, and good kernels avoid
-materialising it at all.
+explicit `repeat_interleave` above allocates temporary expanded tensors each
+step. Native grouped kernels can avoid this expansion; this Python reference
+does not. The offset mask lets query `i` see keys through `past+i`.
 
 ### Who uses GQA
 
@@ -265,9 +271,10 @@ flowchart TD
 
 ### The RoPE complication
 
-There is a genuine wrinkle. RoPE is position-dependent, so it cannot be applied
-*after* decompression without breaking the low-rank structure — the up-projection
-and the rotation do not commute cleanly.
+One can decompress keys and then apply RoPE correctly. The difficulty is
+efficient **weight absorption**: position-dependent rotations generally cannot
+be absorbed into one fixed query/up-projection product across all key positions.
+Decoupling the positional branch avoids rebuilding the large content keys.
 
 DeepSeek's solution: **split each head's dimensions in two.**
 
@@ -277,8 +284,9 @@ DeepSeek's solution: **split each head's dimensions in two.**
 So the cache holds the latent `c_KV` (512) plus a decoupled RoPE key (64) — 576
 values per token per layer, instead of `2 × 128 heads × 128 dims = 32,768`.
 
-Also worth noting, per Raschka: "the queries are also compressed, but only during
-training, not inference."
+Queries may also use a low-rank projection. Whether its factors are explicitly
+evaluated or algebraically fused is an implementation choice; query compression
+is not inherently a training-only operation.
 
 ### The numbers
 
@@ -286,10 +294,12 @@ DeepSeek V3 — `L = 61`, 128 heads, `d_head = 128`, bf16, 32k context:
 
 | | Per token | Cache at 32k |
 |---|---|---|
-| Equivalent MHA | 3904 KB | 122.00 GB |
-| **MLA** (`d_c` = 512 + 64 RoPE) | **68.6 KB** | **2.14 GB** |
+| Hypothetical equal-width MHA | 3904 KiB | 122.00 GiB |
+| **MLA** (`d_c` = 512 + 64 RoPE) | **68.625 KiB** | **2.145 GiB** |
 
-**~57× smaller.** That is a different regime, not an improvement.
+**~57× smaller against this chosen equal-width MHA baseline.** DeepSeek's content
+and positional key widths differ; this is not an exact count of every possible
+expanded-key implementation or a universal MLA compression ratio.
 
 ### The surprising part: it is also *better*
 
@@ -381,13 +391,52 @@ advantage is real but measured by its authors.
 
 ---
 
+## Worked latent absorption and memory accounting
+
+Use row-vector notation with cached `C` of shape `(T,r)`. For one head let
+`U_K:(r,d_k)`, `U_V:(r,d_v)`, query `q:(1,d_k)`, and output slice
+`O_h:(d_v,d_model)`. Expanded content scores are `q (C U_K).T`;
+absorbed scores are `(q U_K.T) C.T`. If a is the resulting attention row,
+the head output `(a C U_V) O_h` equals `(a C)(U_V O_h)`.
+The latter aggregates in latent space. Head-specific softmax remains necessary;
+absorption does not collapse different heads into one attention distribution.
+
+```python transformer-check
+import torch
+torch.manual_seed(9)
+dtype = torch.float64
+c, uk, uv = torch.randn(5, 3, dtype=dtype), torch.randn(3, 4, dtype=dtype), torch.randn(3, 2, dtype=dtype)
+q, out_proj = torch.randn(1, 4, dtype=dtype), torch.randn(2, 6, dtype=dtype)
+expanded_scores = q @ (c @ uk).T
+absorbed_scores = (q @ uk.T) @ c.T
+torch.testing.assert_close(expanded_scores, absorbed_scores)
+a = (expanded_scores / 4**0.5).softmax(-1)
+torch.testing.assert_close((a @ (c @ uv)) @ out_proj, (a @ c) @ (uv @ out_proj))
+past, new = 3, 2
+allowed = torch.arange(past + new)[None, :] <= past + torch.arange(new)[:, None]
+assert allowed.tolist() == [[True, True, True, True, False], [True] * 5]
+print("Expanded and absorbed content branches agree; cached masks include offsets.")
+```
+
+RoPE adds a positional score branch. Rotating expanded content keys is valid
+but obstructs the single position-independent absorption above. Decoupled
+positional keys retain that efficient content path. The latent algebra here
+is a shape-level derivation, not the entire DeepSeek projection stack.
+
+For GQA, persistent cache bytes are `B*T*L*H_kv*(d_k+d_v)*s`. The familiar
+factor two assumes equal key/value widths. A latent-plus-positional cache uses
+`B*T*L*(r+d_rope)*s`, before metadata/alignment. Divide by `2**30` for GiB,
+`10**9` for GB. Sharding requires per-rank accounting: replicated KV heads
+or latent states do not automatically divide by tensor-parallel degree.
+Failure to fit on one GPU does not imply failure to serve across devices.
+
 ## Key takeaways
 
 - The KV cache turns decoding from `O(T)` recompute into `O(1)`, but its size
   becomes the binding constraint: `2·B·T·L·H_kv·d_head·bytes`.
-- At 32k context an MHA-shaped 70B model needs ~80 GB of cache for **one**
-  request. Not servable.
-- `H_kv` is the only term you can design. MHA (`H_kv=H`), MQA (`H_kv=1`), and GQA
+- At 32k context the hypothetical MHA-shaped 70B example needs 80 GiB of cache
+  per request, motivating multi-device serving or a reduced cache requirement.
+- Holding other dimensions fixed, `H_kv` is the dial here. MHA (`H_kv=H`), MQA (`H_kv=1`), and GQA
   (in between) are points on that one dial.
 - **MQA** shrinks the cache `H`× but forces every head to share one key space,
   costing quality.
@@ -396,8 +445,8 @@ advantage is real but measured by its authors.
 - **MLA** compresses K/V into a ~512-dim latent, caching that instead. ~57×
   smaller for DeepSeek V3, and DeepSeek's ablations show quality *at or above*
   MHA. Much harder to implement; needs a decoupled RoPE dimension.
-- Decoding is memory-bandwidth-bound, so a smaller cache is also *faster*, not
-  just smaller.
+- Smaller caches can improve bandwidth-bound decoding as well as capacity;
+  extra projections, dispatch and kernel efficiency affect measured latency.
 - All three are constant-factor wins. Cache still grows linearly in `T` and
   attention is still `O(T²)`.
 
@@ -408,8 +457,9 @@ advantage is real but measured by its authors.
    consumer GPU alongside a 14 GB model?
 2. Module 04 argued multiple heads exist to capture multiple perspectives. Given
    that, explain precisely what MQA gives up — and why GQA gives up much less.
-3. MLA must reconstruct K and V with an extra matmul at every step. Why is that
-   still a win, given decoding is memory-bandwidth-bound?
+3. Derive the content-score and output weight absorptions for MLA. What extra
+   computation or storage is needed for positional information, and why can
+   the resulting cache still be smaller than expanded K/V?
 
 ---
 

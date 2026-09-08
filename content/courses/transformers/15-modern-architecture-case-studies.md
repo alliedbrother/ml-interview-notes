@@ -101,9 +101,9 @@ choices at nearly every knob.
 | Component | Choice | vs DeepSeek V3 |
 |---|---|---|
 | Attention | **GQA** | MLA |
-| MoE experts | 128, **2 active** | 256, 9 active |
+| MoE experts | 128 routed, **1 routed + 1 shared active** | 256 routed, 8 routed + 1 shared active |
 | Expert hidden | **8192** (large) | 2048 (small) |
-| Shared expert | **no** | yes |
+| Shared expert | **yes** | yes |
 | MoE placement | **alternating** MoE/dense blocks | every block after the first 3 |
 | Active params | 17B | 37B |
 
@@ -337,7 +337,7 @@ flowchart LR
     ATT --> A3["MLA — DeepSeek, Kimi, Mistral 3 Large, GLM-5"]
     ATT --> A4["+ sliding window — Gemma, gpt-oss, Olmo 3, MiMo"]
     ATT --> A5["+ linear hybrid — Qwen3-Next, Kimi Linear, Nemotron"]
-    FFN --> F1["Dense SwiGLU — Qwen3 dense, Gemma 3"]
+    FFN --> F1["Dense gated MLP — Qwen3: SwiGLU, Gemma 3: gated GELU"]
     FFN --> F2["MoE many small — DeepSeek, Qwen3, GLM"]
     FFN --> F3["MoE few large — Llama 4, gpt-oss, Grok 2.5"]
     NORM --> N1["Pre-norm — most"]
@@ -354,7 +354,7 @@ flowchart LR
 | Model | Size (total/active) | Attention | MoE | Shared expert | Norm | Position |
 |---|---|---|---|---|---|---|
 | **DeepSeek V3** | 671B / 37B | MLA | 256 exp, 8+1 | **yes** | pre-RMS | RoPE |
-| **Llama 4 Maverick** | 400B / 17B | GQA | 128 exp, 2, alternating | no | pre-RMS | RoPE |
+| **Llama 4 Maverick** | 400B / 17B | GQA | 128 routed, 1+1 shared, alternating | yes | pre-RMS | RoPE/NoPE interleaving |
 | **Qwen3 235B** | 235B / 22B | GQA + QK-Norm | 128 exp, 8 | no | pre-RMS | RoPE |
 | **Qwen3-Next** | 80B / 3B | GatedDeltaNet+Attn 3:1 | 512 exp, 10+1 | **yes** | pre-RMS | partial RoPE |
 | **Gemma 3** | 27B dense | GQA + SWA 5:1 | — | — | **pre+post** | RoPE |
@@ -376,11 +376,11 @@ flowchart LR
 
 ### What is universal in 2026
 
-Every model in that table uses:
+Common patterns in this historical snapshot, not requirements for every model:
 
 - **Decoder-only** architecture
-- **RMSNorm** (never LayerNorm)
-- **SwiGLU** or a gated variant (never plain ReLU/GELU)
+- **RMSNorm** in many language backbones, with placement and scope differences
+- **Gated FFNs**, including SwiGLU and Gemma 3's GELU-based gate
 - **Residual connections** around both sublayers
 - **RoPE** or a deliberate variant of it
 - **Some form of KV reduction** — GQA, MLA, sliding window, or linear
@@ -477,14 +477,70 @@ training, not from the block diagram.
 
 ---
 
+## Evidence and executable configuration reading
+
+The table is an April-2026 comparison snapshot, not a live leaderboard or a
+claim that every row was independently reproduced. Distinguish measured vendor
+facts, implementation facts and explanations proposed by the author. For
+example, alternate dense/MoE placement is observable; "chosen to reduce routing
+instability" is a hypothesis unless supported by an ablation.
+
+Two important primary-source corrections are material here: [Meta's Llama 4
+announcement](https://ai.meta.com/blog/llama-4-multimodal-intelligence/) describes
+128 routed experts plus a shared expert for Maverick, and the
+[versioned Llama 4 implementation](https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/llama4/modeling_llama4.py)
+has a separate shared path. "Two active" is not two routed experts.
+[Gemma 3's configuration](https://huggingface.co/docs/transformers/model_doc/gemma3)
+uses a GELU-based gate, so SwiGLU is not universal.
+
+For every real checkpoint record vendor repository, exact revision, model size,
+text-only versus multimodal scope, config fields and implementation version.
+A vision tower/projector belongs in total parameter counts but not in a
+text-decoder KV calculation. Some fields describe defaults rather than the
+chosen released size; remote/custom modeling code may override generic helpers.
+Do not execute untrusted remote code merely to inspect a JSON configuration.
+
+The following two **synthetic schemas** are a parser exercise, not vendor
+checkpoints. One has explicit head width different from residual width/H;
+the other nests its text configuration. They deliberately catch the two common
+accounting mistakes without downloading large models.
+
+```python transformer-check
+def projection_and_cache(config, batch=1, length=1024, bytes_per_value=2):
+    c = config.get('text_config', config)
+    d, h = c['hidden_size'], c['num_attention_heads']
+    hk = c.get('num_key_value_heads', h)
+    dh = c['head_dim'] if 'head_dim' in c else d // h
+    assert h % hk == 0
+    if 'head_dim' not in c:
+        assert d % h == 0
+    attention_weights = 2 * d * h * dh + 2 * d * hk * dh
+    cache_bytes = batch * length * c['num_hidden_layers'] * hk * (2 * dh) * bytes_per_value
+    return attention_weights, cache_bytes
+flat = dict(hidden_size=12, num_attention_heads=3, num_key_value_heads=1,
+            head_dim=6, num_hidden_layers=2)
+nested = dict(text_config=dict(hidden_size=12, num_attention_heads=3,
+                              num_key_value_heads=1, num_hidden_layers=2),
+              vision_config=dict(hidden_size=99))
+assert projection_and_cache(flat) == (576, 49152)
+assert projection_and_cache(nested) == (384, 32768)
+print("Explicit head width and nested text schemas produce different budgets.")
+```
+
+This calculation assumes equal K/V widths, all-global attention, bias-free
+projections and an unsharded GQA cache. MLA, local/global mixtures, KV sharing,
+quantization metadata and MoE routing require the corresponding formulas from
+09-12. The earlier GLM-shaped JSON is also a teaching configuration, not an
+assertion that a vendor shipped precisely those values.
+
 ## Key takeaways
 
 - **The block from module 06 is unchanged across every model here.** What differs
   is which variant occupies each slot.
 - **DeepSeek V3** — MLA + fine-grained MoE with a shared expert + dense first 3
   layers. 37B active outperforming 405B dense Llama 3 is what made MoE the norm.
-- **Llama 4 Maverick** — the conservative mirror: GQA not MLA, 2 large experts not
-  9 small, alternating not pervasive MoE, no shared expert.
+- **Llama 4 Maverick** — GQA rather than MLA, one large routed plus one shared
+  expert active, and alternating rather than pervasive MoE.
 - **Qwen3** — the reference family. Ships dense *and* MoE; deeper-and-narrower than
   Llama; dropped the shared expert, then Qwen3-Next added it back with 4× more
   experts and a 3:1 Gated DeltaNet hybrid.
@@ -493,7 +549,8 @@ training, not from the block diagram.
   keys` in global layers and 25% p-RoPE.
 - **Kimi K2** — DeepSeek V3 scaled to 1T with more experts and fewer MLA heads. Its
   real novelty is the **Muon** optimizer at production scale.
-- Universal in 2026: decoder-only, RMSNorm, SwiGLU, residuals, RoPE, and *some*
+- Common patterns, with model-specific exceptions: decoder-only language
+  backbones, RMSNorm, gated FFNs, residuals, positional schemes, and *some*
   KV-reduction scheme.
 - Genuinely contested: shared experts, expert granularity, norm placement, and
   whether linear attention is production-ready.

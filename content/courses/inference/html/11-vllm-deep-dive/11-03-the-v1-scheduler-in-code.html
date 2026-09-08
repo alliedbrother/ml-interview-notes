@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The V1 scheduler, in code — The Inference Engineering Book</title>
+<title>The V1 scheduler, in code — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 11 · vLLM deep dive · 11-03</div>
 <h1>The V1 scheduler, in code</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>vllm/v1/core/sched/output.py</code></li><li><code>vllm/v1/core/kv_cache_manager.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>vllm/v1/core/sched/output.py</code></li><li><code>vllm/v1/core/kv_cache_manager.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">One file, 3,037 lines, and one method inside it that runs for 844 of them. This chapter is a guided read of <code>vllm/v1/core/sched/scheduler.py</code> at SHA <code>a556f3f</code> — the map first, then <code>schedule()</code> block by block, then the invariants you must not break.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You have a scheduling bug. Maybe requests are starving, maybe the token budget is being overrun, maybe a preempted request came back with the wrong <code>num_computed_tokens</code>. So you open the file:</p>
@@ -829,7 +829,7 @@ flowchart TD
             # Schedule newly needed KV blocks for the request.</code></pre>
 </div>
 
-<p>This is one of two places where the author documents a deliberate policy violation, and it is why <a href="../05-parallelism/05-05-worker-orchestration.html">§5.5</a>'s finding about V1 scheduling non-determinism is unsurprising: batch composition depends on which requests happened to clamp to zero.</p>
+<p>This is a documented departure from strict FCFS: a blocked earlier request can be skipped for a later eligible one. It can be completely deterministic given identical state. Nondeterminism instead requires varying arrivals, asynchronous results or other inputs; policy ordering and reproducibility are separate properties.</p>
 
 <h3>The allocation loop and what <code>None</code> means</h3>
 
@@ -1164,7 +1164,7 @@ flowchart TD
   </div>
 </div>
 
-<p>One invariant is <em>not</em> asserted and is the one most likely to bite: a preempted request's blocks must be freed before another request allocates. It holds structurally — <code>_preempt_request</code> calls <code>_free_request_blocks</code> at <code>L1363</code>, synchronously, before the inner <code>while True</code> retries <code>allocate_slots</code>. If you refactor preemption to be lazy, the retry allocates against a pool that has not been replenished and the loop spins until it preempts everything.</p>
+<p>Reclamation must respect ownership: an allocation retry may use only slots whose references and outstanding GPU writes are finished. The shown preemption helper calls the free path synchronously in the simple case, but async/connector paths can defer physical availability. If no usable memory was reclaimed, terminate or defer the retry safely rather than spinning. A function call named free is not itself an independent proof of safe reuse.</p>
 
 <div class="callout callout--warn">
   <span class="callout__k">Assertions off</span>
@@ -1306,11 +1306,11 @@ flowchart TD
 <p>Step 19 is the one people miss: the id is announced to the worker one step <em>after</em> the request finished, and the reset at L1434-L1438 deliberately rebinds rather than calling <code>clear()</code>, because the previously-built <code>SchedulerOutput</code> still holds a reference to that same set object.</p></div></section>
 <section class="sec" id="pitfalls" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Reading pitfalls</h2></div><div class="sec__body"><div class="cards cards--2">
   <div class="ve-card"><span class="ve-card__k">pitfall 1</span><h4>The async path is a 70-line subclass</h4><p><code>async_scheduler.py</code> overrides exactly three methods: <code>__init__</code> (<code>L13</code>), <code>_update_after_schedule</code> (<code>L19</code>) and <code>_update_request_with_output</code> (<code>L51</code>). Everything else is inherited. If you are reading <code>schedule()</code> and wondering where async scheduling happens — it does not, except through <code>num_output_placeholders</code>, which the override increments at <code>async_scheduler.py:L39-L41</code> and which <code>schedule()</code> then reads at <code>L568</code>.</p></div>
-  <div class="ve-card"><span class="ve-card__k">pitfall 2</span><h4>Gated-off code that looks live</h4><p>Every <code>self.connector is not None</code> branch — roughly <code>L813-L890</code>, <code>L1064-L1084</code>, and all of <code>L2699-L3037</code> — is dead without <code>--kv-transfer-config</code>. Same for <code>self.ec_connector</code>, <code>self.need_mamba_block_aligned_split</code> and <code>self.enable_return_routed_experts</code>. <code>self.use_v2_model_runner</code> is the opposite trap: it is normally <b>on</b> — <code>vllm/config/vllm.py:L743</code> ends <code>return is_default_v2_architecture or not model_config.is_moe</code>, so every dense model defaults to Model Runner V2 — which makes the V2 branches at <code>L1202</code>, <code>L1234</code> and <code>L1521</code> the live ones and their <code>else</code> arms the dead ones. Check the constructor before assuming a branch runs, in either direction.</p></div>
+  <div class="ve-card"><span class="ve-card__k">pitfall 2</span><h4>Gated-off code that looks live</h4><p>Every <code>self.connector is not None</code> branch — roughly <code>L813-L890</code>, <code>L1064-L1084</code>, and guarded portions of <code>L2699-L3037</code> (not unconditional helpers inside that range) — is dead without <code>--kv-transfer-config</code>. Same for <code>self.ec_connector</code>, <code>self.need_mamba_block_aligned_split</code> and <code>self.enable_return_routed_experts</code>. <code>self.use_v2_model_runner</code> is the opposite trap: it is normally <b>on</b> — <code>vllm/config/vllm.py:L743</code> ends <code>return is_default_v2_architecture or not model_config.is_moe</code>, so eligible dense models default to V2 after all preceding guards — which makes the V2 branches at <code>L1202</code>, <code>L1234</code> and <code>L1521</code> the live ones and their <code>else</code> arms the dead ones. Check the constructor before assuming a branch runs, in either direction.</p></div>
   <div class="ve-card"><span class="ve-card__k">pitfall 3</span><h4>continue versus break is policy</h4><p>In the running loop, exhausting a request's tokens is <code>continue</code> (L634) but exhausting the KV cache is <code>break</code> (L700). In the waiting loop nearly everything is <code>break</code>, except the four blocked-status filters which are <code>pop</code> plus re-queue. Misreading one for the other inverts the fairness behaviour you think you are looking at.</p></div>
   <div class="ve-card"><span class="ve-card__k">pitfall 4</span><h4>Two allocate_slots call sites</h4><p>L639 (three args, decode) and L1041 (eleven args, admission). They have different failure semantics: the first triggers preemption, the second just breaks the loop and — note <code>L1058-L1062</code> — un-touches the encoder cache first. Grep for <code>allocate_slots</code> and you will find both; know which one your stack trace is in.</p></div>
   <div class="ve-card"><span class="ve-card__k">pitfall 5</span><h4>num_computed_tokens is optimistic</h4><p>It is advanced at L1403 before the forward pass has run, and rolled back at L1857 if spec tokens are rejected. A debugger snapshot taken between <code>schedule()</code> and <code>update_from_output()</code> shows a value the GPU has not yet earned. The comment at <code>request.py:L168-L171</code> says so explicitly.</p></div>
-  <div class="ve-card"><span class="ve-card__k">pitfall 6</span><h4>There is no swap path</h4><p>Do not go looking for one. <a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a> established that V1 dropped swapping entirely; <code>_preempt_request</code> at L1363 frees blocks and that is the whole story. Freed victim blocks keep their hashes, so a resumed request can hit the prefix cache on its own former KV — which is why L1367 resets <code>num_computed_tokens</code> to 0 without losing all the work.</p></div>
+  <div class="ve-card"><span class="ve-card__k">pitfall 6</span><h4>There is no swap path</h4><p>V1's described policy is recomputation rather than a general swap mechanism. The free path releases ownership subject to references and in-flight safety; retained hashed blocks may still be reusable until overwritten. Thus resetting <code>num_computed_tokens</code> does not imply that all prefix work is lost, nor that every freed block is immediately available.</p></div>
 </div>
 
 <div class="callout callout--note">
@@ -1353,7 +1353,7 @@ awk 'NR&gt;=484 &amp;&amp; NR&lt;=1327 &amp;&amp; /break|continue/ {print NR": "
 )</code></pre>
 </div>
 
-<p>Run any workload against it. A healthy server shows <code>issued</code> pinned near the budget during prefill-heavy phases and far below it during pure decode — because decode issues one token per running request, so <code>issued &asymp; len(running)</code>. If <code>preempted</code> is ever non-zero on a steady-state workload, you are in the <a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a> thrash regime.</p></div></section>
+<p>During pure decode, issued tokens approximately follow the number of scheduled requests; prefill-heavy phases can fill the token budget. Occasional preemption under changing lengths is not proof of thrashing. Diagnose repeated eviction/recomputation with poor forward progress, retained-prefix length and completed tokens per unit work.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:11"><div class="sec__h"><span class="sec__n">§12</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li><b>Read and answer.</b> Open <code>request_queue.py</code>. <code>FCFSRequestQueue.remove_requests</code> (L109-L116) clears the deque and rebuilds it. Why can it not use <code>deque.remove</code> in a loop, and what is the complexity of each option?</li>
   <li><b>Read and answer.</b> In the running loop, <code>req_to_new_blocks[request_id]</code> is assigned <code>new_blocks</code> (L706). In the waiting loop it is assigned <code>self.kv_cache_manager.get_blocks(request_id)</code> (L1137-L1139). Trace both through <code>_make_cached_request_data</code> and <code>NewRequestData.from_request</code> and explain why the difference is correct.</li>
@@ -1373,11 +1373,11 @@ awk 'NR&gt;=484 &amp;&amp; NR&lt;=1327 &amp;&amp; /break|continue/ {print NR": "
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:12"><div class="sec__h"><span class="sec__n">§13</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li><code>schedule()</code> spans <code>L484-L1327</code> and has exactly two loops. Everything else in the file is a helper it calls, a return path, or connector code that is inert without <code>--kv-transfer-config</code>.</li>
+  <li><code>schedule()</code> spans <code>L484-L1327</code> and has exactly two loops. Other code includes helpers, retirement and guarded connector paths; unconditional helpers remain live even within a connector-heavy source range.</li>
   <li>There are two budgets, not one. <code>token_budget</code> counts issued tokens; <code>input_budget</code> additionally reserves <code>draft_slots</code> per scheduled request for tokens the worker appends. Both are asserted non-negative at <code>L1181-L1182</code>.</li>
-  <li><code>allocate_slots</code> returning <code>None</code> is the only admission-failure signal in the whole subsystem — no exception, no log. It is the correct breakpoint for every "why was my request not scheduled" question.</li>
+  <li><code>allocate_slots</code> returning <code>None</code> signals KV allocation failure. Admission can also stop at token/input budgets, sequence limits, grammar waits, LoRA limits, encoder constraints and policy guards; inspect which gate was reached.</li>
   <li><code>num_computed_tokens</code> is advanced optimistically in <code>_update_after_schedule</code> after the output is sealed, and rolled back in <code>update_from_output</code> when spec tokens are rejected. Any snapshot between the two shows work the GPU has not done.</li>
-  <li>The 39 asserts are the contract. The one invariant they do <em>not</em> cover — victim blocks freed before the allocation retry — holds only because <code>_preempt_request</code> frees synchronously at <code>L1363</code>.</li>
+  <li>Assertions cover selected invariants, not the entire contract. Physical reuse additionally requires that references and in-flight holders have ended; synchronous helper invocation is not proof of immediate reclamation on every async or connector path.</li>
   <li><code>AsyncScheduler</code> is 70 lines and overrides three methods. Subclass it, not <code>Scheduler</code>: <code>get_scheduler_cls</code> warns that doing otherwise silently disables async scheduling.</li>
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:13"><div class="sec__h"><span class="sec__n">§14</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
@@ -1389,7 +1389,7 @@ awk 'NR&gt;=484 &amp;&amp; NR&lt;=1327 &amp;&amp; /break|continue/ {print NR": "
 </ul></div></section>
 <div class="pager"><a href="11-02-engine-layers.html"><div class="pager__k">← Previous</div><div class="pager__t">AsyncLLM → EngineCore → Executor → Worker</div></a><a class="pager__next" href="11-04-model-runner-and-backends.html"><div class="pager__k">Next →</div><div class="pager__t">GPUModelRunner, the input batch, the attention backend</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

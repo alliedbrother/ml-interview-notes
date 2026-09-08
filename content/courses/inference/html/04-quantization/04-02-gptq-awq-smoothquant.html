@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GPTQ, AWQ, SmoothQuant, and calibration — The Inference Engineering Book</title>
+<title>GPTQ, AWQ, SmoothQuant, and calibration — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,7 +623,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 4 · Quantization · 04-02</div>
 <h1>GPTQ, AWQ, SmoothQuant, and calibration</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>csrc/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>csrc/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">Weights are boring. Take any trained transformer, look at a linear layer's weight matrix, and
 you find a well-behaved unimodal distribution you could quantize to 4 bits with a ruler. Then look at what
@@ -704,11 +704,9 @@ positive vector $s \in \mathbb{R}^{C_{\text{in}}}$. Then</p>
 
 <div class="math-display">$$ Y \;=\; XW \;=\; \big(X\,\mathrm{diag}(s)^{-1}\big)\,\big(\mathrm{diag}(s)\,W\big) \;=\; \hat{X}\hat{W} $$</div>
 
-<p>exactly, in exact arithmetic, for free. Nothing has been approximated. What changes is the <em>numerical
+<p>exactly in real arithmetic. Runtime cost is zero only where the required transforms can be folded or fused without additional work. Nothing has been approximated. What changes is the <em>numerical
 range</em> of the two factors: $\hat{X}_{:,j} = X_{:,j}/s_j$ and $\hat{W}_{j,:} = s_j W_{j,:}$. Quantization
-error is a function of range, so this identity is a dial that moves error between the two operands. AWQ turns it
-one way ($s_j > 1$ on salient channels, to protect weights). SmoothQuant turns it the other way (to protect
-activations). That is the whole chapter in one equation.</p>
+error is a function of range, so this identity is a dial that moves error between the two operands. AWQ chooses scales to protect salient weights under group quantization. SmoothQuant trades activation range against weight range. Both can increase $s_j$ on large-activation channels; their objectives and quantized operands differ, not necessarily the numerical direction of scaling. That is the whole chapter in one equation.</p>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 1 &mdash; The migration, drawn to scale.</b>
@@ -829,7 +827,7 @@ possible rounding?</p>
 weight $W$ and a calibration input batch $X \in \mathbb{R}^{C_{\text{in}} \times N}$ ($N$ = total calibration
 tokens):</p>
 
-<div class="math-display">$$ \hat{W}^\star \;=\; \arg\min_{\hat{W}} \;\big\| WX - \hat{W}X \big\|_2^2 \qquad \text{s.t. } \hat{W}\ \text{on the quantization grid} $$</div>
+<div class="math-display">$$ \hat{W}^\star \;=\; \arg\min_{\hat{W}} \;\big\| WX - \hat{W}X \big\|_F^2 \qquad \text{s.t. } \hat{W}\ \text{on the quantization grid} $$</div>
 
 <p>Note what this is <em>not</em>: it is not $\|W - \hat{W}\|^2$. Round-to-nearest minimises that, and RTN is the
 baseline GPTQ beats. Minimising the output error instead means an individual weight is allowed to move far from
@@ -839,7 +837,7 @@ close.</p>
 <h3>Where the Hessian comes from</h3>
 
 <p>Expand the objective as a function of the perturbation $E = \hat{W} - W$. Since
-$\|EX\|_2^2 = \operatorname{tr}(E X X^\top E^\top)$, the objective is exactly quadratic in $E$ with Hessian</p>
+$\|EX\|_F^2 = \operatorname{tr}(E X X^\top E^\top)$, the objective is exactly quadratic in $E$ with Hessian</p>
 
 <div class="math-display">$$ H \;=\; 2\,X X^\top \;\in\; \mathbb{R}^{C_{\text{in}} \times C_{\text{in}}} $$</div>
 
@@ -859,7 +857,7 @@ weights one input-channel (column) at a time. When you quantize column $q$, you 
 $w_q - \mathrm{quant}(w_q)$; the optimal correction spreads that error over the columns
 <em>not yet quantized</em>, weighted by the inverse Hessian:</p>
 
-<div class="math-display">$$ w_q \;=\; \arg\min_q \frac{\big(\mathrm{quant}(w_q) - w_q\big)^2}{[H^{-1}]_{qq}}, \qquad \delta_F \;=\; -\,\frac{w_q - \mathrm{quant}(w_q)}{[H^{-1}]_{qq}}\;\cdot\;\big(H^{-1}\big)_{:,q} $$</div>
+<div class="math-display">$$ q^\star \;=\; \arg\min_q \frac{\big(\mathrm{quant}(w_q) - w_q\big)^2}{[H^{-1}]_{qq}}, \qquad \delta_F \;=\; -\,\frac{w_q - \mathrm{quant}(w_q)}{[H^{-1}]_{qq}}\;\cdot\;\big(H^{-1}\big)_{:,q} $$</div>
 
 <p>Read the second equation as: the scalar rounding residual, normalised by how "free" that coordinate is
 ($[H^{-1}]_{qq}$ large means the objective barely cares about $q$), smeared over the remaining coordinates in
@@ -878,14 +876,14 @@ column-by-column sweep beats rounding everything at once: each column gets to co
   $\lambda I$ with $\lambda$ set to 1% of the mean diagonal before inverting.</li>
   <li><strong>Cholesky.</strong> The naive loop repeatedly removes a row/column from $H^{-1}$ and re-inverts,
   which accumulates error until the matrix goes indefinite on a 175B model. Instead, note that the sequence of
-  $H^{-1}$ rows the algorithm actually consumes is precisely the rows of the Cholesky factor of $H^{-1}$. Compute
+  updated inverse-Hessian information can be represented by an upper Cholesky factor of the damped inverse. Its rows are not the unchanged inverse-Hessian rows: the residual is divided by the triangular diagonal before a rank-one update over remaining columns. Compute
   that factor <strong>once</strong>, up front, with a numerically stable routine, then just read rows off it. The
   update becomes a rank-1 outer product against a precomputed triangular factor &mdash; stable and fast.</li>
 </ol>
 
 <div class="diagram-shell">
   <p class="diagram-shell__cap"><b>Figure 2 &mdash; The GPTQ sweep for one layer.</b>
-  Shapes are Llama-3-8B's <code>gate_proj</code>: $W$ is $4096 \times 14336$, so $H$ is $4096\times4096$ and the
+  Shapes are Llama-3-8B's <code>gate_proj</code>: $W$ is $14336 \times 4096$ (output-by-input for $WX$), so $H$ is $4096\times4096$ and the
   sweep runs 4096 columns in blocks. Everything left of the dashed boundary is frozen on the grid; everything
   right of it is still float and still absorbing debt.</p>
   <div class="mermaid-wrap">
@@ -1121,7 +1119,7 @@ and to score 20 candidates.</p>
       <text x="400" y="68">&middot;</text>
       <text x="480" y="68">diag(s) W</text>
     </g>
-    <text x="600" y="62" fill="var(--teal)" font-size="12.5">product: bit-exact identity</text>
+    <text x="600" y="62" fill="var(--teal)" font-size="12.5">product: exact over real arithmetic</text>
     <text x="600" y="82" fill="var(--copper)" font-size="12.5">ranges: moved, deliberately</text>
 
     <text x="40" y="140" fill="currentColor" fill-opacity="0.75" font-size="12.5">INT4 group grid, step &Delta; set by the group maximum (a different channel)</text>
@@ -1146,8 +1144,8 @@ and to score 20 candidates.</p>
       <line x1="420" y1="282" x2="420" y2="298"/><line x1="510" y1="282" x2="510" y2="298"/>
       <line x1="600" y1="282" x2="600" y2="298"/><line x1="690" y1="282" x2="690" y2="298"/>
     </g>
-    <circle cx="420" cy="290" r="6" fill="var(--teal)"/>
-    <text x="60" y="270" fill="currentColor" fill-opacity="0.7" font-size="12">after s = 4:  ws = 4&Delta;, exactly on a code</text>
+    <circle cx="240" cy="290" r="6" fill="var(--teal)"/>
+    <text x="60" y="270" fill="currentColor" fill-opacity="0.7" font-size="12">after s = 4:  ws = 2&Delta;, exactly on a code</text>
     <text x="440" y="322" fill="var(--teal)" font-size="12">residual 0 &mdash; and the 1/s in the activation restores the product</text>
   </svg>
 </div>
@@ -1163,9 +1161,7 @@ baseline &mdash; a different framework from the ones this book reads, so treat i
   <p>A fourth family &mdash; QuaRot (<a href="https://arxiv.org/abs/2404.00456">arXiv:2404.00456</a>) and SpinQuant
   (<a href="https://arxiv.org/abs/2405.16406">arXiv:2405.16406</a>) &mdash; attacks the same asymmetry by change of
   basis rather than rescaling. Insert $QQ^\top = I$ between operands: $XW = (XQ)(Q^\top W)$. Fold $Q$ into the
-  preceding weight and $Q^\top$ into this one and the rotation is free at inference, while a Hadamard $Q$ smears
-  each outlier channel across all $d$ coordinates. The mechanics of the Hadamard transform, why the post-rotation
-  marginal is Gaussian, and how vLLM applies it are derived for the KV cache in
+  preceding weight and $Q^\top$ into this one where the architecture permits it. Rotations cannot generally commute through nonlinearities; some placements need online transforms with measurable cost. A signed randomized Hadamard transform spreads channel energy across coordinates. The mechanics of the Hadamard transform, when post-rotation marginals become approximately well spread, and how vLLM applies it are derived for the KV cache in
   <a href="../02-memory-and-kv-cache/02-05-kv-quantization.html#rotation">&sect;2.5</a>; the weight-side story is
   the same transform on a different tensor.</p>
 </div></div></section>
@@ -1630,8 +1626,7 @@ a 117&nbsp;MB fp16 tensor to multiply it by a single row &mdash; and it is why S
 compatibility fallback rather than a serving path. Both engines expect Marlin to handle the real workload
 (<a href="04-03-formats-and-kernels.html">&sect;4.3</a>).</p>
 
-<p>SGLang resolves the act-order/tensor-parallel collision the other way &mdash; sharded scales kept, shuffle
-optimisation dropped:</p>
+<p>SGLang resolves the act-order/tensor-parallel collision the other way &mdash; full scales replicated when act-order requires them, with the shuffle optimization disabled on that path:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1814,13 +1809,10 @@ spurious degradation in quantized models (<code>docs/features/quantization/llm_c
 Only after those three is "INT8 is not viable for this model" a supportable conclusion.</p>
 
 <h3>Calibrating on the eval set</h3>
-<p>The quiet one. If the calibration draw and the eval draw come from the same corpus, GPTQ's Hessian and
-SmoothQuant's channel maxima are fitted to the thing you are about to measure, and you will not see the
-degradation your users see. Hold out a genuinely different corpus for the eval, and where the deployment domain
-is known, calibrate on it &mdash; vLLM's docs say this outright for fine-tuned models
+<p>The quiet one. Disjoint representative calibration and evaluation samples from the same corpus are valid. Leakage arises from overlapping examples, near duplicates or tuning against the held-out test. Keep calibration, validation and final evaluation separate; add out-of-domain slices to measure robustness. Where the deployment domain is known, calibrate on it &mdash; vLLM's docs say this outright for fine-tuned models
 (<code>docs/features/quantization/llm_compressor/int4.md:L135</code>).</p></div></section>
-<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>No GPU is needed to check every claim this chapter makes about stored artefacts &mdash; a checkpoint's index
-file has all of it.</p>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
+<section class="sec" id="hands-on" style="--i:9"><div class="sec__h"><span class="sec__n">§10</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>No GPU is needed to check every claim this chapter makes about stored artefacts &mdash; checkpoint headers expose shapes and dtypes without materializing full tensors. A sharded index maps tensor names to files; it does not contain all tensor shapes or prove runtime layouts.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1869,8 +1861,7 @@ are <a href="04-04-when-quantization-pays.html">&sect;4.4</a>.</p>
   --batch_size 'auto'</code></pre>
 </div>
 
-<p>The gap between the two seeds is your calibration noise floor. Any algorithm comparison smaller than that gap
-is not a result.</p></div></section>
+<p>Two calibration seeds expose sensitivity but do not estimate a universal noise floor. Use multiple calibration draws and paired evaluation on identical held-out examples; report uncertainty for the algorithm difference and calibration variability separately.</p></div></section>
 <section class="sec sec--exercises" id="exercises" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Exercises</h2></div><div class="sec__body"><ol>
   <li>Read <code>vllm/model_executor/layers/quantization/auto_gptq.py:L366-L378</code>. Under what two conditions
   does vLLM replicate the scale tensor on every tensor-parallel rank instead of sharding it? For Llama-3-8B's
@@ -1952,10 +1943,8 @@ is not a result.</p></div></section>
   end up far from its original value. The Cholesky reformulation is not an optimisation detail &mdash; it is what
   keeps the algorithm numerically alive at 175B.</li>
 
-  <li>AWQ and SmoothQuant are the same identity $XW = (X\,\mathrm{diag}(s)^{-1})(\mathrm{diag}(s)W)$ pointed in
-  opposite directions. AWQ raises $s$ on salient channels to protect weights (W4A16); SmoothQuant lowers the
-  activation range to make INT8 activations representable (W8A8). Neither costs anything at runtime, because both
-  fold their scales into stored weights offline.</li>
+  <li>AWQ and SmoothQuant are the same identity $XW = (X\,\mathrm{diag}(s)^{-1})(\mathrm{diag}(s)W)$ optimized for different error objectives. AWQ raises $s$ on salient channels to protect weights (W4A16); SmoothQuant lowers the
+  activation range to make INT8 activations representable (W8A8). Transforms can be folded into suitable adjacent linear or normalization parameters, but runtime cost depends on the actual graph and any online activation quantization.</li>
 
   <li>$\alpha$ is the only true dial in SmoothQuant, and it is not universal: 0.5 in the paper for OPT/BLOOM, 0.75
   for GLM-130B, 0.8 in vLLM's own llm-compressor recipe. Sweeping it is the first move when a W8A8 conversion
@@ -1963,8 +1952,7 @@ is not a result.</p></div></section>
 
   <li>Calibration is an unversioned input with measurable variance. Across ten draws from one corpus, downstream
   accuracy moved by about 1.6 points for GPTQ on OPT-6.7B and by 9 points for SparseGPT pruning on LLaMA-7B
-  (<a href="https://aclanthology.org/2024.acl-long.544/">Williams &amp; Aletras, ACL 2024</a>). Any A/B smaller
-  than your own seed-to-seed gap is noise.</li>
+  (<a href="https://aclanthology.org/2024.acl-long.544/">Williams &amp; Aletras, ACL 2024</a>). A single seed-to-seed gap does not invalidate every smaller paired A/B effect; estimate both sources of variability.</li>
 
   <li>Once loaded, GPTQ and AWQ checkpoints reach <em>the same</em> kernel entry point in vLLM
   (<code>apply_gptq_marlin_linear</code>); the only structural difference is whether <code>g_idx</code> is empty.
@@ -2003,7 +1991,7 @@ is not a result.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="04-01-the-design-space.html"><div class="pager__k">← Previous</div><div class="pager__t">The design space: PTQ/QAT, weight-only, W+A, KV</div></a><a class="pager__next" href="04-03-formats-and-kernels.html"><div class="pager__k">Next →</div><div class="pager__t">Formats and kernels: FP8, INT8, INT4, Marlin, Machete</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

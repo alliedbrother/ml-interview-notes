@@ -1,7 +1,7 @@
 ---
 order: 5
 description: Natural language processing from tokenization to LLMs — representation, language models, classification and tagging, translation, generation and decoding, RAG, speech, and evaluation.
-meta: 12 topics · complete
+meta: 12 published topics · practical reference
 ---
 
 # NLP
@@ -64,7 +64,7 @@ flowchart TD
 5. **Pretrained Model Families** — how to choose a checkpoint.
 6. **Text Generation & Decoding**, then **LLM Prompting & Alignment**.
 7. **RAG & Retrieval** — the standard production architecture.
-8. **NLP Evaluation** — before you believe any number.
+8. **NLP Evaluation** — revisit in depth here; read its split/metric protocol before tuning any earlier model or prompt.
 9. **Sequence Labeling**, **Machine Translation**, and **Speech & Audio** as
    needed.
 
@@ -72,7 +72,7 @@ flowchart TD
 
 - **[Transformers Deep Dive](/courses/transformers/)** — 17 modules deriving the
   architecture from first principles.
-- **[The Inference Engineering Book](/courses/inference/)** — 14 chapters on
+- **[The Inference Engineering Course](/courses/inference/)** — 14 chapters on
   serving these models efficiently.
 
 ## The short version
@@ -81,10 +81,27 @@ flowchart TD
   ability, and cross-language equity.
 - **Run the cheap baseline.** TF-IDF plus a linear model, and BM25 for
   retrieval, are still hard to beat and take minutes.
-- **Fine-tuning teaches behaviour; retrieval supplies knowledge.** Most projects
-  reach for the wrong one.
-- **Hallucination follows from the objective.** Probable text is not true text,
-  and no amount of scale changes that.
-- **Evaluate on your own data.** Public benchmarks are contaminated, and a
-  50-example golden set predicts your production quality better than any
-  leaderboard.
+- **Fine-tuning and retrieval solve overlapping problems.** Weights can learn
+  facts; retrieval often makes changing information and attribution easier.
+- **Likelihood is not a truth guarantee.** Next-token training alone neither
+  guarantees factuality nor proves a theorem that every possible model must hallucinate.
+- **Evaluate relevant data with enough evidence.** Private task fixtures complement
+  public benchmarks; fifty examples may be useful for debugging but underpowered
+  for small gains or rare subgroup failures.
+
+### Shared task contract
+
+Before choosing a checkpoint, record input unit, output ontology, annotation
+ambiguities, source/license permissions, privacy handling, and document/user/time
+split boundaries. Entry skills are array shapes, conditional probability, and
+train/development/test isolation. Exit skills include explaining a tokenizer's
+offsets, fitting a leakage-safe baseline, distinguishing score from decision
+metrics, and tracing a generated claim to authorized evidence or abstaining.
+
+A small capstone can reuse a versioned, redistributable support-document corpus
+for topic classification, entity extraction, retrieval and grounded answers.
+Maintain one annotation guide and provenance manifest, plus unanswerable queries,
+near duplicates, minority-language slices, and malformed input cases. Freeze the
+evaluation protocol before repeated prompt/model selection. Record quality,
+uncertainty, latency and cost together; a polished output on one example is not
+an evaluation dashboard.

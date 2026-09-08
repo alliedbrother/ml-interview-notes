@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The decode loop and why the KV cache exists — The Inference Engineering Book</title>
+<title>The decode loop and why the KV cache exists — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,9 +623,9 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 0 · Foundations · 00-02</div>
 <h1>The decode loop and why the KV cache exists</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/worker/gpu_model_runner.py</code></li><li><code>python/sglang/srt/model_executor/forward_batch_info.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/worker/gpu_model_runner.py</code></li><li><code>python/sglang/srt/model_executor/forward_batch_info.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
-<div class="prose"><p class="lead">Generating 512 tokens from Llama-3-8B after a 2048-token prompt costs about
+<div class="prose"><p class="lead">Running 512 post-prefill decode steps from Llama-3-8B after a 2048-token prompt costs about
 8.8&nbsp;TFLOP with a KV cache and about 19.7&nbsp;PFLOP without one. That factor of
 2,200&times; is the single reason every serving engine in this book is organised around a
 block of memory rather than around a matrix multiply.</p></div>
@@ -636,7 +636,7 @@ whole sequence, once per output token. Every previous token's key and value vect
 recomputed from scratch at every single step, from identical inputs, to identical values.</p>
 
 <p>Here is what that costs on one real model. Llama-3-8B, bf16, batch 1, a 2048-token
-prompt, 512 generated tokens. Both columns are arithmetic from published shapes
+prompt, 512 post-prefill decode forwards (513 sampled outputs including prefill's first token). Both columns are arithmetic from published shapes
 (<code>L=32, d=4096, h=32, h_kv=8, d_h=128, d_ff=14336</code>, vocab 128256, $P =
 8.03\times10^{9}$), not measurements.</p>
 
@@ -700,9 +700,7 @@ rows first and throws them away.</p></div></section>
 <section class="sec" id="first-principles" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">First principles: the algebra of one step</h2></div><div class="sec__body"><p>Symbols, matching <a href="../FORMULAS.html">the formula sheet</a>: $L$ layers, hidden
 size $d$, $h$ query heads, $h_{kv}$ key/value heads, head dimension $d_h$, FFN
 intermediate size $d_{ff}$, total parameter count $P$, bytes per cached element $b$
-(2 for bf16). Let $p$ be the prompt length and $n$ the number of tokens to generate. At
-decode step $t \in \{1 \dots n\}$ the sequence length including the token being produced
-is $s_t = p + t$.</p>
+(2 for bf16). Let $p$ be the prompt length and $n$ the number of subsequent decode forwards. Prefill already samples the first output; $n$ more forwards produce $n+1$ output tokens in total. At decode step $t \in \{1 \dots n\}$, $s_t=p+t$ is the processed context, including the previously sampled token fed into this forward, not the output about to be sampled. Generating exactly 512 outputs would instead require 511 such forwards.</p>
 
 <h3>Cost of one cached decode step</h3>
 
@@ -722,9 +720,7 @@ is $s_t = p + t$.</p>
 </ul>
 
 <p>Every term except attention is a fixed cost per token that depends only on weight
-shapes, and summing all of them over $L$ layers plus the embedding and LM head is exactly
-$2P$ — two FLOPs per parameter, because each weight is touched by one multiply and one
-add. So:</p>
+shapes. We use the common approximate $2P$ projection model below. It is not an exact parameter identity: input embeddings are gathered, normalization has different costs, and an optimized uncached implementation can project only the last hidden state into vocabulary logits. <a href="00-04-roofline-and-arithmetic-intensity.html">The roofline chapter</a> distinguishes approximately 7.50B streamed matrix parameters from 8.03B resident parameters. The table here intentionally uses the coarse 8.03B accounting consistently, so its ratios are estimates, not exact implementation FLOP counts:</p>
 
 <div class="math-display">$$\text{FLOPs}^{\text{cached}}_{t} \;=\; 2P \;+\; 4\,L\,h\,d_h\,s_t$$</div>
 
@@ -751,7 +747,7 @@ one.</p>
 <div class="callout callout--note">
   <span class="callout__k">Precision</span>
   <p>&ldquo;The KV cache turns $O(n^2)$ into $O(n)$&rdquo; is shorthand for the
-  <em>per-step</em> statement, and it is the projections it refers to, not attention.
+  <em>per-step</em> statement, and it is attention it refers to, not the projections.
   Attention per step is $O(n^2) \to O(n)$; the model as a whole per step is
   $O(n) \to O(1)$ in the term that actually dominates. Total attention work across a
   generation stays quadratic even with a perfect cache &mdash; which is why long-context
@@ -835,11 +831,7 @@ dominates single-stream latency.</p></div></section>
   </div>
 </div>
 
-<p>Causality is the precondition, not a detail. Drop the causal mask &mdash; a BERT-style
-encoder, or a prefix-LM segment where every token attends to every other &mdash; and $x_i$
-becomes a function of the <em>whole</em> sequence, so appending a token invalidates every
-previously computed K and V. There is nothing to cache. vLLM encodes precisely this in the
-KV-cache spec: an encoder-only attention layer contributes no cache group at all.</p>
+<p>The actual precondition is invariant cached states. Extending a bidirectional segment can change earlier hidden states and invalidate its old K/V; a causal decoder avoids that dependency. However, a fixed encoder output, cross-attention K/V, or an immutable bidirectional prefix can still be cached. The following vLLM policy gives encoder-only layers no autoregressive cache group; it is not a theorem that noncausal computation cannot be cached. Reuse additionally requires matching weights/adapters, positions, masks, and any multimodal inputs.</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -861,8 +853,7 @@ KV-cache spec: an encoder-only attention layer contributes no cache group at all
 <p>The same assumption sits in the attention metadata as a plain default. As of
 <code>a556f3f</code>, <code>CommonAttentionMetadata</code> carries <code>causal: bool |
 torch.Tensor = True</code> at
-<code>vllm/v1/attention/backend.py:L485</code> &mdash; causal is the default because the
-cache is only valid under it.</p>
+<code>vllm/v1/attention/backend.py:L485</code> &mdash; causal is the default for the decoder use case, not a universal condition on every reusable tensor.</p>
 
 <p>Two fields above it encode the entire asymmetry of this chapter:</p>
 
@@ -889,8 +880,7 @@ cache is only valid under it.</p>
     """Longest context length (may be an upper bound)"""</code></pre>
 </div>
 
-<p>Query length and sequence length are <em>separate tensors</em>. In prefill they are
-equal. In decode, query length is 1 and sequence length is $s_t$. Every attention backend
+<p>Query length and sequence length are <em>separate tensors</em>. In fresh, unchunked prefill with no reused prefix they are equal; chunked or warm-prefix prefill can have a shorter query than its total context. In decode, query length is 1 and sequence length is $s_t$. Every attention backend
 in vLLM is written against that pair, because that pair is the KV cache.</p>
 
 <div class="diagram-shell">
@@ -1098,8 +1088,7 @@ packing via <code>AttentionBackend.get_kv_cache_shape</code>
 concrete layout makes kernels and PD transfer simple to write against; vLLM's abstraction
 lets FlashAttention, FlashInfer, Triton and MLA backends each choose a layout their kernel
 prefers, at the cost of a level of indirection everywhere the cache is touched. Both
-converge on the same non-negotiable: one contiguous device allocation, sized at startup,
-never resized.</p>
+converge on the same non-negotiable: startup-sized backing pools whose slots are reused. The excerpt itself allocates separate per-layer K and V tensors, not one global contiguous allocation.</p>
 
 <p>SGLang's write path takes K and V and nothing else &mdash; the API itself refuses to
 cache a query:</p>
@@ -1121,7 +1110,7 @@ cache a query:</p>
         dcp_kv_mask: Optional[torch.Tensor] = None,
     ):</code></pre>
 </div></div></section>
-<section class="sec" id="worked-trace" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: one decode step through vLLM</h2></div><div class="sec__body"><p>Follow the 512th token of the running example through <code class="c-vllm">a556f3f</code>.</p>
+<section class="sec" id="worked-trace" style="--i:6"><div class="sec__h"><span class="sec__n">§7</span><h2 class="sec__t">Worked trace: one decode step through vLLM</h2></div><div class="sec__body"><p>Follow the 512th post-prefill decode forward of the running example through <code class="c-vllm">a556f3f</code>.</p>
 
 <p><b>1. The loop.</b> <code>EngineCore.step()</code> is the outer loop of the whole
 system &mdash; schedule, execute, sample, update:</p>
@@ -1294,13 +1283,11 @@ query heads gives 512 KiB per token instead of 128 KiB &mdash; a 4&times; over-e
 and the wrong number to plan a fleet on. The formula depends on $h_{kv}$. On an MQA model
 ($h_{kv}=1$) the gap is 32&times;; on MLA it is a different formula entirely.</p>
 
-<p><b>Expecting the cache to shrink.</b> It only grows within a sequence, and it is freed
-all at once at EOS. A long-running request holds its full footprint for its entire
-lifetime, which is why preemption and recomputation exist, and why the scheduler
+<p><b>Expecting the cache to shrink.</b> For full attention without eviction, the logical context grows during generation. Sliding windows, speculative rollback, and preemption can release active entries; prefix caching can retain reusable entries after EOS. A long-running full-attention request can therefore hold a large footprint throughout its lifetime, which is why preemption and recomputation exist, and why the scheduler
 (<a href="../01-the-core-loop/01-04-the-scheduler.html">§1.4</a>) is fundamentally a memory
 allocator wearing a batching costume.</p></div></section>
 <section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Measure the ratio yourself on CPU, no GPU required. HuggingFace <code>transformers</code>
-exposes the flag directly:</p>
+exposes the flag directly. This example downloads a public checkpoint on first use; the warmup is excluded and both paths generate the same number of tokens. Timing is illustrative, not a GPU speedup prediction:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -1309,21 +1296,32 @@ exposes the flag directly:</p>
   </div>
   <pre class="code-block code-block--wrap"><code>python3 - &lt;&lt;'PY'
 import time, torch
+torch.set_num_threads(1)
+torch.manual_seed(7)
 from transformers import AutoModelForCausalLM, AutoTokenizer
 m = "HuggingFaceTB/SmolLM2-135M"          # small enough to run on a laptop CPU
 tok = AutoTokenizer.from_pretrained(m)
 mod = AutoModelForCausalLM.from_pretrained(m, dtype=torch.float32).eval()
 ids = tok("The capital of France is", return_tensors="pt").input_ids
-for use_cache in (True, False):
-    t0 = time.perf_counter()
-    mod.generate(ids, max_new_tokens=128, do_sample=False, use_cache=use_cache)
-    print(f"use_cache={use_cache}: {time.perf_counter()-t0:.2f}s")
+outputs = []
+with torch.inference_mode():
+    for use_cache in (True, False):
+        mod.generate(ids, min_new_tokens=4, max_new_tokens=4,
+                     do_sample=False, use_cache=use_cache)
+        t0 = time.perf_counter()
+        out = mod.generate(ids, min_new_tokens=128, max_new_tokens=128,
+                           do_sample=False, use_cache=use_cache)
+        elapsed = time.perf_counter() - t0
+        assert out.shape[1] - ids.shape[1] == 128
+        outputs.append(out)
+        print(f"use_cache={use_cache}: {elapsed:.2f}s, 128 output tokens")
+assert torch.equal(outputs[0], outputs[1])
 PY</code></pre>
 </div>
 
 <p>Then confirm the shapes claim: run one forward pass with
 <code>use_cache=True</code>, take the layer-0 key tensor out of the returned
-<code>past_key_values</code>, and check its shape is <code>[batch, h_kv, seq, d_h]</code>.
+<code>past_key_values</code>, and check its logical shape is <code>[batch, h_kv, seq, d_h]</code> for this model/backend.
 The dimension to stare at is the second one &mdash; it is the <em>KV</em> head count, not
 the query head count. On a GQA model the two differ, and every capacity mistake in this
 chapter's pitfalls list comes from confusing them. (The exact accessor moved when
@@ -1408,19 +1406,12 @@ engine.</p></div></section>
     the batch is rectangular, which is what makes CUDA-graph capture possible for decode
     and awkward for extend.</p>
 
-    <p><b>5.</b> Divergence begins at the very first token generated after the mask is
-    removed, because a bidirectional layer's hidden state at position $i$ changes as soon
-    as position $i{+}1$ exists, invalidating every cached K and V. No assertion fires:
-    <code>causal</code> is a plain field with a default
-    (<code>vllm/v1/attention/backend.py:L485</code>), and backends that advertise
-    <code>supports_non_causal</code> simply pass it through to the kernel. The failure is
-    numerical, not structural &mdash; which is the general shape of KV-cache bugs.</p>
+    <p><b>5.</b> If both paths recompute the same initial bidirectional prefill, their first sampled output may still agree. Appending a token can then change earlier hidden states, invalidating the stale cached path. The first differing logit or token depends on weights, data, masks, and numerical rounding; divergence is not guaranteed at one universal index. A backend may reject unsupported noncausal mode, while a supported mode still cannot detect semantic cache invalidity from the causal flag alone.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
   <li>The cache exists because causal masking makes $k_i$ and $v_i$ functions of tokens
-  $1 \dots i$ only. Remove causality and there is nothing to cache; that is the whole
-  precondition, and it is why encoder layers get no cache group in vLLM
+  $1 \dots i$ only. Cache reuse requires invariant states; fixed encoder/cross-attention KV can be cached without causal self-attention, and it is why encoder layers get no cache group in vLLM
   (<code>vllm/model_executor/layers/attention/attention.py:L597-L608</code>).</li>
 
   <li>The dominant saving is <em>not</em> attention arithmetic. At 2.5k context on
@@ -1481,7 +1472,7 @@ engine.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="00-01-what-inference-is.html"><div class="pager__k">← Previous</div><div class="pager__t">Inference is not training</div></a><a class="pager__next" href="00-03-gpu-architecture.html"><div class="pager__k">Next →</div><div class="pager__t">GPU architecture for inference engineers</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

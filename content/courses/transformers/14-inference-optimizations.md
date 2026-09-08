@@ -2,7 +2,7 @@
 
 > **Prerequisites:** modules 11, 13.
 > **You will learn:** how INT8/INT4 quantization works and what GPTQ/AWQ actually
-> do, why speculative decoding gives free speedups, and how continuous batching
+> do, when speculative decoding helps without changing the target distribution, and how continuous batching
 > turns latency wins into throughput wins.
 
 ---
@@ -13,7 +13,9 @@ Module 11 established the governing fact: **decoding is memory-bandwidth-bound.*
 
 Generating one token requires reading every weight the token touches, plus its KV
 cache, from HBM. The arithmetic is trivial by comparison — with batch size 1 you
-do roughly two FLOPs per parameter byte read, while the hardware can do hundreds.
+do roughly two FLOPs per weight, or one FLOP per byte for BF16 weights. The
+weight-only intensity is `2B/s` FLOPs/byte for batch `B` and `s` bytes per weight,
+before KV reads, activation traffic, dequantization and communication.
 
 That single fact organises this entire module:
 
@@ -43,8 +45,9 @@ Store weights in fewer bits.
 
 INT4 is what puts a 70B model on a single 48 GB GPU, or a 7B model on a laptop.
 
-And because decoding is bandwidth-bound, **4× fewer bytes means roughly 4× faster
-decoding** — the speedup is nearly as large as the memory saving.
+INT4 gives **4× fewer raw weight bytes than BF16**, not a guaranteed 4× latency
+speedup. Scale metadata, nonquantized weights, KV traffic, dequantization, batch
+size and kernel support determine the observed gain.
 
 ### The basic mechanism
 
@@ -55,12 +58,14 @@ $$q = \text{round}\left(\frac{x}{s}\right) + z, \qquad \hat{x} = s\,(q - z)$$
 ```python
 def quantize_int8(x, axis=-1):
     """Symmetric per-channel INT8 quantization."""
+    x = x.float()
     scale = x.abs().amax(dim=axis, keepdim=True) / 127.0
+    scale = torch.where(scale > 0, scale, torch.ones_like(scale))
     q = torch.round(x / scale).clamp(-128, 127).to(torch.int8)
     return q, scale
 
 def dequantize(q, scale):
-    return q.to(torch.float16) * scale
+    return q.to(torch.float32) * scale
 ```
 
 **Granularity** is the main quality lever:
@@ -210,7 +215,7 @@ That property is why it is deployed by default in most serving stacks.
 | **Self-speculative** | the target model with some layers skipped |
 | **Medusa** | extra heads on the target predicting `t+1..t+k` |
 | **EAGLE** | a lightweight head over the target's own features |
-| **MTP heads** | the training-time heads from module 13 — free |
+| **MTP heads** | reuse training-time modules; draft computation still costs time |
 | **Prompt lookup** | copy n-grams from the prompt — no model at all |
 
 The **MTP** route is especially neat: heads trained for the auxiliary objective in
@@ -306,15 +311,20 @@ in any inference discussion.
 
 ```python
 def sample(logits, temperature=0.8, top_p=0.95):
+    import math
+    if logits.ndim != 2 or logits.shape[-1] == 0 or not torch.isfinite(logits).all():
+        raise ValueError("expected finite (batch, vocabulary) logits")
+    if not math.isfinite(temperature) or temperature < 0 or not 0 < top_p <= 1:
+        raise ValueError("temperature must be nonnegative and 0 < top_p <= 1")
     if temperature == 0:
-        return logits.argmax(-1)
-    logits = logits / temperature
+        return logits.argmax(-1, keepdim=True)
+    logits = (logits.double() - logits.double().amax(dim=-1, keepdim=True)) / temperature
     probs = F.softmax(logits, dim=-1)
 
     sorted_probs, sorted_idx = probs.sort(descending=True, dim=-1)
     cumulative = sorted_probs.cumsum(dim=-1)
     # drop the tail beyond the nucleus, keeping at least one token
-    mask = cumulative - sorted_probs > top_p
+    mask = cumulative - sorted_probs >= top_p
     sorted_probs[mask] = 0.0
     sorted_probs /= sorted_probs.sum(dim=-1, keepdim=True)
 
@@ -388,12 +398,58 @@ lossy technique here, and it is a *tunable* loss — you choose the bit-width.
 
 ---
 
+## Worked rejection correction and quantization boundaries
+
+Let target probabilities be `p=(0.5,0.3,0.2)` and draft probabilities
+`q=(0.2,0.5,0.3)`. Accepted proposal mass is `min(p,q)=(0.2,0.3,0.2)`, summing
+to 0.7. Rejection probability is 0.3; positive residual `(p-q)_+=(0.3,0,0)`
+therefore supplies the missing mass at the first token. Accepted plus corrected
+mass equals p exactly. In general `q_i*min(1,p_i/q_i)=min(p_i,q_i)` for proposed
+tokens with `q_i>0`; zero-q target mass is recovered in the correction branch.
+If rejection probability is zero, no residual normalization is needed.
+
+```python transformer-check
+import torch
+p = torch.tensor([.5, .3, .2], dtype=torch.float64)
+q = torch.tensor([.2, .5, .3], dtype=torch.float64)
+accepted = torch.minimum(p, q)
+residual = (p - q).clamp_min(0)
+reject_probability = 1 - accepted.sum()
+output_mass = accepted + reject_probability * residual / residual.sum()
+torch.testing.assert_close(output_mass, p)
+x = torch.tensor([[0., 0., 0.], [-2., 0., 2.]])
+scale = x.abs().amax(-1, keepdim=True) / 127
+scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+quantized = (x / scale).round().clamp(-128, 127).to(torch.int8)
+recovered = quantized.float() * scale
+assert torch.isfinite(recovered).all()
+torch.testing.assert_close(recovered[0], torch.zeros(3))
+assert (recovered - x).abs().max() <= scale.max() / 2 + 1e-6
+print("Rejection correction recovers p; zero quantization channels stay finite.")
+```
+
+For k draft tokens, if conditional acceptance is the same independent alpha at
+every step and a bonus target token is emitted after all accept, expected output
+length is `1+alpha+...+alpha**k`. Real acceptances are prefix-dependent; drafting,
+verification, scheduling and KV writes cost time, so this is not a speedup
+formula by itself. Exactness means matching the target **distribution** after
+the same temperature/truncation rules, not matching an ordinary decoder's output
+under the same RNG seed. Numerical precision and an incorrectly implemented
+sampler can violate the contract.
+
+The sampling function returns `(B,1)` for greedy and stochastic modes, requires
+finite logits and `0<top_p<=1`, and treats temperature zero as greedy. A caller
+must still handle EOS, maximum length, generator/RNG ownership and finished batch
+rows. Architecture changes such as MHA-to-GQA conversion are not exact inference
+rewrites of arbitrary pretrained weights. Speedup tables are illustrative
+workload reports or byte ratios, not multipliers that can be stacked blindly.
+
 ## Key takeaways
 
 - Decoding is memory-bandwidth-bound. Every technique here moves fewer bytes or
   extracts more work per byte.
-- **Quantization**: INT4 gives 4× smaller weights *and* roughly 4× faster
-  decoding, because bandwidth is the bottleneck.
+- **Quantization**: INT4 gives 4× fewer raw weight bytes than BF16; end-to-end
+  latency gains must be measured, including metadata and kernel overhead.
 - LLM activations have **massive outlier channels**; naive per-tensor
   quantization crushes everything else. Every serious method addresses this.
 - **GPTQ** compensates rounding error by updating not-yet-quantized weights.
@@ -406,12 +462,12 @@ lossy technique here, and it is a *tunable* loss — you choose the bit-width.
 - **Speculative decoding** drafts `k` tokens cheaply and verifies them in one
   target pass. Modified rejection sampling makes the output distribution
   **exactly** unchanged — a bad draft is slower, never wrong.
-- MTP heads (module 13) serve as a free draft model. Qwen3-Next and Nemotron 3
+- MTP heads (module 13) can serve as a draft model with nonzero compute cost. Qwen3-Next and Nemotron 3
   Super do exactly this.
 - Speculative decoding is a **latency** optimization; at high batch size it can
   reduce throughput.
-- **Continuous batching** frees a slot the step a sequence finishes; it depends on
-  PagedAttention's independent block allocation.
+- **Continuous batching** reschedules at iteration boundaries; paged allocation
+  is complementary rather than required.
 - **Chunked prefill** interleaves compute-bound prefill with memory-bound decode.
 - **Top-p** adapts to model confidence and is generally preferred to top-k.
 - Most large inference wins are **exact**. Quantization is the main lossy one, and
@@ -419,8 +475,8 @@ lossy technique here, and it is a *tunable* loss — you choose the bit-width.
 
 ## Self-check
 
-1. INT4 quantization gives 4× memory savings and roughly 4× faster decoding, but
-   only ~1× faster prefill at large batch. Explain the asymmetry.
+1. INT4 saves raw weight bytes, but a measured decode gain may exceed or fall
+   below a prefill gain. Explain using arithmetic intensity and kernel overhead.
 2. Speculative decoding uses a weaker draft model yet is claimed lossless. Explain
    the acceptance rule and what happens on rejection that preserves the target
    distribution exactly.

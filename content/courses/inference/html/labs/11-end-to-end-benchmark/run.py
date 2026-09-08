@@ -135,9 +135,9 @@ def cmd_plan(args):
                          f"{3 * t_rel:.0f} s", f"{3 * n_rel:,.0f}", f"{W * 1000:.0f} ms"))
         table(rows, f"Derived - warmup sizing at mu = {args.mu:g} req/s. "
                     "M/M/1 relaxation from an empty queue; nothing measured.")
-        print("\nWarm AT the load you will measure, for at least 3 t_rel, THEN flush,")
-        print("THEN discard L-bar = lambda*W more requests to refill the batch the")
-        print("flush emptied. Both harnesses default to 0 or 1 warmup requests.")
+        print("\nThis M/M/1 estimate is a planning aid, not a warmup guarantee.")
+        print("After any drain/flush, re-establish the chosen queue/cache state and")
+        print("check stable windows of throughput, queue depth and latency before measuring.")
 
         rho_hi = max(args.rho)
         _, lam_hi, _, _ = relaxation(args.mu, rho_hi)
@@ -309,7 +309,7 @@ def cmd_report(args):
         by_point.setdefault((arm, rate), []).append(load(f))
 
     rows = [("engine / arm", "lambda", "runs", "completed", "failed", "tput req/s",
-             "goodput req/s", "good/total", "TTFT p99 ms", "TPOT p99 ms",
+             "goodput req/s", "good/completed", "TTFT p99 ms", "TPOT p99 ms",
              "window s", "CV of tput")]
     no_goodput = []
     for (arm, rate) in sorted(by_point):
@@ -324,7 +324,11 @@ def cmd_report(args):
             no_goodput.append((arm, rate))
         mean = statistics.mean
         cv = (statistics.stdev(tputs) / mean(tputs)) if len(tputs) > 1 and mean(tputs) else None
-        ratio = (mean(goods) / mean(tputs)) if goods and tputs else None
+        paired = [r for r in rs if r['goodput'] is not None
+                  and r['duration'] is not None and r['completed'] is not None]
+        completed = sum(r['completed'] for r in paired)
+        ratio = (sum(r['goodput'] * r['duration'] for r in paired) / completed
+                 if len(paired) == len(rs) and completed else None)
         rows.append((
             arm, f"{rate:g}", str(len(rs)),
             f"{mean(col('completed')):.0f}" if col("completed") else "-",
@@ -338,6 +342,8 @@ def cmd_report(args):
             f"{100 * cv:.1f}%" if cv is not None else "n/a (n=1)",
         ))
     table(rows, "Measured - mean over runs per point, read from the harness result JSON")
+    print("good/completed excludes failed arrivals. Report offered, rejected, timed-out and")
+    print("cancelled counts separately; it is not the SLO-satisfied fraction of all arrivals.")
 
     # What you may and may not claim.
     cvs = []

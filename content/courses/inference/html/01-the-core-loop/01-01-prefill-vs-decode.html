@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Prefill and decode are two different computers — The Inference Engineering Book</title>
+<title>Prefill and decode are two different computers — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,20 +623,14 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 1 · The core serving loop · 01-01</div>
 <h1>Prefill and decode are two different computers</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>python/sglang/srt/managers/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/v1/core/sched/scheduler.py</code></li><li><code>python/sglang/srt/managers/scheduler.py</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">A stack with a 9 ms median inter-token latency and a 2.1 s p99 does not have a latency
 problem. It has two different programs sharing one GPU, and no policy for which of them wins the
 next microsecond. This chapter is the physics of that conflict; the rest of Part 1 is the policy.</p></div>
-<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>You are serving Llama-3-8B on a single H100. Thirty-two chat sessions are streaming tokens
-smoothly at roughly 110 tokens per second each. A thirty-third request arrives with a 32,768-token
-document pasted into the prompt. Every one of the thirty-two open streams freezes for two seconds,
-then resumes as if nothing happened. Nothing crashed. No memory was exhausted. No request was
-preempted. The GPU was 100% busy the entire time.</p>
+<section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Consider the Llama-3-8B tensor shapes on an H100, but use Llama-3.1-8B for the runnable 32k-context experiment: original Llama-3 has an 8k native limit. Assume at least 33 active-request slots. Thirty-two streams are decoding when a 32,768-token prompt arrives; an unchunked prefill can create a roughly two-second stall under the illustrative arithmetic model below.</p>
 
-<p>What happened is that the engine spent one scheduler step doing 808 TFLOP of work for a single
-request. Total token throughput over that window went <em>up</em>, because 32,768 prompt tokens is
-a lot of tokens. The p99 inter-token latency went up by a factor of 222.</p>
+<p>Total throughput can increase while a long inter-token stall appears. Whether that stall changes p99 depends on how many gaps are affected and the measurement window; it is not automatically a 222-fold p99 increase.</p>
 
 <div class="kpis">
   <div class="kpi kpi--hero"><div class="kpi__n">2041 ms</div><div class="kpi__l">one 32k prefill, Llama-3-8B (derived)</div></div>
@@ -858,10 +852,10 @@ a bookkeeping label — downstream code branches on it:</p>
 
 <p><code>is_cuda_graph()</code> is the phase split leaking into the runtime. Decode steps have a
 fixed, small, enumerable shape, so they can be captured into CUDA graphs and replayed with almost
-no launch overhead; <code>EXTEND</code> has an arbitrary token count and cannot
+no launch overhead; this particular decode-graph predicate excludes <code>EXTEND</code>; general or piecewise graph capture can still support prefill
 (<a href="../08-compilation-and-runtime/08-01-cuda-graphs.html">&sect;8.1</a>). At 9.2 ms per decode
 step and dozens of kernel launches per layer, launch overhead is a real fraction of a decode step
-and none of a prefill step.</p>
+and generally a smaller fraction of a sufficiently large prefill step.</p>
 
 <p>The scheduler loop consumes the phase as a hard branch. Each iteration asks for a prefill batch
 first; only if there is none does it run the decode batch:</p>
@@ -1094,7 +1088,7 @@ flattening inside Triton kernels — and the worked example is in the comment:</
 </div>
 
 <p>Three requests scheduled for 2, 5 and 3 tokens become a flat run of 10 rows plus a cumulative
-offset array <code>[2, 7, 10]</code>, which becomes <code>query_start_loc</code> for the attention
+end-offset array <code>[2, 7, 10]</code>; prepend zero to obtain <code>query_start_loc=[0, 2, 7, 10]</code> for the attention
 backend. Substitute <code>[1, 1, 2046]</code> and you have a mixed batch: two decodes and one
 prefill chunk, indistinguishable to every kernel except attention, which reads the offsets and the
 per-request sequence lengths and does the right thing per segment.</p>
@@ -1222,14 +1216,7 @@ prefill is admitted as a single step, every decoding request waits for it.</p>
 </svg>
 </div>
 
-<p>The fix is <strong>chunked prefill</strong>: cap the number of prefill tokens per step so no
-single step can run long, and carry the decode tokens along in the same step. Splitting the 32k
-prompt into sixteen 2048-token chunks does not reduce total work — it is still 808 TFLOP — but it
-turns one 2041 ms step into sixteen steps of 86 to 169 ms each, so a decoding request waits at most
-169 ms instead of 2050 ms. Chunks get progressively more expensive because each one attends to a
-longer prefix. The mechanism, the budget interaction, and where the crossover sits are
-<a href="01-05-chunked-prefill.html">&sect;1.5</a>; the alternative of putting prefill and decode
-on physically separate GPUs is <a href="01-06-pd-disaggregation.html">&sect;1.6</a>.</p>
+<p>Chunking caps each prefill contribution and lets decode rows run alongside it. Sixteen chunks of 2048 prefill tokens require a budget of at least 2080 when 32 decode rows share the step; with a total budget of 2048 the prompt receives 2016 rows per full step and needs 17 chunks. Attention to the growing prefix changes chunk cost, and the final shorter chunk need not be the most expensive.</p>
 
 <p>Both engines ship chunking on by default (<code>enable_chunked_prefill: bool = True</code> at
 <code>vllm/config/scheduler.py:L74</code>), with the cap expressed differently. vLLM's is the
@@ -1325,17 +1312,17 @@ streams pause.</p>
     <span class="tag tag--shell">shell</span>
   </div>
   <pre class="code-block code-block--wrap"><code># vLLM: raise the budget so a 32k prompt lands in one step
-vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-  --max-num-batched-tokens 32768 --max-model-len 32768 --max-num-seqs 32
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --max-num-batched-tokens 32768 --max-model-len 65536 --max-num-seqs 64
 
-# then the same with the default 2048 budget and compare the ITL tail
-vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-  --max-num-batched-tokens 2048 --max-model-len 32768 --max-num-seqs 32
+# then the same with an explicitly configured 2048 budget and compare the ITL tail
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --max-num-batched-tokens 2048 --max-model-len 65536 --max-num-seqs 64
 
 # SGLang: disable chunking entirely, then enable it and mix
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct \
   --chunked-prefill-size -1
-python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct \
+python -m sglang.launch_server --model-path meta-llama/Llama-3.1-8B-Instruct \
   --chunked-prefill-size 2048 --enable-mixed-chunk</code></pre>
 </div>
 
@@ -1407,7 +1394,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
     rows while the others carry 1, or where one request was resumed after preemption and is
     replaying a chunk. Then <code>max_num_scheduled_tokens &gt; 1</code> and the equality fails, so
     the runner takes the non-uniform path: a general (or piecewise) CUDA graph or eager execution
-    instead of the dense decode graph, paying full kernel-launch overhead on a step whose compute
+    instead of the dense decode graph, whose launch overhead depends on how much is captured, on a step whose compute
     is only a few hundred microseconds.</p>
   </div>
 </details></div></section>
@@ -1478,7 +1465,7 @@ python -m sglang.launch_server --model-path meta-llama/Meta-Llama-3-8B-Instruct 
 </div></div></section>
 <div class="pager"><a href="../00-foundations/00-05-numerics.html"><div class="pager__k">← Previous</div><div class="pager__t">Numerics: FP32 to INT4, and why bf16 won</div></a><a class="pager__next" href="01-02-latency-metrics-and-slos.html"><div class="pager__k">Next →</div><div class="pager__t">TTFT, TPOT, ITL, E2E, goodput</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

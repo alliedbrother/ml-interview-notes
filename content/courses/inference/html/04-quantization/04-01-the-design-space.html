@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The design space: PTQ/QAT, weight-only, W+A, KV — The Inference Engineering Book</title>
+<title>The design space: PTQ/QAT, weight-only, W+A, KV — The Inference Engineering Course</title>
 <meta name="description" content="How LLM serving systems actually work, read out of vLLM and SGLang">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
 <style>
 /* ==================================================================
-   The Inference Engineering Book — stylesheet
+   The Inference Engineering Course — stylesheet
    Aesthetic: technical blueprint on warm paper.
    Ink-teal primary, copper accent, fine engineering grid.
    Fonts: IBM Plex Sans (body) + IBM Plex Mono (code/labels).
@@ -519,7 +519,7 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <nav class="nav" id="nav">
 <a class="nav__brand" href="../index.html">
 <span><span class="nav__brand-k">Inference Engineering</span>
-<span class="nav__brand-t">The Inference Engineering Book</span></span>
+<span class="nav__brand-t">The Inference Engineering Course</span></span>
 <button class="navtoggle" id="navtoggle" aria-expanded="false">Contents</button>
 </a>
 <div class="nav__list" id="navlist">
@@ -623,13 +623,12 @@ details.fold > .fold__body { padding: 15px 19px 6px; font-size: 14px; line-heigh
 <div class="hd__k">Part 4 · Quantization · 04-01</div>
 <h1>The design space: PTQ/QAT, weight-only, W+A, KV</h1>
 
-<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">VERIFIED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>python/sglang/srt/layers/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Verified against</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
+<div class="fm"><div class="fm__row"><div class="fm__k">Status</div><div class="fm__v"><span class="pill pill--verified">SOURCE PINNED</span></div></div><div class="fm__row"><div class="fm__k">Primary sources</div><div class="fm__v"><ul><li><code>vllm/model_executor/layers/quantization/</code></li><li><code>python/sglang/srt/layers/quantization/</code></li></ul></div></div><div class="fm__row"><div class="fm__k">Edition pins</div><div class="fm__v">vllm <code>a556f3f</code> · sglang <code>7d89325</code></div></div></div>
 </header>
 <div class="prose"><p class="lead">SGLang will start a server, load your quantized checkpoint, and then log
 <em>"%s quantization is not fully optimized yet. The speed can be slower than non-quantized
 models."</em> That warning is the whole of Part 4 in one line: quantization is not one knob,
-it is six independent choices, and most of the ways to combine them are slower than doing
-nothing.</p></div>
+it is six coupled design choices, and an unsupported or poorly matched combination can be slower than leaving the weights unquantized.</p></div>
 <section class="sec" id="the-problem" style="--i:0"><div class="sec__h"><span class="sec__n">§1</span><h2 class="sec__t">The problem</h2></div><div class="sec__body"><p>Here is the warning, at the bottom of SGLang's config validation:</p>
 
 <div class="code-file">
@@ -752,7 +751,7 @@ supplied by where the key is used: <code>weight_quant_key</code> or
     <text x="34" y="470" font-family="monospace" font-size="11" fill="var(--text-dim)">At T tokens per step</text>
     <text x="34" y="486" font-family="monospace" font-size="11" fill="var(--text-dim)">multiply all of these</text>
     <text x="34" y="502" font-family="monospace" font-size="11" fill="var(--text-dim)">by T. At T = 8192 the</text>
-    <text x="34" y="518" font-family="monospace" font-size="11" fill="var(--text-dim)">gate input alone is</text>
+    <text x="34" y="518" font-family="monospace" font-size="11" fill="var(--text-dim)">gate_proj input is</text>
     <text x="34" y="534" font-family="monospace" font-size="11" fill="var(--text-dim)">67.1 MB &mdash; comparable</text>
     <text x="34" y="550" font-family="monospace" font-size="11" fill="var(--text-dim)">to the weights.</text>
 
@@ -1054,7 +1053,7 @@ you get two choices. <b>Static</b>: run a calibration set through the model, rec
 range per tensor, freeze it into the checkpoint. Costs one fp32 per tensor, zero runtime work,
 and clips anything the calibration set did not see. <b>Dynamic</b>: compute
 $s = \max|x| / q_{\max}$ over each token's row inside the kernel, every forward pass. Costs a
-reduction over the activation and an extra scale array, and cannot clip.</p>
+reduction over the activation and an extra scale array. A finite exact max-based scale covers that sampled row, but overflow, scale underflow/rounding, saturation, nonfinite values and implementation choices still need explicit handling.</p>
 
 <p>The line in vLLM's FP8 linear method that picks between them is the clearest statement of the
 axis anywhere in either tree:</p>
@@ -1096,7 +1095,7 @@ not fully independent in practice, because a 128&times;128 weight block only pai
 1&times;128 activation group, and a static scale over a 128-element slice of an activation row is
 not a thing anyone calibrates. The config constructor rejects the combination with an explicit
 message (<code>fp8.py:L115-L132</code>). Everywhere else in the space, dynamic per-token is the
-default because it is both more accurate and, on a CUTLASS path, free.</p>
+a common choice because it adapts to the current row. Fusing the reduction and conversion can hide some overhead, but neither higher accuracy nor zero cost is universal.</p>
 
 <h3>PTQ vs QAT, and why serving only sees one of them</h3>
 
@@ -1137,15 +1136,14 @@ H100 constants), so $I^{*}_{\text{fp8}} = 591$.</p>
 <div class="table-wrap">
   <div class="table-wrap__cap">Batch at which each weight format stops being memory-bound.
   <b>Derived</b> from $B^{*} = I^{*} b_w / 2$ with the H100 constants above. Weight term only;
-  &sect;0.4's $B \approx 345$ for bf16 includes KV and activation bytes, which shifts every row
-  right by the same factor and does not change the ordering.</div>
+  &sect;0.4's $B \approx 345$ for the square bf16 GEMM includes activation input/output bytes, not KV. Mixed traffic and achieved throughput need separate recomputation for each scheme.</div>
   <div class="table-scroll">
     <table class="dt">
       <thead><tr><th>Weight format</th><th class="num">$b_w$ (B)</th><th>Compute ceiling</th><th class="num">$I^{*}$</th><th class="num">$B^{*}$</th></tr></thead>
       <tbody>
         <tr><td>bf16</td><td class="num">2</td><td>bf16, 989 TF/s</td><td class="num">295</td><td class="num">295</td></tr>
         <tr><td>W8A16 (fp8/int8 weight-only)</td><td class="num">1</td><td>bf16, 989 TF/s</td><td class="num">295</td><td class="num">148</td></tr>
-        <tr><td>W4A16 (int4 group-128)</td><td class="num">0.5</td><td>bf16, 989 TF/s</td><td class="num">295</td><td class="num">74</td></tr>
+        <tr><td>W4A16 (ideal int4; metadata excluded)</td><td class="num">0.5</td><td>bf16, 989 TF/s</td><td class="num">295</td><td class="num">74</td></tr>
         <tr><td>W8A8 (fp8)</td><td class="num">1</td><td>fp8, 1979 TF/s</td><td class="num">591</td><td class="num">295</td></tr>
       </tbody>
     </table>
@@ -1158,7 +1156,7 @@ runway at $B \approx 74$ and past that converges to bf16 performance minus the d
 overhead. W8A8-FP8 divides step time by only two in the memory-bound region &mdash; but it also
 doubles the ceiling, so its crossover sits at the same $B^{*} = 295$ as bf16 and it stays 2&times;
 ahead on <em>both</em> sides of the ridge. Weight-only wins at low batch; W+A wins at high batch;
-the crossover between them is around $B \approx 74$ on this part.</p>
+their ideal pairwise crossover is around $B=\pi_{bf16}/(2\beta)\approx148$. W4's own ridge near 74 is a different boundary: W4 remains faster than W8A8 between 74 and 148 in this model. Actual kernel and mixed-layer costs can shift the crossing.</p>
 
 <p>That derived boundary agrees with the largest published sweep: the Red Hat / Neural Magic study
 (<a href="https://arxiv.org/abs/2411.02355">arXiv:2411.02355</a>, &gt;500,000 evaluations over the
@@ -1185,7 +1183,7 @@ roofline.</p>
 flowchart TD
     A["Workload<br/>B concurrent decodes<br/>N resident tokens<br/>P params, HBM budget"] --> B{"Does bf16 fit<br/>with room for KV?"}
     B -- no --> C["Weight quantization is mandatory<br/>this is a capacity decision<br/>not a latency one"]
-    B -- yes --> D{"B below 74?"}
+    B -- yes --> D{"B below 148 in the ideal model?"}
     C --> D
     D -- yes --> E["W4A16 group-128<br/>AWQ or GPTQ or compressed-tensors wNa16<br/>2.8x weight traffic on Llama-3-8B"]
     D -- no --> F{"B below 295?"}
@@ -1195,7 +1193,7 @@ flowchart TD
     G --> I
     H --> I
     I -- yes --> J["Quantize KV as well<br/>fp8 first, INT4 per-token-head<br/>or TurboQuant if you need more<br/>see 2.5"]
-    I -- no --> K["Leave KV at bf16<br/>it is under 2 percent of traffic"]
+    I -- no --> K["Measure KV savings and quality<br/>below equality does not mean negligible"]
     J --> L{"Accuracy gate passes<br/>on YOUR task at YOUR length?"}
     K --> L
     L -- no --> M["Back off one rung<br/>finer group, 8-bit, or spare more layers"]
@@ -1260,7 +1258,7 @@ dict built lazily inside <code>get_quantization_config</code>
 including four TurboQuant modes and <code>int4_per_token_head</code> &mdash; and SGLang's in
 <code>--kv-cache-dtype</code>'s nine choices at
 <code>python/sglang/srt/server_args.py:L690-L713</code>. A weight scheme and a KV scheme are
-selected by different flags, validated by different code, and combine freely. The one place they
+selected by different flags and validated by different code, but compatibility still depends on model architecture, kernel, device and checkpoint metadata. The one place they
 meet is <code>compressed-tensors</code>, whose checkpoints can carry a <code>kv_cache_scheme</code>
 &mdash; and vLLM restricts what it will accept there to a single point in the space:</p>
 
@@ -1534,6 +1532,7 @@ closest thing that ships with the code is vLLM's CI thresholds under
   <code>"Using scheme: %s for %s"</code> debug line immediately after
   (<code>compressed_tensors.py:L930-L932</code>).</p>
 </div></div></section>
+<p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
 <section class="sec" id="hands-on" style="--i:8"><div class="sec__h"><span class="sec__n">§9</span><h2 class="sec__t">Hands-on</h2></div><div class="sec__body"><p>Enumerate both registries yourself and diff them &mdash; this is the table above, regenerated
 at whatever SHA you are on:</p>
 
@@ -1635,39 +1634,28 @@ read straight off the artefact.</p></div></section>
   <summary>Answer &mdash; 4</summary>
   <div class="fold__body">
   <p>Branch 1: 70B at bf16 is 141&nbsp;GB against 4&times;80&nbsp;GB &mdash; it fits, so weight
-  quantization is not forced. Branch 2: concurrency 12 is far below 74, so W4A16 group-128, and it
-  is the right answer for a strict TPOT target because TPOT at $B=12$ is a pure bandwidth number.
+  quantization is not forced. Branch 2: if the actual decode batch is 12, W4A16 group-128 is a candidate in the weight-bandwidth model, not a guaranteed TPOT winner. KV traffic, communication, launch overhead and accuracy remain separate gates.
   Branch 3: $N = 12 \times 32768 = 3.93\times10^{5}$ against $N^{*}_{70B} = 4.31\times10^{5}$
-  &mdash; just under, so KV quantization is a capacity lever here rather than a latency one, and
-  with 320&nbsp;GB of HBM you may not need the capacity. Branch 4 is the one that bites: the task
+  &mdash; close to equality, not negligible. With bf16 weights, halving KV traffic would save about $r/[2(1+r)]\approx24\%$ of this ideal combined read volume for $r=0.912$. W4 weights further increase KV's traffic share. KV quantization can therefore affect latency as well as capacity; validate kernel overhead and long-context accuracy. Branch 4 is the one that bites: the task
   is code generation with long outputs, which is exactly the regime
   <a href="https://arxiv.org/abs/2504.04823">arXiv:2504.04823</a> reports as most fragile. Expect
   W4A16 to need a finer group, or to lose to W8A8 on quality at a TPOT you can still afford.</p>
   </div>
 </details></div></section>
 <section class="sec sec--takeaways" id="takeaways" style="--i:10"><div class="sec__h"><span class="sec__n">§11</span><h2 class="sec__t">Key takeaways</h2></div><div class="sec__body"><ul>
-  <li>The six axes are genuinely independent, and vLLM encodes five of them in one frozen
-  dataclass. If you can write down a scheme's <code>QuantKey</code> for weights and its
-  <code>QuantKey</code> for activations, you have specified it completely &mdash; everything else
-  is which layers it applies to.</li>
+  <li>The axes are a taxonomy, not freely composable choices. <code>QuantKey</code> records selected representation properties; accumulation dtype, calibration, ignored layers, hardware support and the resolved kernel are additional parts of the execution contract.</li>
 
-  <li>Batch size selects the axis, and the selection boundary is arithmetic, not taste. Below
-  $B \approx 74$ on an H100, weight-only 4-bit dominates because you are moving weight bytes and
-  nothing else. Above it, only a scheme that raises the compute ceiling helps, and weight-only
-  never does.</li>
+  <li>Distinguish the W4 own-ridge near 74, the W4/W8A8 ideal crossover near 148, and the W8A8 own-ridge near 295 for the stated H100 model. Shape, achieved throughput, unquantized heads, dequantization and KV traffic change real winners; benchmark feasible schemes after a quality gate.</li>
 
   <li>4-bit is not 4&times;. Metadata costs 0.125&ndash;0.5 bits per weight depending on group
   size, and the embedding plus LM head are 13% of Llama-3-8B and are almost never quantized. The
   real ratio is 2.80&times; for the 8B and 3.55&times; for the 70B &mdash; the gap is the fixed
   vocabulary cost amortising.</li>
 
-  <li>Symmetric weights are a hardware constraint dressed as a modelling choice: the low-precision
-  tensor-core instructions take signed integers, so the zero-point only survives in weight-only
-  schemes that dequantise into a bf16 GEMM anyway.</li>
+  <li>Operand instruction support constrains implementations, but symmetry is not synonymous with signed arithmetic. Asymmetric quantization can use zero-point correction terms; inspect the complete kernel and scale contract.</li>
 
   <li>KV quantization is a different flag, a different validator, and a different decision. It is
-  under 2% of decode traffic until $N$ passes the crossover, and it composes freely with any weight
-  scheme.</li>
+  less than 50% of the two-term weight-plus-KV traffic below equality, not necessarily less than 2%. Weight quantization moves that equality point, and combining formats remains backend-dependent.</li>
 
   <li>The engine does not choose your scheme; the checkpoint does, and
   <code>--quantization</code> is mostly a tie-breaker between config classes that would both claim
@@ -1709,7 +1697,7 @@ read straight off the artefact.</p></div></section>
 </ul></div></section>
 <div class="pager"><a href="../03-attention-kernels/03-06-positional-encoding-and-long-context.html"><div class="pager__k">← Previous</div><div class="pager__t">RoPE, scaling, sliding window, attention sinks</div></a><a class="pager__next" href="04-02-gptq-awq-smoothquant.html"><div class="pager__k">Next →</div><div class="pager__t">GPTQ, AWQ, SmoothQuant, and calibration</div></a></div>
 <footer class="foot">
-<p>The Inference Engineering Book · code read at
+<p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
 <code>sglang@7d893255c3</code>, pinned 2026-08-21.
 See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>

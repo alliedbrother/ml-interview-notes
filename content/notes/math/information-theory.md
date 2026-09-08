@@ -8,9 +8,7 @@ meta: Math for ML · core
 
 Shannon set out in 1948 to answer an engineering question — how few bits can
 carry a message reliably — and produced the measuring system that machine
-learning now runs on. Your loss function is a cross-entropy. Your evaluation
-metric is an exponentiated entropy. Your decision-tree splits maximise
-information gain. Your contrastive objective is a bound on mutual information.
+learning now runs on. Many classification losses are cross-entropies; language models use exponentiated cross-entropy as perplexity. Some decision trees use information gain, and certain contrastive objectives yield mutual-information bounds under sampling assumptions.
 Your model's job, under one influential reading, is compression.
 
 This page builds the quantities from the ground up and then shows where each one
@@ -121,7 +119,7 @@ For a sequence, the chain rule iterates:
 $$H(X_1,\dots,X_T)=\sum_{t=1}^{T}H(X_t\mid X_{<t})$$
 
 An autoregressive language model is a machine for estimating each term on the
-right, and its training loss is a direct estimate of that sum.
+right. Its empirical loss estimates cross-entropy under the fitted model, equal to true conditional entropy only for correct conditionals in expectation. Evaluation on training data also carries fitting optimism.
 
 ## Cross-entropy and KL divergence
 
@@ -155,12 +153,14 @@ loss.
 
 ### Direction matters
 
+The following picture describes possible tendencies when $q$ belongs to a restricted family unable to represent $p$. If $p$ is representable, both KL directions minimize at $q=p$. Finite underweighting is not the same as assigning zero support.
+
 ```mermaid
 flowchart TD
     P["true distribution p<br/>two separated modes"] --> F["forward KL:<br/>min KL of p given q"]
     P --> R["reverse KL:<br/>min KL of q given p"]
     F --> FR["q must put mass<br/>wherever p does,<br/>or pay infinite penalty"]
-    R --> RR["q must avoid mass<br/>where p has none;<br/>ignoring a mode is free"]
+    R --> RR["q must avoid mass<br/>where p has none;<br/>not sampling a mode<br/>can favor dropping it"]
     FR --> FO["result: broad q<br/>covering both modes,<br/>mass in the empty middle"]
     RR --> RO["result: narrow q<br/>locked onto one mode"]
 ```
@@ -169,12 +169,10 @@ flowchart TD
 |---|---|---|
 | Nickname | mean-seeking, zero-avoiding | mode-seeking, zero-forcing |
 | Penalty | $\infty$ if $q=0$ where $p>0$ | $\infty$ if $q>0$ where $p=0$ |
-| Failure | over-dispersed, blurry samples | mode collapse |
-| Appears in | MLE, cross-entropy training, knowledge distillation | variational inference, VAE ELBO, RLHF KL penalty, expectation propagation's dual |
+| Possible restricted-family tendency | over-dispersion | mode concentration |
+| Appears in | MLE, cross-entropy training, knowledge distillation | variational inference, VAE ELBO, RLHF KL penalty |
 
-Blurry VAE reconstructions and mode-dropping GANs are two sides of the same
-coin, and which side you land on is determined by which KL direction your
-objective implies.
+VAE blur can reflect decoder likelihood and averaging; GAN mode dropping also depends on model restrictions and training dynamics. Neither is universally determined by one KL direction. The original idealized GAN minimax objective involves JS, not simply reverse KL.
 
 ### Jensen–Shannon divergence
 
@@ -187,9 +185,7 @@ original GAN objective is, at the optimal discriminator, minimising
 $2\,\mathrm{JS}(p_{\text{data}}\|p_g) - \log 4$. **Its flaw is instructive**:
 when the two distributions have disjoint support — which is generic for
 high-dimensional data on low-dimensional manifolds — JS is constant at $\log 2$
-and its gradient is zero. That is the theoretical diagnosis of GAN training
-failure, and the reason Wasserstein GAN swapped in the earth-mover distance,
-which stays informative for disjoint supports.
+over parameter regions where supports stay disjoint. This motivates studying Wasserstein objectives, but does not certify the gradient of a finite, imperfect discriminator or diagnose every training failure. See the [original GAN analysis](https://arxiv.org/abs/1406.2661).
 
 ### Other divergences worth recognising
 
@@ -221,14 +217,11 @@ flowchart LR
 ### Where mutual information already appears in your work
 
 - **Decision trees**: information gain is $I(Y; \text{split})$ — the entropy of
-  the labels minus the weighted entropy of the children. ID3 and C4.5 split on
-  whichever feature maximises it.
+  the labels minus weighted child entropy. ID3 uses information gain; C4.5 uses gain ratio, normalizing gain by split entropy with additional selection details.
 - **Feature selection**: mutual information filters rank features by
   $I(X_j; Y)$, catching non-linear relevance that correlation misses. mRMR adds
   a redundancy penalty $I(X_j; X_k)$.
-- **Contrastive learning**: InfoNCE is a lower bound on $I(\text{view}_1;
-  \text{view}_2)$. With $N$ negatives the bound saturates at $\log N$, which is
-  the honest reason large batch sizes help SimCLR and CLIP.
+- **Contrastive learning**: with $N$ total candidates (one joint positive and $N-1$ independent marginal negatives), the usual InfoNCE result is $I(X;Y)\ge\log N-\mathcal L_{\mathrm{NCE}}$. The loss itself is not the lower bound; changing negative sampling can invalidate this interpretation. The bound cannot exceed $\log N$. See [CPC](https://arxiv.org/abs/1807.03748).
 - **Information bottleneck**: learn $Z$ minimising $I(X;Z) - \beta I(Z;Y)$ —
   compress the input as much as possible while keeping what predicts the label.
   It is a clean formal statement of what a good representation is.
@@ -242,7 +235,7 @@ with the same suspicion as reported p-values.
 
 ## Coding: where the bits come from
 
-Shannon's **source coding theorem**: any lossless code for i.i.d. symbols from
+Shannon's **source coding theorem**: uniquely decodable binary coding of iid symbols from
 $p$ has expected length $\ge H(p)$ bits per symbol, and codes achieving $H(p) +
 \epsilon$ exist.
 
@@ -252,12 +245,7 @@ $p$ has expected length $\ge H(p)$ bits per symbol, and codes achieving $H(p) +
 | Arithmetic coding | encode the whole message as one interval | reaches $H$ asymptotically; handles fractional bits |
 | Asymmetric numeral systems (ANS) | state-machine version of arithmetic coding | modern default (Zstandard, JPEG XL) |
 
-**The connection to language models is exact, not metaphorical.** An LM gives
-$p(x_t\mid x_{<t})$; feed those probabilities to an arithmetic coder and you
-compress the text at a rate equal to the model's cross-entropy. A model with 0.7
-bits/byte on English text *is* a compressor achieving 0.7 bits/byte — better
-than any classical algorithm. This is the precise sense in which "prediction is
-compression", and why "compression = intelligence" arguments keep resurfacing.
+**The connection to language models is operational.** Feed shared conditional probabilities to an arithmetic coder and ideal message length approaches the summed negative base-two log probabilities. Actual finite files also include coder overhead, finite-precision effects and any model or tokenizer metadata not already shared. Tokenization must be reversible to recover the exact source bytes. No corpus-independent claim of beating all classical compressors follows from a model's reported bits per byte.
 
 ### Kolmogorov complexity, in one paragraph
 
@@ -274,16 +262,9 @@ unless it pays for itself in data-coding savings.
 $$\mathrm{PPL} = \exp\left(-\frac{1}{T}\sum_{t=1}^{T}\log p(x_t\mid x_{<t})\right) = e^{H}$$
 
 Perplexity is the exponentiated average cross-entropy, i.e. the **effective
-number of equally likely choices** at each step. A model with PPL 20 is as
-uncertain as one choosing uniformly among 20 options.
+number of equally likely choices** at each step. A model with PPL 20 assigns the observed targets geometric-mean probability $1/20$; its actual predictive entropy need not equal that of a uniform distribution.
 
-| Model class | Rough PPL on English (word-level, historical) |
-|---|---|
-| Uniform over 50k vocab | 50,000 |
-| Unigram | ~950 |
-| Trigram with smoothing | ~150 |
-| LSTM LM (2016 era) | ~60 |
-| Transformer LM (modern, large) | ~10 or below |
+For a uniform model over 50,000 tokens, perplexity is 50,000. Other model-family values require a named corpus, tokenizer and evaluation protocol; there is no universal historical-to-modern quality ladder.
 
 Three caveats that decide whether a perplexity comparison is meaningful at all:
 
@@ -292,7 +273,7 @@ Three caveats that decide whether a perplexity comparison is meaningful at all:
    tokenisers.
 2. **Corpus.** Perplexity on Wikipedia and on code are different numbers about
    different things.
-3. **Context length.** Longer context lowers perplexity for free.
+3. **Context length.** True conditional entropy cannot increase on average when conditioning on more information. A fitted model's measured perplexity can increase with added context or changed evaluation windows.
 
 Perplexity also correlates imperfectly with downstream usefulness — an
 instruction-tuned model often has *worse* perplexity on raw web text than its
@@ -305,10 +286,9 @@ Replace the one-hot target with
 $$y'_k = (1-\epsilon)\,y_k + \frac{\epsilon}{K}$$
 
 The target now has entropy $>0$, so the minimum achievable loss is no longer
-zero and the model cannot drive the correct logit to $+\infty$. Effects:
+zero when $0<\epsilon<1$ and $K>1$. At an unconstrained optimum, probability ratios and hence relative logit differences are finite. Absolute logits remain shift-invariant and unbounded. Possible empirical effects:
 
-- Bounded logit magnitudes, which improves **calibration** — networks trained on
-  hard targets are famously overconfident.
+- Less extreme probability targets, which can improve or worsen held-out **calibration** depending on the data and model.
 - A small regularisation effect, since the model is penalised for extreme
   confidence.
 - Tighter, more equidistant class clusters in the penultimate layer.
@@ -327,9 +307,7 @@ relative probability it assigns to *wrong* classes — that a 7 looks a bit like
 - **Entropy bonus**: adding $+\beta H(\pi(\cdot\mid s))$ to the policy objective
   keeps the policy stochastic and encourages exploration. Soft actor-critic
   builds this in as a maximum-entropy objective.
-- **KL trust region**: TRPO and PPO constrain
-  $D_{\mathrm{KL}}(\pi_{\text{old}}\|\pi_{\text{new}})$ so a policy update
-  cannot destroy the policy.
+- **KL trust regions**: TRPO uses a KL-constrained surrogate. PPO includes a clipped-surrogate variant and a KL-penalty variant; clipping is not a hard KL constraint and does not guarantee policy improvement. See [PPO](https://arxiv.org/abs/1707.06347).
 - **RLHF KL penalty**: the reward is $r(x,y) - \beta
   D_{\mathrm{KL}}(\pi_{\text{RL}}\|\pi_{\text{SFT}})$. Without it the policy
   drifts into degenerate text that games the reward model. $\beta$ is the
@@ -338,17 +316,125 @@ relative probability it assigns to *wrong* classes — that a 7 looks a bit like
   for an explicit reward model — its derivation is essentially an exercise in
   KL-regularised optimisation.
 
+## Worked information and coding
+
+### A binary channel connects every entropy quantity
+
+Let $X$ be a fair bit, $E$ an independent Bernoulli$(1/4)$ bit, and
+$Y=X\oplus E$. Joint probabilities are $p(0,0)=p(1,1)=3/8$ and
+$p(0,1)=p(1,0)=1/8$. Both marginals are uniform, so $H(X)=H(Y)=1$
+bit. The uncertainty in $Y$ given $X$ is the flip uncertainty:
+$H(Y\mid X)=H_b(1/4)\approx.811278$ bits. Consequently
+$H(X,Y)=1.811278$ and $I(X;Y)=.188722$ bits.
+
+Conditional information is different: knowing the error bit makes $Y$
+determine $X$, so $I(X;Y\mid E)=H(X\mid E)-H(X\mid Y,E)=1$ bit.
+Conditioning can increase mutual information; there is no blanket
+"conditioning reduces every information quantity" rule.
+
+### Data processing needs a Markov relation
+
+If $X\to Y\to Z$ is a Markov chain, meaning $X\perp Z\mid Y$, then
+$I(X;Z)\le I(X;Y)$. To see this, expand the same quantity two ways:
+
+$$
+I(X;Y,Z)=I(X;Y)+I(X;Z\mid Y)
+=I(X;Z)+I(X;Y\mid Z).
+$$
+
+The first conditional term vanishes under the Markov assumption and the last
+is nonnegative. Equality means $Z$ has discarded no information in $Y$
+relevant to $X$, formally $I(X;Y\mid Z)=0$ where the chain rules are finite.
+A learned representation does not add information about the original sample,
+but can make task-relevant information easier for a restricted classifier to use.
+
+For a second independent bit flip with probability $1/4$, the combined
+flip probability is $1/4(3/4)+3/4(1/4)=3/8$.
+Thus $I(X;Z)=1-H_b(3/8)\approx.045566$, less than $.188722$.
+
+### KL support conventions and a short proof
+
+Use $0\log(0/q)=0$. If $p_i>0,q_i=0$, KL is infinite. Otherwise
+$-\log t\ge1-t$ gives
+
+$$
+D_{\rm KL}(p\|q)\ge\sum_{p_i>0}p_i(1-q_i/p_i)
+=1-\sum_{p_i>0}q_i\ge0.
+$$
+
+Equality requires the distributions to agree, including support. Log base
+changes units, not this conclusion.
+For continuous $U\sim U(0,1)$, $h(U)=0$ nats and
+$h(2U)=\log2$: differential entropy depends on units.
+For a non-atomic continuous $X$, the joint law of $(X,X)$ lies on the
+diagonal, while the product marginal law assigns that diagonal zero mass.
+Therefore $I(X;X)=\infty$. Subtracting informal infinite differential
+entropies is not a valid computation; the measure-based KL definition explains it.
+
+### Prefix codes, Kraft and Huffman
+
+A binary prefix code has no codeword that prefixes another. Lengths $\ell_i$
+satisfy Kraft's inequality $\sum_i2^{-\ell_i}\le1$; conversely such integer
+lengths admit a prefix code. This prevents ambiguity when concatenating symbols.
+For probabilities $(1/2,1/4,1/8,1/8)$, repeatedly merge the smallest pair:
+$1/8+1/8=1/4$, then $1/4+1/4=1/2$, then $1/2+1/2=1$.
+One Huffman code is $0,10,110,111$, with lengths $(1,2,3,3)$.
+Expected length is $1.75$ bits, exactly the entropy for these dyadic masses.
+For general finite distributions, Huffman satisfies $H\le E[\ell]<H+1$.
+
+Language is not iid. Block coding under stationary ergodic source assumptions
+connects achievable per-symbol rates to entropy rate, while an autoregressive
+coder uses conditional probabilities explicitly. Coding the model and preserving
+source bytes remain separate engineering obligations.
+
+```python runnable
+import numpy as np
+
+def entropy(p):
+    p = np.asarray(p, dtype=float)
+    if np.any(p < 0) or not np.isclose(p.sum(), 1):
+        raise ValueError("Expected normalized nonnegative masses")
+    positive = p > 0
+    return -np.sum(p[positive]*np.log2(p[positive]))
+
+def kl(p, q):
+    p, q = np.asarray(p, float), np.asarray(q, float)
+    if p.shape != q.shape:
+        raise ValueError("Shapes must agree")
+    entropy(p)
+    entropy(q)
+    active = p > 0
+    if np.any(q[active] == 0):
+        return np.inf
+    return np.sum(p[active]*np.log2(p[active]/q[active]))
+
+joint = np.array([[3/8, 1/8], [1/8, 3/8]])
+mi = kl(joint, joint.sum(1)[:, None]*joint.sum(0)[None, :])
+assert np.isclose(mi, 1-entropy([.25, .75]))
+later = 1-entropy([.375, .625])
+assert 0 <= later < mi
+assert entropy([1., 0.]) == 0.
+assert np.isinf(kl([1., 0.], [0., 1.]))
+p, q = np.array([.8, .2]), np.array([.5, .5])
+assert not np.isclose(kl(p, q), kl(q, p))
+lengths = np.array([1, 2, 3, 3])
+probabilities = np.array([.5, .25, .125, .125])
+assert np.isclose(np.sum(2.**-lengths), 1.)
+assert np.isclose(probabilities@lengths, entropy(probabilities))
+print("MI before / after second channel:", mi, later)
+```
+
 ## Common misconceptions
 
 | Claim | Correction |
 |---|---|
-| "KL is a distance" | asymmetric, no triangle inequality; use JS or Wasserstein if you need a metric |
+| "KL is a distance" | asymmetric, no triangle inequality; use square-root JS or an appropriate Wasserstein metric |
 | "High entropy means noisy data" | it means uniform-ish; a fair coin is maximally uncertain but perfectly clean |
 | "$I(X;Y)=0$ means unrelated" | it does mean independent — this one is true, unlike $\rho = 0$ |
 | "Lower perplexity is a better model" | only within identical tokenisation, corpus, and context length |
 | "Cross-entropy and KL are different losses" | they differ by a constant; the same gradient |
 | "Differential entropy is entropy" | it can be negative and changes under reparameterisation |
-| "Compression is a metaphor for prediction" | it is an exact equivalence via arithmetic coding |
+| "Compression is a metaphor for prediction" | ideal code length follows negative log probabilities; finite coding and model-sharing overhead still matter |
 
 ## Self-check
 
@@ -363,6 +449,28 @@ relative probability it assigns to *wrong* classes — that a 7 looks a bit like
    reports 8 with a 100k-token vocabulary. Who is better?
 6. Explain the information-bottleneck objective and what $\beta$ controls.
 7. Why can label smoothing hurt distillation?
+
+## Worked self-check answers
+
+1. Independent probabilities multiply while surprises add; a monotone solution
+   of $s(pq)=s(p)+s(q)$ is $-c\log p$, with positive $c$ fixing the unit.
+2. $H(p,q)=H(p)+D_{\rm KL}(p\|q)$; fixed data entropy does not depend on
+   model parameters. Both objectives therefore have the same minimizers.
+3. At an ideal optimal discriminator, the original minimax value is constant
+   for disjoint supports. That can remove an informative distributional gradient,
+   but a finite discriminator and non-saturating loss need their own analysis.
+4. The Gaussian maximizes differential entropy at fixed finite mean and
+   variance. Its fixed-variance NLL is squared error plus constants; squared
+   error can also target a conditional mean without assuming Gaussian outcomes.
+5. Neither number establishes superiority across tokenizers. Compare exact
+   source bytes, corpus, context and compatible bits-per-byte code lengths,
+   or evaluate the actual downstream task.
+6. $I(X;Z)-\beta I(Z;Y)$ trades input compression against retained target
+   information. Increasing $\beta$ favors target information, but estimation,
+   deterministic continuous variables and feasibility complicate optimization.
+7. Smoothing can erase relative teacher probabilities among wrong classes,
+   reducing information available to the student. The effect is empirical,
+   and neither calibration improvement nor distillation harm is universal.
 
 ## Where to go next
 

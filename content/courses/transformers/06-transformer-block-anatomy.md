@@ -33,7 +33,8 @@ flowchart TD
 Two invariants worth stating loudly:
 
 - **Shape is preserved end to end.** `(T, 512)` in, `(T, 512)` out, at every
-  intermediate point. This is what lets blocks stack, and it is why module 04
+  residual boundary, not every expanded intermediate. This lets blocks stack,
+  and is why module 04
   insisted on the `W_O` projection back to `d_model`.
 - **Every block has its own parameters.** The playlist's phone analogy: every
   iPhone 15 has identical hardware, but the apps differ. Blocks are
@@ -70,9 +71,10 @@ Concretely, differentiating `out = f(x) + x` gives:
 
 $$\frac{\partial \text{out}}{\partial x} = \frac{\partial f}{\partial x} + 1$$
 
-That `+1` is the point. Even if `∂f/∂x` shrinks toward zero, the gradient
-reaching `x` cannot fall below the identity path. With 6, 60, or 94 stacked
-blocks, this is the difference between training and not training.
+For vectors the `1` is an identity matrix: `J_out = I + J_f`. When `J_f` is
+small this is close to identity, which helps signal propagation. It is not a
+lower bound on gradient magnitude: `f(x)=-x` gives `I+J_f=0`, complete
+cancellation. Products of residual Jacobians can still vanish or explode.
 
 ### Reason 2: transformations can be skipped
 
@@ -82,7 +84,8 @@ the damage propagates. With one, the network can learn to downweight the
 sublayer and pass the original features through nearly unchanged.
 
 A residual block can represent the identity function by driving `f → 0`. A plain
-stack cannot easily do that. Adding depth therefore never has to *hurt*.
+stack may find that harder. Identity representability does not guarantee that
+optimization finds it or that additional depth improves generalization.
 
 ### The empirical evidence
 
@@ -132,7 +135,8 @@ Given an activation tensor of shape `(batch, features)`:
 
 ### The padding argument
 
-Here is the concrete reason, and it is decisive.
+Padding illustrates why the reduction axes matter; it is not a proof that
+BatchNorm is impossible in a sequence model.
 
 Batching sentences of different lengths requires **padding** to the longest one:
 
@@ -141,26 +145,25 @@ sentence 1: "hi Nitesh"                -> hi  Nitesh  PAD  PAD
 sentence 2: "how are you today"        -> how  are    you  today
 ```
 
-Padding embeddings are zeros, and stay zero through attention (anything times
-zero is zero). Now scale up: batch size 32, longest sentence 100 tokens, average
-sentence 30 tokens. Roughly **70% of every column is padding zeros.**
+Padding embeddings may start at zero, but a zero query gives equal logits and
+therefore averages the allowed values. For `Q=0` and values `[2,4]`, its output
+is `3`, not zero. Biases can also create nonzero padded states.
 
-BatchNorm computes each column's mean and variance down that column — **including
-all those zeros.** As the playlist puts it: those zeros "are not a part of our
-original data, but we are forced to keep them here." A mean computed mostly from
-artificial zeros is not a true representation of the data, and neither is the
-standard deviation.
+If `(B,T,D)` is flattened over batch and time for feature-wise BatchNorm, all
+`B*T` positions contribute unless a masked normalization is implemented. With
+average length 30 padded to 100, 70% of positions are artificial. A real feature
+that is constantly 2 has padded mean 0.6 and variance 0.84 under that zero-padding
+assumption, instead of real-token mean 2 and variance 0.
 
-LayerNorm normalizes **within each token's own feature vector**. A real token's
-512 features are all real numbers; padding tokens normalize themselves (to zero)
-and contaminate nobody.
+LayerNorm reduces only `D`, independently at each `(b,t)`, so a padded token
+does not affect another token's **normalization statistics**. Attention still
+needs a key-validity mask and padded target labels must be excluded from loss.
+Padded query outputs may be ignored or explicitly zeroed; LayerNorm's learned
+bias need not map a zero vector to zero.
 
-> **The zeros only affect themselves and do not affect others.** That is the
-> whole argument.
-
-There is a second, independent reason: BatchNorm's statistics depend on batch
-composition, which makes behaviour differ between training and inference and
-breaks down at batch size 1 — exactly the autoregressive generation case.
+BatchNorm's training statistics depend on the batch; evaluation can use running
+statistics even with batch size one. Per-token norms avoid this train/eval
+statistic contract and cross-token coupling without requiring masked BatchNorm.
 
 ### In code
 
@@ -199,8 +202,9 @@ $$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_i x_i^2 + \epsilon}} \cdot 
 
 Dropping mean subtraction removes a full reduction pass over the feature
 dimension. On a GPU, reductions are memory-bandwidth-bound, so halving them is a
-real speedup — and empirically quality is unaffected. That is the whole trade:
-same results, cheaper.
+potential speedup. Fused-kernel implementations and reduction algorithms affect
+the saving; comparable quality is an empirical finding for tested recipes, not
+an identity between LayerNorm and RMSNorm.
 
 ```python
 class RMSNorm(nn.Module):
@@ -217,8 +221,10 @@ class RMSNorm(nn.Module):
         return (x * rms).to(dtype) * self.weight
 ```
 
-The fp32 upcast matters. In bf16 the sum of squares over 4096 dimensions can
-overflow or lose precision; every production implementation does this.
+The fp32 reduction improves precision. Bfloat16 has approximately float32's
+exponent range: 4096 ordinary unit-scale terms do not inherently overflow it.
+Accumulation precision and cast placement are implementation choices; inspect
+the kernel rather than assuming every implementation uses this exact code.
 
 ## 6.5 Pre-norm vs post-norm — the most-varied choice in 2026
 
@@ -333,9 +339,10 @@ class GroupedQueryAttention(nn.Module):
     def __init__(self, d_in, num_heads, num_kv_groups, head_dim=None,
                  qk_norm=False, dtype=None):
         # ...
+        self.head_dim = head_dim or d_in // num_heads
         if qk_norm:
-            self.q_norm = RMSNorm(head_dim, eps=1e-6)
-            self.k_norm = RMSNorm(head_dim, eps=1e-6)
+            self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
+            self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
         else:
             self.q_norm = self.k_norm = None
 
@@ -343,6 +350,12 @@ class GroupedQueryAttention(nn.Module):
         queries = self.W_query(x)
         keys    = self.W_key(x)
         values  = self.W_value(x)
+
+        # Projections concatenate heads; normalize each head's last dimension.
+        B, T, _ = queries.shape
+        queries = queries.view(B, T, -1, self.head_dim).transpose(1, 2)
+        keys = keys.view(B, T, -1, queries.shape[-1]).transpose(1, 2)
+        values = values.view(B, T, -1, queries.shape[-1]).transpose(1, 2)
 
         if self.q_norm:                      # QK-Norm
             queries = self.q_norm(queries)
@@ -432,6 +445,37 @@ still unsettled.
 
 ---
 
+## Worked normalization and gradient counterexamples
+
+With upstream row gradient g, a pre-norm residual has Jacobian
+`I + J_f J_norm`; a post-norm residual has `J_norm (I+J_f)`. The latter applies
+normalization to the identity contribution too. A sandwich branch has
+`I+J_norm2 J_f J_norm1`. This explains why placements alter initialization
+dynamics, but says neither that pre-norm never needs warmup nor that its
+gradients have a positive lower bound. Learned norm gains can grow as well.
+
+```python transformer-check
+import torch
+import torch.nn.functional as F
+x = torch.tensor([1., 2.], requires_grad=True)
+(x + (-x)).sum().backward()
+torch.testing.assert_close(x.grad, torch.zeros_like(x))
+query = torch.zeros(1, 2)
+keys = torch.eye(2)
+values = torch.tensor([[2.], [4.]])
+torch.testing.assert_close(F.scaled_dot_product_attention(query, keys, values), torch.tensor([[3.]]))
+batch = torch.tensor([[[1., 3.], [0., 0.]], [[2., 6.], [9., 11.]]])
+norm = torch.nn.LayerNorm(2, elementwise_affine=False)
+changed = batch.clone()
+changed[0, 1] = 1000
+torch.testing.assert_close(norm(batch)[0, 0], norm(changed)[0, 0])
+print("Residual cancellation, nonzero padded queries, and per-token norm axes verified.")
+```
+
+Residual **boundaries** preserve `(B,T,d_model)`. Internal FFN tensors have
+`d_ff` features, per-head Q/K have `d_head`, and concatenated projections may
+have `H*d_head` features. Shape invariance is not a claim about every intermediate.
+
 ## Key takeaways
 
 - A block is: attention sublayer + FFN sublayer, each wrapped in a residual and a
@@ -440,11 +484,11 @@ still unsettled.
 - Residuals give gradients an identity path (`∂out/∂x = ∂f/∂x + 1`) and let the
   network skip an unhelpful transformation. Removing them measurably degrades
   quality.
-- **LayerNorm not BatchNorm** because padding zeros — up to ~70% of a batch —
-  poison per-column statistics. LayerNorm normalizes within each token, so
-  padding affects only itself.
+- **LayerNorm** has per-token statistics independent of other sequence lengths.
+  This does not replace attention masks or ignored padding labels.
 - **RMSNorm** drops mean-centering and bias: one reduction instead of two, half
-  the parameters, same quality. Universal in 2026.
+  the normalization parameters in the standard affine forms. Common, not universal;
+  speed and quality depend on the complete recipe.
 - **Pre-norm** (norm inside the residual branch) is the default: cleaner
   gradients, no warm-up needed.
 - Placement is genuinely contested: OLMo 2/Olmo 3 use post-norm inside the
