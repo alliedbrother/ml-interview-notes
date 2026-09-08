@@ -403,8 +403,10 @@ Consider $f: \mathbb{R}^n \to \mathbb{R}^m$ built from elementary operations.
   derivative of *one output* with respect to *all inputs*. Cost: $O(m)$ passes.
 
 Neural network training has $n \approx 10^9$ parameters and $m = 1$ scalar loss.
-Reverse mode wins by nine orders of magnitude. That asymmetry is the reason
-deep learning is computationally possible at all.
+One reverse-mode gradient avoids a separate forward directional sweep for each
+parameter. This is a derivative-pass complexity comparison, not a measured
+billionfold wall-clock speedup: operator costs, saved activations, recomputation,
+hardware, and the requested derivative all matter.
 
 | | Forward mode | Reverse mode |
 |---|---|---|
@@ -582,7 +584,7 @@ For $Z=g_\theta(\epsilon)$ with parameter-independent noise,
 $$
 \nabla_\theta\mathbb E[h_\theta(Z)]
 =\mathbb E[\partial_\theta h_\theta(g_\theta(\epsilon))
-J_{g_\theta}^\top\nabla_z h_\theta(g_\theta(\epsilon))].
++J_{g_\theta}^\top\nabla_z h_\theta(g_\theta(\epsilon))].
 $$
 
 Alternatively, differentiating a density on fixed support gives the
@@ -591,7 +593,7 @@ score-function identity
 $$
 \nabla_\theta\mathbb E_{p_\theta}[h_\theta(Z)]
 =\mathbb E[\partial_\theta h_\theta(Z)
-h_\theta(Z)\nabla_\theta\log p_\theta(Z)].
++h_\theta(Z)\nabla_\theta\log p_\theta(Z)].
 $$
 
 For $Z\sim N(\mu,1)$ and $h(Z)=Z^2$, both yield derivative $2\mu$:
@@ -646,6 +648,187 @@ print("JVP:", jvp.tolist(), "VJP:", vjp.tolist(), "best error:", min(errors))
 The central difference at the ReLU kink is $1/2$, while PyTorch selects zero.
 Neither is evidence that the smooth derivative checker is broken: no ordinary
 derivative exists at that point.
+
+## Curvature without constructing the Hessian
+
+An optimizer often needs the action of a derivative on one vector, not every
+entry of the derivative matrix. A Hessian-vector product is the central example.
+This section derives both autodiff constructions and connects them to a
+[downloadable float64 CPU lab](/assets/examples/implicit_hvp.py). The lab uses
+Python 3.11, NumPy 1.26.4, SciPy 1.11.4, and PyTorch 2.8.0 from the existing
+[example environment](/assets/examples/requirements.txt). It makes no network
+requests and does not require a GPU.
+
+### Start with the derivative shapes
+
+Use column gradients throughout. For a smooth scalar loss
+$f:\mathbb R^d\to\mathbb R$, write $g(x)=\nabla f(x)$ and
+$H(x)=\nabla^2 f(x)$. For a vector-valued map
+$F:\mathbb R^d\to\mathbb R^m$, write its Jacobian as $J_F\in\mathbb R^{m\times d}$.
+
+| Object | Shape | Meaning |
+|---|---|---|
+| $f(x)$ | scalar | objective value |
+| $g(x)$ | $d$ | first derivative represented as a column vector |
+| $H(x)$ | $d\times d$ | Jacobian of the gradient |
+| $J_Fv$ | $m$ | output sensitivity to input tangent $v\in\mathbb R^d$ |
+| $J_F^Ta$ | $d$ | input adjoint induced by output adjoint $a\in\mathbb R^m$ |
+| $Hv$ | $d$ | change in the gradient along the fixed direction $v$ |
+| $v^THv$ | scalar | directional second derivative for a constant $v$ |
+
+An HVP is not the Hessian diagonal, and $Hv$ is not a Newton step. The latter
+requires solving a linear system whose operator is the Hessian or a modified
+curvature model. For tensors with several parameter axes, flattening defines a
+coordinate ordering; a full second derivative has two copies of the parameter
+shape. Do not confuse a batch axis with another parameter axis.
+
+### Forward-over-reverse
+
+The first-order expansion of the gradient gives
+
+$$
+g(x+\epsilon v)=g(x)+\epsilon H(x)v+o(\epsilon),
+\qquad
+Hv=\left.\frac{d}{d\epsilon}g(x+\epsilon v)\right|_{\epsilon=0}.
+$$
+
+Reverse-mode AD constructs the gradient computation; forward-mode AD propagates
+the direction through that computation. In PyTorch's functional transforms:
+
+```python
+from torch.func import grad, jvp
+
+def hvp(loss, x, v):
+    return jvp(grad(loss), (x,), (v.detach(),))[1]
+```
+
+The first returned JVP item is the ordinary gradient, and the second is its
+directional derivative. `v.detach()` states that the supplied direction is held
+fixed. The transformed loss should be a pure scalar-returning function; avoid
+mutating external state, invoking `.backward()` inside it, or relying on changing
+random masks. The [PyTorch transform tutorial](https://docs.pytorch.org/tutorials/intermediate/jacobians_hessians.html)
+demonstrates this composition and an alternative using reverse mode when an
+operator lacks forward-AD support.
+
+### Reverse-over-reverse
+
+For fixed $v$, differentiate the scalar gradient projection:
+
+$$
+\nabla_x\bigl(g(x)^Tv\bigr)=J_g(x)^Tv=H(x)^Tv.
+$$
+
+If $f$ has continuous second partial derivatives locally, $H^T=H$, so the result
+is the same HVP. An explicit eager-autograd version must retain a differentiable
+graph for the first derivative:
+
+```python
+import torch
+
+x = torch.tensor([.4, -.7, 1.1], dtype=torch.float64, requires_grad=True)
+v = torch.tensor([.3, -.5, .8], dtype=x.dtype)
+loss = x.pow(4).sum()
+g = torch.autograd.grad(loss, x, create_graph=True)[0]
+hv = torch.autograd.grad((g * v.detach()).sum(), x)[0]
+torch.testing.assert_close(hv, 12 * x.detach().square() * v)
+```
+
+`create_graph=True` makes the derivative computation itself differentiable.
+`retain_graph=True` only keeps a graph available for reuse; it is not a substitute.
+Avoid accumulating repeated HVPs into leaf `.grad` fields when a returned tensor
+will do. A constant or linear objective has a zero Hessian, but a hand-written
+second `autograd.grad` may fail when its first derivative has no dependency graph.
+The downloaded lab uses `torch.func.grad` composition and tests these zero-curvature
+cases explicitly.
+
+The fixed-direction condition is essential. If you differentiate through
+$v(x)$, the result becomes
+
+$$
+\nabla_x\bigl(g(x)^Tv(x)\bigr)
+=H(x)^Tv(x)+J_v(x)^Tg(x),
+$$
+
+which is a different quantity. Similarly, changing parameters, minibatch samples,
+or dropout masks between matrix-vector calls changes the operator seen by a
+linear solver. Reproducibility here is a mathematical precondition, not merely
+a debugging convenience.
+
+### A worked nonlinear reference
+
+The lab uses a small smooth objective with a quadratic data term, a quartic term,
+and a sine term:
+
+$$
+f(x)=\frac12\|Ax-b\|^2+0.1\sum_i x_i^4+0.2\sum_i\sin x_i,
+$$
+
+$$
+g(x)=A^T(Ax-b)+0.4x^{\odot3}+0.2\cos x,
+\qquad
+H(x)=A^TA+\operatorname{diag}(1.2x_i^2-0.2\sin x_i).
+$$
+
+The sine contribution can have negative curvature; the Hessian is not assumed
+positive definite just because the implementation is smooth. At the supplied
+fixture point, its spectrum is positive and the damped CG comparison is valid.
+An additional indefinite quadratic test exhibits a direction with $v^THv<0$.
+
+The script compares four routes: forward-over-reverse, reverse-over-reverse,
+the analytic NumPy Hessian applied to $v$, and a full autodiff Hessian on this
+three-parameter problem. The full Hessian is a testing oracle here, not the
+large-model implementation. The reproduced product is approximately
+$(1.609235,-4.589672,6.919007)^T$.
+
+### Finite differences are a diagnostic, not an oracle
+
+For sufficiently smooth $g$, central differencing gives
+
+$$
+Hv\approx\frac{g(x+hv)-g(x-hv)}{2h}.
+$$
+
+The truncation error is $O(h^2)$ under the requisite higher-derivative bounds,
+while subtractive cancellation and floating-point roundoff grow as $h$ becomes
+too small. The useful step also depends on the scales of $x$, $v$, and $g$;
+normalizing a direction changes what a particular scalar step means. An alternative
+scalar check of $v^THv$ uses a second difference of $f$, but division by $h^2$
+can amplify cancellation more strongly.
+
+In the reproduced float64 sweep, the absolute HVP error drops from approximately
+$2.25\times10^{-3}$ at $h=10^{-1}$ to $4.0\times10^{-11}$ near $h=10^{-5}$,
+then rises to about $5.5\times10^{-6}$ at $h=10^{-10}$. These are measured values
+for the supplied fixture, not recommended universal step sizes. The test checks
+agreement in the useful part of the sweep and verifies that perturbations never
+modify the original input array.
+
+At a kink, a finite difference can straddle two regimes. At a branch selected by
+data-dependent control flow, AD differentiates the executed branch according to
+supported operator rules. Neither provides a classical Hessian at a genuinely
+nonsmooth point. Use a smooth fixture to validate a smooth second-derivative
+implementation, then test your model's nonsmooth conventions separately.
+
+### Complexity and what the lab actually establishes
+
+A dense $d\times d$ Hessian stores $d^2$ numbers. One HVP stores an output of
+length $d$ and avoids that matrix, while still paying for the forward values and
+derivative intermediates required by the chosen AD composition. It is often a
+small constant multiple of a gradient computation for supported operations, not
+an exact universal count of extra backward passes or a guarantee of low peak
+memory. Reusing linearizations or checkpointing introduces additional tradeoffs.
+
+Run the complete file with:
+
+```bash
+python implicit_hvp.py
+```
+
+It prints the HVP checks, finite-difference sweep, a matrix-free damped solve,
+and three independently constructed ridge hypergradients. Continue to
+[implicit differentiation and solver accuracy](./optimization.md#implicit-differentiation-through-a-stationary-solution)
+for the stationary-equation derivation and its assumptions. This is a specialist
+CPU correctness lab, not a neural-network memory benchmark or a general-purpose
+second-order optimizer.
 
 ## Where calculus quietly fails you
 

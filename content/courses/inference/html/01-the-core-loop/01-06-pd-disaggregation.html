@@ -1352,6 +1352,22 @@ python -m sglang_router.launch_router --pd-disaggregation \
 <li><code>vllm/distributed/kv_transfer/README.md</code> — short, and the only prose in either tree describing why the connector abstraction is shaped the way it is.</li>
 </ul></div></section>
 <div class="pager"><a href="01-05-chunked-prefill.html"><div class="pager__k">← Previous</div><div class="pager__t">Chunked prefill</div></a><a class="pager__next" href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html"><div class="pager__k">Next →</div><div class="pager__t">The KV cache size formula</div></a></div>
+<section class="sec" id="cpu-transfer-failure-contract" style="--i:10"><div class="sec__h"><span class="sec__n">Lab</span><h2 class="sec__t">Turn transfer failures into executable contracts</h2></div><div class="sec__body">
+<p>The real Mooncake experiment above requires GPUs and a supported transport. The <a href="../labs/03-continuous-batching-effects/README.html#cpu-transfer-faults">CPU transfer-fault lab</a> isolates a narrower prerequisite: safe ownership when completion, cancellation and room reuse occur in different orders. It ships a standard-library model with a deterministic event trace and seeded tests, not an RDMA implementation or a performance benchmark.</p>
+<h3>Cancellation is a control decision, not a memory fence</h3>
+<p>Both sides of an in-flight transfer retain storage obligations. The producer must not overwrite source KV while it is being read, and the consumer must not repurpose destination pages while they may still be written. The model represents these obligations with separate pins. Aborting the request removes destination request ownership but preserves both pins until an explicit drain acknowledgement. Source mutation uses copy-on-write on a pinned partial page, so the eventual completed snapshot stays stable.</p>
+<p>Four abort reasons share the same safety rule: user cancellation, timeout, producer failure and consumer failure. A timeout or process-failure notification alone does not authorize page reuse. The relevant question is whether the backend guarantees that no queued or remote operation can still touch those allocations. The model's <code>acknowledge_drained()</code> is the place where a real implementation must supply that guarantee. Without it, retaining memory is intentional quarantine, not a proven leak that can be fixed by freeing pages.</p>
+<h3>Fence attempts, not just request names</h3>
+<p>The lab assigns each transfer attempt a monotonically increasing key and treats the room name as a reusable routing label. Duplicate live rooms are rejected. A room becomes reusable only after the old attempt drains or its published output is released; a callback for the old key cannot affect its successor. Success exposes destination KV to decode only after completion. Aborting first makes subsequent completion notifications nonpublishing; completing first instead requires ordinary output release.</p>
+<p>Generation-qualified callbacks protect metadata but do not themselves prevent a late device write. A production protocol also needs transport-level revocation, completion or incarnation fencing before address reuse, plus bounded terminal-record retention. Worker restart, registration lifetime, partial-copy corruption, incompatible cache layouts and model-version mismatch need additional real-backend tests. The CPU exercise verifies none of those by implication.</p>
+<h3>Acceptance criteria for a backend adapter</h3>
+<ol><li>For each abort reason, retain source and destination allocations until the transport proves quiescence; do not publish partially transferred KV.</li>
+<li>Inject duplicate completion, duplicate cancellation, delayed drain and old-attempt callbacks after room reuse. Check that the new attempt's ownership and output are unchanged.</li>
+<li>Fail destination allocation midway. Verify that all temporary pages and source pins are rolled back, while the producer's original KV remains readable.</li>
+<li>Cancel the producer while its request is being preempted. Verify that replay cannot reuse pinned pages, then succeeds once the transport has drained.</li>
+<li>Separate eventual cleanup from safety. A missing acknowledgement must not cause early reuse; an operational test must also demonstrate the backend's actual recovery path and deadline.</li></ol>
+<p>The included tests cover the abstract contracts for all four abort reasons and compare published rows with an independent token-history oracle. Port these assertions to backend-specific fixtures before drawing conclusions about real engines, failure recovery time or available serving capacity.</p>
+</div></section>
 <footer class="foot">
 <p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
@@ -1368,7 +1384,8 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#key-takeaways">Key takeaways</a>
-<a href="#further-reading">Further reading</a></aside>
+<a href="#further-reading">Further reading</a>
+<a href="#cpu-transfer-failure-contract">CPU transfer failure contracts</a></aside>
 </div>
 <script>
 /* scroll-spy for the right-hand TOC + mobile nav toggle */

@@ -1043,6 +1043,93 @@ print("deterministic trace and complete cleanup: OK")</code></pre>
 <p>From a repository checkout run <code>python site/test_inference_scheduler.py</code>. Tests execute both printed Python examples, the CLI JSONL roundtrip, deterministic boundary cases, 60 seeded scheduler workloads and 5,000 randomized allocator operation choices against a separate logical-token oracle. See <a href="../../02-memory-and-kv-cache/02-02-pagedattention.html#cpu-ownership-model">the ownership lesson</a> for shared partial prefixes, synchronous copy-on-write, transfer pins and failure-atomic allocation.</p>
 <p>No real request traces or performance measurements are bundled. Replay accepts arrivals, intended lengths and cancellations, not worker kernel traces. The scheduler has no preemption, cache-hit-aware admission, distributed routing, deadline objective or prefill/decode-specific cost curve; the allocator's shared-prefix operations are tested separately from scheduling. Keep the JSON configuration with any result, and retain these exclusions when discussing what an experiment demonstrates. Extend one policy at a time and rerun the conservation tests before adding a performance interpretation.</p>
 </div></section>
+<section class="sec" id="cpu-preemption-recompute" style="--i:6"><div class="sec__h"><span class="sec__n">CPU</span><h2 class="sec__t">Preemption, replay and exactly-once emission</h2></div><div class="sec__body">
+<p>The previous arrival simulator deliberately reserves worst-case capacity and has no victim-selection policy. This separate lifecycle exercise adds explicit preemption and full recomputation without changing that scheduler's results. Download <a href="../scheduler_faults.py" download>scheduler_faults.py</a> beside <a href="../scheduler_sim.py" download>scheduler_sim.py</a>. Both use only the Python standard library. Run <code>python scheduler_faults.py --output faults.json</code> for a deterministic JSON event trace; run <code>python site/test_inference_faults.py</code> from the repository for the executable contracts.</p>
+<h3>Three histories that must not be confused</h3>
+<p>A request retains its original prompt, the tokens already sent to the client, and the input rows whose KV has been materialized. For a prompt <code>[10, 11, 12]</code> and sampled outputs <code>[20, 21]</code>, the committed KV rows are <code>[10, 11, 12, 20]</code>. Token 21 has been sampled but has not yet been fed back. Rebuilding all five tokens now and feeding 21 again on the next decode step would duplicate an input row. Re-emitting 20 and 21 would instead duplicate the client-visible output stream. These are different bugs.</p>
+<p><code>RecomputeRequest</code> keeps prompt and emitted-token history on the host. <code>preempt()</code> releases its page-table ownership and marks it preempted; it does not erase that history. <code>resume()</code> rebuilds the prompt plus all but the most recent sampled output, then makes the request active. The next <code>sample()</code> first commits the pending sampled token and records one new output. The supplied token is a hypothetical model result: this module does not implement a model, sampling algorithm, RNG restoration or logits evaluation.</p>
+<div class="table-wrap"><table class="dt"><thead><tr><th>Operation</th><th>Client output history</th><th>Materialized KV rows</th><th>New replay work</th></tr></thead><tbody>
+<tr><td>Initial prefill</td><td>[]</td><td>[10, 11, 12]</td><td>0 replay rows; 3 initial rows</td></tr>
+<tr><td>Sample 20</td><td>[20]</td><td>[10, 11, 12]</td><td>0</td></tr>
+<tr><td>Sample 21</td><td>[20, 21]</td><td>[10, 11, 12, 20]</td><td>0</td></tr>
+<tr><td>Preempt</td><td>[20, 21]</td><td>No request-owned rows</td><td>0</td></tr>
+<tr><td>Resume</td><td>[20, 21]</td><td>[10, 11, 12, 20]</td><td>4</td></tr>
+<tr><td>Sample 22</td><td>[20, 21, 22]</td><td>[10, 11, 12, 20, 21]</td><td>0</td></tr>
+</tbody></table></div>
+<pre><code class="language-python" data-inference-fault-example="recompute">from scheduler_faults import PagedKV, RecomputeRequest
+
+pool = PagedKV(capacity=4, block_size=2)
+request = RecomputeRequest(pool, "r", [10, 11, 12])
+assert request.resume()
+request.sample(20)
+request.sample(21)
+request.preempt()
+assert len(pool.free) == 4
+assert request.resume()
+assert request.recomputed_rows == 4
+assert pool.read("r") == [10, 11, 12, 20]
+request.sample(22)
+assert request.outputs == [20, 21, 22]
+request.cancel()
+assert len(pool.free) == 4</code></pre>
+<h3>Admission failure is not partial progress</h3>
+<p>Reconstruction needs enough pages for the entire committed prefix in this model. If allocation fails halfway through, <code>resume()</code> releases every partially reconstructed page, leaves the request queued or preempted, returns <code>False</code>, and does not increment the successful-replay counter. A failed decode allocation similarly emits no new token. The test suite deliberately leaves one competing page resident so a two-page replay starts allocating but cannot finish, then verifies that no page leaks and a later retry succeeds.</p>
+<p>This atomic operation is a teaching simplification, not chunked-prefill scheduling. It counts successfully reconstructed input rows, not wasted partial reconstruction attempts or FLOPs. A real scheduler may checkpoint reconstruction progress across several token-budget-limited dispatches. Its accounting must distinguish useful rows, failed work, retained partial KV and client-visible progress. Attention over a warm suffix also has different work from a cold prompt of the same suffix length; token counts alone do not establish a swap-versus-recompute speedup.</p>
+<h3>What the model proves, and what it does not</h3>
+<p>The invariant is exact: while active, the page-table read equals prompt plus emitted outputs excluding the newest output. Every emission event has one increasing output index, and replay produces no emission events. Cancellation is idempotent; a cancelled request cannot resume. Forty fixed random seeds exercise 2,000 preempt/sample operation choices against an independently retained output-history oracle.</p>
+<p>The model does not prove output equality after an actual engine replay. Real equivalence additionally depends on positions, attention masks, model and adapter identity, numeric execution, sampling/RNG state and the exact accepted history under speculative decoding. Nor does it prove scheduling fairness: a victim-selection policy can keep preempting the same request forever. To evaluate such a policy, add a bounded-arrival workload, a starvation metric and an explicit progress assumption rather than inferring fairness from memory conservation. See <a href="../../01-the-core-loop/01-04-the-scheduler.html#cpu-recompute-contract">the scheduler's recomputation contract</a>.</p>
+</div></section>
+
+<section class="sec" id="cpu-transfer-faults" style="--i:7"><div class="sec__h"><span class="sec__n">CPU</span><h2 class="sec__t">Asynchronous transfer faults and fenced cleanup</h2></div><div class="sec__body">
+<p>A request is cancelled in the control plane while a transport still holds its source and destination addresses. Returning those pages to the free list immediately is unsafe: a delayed write could corrupt another request. <code>TransferManager</code> models this lifetime mismatch using the existing allocator's transfer pins. Source and destination use one pool so every page is observable; real P and D workers have separate address spaces, allocators and failure detectors.</p>
+<h3>State machine and publication boundary</h3>
+<p><code>begin(source, room)</code> snapshots the source rows, pins their storage, reserves private destination pages and pins those pages too. If reservation fails, all newly allocated pages and the source pin are rolled back. The destination is unpublished: <code>read()</code> raises until <code>complete()</code> copies the snapshot and changes the transfer to <code>ready</code>. This is an atomic control-plane model of a completion acknowledgement, not a simulation of bytes arriving over a network.</p>
+<div class="table-wrap"><table class="dt"><thead><tr><th>Current state</th><th>Event</th><th>Next state</th><th>Storage rule</th></tr></thead><tbody>
+<tr><td>in_flight</td><td>Completion acknowledged</td><td>ready</td><td>Unpin both sides; destination owner retains published KV</td></tr>
+<tr><td>in_flight</td><td>Cancel, timeout, producer or consumer failure</td><td>draining</td><td>Remove destination request ownership but retain both transport pins</td></tr>
+<tr><td>draining</td><td>Late completion notification</td><td>draining</td><td>Ignore publication; no storage becomes reusable</td></tr>
+<tr><td>draining</td><td>No-further-access drain acknowledged</td><td>drained</td><td>Unpin both sides; collect only ownerless pages</td></tr>
+<tr><td>ready</td><td>Consumer releases output</td><td>released</td><td>Remove destination ownership</td></tr>
+</tbody></table></div>
+<p>A cancellation arriving after successful publication loses this particular state-machine race: <code>abort()</code> returns <code>False</code>, and the caller releases the already published output through <code>release_output()</code>. An abort that arrives first prevents subsequent publication. A duplicate completion, duplicate drain acknowledgement or unknown transfer key returns <code>False</code> without touching memory. This explicit event ordering makes the example reproducible; it is not a claim that every engine resolves races identically.</p>
+<h3>Worked cancellation ledger</h3>
+<p>Take four pages of two rows each. A three-row producer occupies two pages; destination reservation occupies the other two. The producer cancels and drops its owner. The transfer aborts and drops the destination owner. There are now <strong>zero request-owned pages but also zero free pages</strong>: four pages remain pinned by transport. Even an attempted reconstruction must fail until the transport is known to have stopped accessing them.</p>
+<pre><code class="language-python" data-inference-fault-example="transfer">from scheduler_faults import PagedKV, RecomputeRequest, TransferManager
+
+pool = PagedKV(4, 2)
+request = RecomputeRequest(pool, "r", [1, 2, 3])
+assert request.resume()
+manager = TransferManager(pool)
+old = manager.begin("r", "room-a")
+request.preempt()
+assert manager.abort(old, "consumer_failure")
+assert len(pool.free) == 0
+assert not request.resume()
+assert not manager.complete(old)
+assert manager.acknowledge_drained(old)
+assert len(pool.free) == 4
+assert request.resume()
+new = manager.begin("r", "room-a")
+assert new != old
+assert not manager.complete(old)
+assert manager.complete(new)
+assert manager.read(new) == [1, 2, 3]
+manager.release_output(new)
+request.cancel()
+assert len(pool.free) == 4</code></pre>
+<h3>Room reuse and stale callbacks</h3>
+<p>A room name is a routing label, not a lifetime identity. The manager rejects a second live transfer for the same room and allows reuse only after drain or output release. Each attempt receives a monotonically increasing key. A late callback carries that old key, never only the room string, so it cannot publish into or release the newer attempt's pages. The transfer counter advances even when destination reservation fails; skipped generations are harmless.</p>
+<p>The model retains terminal records as tombstones, and one manager owns its private owner/pin namespace for a pool. Production systems cannot grow tombstones forever. They need an explicit callback-expiry and garbage-collection policy, an incarnation identifier that survives worker restarts, and fencing at the transport or allocation layer. Merely ignoring a stale Python callback cannot stop an old RDMA write into an address that has already been reused. That is why this model permits reuse only after an externally justified drain acknowledgement.</p>
+<h3>Fault matrix and liveness assumptions</h3>
+<p>The executable suite applies the same retention contract to cancellation, timeout, producer failure and consumer failure. It also tests duplicate room names, stale and duplicate callbacks, publication before read, partial-allocation rollback, source mutation during transfer, and recomputation blocked by pinned pages. Thirty seeded randomized runs make 3,000 lifecycle operation choices and compare each published snapshot with a separate token-history oracle. Pins freeze the source view: appending to a shared or pinned partial tail invokes copy-on-write rather than changing the bytes a transfer is expected to read.</p>
+<p>Safety is unconditional within the API contract; eventual cleanup is conditional. If no trustworthy drain acknowledgement ever arrives, the model intentionally retains storage. A timeout alone is not proof that a remote writer stopped. A production recovery path might revoke registrations, reset a transport context, destroy a worker incarnation or quarantine pages until hardware completion, depending on the backend. The exercise supplies none of those mechanisms, no actual process crash, and no GPU/network measurement. See <a href="../../01-the-core-loop/01-06-pd-disaggregation.html#cpu-transfer-failure-contract">P/D failure contracts</a> before applying the toy result to an engine.</p>
+<h3>Exercises with observable answers</h3>
+<ol><li><strong>Remove a drain acknowledgement.</strong> Stop immediately after <code>abort()</code>. Expected: the request is no longer active, but four pages remain allocated. A test expecting all pages free here would encode a use-after-free bug.</li>
+<li><strong>Reverse completion and abort.</strong> Run completion first, then abort. Expected: the destination is readable, abort returns false, and output release frees destination ownership. Reverse the order and the read remains forbidden until that aborted attempt is drained; it never becomes ready.</li>
+<li><strong>Append during transfer.</strong> Transfer <code>[1, 2, 3]</code> with two-row pages, then append 4 at the source. Expected: completion still publishes <code>[1, 2, 3]</code>; the source's partial tail has been copied. Repeat with no spare page and verify that append fails without changing either snapshot.</li>
+<li><strong>Reuse a room.</strong> Drain attempt A, start B in the same room, then deliver A's completion again. Expected: B remains in flight and its allocations are unchanged. A room-only lookup would fail this experiment.</li>
+<li><strong>Interpret the built-in JSON.</strong> Expected: outputs <code>[20, 21, 22]</code>, received rows <code>[10, 11, 12, 20, 21]</code>, four successfully recomputed rows, four pages retained before the first drain acknowledgement, and all eight pages free at the end. These are exact accounting values, not latency estimates.</li></ol>
+</div></section>
 <footer class="foot">
 <p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
@@ -1055,7 +1142,9 @@ See <a href="../../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#expect">What to expect</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>
-<a href="#cpu-trace-replay">CPU trace replay</a></aside>
+<a href="#cpu-trace-replay">CPU trace replay</a>
+<a href="#cpu-preemption-recompute">Preemption and recompute</a>
+<a href="#cpu-transfer-faults">Transfer faults</a></aside>
 </div>
 <script>
 /* scroll-spy for the right-hand TOC + mobile nav toggle */

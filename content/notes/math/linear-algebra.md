@@ -880,6 +880,78 @@ the reduced equation is $(3-1/2)y=2-1/2$, giving $y=0.6$ and $x=0.2$.
 The same logic scales to grouped parameters, constrained optimization systems,
 and elimination of latent variables.
 
+```html
+<h3 id="low-rank-updates-sherman-morrison-and-woodbury">Low-rank updates: Sherman-Morrison and Woodbury</h3>
+```
+
+Suppose a fitted system changes from $A$ to $M=A+UCV^T$, where $A$ is
+$n\times n$, $U,V$ are $n\times r$, and $C$ is $r\times r$. When $r$ is small,
+the change is restricted to a low-dimensional subspace even though $M$ need not
+have low rank. Updating observations, covariance models and a ridge system can
+create this structure. A LoRA weight update also has a low-rank form, but a
+forward neural-network layer normally multiplies by its weights; it does not
+therefore need a Woodbury inverse.
+
+Derive a solve instead of memorizing an inverse formula. To solve $Mx=b$, first
+solve $Ay=b$ and $AZ=U$. The original equation becomes
+
+$$
+x=y-ZCV^Tx.
+$$
+
+Introduce $q=CV^Tx$. Substitution gives the small system
+
+$$
+(I_r+CV^TZ)q=CV^Ty,\qquad x=y-Zq.
+$$
+
+This form requires invertible $A$ and $I_r+CV^TA^{-1}U$, but **does not require
+invertible $C$**. The matrix determinant identity
+
+$$
+\det(A+UCV^T)=\det(A)\det(I_r+CV^TA^{-1}U)
+$$
+
+explains the equivalence of the two nonsingularity conditions when $A$ is
+invertible. If $C$ is invertible, rearranging the same algebra yields the familiar
+Woodbury identity with $(C^{-1}+V^TA^{-1}U)^{-1}$. That version should not be
+applied blindly when the update contains zero directions.
+
+For $r=1$, write the update as $A+uv^T$. The correction reduces to
+
+$$
+x=y-z\frac{v^Ty}{1+v^Tz},\qquad Ay=b,\quad Az=u.
+$$
+
+The denominator is a mathematical condition, not a detail to handle by adding an
+arbitrary epsilon. For $A=I_2$, $u=(1,0)^T$, and $v=(-1,0)^T$, the updated
+matrix is singular even though the original matrix was perfectly conditioned.
+Replacing $-1$ by $-1+\epsilon$ produces a nearly singular system for small
+positive $\epsilon$.
+
+The [downloadable spectral/update lab](/assets/examples/spectral_updates.py)
+uses library solves, combines $b$ and $U$ into one multiple-right-hand-side solve,
+and tests nonsymmetric updates, singular $C$, multiple right-hand sides and
+singular updated systems. It also reconstructs the dense updated matrix for a
+residual check; this is a small correctness experiment, not a memory benchmark.
+Run it in the [pinned NumPy/SciPy example environment](/assets/examples/requirements.txt):
+
+```bash
+python spectral_updates.py
+```
+
+With an existing dense factorization of $A$, the extra solves cost roughly
+$O(n^2r)$, the reduced products $O(nr^2)$, and the small factorization $O(r^3)$,
+before accounting for additional right-hand sides. If you refactor $A$ for every
+single update, that original $O(n^3)$ cost remains. Sparse structure, batching and
+factor reuse determine actual speed; low rank alone is not a timing result.
+
+Repeated updates may accumulate numerical error. Cancellation in $y-Zq$, a
+fragile base solve and a poorly scaled reduced system can all matter. Check the
+residual against the **updated** system, and periodically compare with a fresh
+factorization. See [the numerical update diagnostics](./numerical-methods.md#structured-solves-still-need-error-checks)
+for why even the small system's condition number is not a sufficient certificate.
+
 ### Kronecker products and vectorization
 
 The Kronecker product $A\otimes B$ replaces every entry $a_{ij}$ by a block
@@ -1097,6 +1169,134 @@ $$
 $$
 
 It is a weighted average of eigenvalues, so it lies between the smallest and largest. The largest eigenvalue is the maximum of $x^TAx$ over unit vectors, achieved by a leading eigenvector. This is the bridge from an algebraic equation to the variance-maximization formulation of PCA.
+
+```html
+<h3 id="generalized-eigenvectors-use-a-different-metric">Generalized eigenvectors use a different metric</h3>
+```
+
+In a generalized symmetric eigenproblem,
+
+$$
+Ax=\lambda Bx,\qquad A=A^T,\quad B=B^T\succ0,
+$$
+
+the natural normalization is $x^TBx=1$, not necessarily $x^Tx=1$. The associated
+Rayleigh quotient is
+
+$$
+\mathcal R_{A,B}(x)=\frac{x^TAx}{x^TBx}.
+$$
+
+Maximizing $x^TAx$ subject to $x^TBx=1$ gives $Ax=\lambda Bx$ through a Lagrange
+multiplier. The constraint measures length in the $B$ metric. Examples include
+variance relative to within-class scatter and eigenproblems defined by a mass
+matrix. If the denominator matrix is singular, the SPD formulation no longer
+applies without an explicitly chosen restriction or regularization.
+
+Use a Cholesky factorization $B=LL^T$ and coordinates $z=L^Tx$. Then
+
+$$
+(L^{-1}AL^{-T})z=\lambda z,\qquad x=L^{-T}z.
+$$
+
+The transformed matrix is symmetric, and the ordinary orthonormal eigenvectors
+$Z$ recover generalized eigenvectors $X=L^{-T}Z$ satisfying
+
+$$
+AX=BX\Lambda,\qquad X^TBX=I.
+$$
+
+Triangular solves implement the inverse symbols. Directly forming $B^{-1}A$
+usually creates a nonsymmetric matrix in Euclidean coordinates and discards the
+structure a symmetric-definite solver could exploit. Do not pass that product
+to an ordinary symmetric eigensolver and assume it will detect the mistake.
+
+The lab compares Cholesky whitening with
+[`scipy.linalg.eigh(A, B, type=1)`](https://docs.scipy.org/doc/scipy-1.11.4/reference/generated/scipy.linalg.eigh.html)
+on $A=\begin{bmatrix}3&1\\1&2\end{bmatrix}$ and
+$B=\begin{bmatrix}2&0.4\\0.4&1\end{bmatrix}$. It checks the original eigen-equation
+and $B$-orthogonality, and deliberately rejects a nonsymmetric $A$ or a non-SPD
+$B$. SciPy's routine reads a selected triangle rather than automatically
+certifying symmetry, so the wrapper checks its real-matrix contract first.
+The symmetry check is relative to the matrix's own scale; it averages only
+accepted roundoff-level asymmetry before both methods. An ill-conditioned $B$
+can amplify whitening errors, so the lab reports its condition number and the
+methods' eigenvalue discrepancy instead of demanding a universal agreement
+tolerance. A small residual alone does not establish accurate eigenvectors.
+
+Eigenvector signs are arbitrary. Repeated eigenvalues also allow rotation within
+an eigenspace. Compare residuals, metric orthogonality and the relevant invariant
+subspace, not raw column equality between two correct solvers. Adding a ridge
+term to $B$ can make the problem solvable, but changes its metric and eigenproblem;
+report that change instead of calling it a harmless implementation detail.
+
+```html
+<h3 id="schur-form-survives-when-diagonalization-fails">Schur form survives when diagonalization fails</h3>
+```
+
+Every real square matrix has a real Schur factorization
+
+$$
+A=QTQ^T,\qquad Q^TQ=I,
+$$
+
+where $T$ is upper quasi-triangular: real eigenvalues occupy diagonal entries and
+complex-conjugate pairs occupy real $2\times2$ diagonal blocks. Over the complex
+numbers, a unitary Schur factorization has an upper triangular $T$. Unlike an
+eigenvector diagonalization, Schur form does not require a complete eigenvector
+basis. Its off-diagonal entries retain the coupling that a diagonal picture can
+hide. Do not confuse Schur **decomposition** with the Schur **complement** from
+block elimination; they solve different problems.
+
+[`scipy.linalg.schur`](https://docs.scipy.org/doc/scipy-1.11.4/reference/generated/scipy.linalg.schur.html)
+returns the Schur form before the orthogonal/unitary factor. The lab checks
+reconstruction and orthogonality for both a defective matrix and a real rotation
+with complex eigenvalues. A defective Jordan block is not a failure of Schur
+factorization; it is a counterexample to universal diagonalization.
+
+For a continuous linear system $\dot x=Ax$ and a discrete one $x_{k+1}=Ax_k$,
+
+$$
+x(t)=e^{tA}x(0),\qquad x_k=A^kx_0,
+$$
+
+$$
+e^{tA}=Qe^{tT}Q^T,\qquad A^k=QT^kQ^T.
+$$
+
+The [library matrix exponential](https://docs.scipy.org/doc/scipy-1.11.4/reference/generated/scipy.linalg.expm.html)
+is a matrix function, not an elementwise exponential. The lab compares direct
+propagation with propagation in Schur coordinates; it does not implement a
+custom matrix-exponential algorithm.
+
+Continuous asymptotic stability requires every eigenvalue to have negative real
+part; discrete asymptotic stability requires every eigenvalue to have magnitude
+strictly below one. These are different tests. The matrix
+
+$$
+A_c=\begin{bmatrix}-1&8\\0&-2\end{bmatrix}
+$$
+
+is continuous-time stable, yet $\|e^{tA_c}\|_2$ initially exceeds one because it
+is non-normal. For this example the off-diagonal exponential entry is
+$8(e^{-t}-e^{-2t})$, which initially grows while the diagonal entries decay.
+
+Likewise,
+
+$$
+A_d=\begin{bmatrix}0.8&3\\0&0.8\end{bmatrix}
+$$
+
+is discrete-time stable and defective. For $k\ge1$ its off-diagonal entry is
+$3k\,0.8^{k-1}$, so finite-time amplification can be large even though powers
+eventually vanish. The script prints operator-norm curves at specified sample
+times/steps; a finite grid is not a certified global maximum.
+
+The operator norm describes the largest amplification over initial directions,
+not the trajectory of every input. This distinction matters when interpreting
+recurrent-state sensitivity: eigenvalues alone cannot rule out transient growth,
+and a small stable linear fixture does not establish the behavior of an entire
+nonlinear, input-dependent recurrent network.
 
 ## 11. Quadratic forms, curvature, and positive definiteness
 

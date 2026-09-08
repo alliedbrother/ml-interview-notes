@@ -2,7 +2,8 @@
 
 No network access or source checkout modifications. Range checks establish only
 that a path and line interval exist, not that quoted text or its interpretation is
-correct. Unqualified paths outside engine-tagged blocks remain unresolved.
+correct. Abbreviations resolve only against explicit local citation anchors and
+the supplied pinned trees; ambiguous references remain unresolved.
 """
 
 import argparse
@@ -49,7 +50,83 @@ def inventory(course=COURSE):
                           context if context in PINS else None)
                 records.append(dict(page=str(path.relative_to(course)), path=source,
                                     first=int(match['first']), last=int(match['last'] or match['first']),
-                                    engine=engine))
+                                    engine=engine,
+                                    section=(node.find_parent('section') or {}).get('id'),
+                                    declared_engine=node.get('data-source-engine'),
+                                    declared_path=node.get('data-source-path'),
+                                    reviewed_symbol=node.get('data-source-symbol')))
+    return records
+
+
+def resolve_references(records, roots):
+    """Resolve shortened paths using qualified local anchors, not basename search.
+
+    The original fields stay unchanged for inventory fingerprinting. A complete
+    multi-component path may resolve by exact existence in only one of both
+    supplied pinned trees. No suffix/basename search of the trees is performed.
+    Otherwise an anchor
+    must name a real path in a pinned checkout and contain the abbreviated line
+    interval. Same-section evidence takes precedence over same-page evidence;
+    two distinct candidate files at the chosen scope are deliberately ambiguous.
+    Resolved references never become anchors for further speculative inference.
+    """
+    anchors = defaultdict(list)
+    for index, record in enumerate(records):
+        for key in ('resolved_engine', 'resolved_path', 'resolution_status', 'resolution_evidence'):
+            record.pop(key, None)
+        if record['engine'] in roots and check_range(record, roots[record['engine']]) == 'range-exists':
+            anchors[record['page']].append((index, record))
+    for record in records:
+        if record['engine'] is not None:
+            continue
+        declared_engine, declared_path = record.get('declared_engine'), record.get('declared_path')
+        if declared_engine in roots and declared_path and record.get('reviewed_symbol'):
+            declared = dict(record, path=declared_path)
+            status = check_range(declared, roots[declared_engine])
+            if status == 'range-exists':
+                lines = (roots[declared_engine] / declared_path).read_text(errors='replace').splitlines()
+                if record['reviewed_symbol'] in '\n'.join(lines[record['first'] - 1:record['last']]):
+                    record['resolved_engine'], record['resolved_path'] = declared_engine, declared_path
+                    record['resolution_status'] = 'reviewed-context-and-pinned-symbol'
+                    record['resolution_evidence'] = dict(engine=declared_engine, path=declared_path,
+                                                         symbol=record['reviewed_symbol'],
+                                                         method='Authored per-occurrence context qualification; symbol rechecked at cited pinned lines')
+                    continue
+            record['resolution_status'] = 'reviewed-evidence-mismatch'
+            continue
+        # A written multi-component path can itself be a complete repository path.
+        # Require both pinned trees: an omitted competing checkout is not absence.
+        if set(roots) == set(PINS) and '/' in record['path'] and '..' not in Path(record['path']).parts:
+            exact = [engine for engine, root in roots.items()
+                     if check_range(dict(record, first=1, last=1), root) == 'range-exists']
+            if len(exact) == 1:
+                record['resolved_engine'], record['resolved_path'] = exact[0], record['path']
+                record['resolution_status'] = 'unique-exact-path-in-pinned-trees'
+                record['resolution_evidence'] = dict(path=record['path'], checked_engines=sorted(roots),
+                                                     engine=exact[0], pins=PINS)
+                continue
+        candidates = []
+        for index, anchor in anchors[record['page']]:
+            if (anchor['path'] == record['path'] or anchor['path'].endswith('/' + record['path'])) and (
+                    anchor['first'] <= record['first'] <= record['last'] <= anchor['last']):
+                candidates.append((index, anchor))
+        local = [(index, anchor) for index, anchor in candidates
+                 if record.get('section') is not None and anchor.get('section') == record['section']]
+        chosen = local or candidates
+        identities = {(anchor['engine'], anchor['path']) for _, anchor in chosen}
+        if len(identities) != 1:
+            record['resolution_status'] = 'ambiguous-local-anchors' if identities else 'no-qualified-local-anchor'
+            continue
+        index, anchor = min(chosen, key=lambda pair: pair[1]['last'] - pair[1]['first'])
+        resolved = dict(record, engine=anchor['engine'], path=anchor['path'])
+        if check_range(resolved, roots[anchor['engine']]) != 'range-exists':
+            record['resolution_status'] = 'anchor-range-not-verified'
+            continue
+        record['resolved_engine'], record['resolved_path'] = anchor['engine'], anchor['path']
+        record['resolution_status'] = 'same-section-qualified-anchor' if local else 'same-page-qualified-anchor'
+        record['resolution_evidence'] = dict(record_index=index, page=anchor['page'],
+                                             section=anchor.get('section'), engine=anchor['engine'],
+                                             path=anchor['path'], first=anchor['first'], last=anchor['last'])
     return records
 
 
@@ -68,15 +145,20 @@ def check_range(record, checkout):
 
 def inventory_digest(records):
     """Fingerprint inputs, excluding status and URLs added during verification."""
-    fields = ('page', 'path', 'first', 'last', 'engine')
-    canonical = [{key: record[key] for key in fields} for record in records]
+    fields = ('page', 'path', 'first', 'last', 'engine', 'section',
+              'declared_engine', 'declared_path', 'reviewed_symbol')
+    canonical = [{key: record.get(key) for key in fields} for record in records]
     return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
 
 
 def summarize(records, checked_engines):
     pages = defaultdict(Counter)
+    unresolved = defaultdict(lambda: dict(pages=Counter(), reasons=Counter()))
     for record in records:
         pages[record['page']][record['status']] += 1
+        if record['status'] == 'unresolved-engine':
+            unresolved[record['path']]['pages'][record['page']] += 1
+            unresolved[record['path']]['reasons'][record.get('resolution_status', 'no-resolution-evidence')] += 1
     return dict(
         scope='Explicit path:line references in code and source headers only; not a complete bibliography or quote verifier',
         checked_at_utc=datetime.now(timezone.utc).isoformat(),
@@ -84,6 +166,10 @@ def summarize(records, checked_engines):
         checked_engines=sorted(checked_engines),
         inventory_sha256=inventory_digest(records),
         counts=dict(sorted(Counter(record['status'] for record in records).items())),
+        resolution_counts=dict(sorted(Counter(record.get('resolution_status', 'explicit-engine')
+                                              for record in records).items())),
+        unresolved_by_path={path: {key: dict(sorted(counts.items())) for key, counts in details.items()}
+                            for path, details in sorted(unresolved.items())},
         pages={page: dict(sorted(counts.items())) for page, counts in sorted(pages.items())},
     )
 
@@ -106,15 +192,16 @@ def main():
         if result.returncode or result.stdout.strip() != PINS[engine] or dirty.returncode or dirty.stdout.strip():
             parser.error(f'{engine} requires a clean checkout at {PINS[engine]}')
         checked_roots[engine] = root
-    records = inventory()
+    records = resolve_references(inventory(), checked_roots)
     for record in records:
-        engine = record['engine']
+        engine = record.get('resolved_engine', record['engine'])
+        source = record.get('resolved_path', record['path'])
         record['status'] = ('unresolved-engine' if engine is None else
                             'checkout-not-provided' if engine not in checked_roots else
-                            check_range(record, checked_roots[engine]))
+                            check_range(dict(record, path=source), checked_roots[engine]))
         if engine:
             repo = 'vllm-project/vllm' if engine == 'vllm' else 'sgl-project/sglang'
-            record['url'] = f"https://github.com/{repo}/blob/{PINS[engine]}/{record['path']}#L{record['first']}-L{record['last']}"
+            record['url'] = f"https://github.com/{repo}/blob/{PINS[engine]}/{source}#L{record['first']}-L{record['last']}"
     report = summarize(records, checked_roots)
     if not args.summary:
         report['records'] = records
