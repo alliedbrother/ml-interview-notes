@@ -99,3 +99,11 @@ prediction fixtures for serving. Passing means reordered columns are handled or
 rejected explicitly, fitted transforms exclude validation rows, and offline and
 served outputs agree within a declared tolerance. Conversion boundaries must record
 whether labels, nullable dtypes, sparse structure, or device placement are lost.
+
+The [runnable text-artifact capstone](./libraries/mlops-and-serving.md#capstone-train-package-reload-serve)
+now exercises one complete CPU path: grouped data splits, train-only TF-IDF,
+development selection, final evaluation, a versioned pipeline bundle, trusted
+reload, and identical offline/HTTP probabilities. Its downloads include the
+complete script and focused environment. It complements the mixed-column
+examples; the wider boosted-tabular comparison, diagnostic plot gallery, and
+real production deployment remain separate exercises.

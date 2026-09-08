@@ -505,6 +505,191 @@ key-padding masks instead use **True = ignored**. Name tensors `allowed` or
 Teacher forcing also creates an exposure mismatch: evaluation histories include
 model mistakes; this is distinct from future-token leakage.
 
+## Lab: train a padded encoder-decoder
+
+Download [train_tiny_translation.py](./code/train_tiny_translation.py). This is
+an actual optimization and evaluation experiment using `torch.nn.Transformer`,
+not randomly initialized output presented as translation. It runs on CPU with
+no dataset or checkpoint downloads; the tested environment uses PyTorch 2.8.
+
+```bash
+python content/courses/transformers/code/train_tiny_translation.py
+python content/courses/transformers/code/train_tiny_translation.py --output-dir /tmp/course-translation
+python site/test_transformer_training.py
+```
+
+The default run writes its reload-check checkpoint to a temporary directory and
+removes it afterward. `--output-dir` retains `manifest.json`, `checkpoint.pt`
+and `evaluation.json`. The test command also covers the
+[tokenizer lab](./02-tokenization-and-embeddings.md#lab-train-a-tokenizer-and-audit-every-merge)
+and therefore requires the optional `tokenizers` library as well as PyTorch.
+
+### A controlled word-order problem
+
+The task translates English color/shape phrases into a deliberately restricted
+French vocabulary. `a red circle` becomes `un cercle rouge`: the adjective moves
+after the noun. The six isolated color and noun translations are also examples,
+so the batch contains genuinely different sequence lengths. Accents and wider
+French agreement are outside this ASCII toy vocabulary.
+
+Training contains six isolated words and six three-word combinations. The three
+diagonal combinations are held out: `a red square`, `a blue circle`, and
+`a green triangle`. No held-out pair appears in training. Both vocabularies are
+built from **training text only**; every held-out word nevertheless occurs in
+another training phrase. Unknown words raise an explicit error rather than
+silently mapping to an unspecified unknown token.
+
+This split asks whether the model recombines known words in unseen pairs. It is
+not an independent natural-language test set. The grammar, vocabulary and split
+were constructed by us, and three examples cannot estimate translation quality
+reliably. The script reports all three predictions rather than hiding them
+behind a large-looking aggregate percentage. It does not tune hyperparameters
+or stop training according to this split.
+
+### Follow one padded batch
+
+Source sequences end in EOS. Targets contain BOS and EOS before padding. For a
+short isolated-word example beside a longer phrase:
+
+```text
+source:       red EOS PAD PAD
+              a blue square EOS
+
+full target:  BOS rouge EOS PAD PAD
+              BOS un carre bleu EOS
+
+decoder in:   BOS rouge EOS PAD
+              BOS un carre bleu
+
+labels:       rouge EOS PAD PAD
+              un carre bleu EOS
+```
+
+The decoder input is `full_target[:, :-1]`; labels are
+`full_target[:, 1:]`. BOS is never a target. EOS **is** a supervised target, so
+the model learns when to finish. PAD labels are excluded from cross entropy
+using `ignore_index=PAD`; this lab uses the actual PAD ID, whereas the preceding
+worked example used `-100`. Either is valid when collator and loss agree.
+
+The objective is the sum of negative log probabilities over valid target
+positions divided by the **number of valid target tokens**. It is not the mean
+of per-sequence losses. Longer examples consequently contribute more terms.
+The test compares masked cross entropy against explicitly selecting valid
+positions, and checks that changing logits at ignored positions cannot change
+the loss.
+
+### Four independent attention constraints
+
+| Argument | Shape | What `True` excludes |
+| --- | --- | --- |
+| `src_key_padding_mask` | batch by source length | Source PAD keys inside encoder self-attention |
+| `tgt_mask` | target length by target length | Strictly future decoder positions |
+| `tgt_key_padding_mask` | batch by target length | Target PAD keys inside decoder self-attention |
+| `memory_key_padding_mask` | batch by source length | Source PAD columns in decoder cross-attention |
+
+These are boolean masks for `nn.Transformer`, where `True` means forbidden.
+That polarity is opposite to boolean masks passed directly to functional SDPA.
+The library also handles projection, attention and feed-forward layers; the lab
+concentrates on data, masks and training instead of reimplementing those kernels.
+See the [PyTorch Transformer API](https://docs.pytorch.org/docs/2.8/generated/torch.nn.Transformer.html).
+
+A key-padding mask does not force every padded **query output** to zero. A
+padded target position may produce arbitrary finite logits; ignoring its label
+is therefore still necessary. Similarly, masking source padding in the encoder
+does not remove the need to mask those memory positions in cross-attention.
+The position embedding added to a PAD token can be nonzero even when the token
+embedding uses `padding_idx`.
+
+The regression suite perturbs future target tokens and verifies that earlier
+logits do not change. It appends source padding and compares logits with the
+unpadded computation. It also compares a short example alone with its valid
+positions inside a padded mixed-length batch. These checks test information
+flow, not just tensor shapes. Floating-point comparisons use small tolerances
+because equivalent padded and unpadded library paths need not be bit-identical.
+
+### Training and evaluation are different programs
+
+The network has one encoder layer, one decoder layer, width 32, four heads,
+feed-forward width 64, learned positions, and dropout zero. It trains for 250
+full-batch AdamW updates at learning rate 0.015 with gradient norm clipping at
+1.0. Seed 808 and one CPU thread make the experiment reproducible in the tested
+environment. These are tiny-data teaching settings, not a recommended schedule
+for a real translation system; dropout is disabled to isolate the contracts.
+
+Training uses ground-truth target prefixes. Autoregressive evaluation starts
+from BOS and repeatedly supplies the model's **own** previous predictions.
+Greedy decoding excludes PAD and BOS as new outputs. A completed sequence gets
+PAD while other batch members continue. Decoding stops when every sequence has
+produced EOS or the generation limit is reached. The report records `ended`;
+an unterminated text prefix is not counted as an exact match merely because its
+visible words happen to agree. Exact match includes EOS.
+
+For clarity, this small implementation recomputes the encoder and decoder
+prefix each generation step. It does **not** implement an efficient serving
+cache. Reusing encoder memory is an immediate optimization; decoder KV reuse
+requires preserving the same positions and masks described in
+[hardware-aware attention](./11-hardware-aware-attention.md).
+
+One local PyTorch 2.8 CPU run produced:
+
+| Measurement | Training phrases | Held-out combinations |
+| --- | ---: | ---: |
+| Teacher-forced token accuracy | 100% | 91.67% |
+| Autoregressive exact match, including EOS | 12/12 | 2/3 |
+| Teacher-forced cross entropy | 0.000123 | 0.302879 |
+
+Initial training cross entropy was 2.390391. The missed combination was
+`a green triangle`, decoded as `un triangle rouge`. The model learned a good
+training solution without fully learning the intended compositional rule.
+Backend/version differences can change this small run; tests require successful
+training and internally correct metric accounting, **not a predetermined
+held-out score**. Teacher-forced token accuracy is not interchangeable with
+free-running exact match, and a near-zero training loss is not evidence that
+the model understands a language.
+
+### Reload more than a weight matrix
+
+The manifest records architecture geometry, ordered source/target vocabularies,
+special-token IDs through their ordered entries, update count, seed and PyTorch
+version. The checkpoint contains model state, AdamW state and CPU RNG state.
+Reload constructs the architecture from the manifest, validates vocabulary sizes
+and special-token ordering, loads tensors on CPU with `weights_only=True`, and
+restores optimizer state. The script then reproduces evaluation from the disk
+artifact. Tests compare one subsequent optimizer update with the original
+state, not merely two forward passes.
+
+Changing the vocabulary order while keeping its size would silently relabel
+embedding rows unless the same manifest travels with the checkpoint. Treat the
+files as one trusted artifact. `weights_only=True` narrows deserialization but
+is not a sandbox for arbitrary hostile files; this exercise only reloads files
+it creates. It does not provide signed artifacts or a hardened upload endpoint.
+
+For this full-batch, dropout-free CPU run the saved state is sufficient to
+reproduce the next update. A production resume also needs sampler position,
+data/version identifiers, scheduler and scaler state when present, distributed
+RNG state, and any gradient-accumulation progress. A seed alone is not a complete
+resume protocol. See [PyTorch training workflows](/notes/libraries/pytorch/)
+and the [decoder training capstone](./16-end-to-end-forward-pass.md).
+
+### Extend the experiment without invalidating it
+
+1. Add a validation split separate from a final test set before choosing steps,
+   width or learning rate. Repeatedly inspecting the three held-out phrases
+   turns them into development data.
+2. Remove one mask at a time and run the isolation tests. Source PAD masking,
+   future masking and ignored target loss fail for different reasons; explain
+   each failure before looking at the accuracy.
+3. Add longer phrases with multiple modifiers and hold out a length regime.
+   Report length-specific results rather than mixing easy and hard examples.
+   Learned position tables impose a hard configured maximum.
+4. Compare teacher forcing with a free-running error trace. Identify the first
+   wrong token, then separate downstream errors caused by that prefix from
+   errors already present under the correct prefix.
+5. Move to a versioned real parallel corpus, tokenizer artifacts trained only
+   on training text, and established corpus-level translation metrics. Include
+   preprocessing and metric signatures, multiple seeds and uncertainty; this
+   toy exact-match score is not a substitute for that evaluation.
+
 ## Key takeaways
 
 - Three families: encoder-only (BERT, understanding), decoder-only (GPT/Llama,

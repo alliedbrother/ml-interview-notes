@@ -995,6 +995,54 @@ request, or a smaller admission cap &mdash; not a bigger batch.</p>
   cannot cash. The fix is capacity, not a wider batch.</li>
 </ul></div></section>
 
+<section class="sec" id="cpu-trace-replay" style="--i:5"><div class="sec__h"><span class="sec__n">CPU</span><h2 class="sec__t">Replay a scheduler trace without a GPU</h2></div><div class="sec__body">
+<p>The server benchmark above measures a real deployment. This companion lab needs only Python 3.10 or newer and the standard library. It answers a different question: can a scheduler account for every input token, reserved page, cancellation and cleanup event on a fixed workload? Download <a href="../scheduler_sim.py" download>scheduler_sim.py</a>, then run these commands from its directory. No model download, API key, engine install or GPU is used.</p>
+<pre><code class="language-bash">python scheduler_sim.py --output continuous.json
+python scheduler_sim.py --policy serial --output serial.json
+python -m json.tool continuous.json</code></pre>
+<p>Every dispatch lasts one synthetic tick regardless of its token count. Report synthetic TTFT, queue delay and dispatch count, <strong>not milliseconds or tokens per second</strong>. The serial policy admits one request at a time; the continuous policy admits up to <code>max_active</code> and mixes decode rows with chunked prefills. Neither implements padded static batch formation. The model exposes reservation and lifecycle differences without pretending to measure attention bandwidth.</p>
+<h3>Input and output contracts</h3>
+<p>Supply <code>--trace workload.jsonl</code> to replay your own workload. Each nonblank line is one JSON object in either of the following forms; the built-in workload is reproduced here in full. Timestamps are nonnegative integer boundaries, prompt and requested output lengths are positive integers, and all request IDs must be unique for the entire trace. A cancellation must reference a request arriving at or before its timestamp. Unknown fields and booleans masquerading as integers are rejected.</p>
+<pre><code class="language-json">{"time": 0, "event": "arrival", "id": "long", "prompt_tokens": 8, "output_tokens": 4}
+{"time": 0, "event": "arrival", "id": "short", "prompt_tokens": 2, "output_tokens": 2}
+{"time": 1, "event": "arrival", "id": "cancel-me", "prompt_tokens": 6, "output_tokens": 4}
+{"time": 2, "event": "cancel", "id": "cancel-me"}
+{"time": 2, "event": "arrival", "id": "late", "prompt_tokens": 3, "output_tokens": 2}</code></pre>
+<p>The output is one JSON document with <code>schema_version</code>, <code>time_unit</code>, the full <code>config</code>, a per-request table, an ordered <code>events</code> trace and summary counts. Each request records arrival, admission, terminal time, output timestamps, queue ticks, TTFT ticks and individual ITL ticks. TTFT is <code>null</code> when no output was produced; it is never manufactured as zero for cancelled or rejected requests. A one-token response has an empty ITL list because there is no inter-token interval.</p>
+<p>Each <code>snapshot</code> includes logical block tables, allocated and free counts, active reservation credits, draining pages and remaining admission headroom. Snapshots occur after boundary events and admission but before dispatch. Dispatch events list the request, phase and input-token count for every participating row. The subsequent token and terminal events occur at the completion boundary. Arrival, cancellation and release events make missing work distinguishable from missing instrumentation.</p>
+<h3>Expected built-in result</h3>
+<div class="table-wrap"><table class="dt"><thead><tr><th>Request</th><th>Output ticks</th><th>TTFT ticks</th><th>Terminal state</th></tr></thead><tbody>
+<tr><td>long</td><td>4, 5, 6, 7</td><td>4</td><td>finished at 7</td></tr>
+<tr><td>short</td><td>1, 2</td><td>1</td><td>finished at 2</td></tr>
+<tr><td>cancel-me</td><td>none</td><td>null</td><td>cancelled at 2</td></tr>
+<tr><td>late</td><td>4, 5</td><td>2</td><td>finished at 5</td></tr>
+</tbody></table></div>
+<p>The default continuous run performs seven dispatches and processes 19 input tokens: 11 for <code>long</code>, three for <code>short</code>, four for <code>late</code>, and one prefill token wasted on <code>cancel-me</code>. Three requests finish, one cancels, none rejects. All eight pages are reusable by tick eight, one tick after the last response completes. That final drain time is not the last request's response latency.</p>
+<pre><code class="language-python" data-scheduler-example="trace">from scheduler_sim import demo_trace, simulate
+
+report = simulate(demo_trace())
+assert report["time_unit"] == "synthetic_tick"
+assert report["requests"]["long"]["token_times"] == [4, 5, 6, 7]
+assert report["requests"]["cancel-me"]["ttft_ticks"] is None
+assert report["summary"] == {
+    "drained_at_tick": 8, "dispatches": 7,
+    "processed_input_tokens": 19, "free_blocks": 8,
+    "finished": 3, "cancelled": 1, "rejected": 0,
+}
+assert report == simulate(demo_trace())
+print("deterministic trace and complete cleanup: OK")</code></pre>
+<h3>Experiments with an answer you can check</h3>
+<ol>
+<li><strong>Reservation versus allocation.</strong> Set capacity to two four-token pages and submit a one-token prompt requesting eight outputs, followed by a one-token prompt requesting one output. The first request reserves both pages before allocating either, so the second queues despite a nonempty physical free list. Inspect <code>reserved_blocks</code> and <code>admission_headroom</code>, not only <code>free_blocks</code>.</li>
+<li><strong>Cancellation versus reuse.</strong> Use a one-page pool, two one-token prompts with one-token outputs, and <code>--release-delay 3</code>. The first response finishes at tick one, but the second cannot be admitted until tick four. Reducing the delay to zero allows admission at tick one. Delayed release is a storage-lifetime constraint, not extra request computation.</li>
+<li><strong>Boundary races.</strong> Cancel a one-token request at tick one after it was dispatched at tick zero. Completion wins because dispatch results commit before boundary arrivals and cancellations. Cancel the same request at tick zero and it never runs. The trace must show <code>cancel_ignored</code> in the first case and <code>cancelled</code> in the second.</li>
+<li><strong>Decode priority.</strong> Reduce <code>--token-budget</code> to one while multiple requests are active. A decode row can consume the entire budget, delaying prefill. Rotation shares decode opportunities across the current rows; it does not erase the phase-priority tradeoff. Compare each request's token timestamps instead of averaging away the delayed request.</li>
+<li><strong>Failure conservation.</strong> Submit a prompt that cannot fit even alone. It must become <code>rejected</code>, not remain queued forever or acquire negative headroom. Add a duplicate arrival ID and confirm the input is rejected before simulation, preventing ambiguous cancellation routing across ID reuse.</li>
+</ol>
+<h3>Verification and limits</h3>
+<p>From a repository checkout run <code>python site/test_inference_scheduler.py</code>. Tests execute both printed Python examples, the CLI JSONL roundtrip, deterministic boundary cases, 60 seeded scheduler workloads and 5,000 randomized allocator operation choices against a separate logical-token oracle. See <a href="../../02-memory-and-kv-cache/02-02-pagedattention.html#cpu-ownership-model">the ownership lesson</a> for shared partial prefixes, synchronous copy-on-write, transfer pins and failure-atomic allocation.</p>
+<p>No real request traces or performance measurements are bundled. Replay accepts arrivals, intended lengths and cancellations, not worker kernel traces. The scheduler has no preemption, cache-hit-aware admission, distributed routing, deadline objective or prefill/decode-specific cost curve; the allocator's shared-prefix operations are tested separately from scheduling. Keep the JSON configuration with any result, and retain these exclusions when discussing what an experiment demonstrates. Extend one policy at a time and rerun the conservation tests before adding a performance interpretation.</p>
+</div></section>
 <footer class="foot">
 <p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
@@ -1006,7 +1054,8 @@ See <a href="../../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#run">Running it</a>
 <a href="#expect">What to expect</a>
 <a href="#exercises">Exercises</a>
-<a href="#takeaways">Key takeaways</a></aside>
+<a href="#takeaways">Key takeaways</a>
+<a href="#cpu-trace-replay">CPU trace replay</a></aside>
 </div>
 <script>
 /* scroll-spy for the right-hand TOC + mobile nav toggle */

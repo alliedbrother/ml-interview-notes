@@ -446,6 +446,13 @@ modern block end to end with real shapes. That is what
 
 ## Integration exercise: overfit, restore and reject invalid inputs
 
+This decoder-only exercise complements two earlier runnable labs:
+[frequency-logged BPE training](./02-tokenization-and-embeddings.md#lab-train-a-tokenizer-and-audit-every-merge)
+and [padded encoder-decoder translation](./08-encoder-decoder-masking.md#lab-train-a-padded-encoder-decoder).
+The translation lab adds variable-length batches, all four attention-mask
+contracts, disk artifact reloads, and separate teacher-forced/autoregressive
+evaluation. Its held-out toy combinations are not a real translation benchmark.
+
 Run [train_tiny_decoder.py](./code/train_tiny_decoder.py) from the repository root:
 
 ```sh

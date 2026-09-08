@@ -490,6 +490,255 @@ escalate to the large one when the small model's confidence is low. On many
 workloads this cuts cost by more than half at negligible quality loss, and it is
 easy to tune with a single confidence threshold.
 
+## Capstone: train, package, reload, serve
+
+The earlier in-process example isolates the HTTP contract. This capstone connects
+the complete artifact path: a grouped text dataset, train-only preprocessing,
+development-set model selection, final evaluation, a serialized pipeline, an
+integrity-checked manifest, and the same predictions through FastAPI. It is a
+CPU-only offline fixture, with no model downloads, cloud account, registry,
+telemetry, or paid service.
+
+**Downloads:** [complete Python capstone](/assets/examples/artifact_capstone.py)
+and [focused environment](/assets/examples/requirements-artifact-capstone.txt).
+The source includes training, loading, service construction, and the executable
+demonstration. These teaching pins reproduce the example; they are not a
+security-maintained production lockfile.
+
+```mermaid
+flowchart LR
+    G["72 synthetic messages<br/>36 incident groups"] --> S["48 train / 12 dev / 12 test<br/>group-disjoint"]
+    S --> P["Train-only TF-IDF<br/>logistic regression"]
+    P --> D["Choose C on dev<br/>evaluate test once"]
+    D --> A["Pipeline + manifest<br/>metrics + prediction fixture"]
+    A --> L["Trust, integrity, versions<br/>reload and warm up"]
+    L --> H["HTTP schema<br/>offline / served parity"]
+```
+
+### Run the complete workflow
+
+Download the two files into one directory and run with Python 3.11:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements-artifact-capstone.txt
+.venv/bin/python artifact_capstone.py demo --output ./ticket-artifact
+```
+
+The output directory must not already exist. The script refuses to overwrite a
+previous release. A failed run can leave an incomplete directory; inspect it and
+choose a new output path for the next run. In a registry implementation, build
+under a temporary version and promote it atomically only after validation.
+
+The command prints the chosen regularization, development and test log loss,
+per-class scores, confusion matrix, immutable model digest, manifest digest, and
+`roundtrip: passed`. It executes HTTP requests through an in-process ASGI test
+client. **It does not bind a port or deploy a public server.** Use `train` instead
+of `demo` to write the artifact without running the HTTP demonstration.
+
+To call that same artifact through a real local HTTP listener, use the manifest
+digest printed by your own trusted training run:
+
+```bash
+.venv/bin/python artifact_capstone.py serve --artifact ./ticket-artifact \
+  --manifest-sha256 YOUR_TRUSTED_MANIFEST_SHA256 --trust-artifact --port 8001
+```
+
+The server binds only to `127.0.0.1`, runs one worker, and disables access logs.
+Choose another port if 8001 is occupied. In another terminal:
+
+```bash
+curl --fail http://127.0.0.1:8001/ready
+curl --fail http://127.0.0.1:8001/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["please refund the invoice","reset my password"]}'
+```
+
+Stop the server with Ctrl+C. Startup loads and validates the artifact before
+accepting requests. The explicit trust flag is not an authentication mechanism;
+do not take the digest from a bundle whose producer you do not trust. This
+single-process development command does not expose the model publicly and has
+none of the production access controls described below.
+
+| File | What it records | Why it belongs with the release |
+|---|---|---|
+| `dataset.json` | the complete 72-row synthetic fixture | exact data bytes can be hashed and inspected |
+| `splits.json` | row IDs and incident groups in each split | split membership is an artifact, not an undocumented seed |
+| `model.joblib` | fitted TF-IDF vectorizer and classifier together | inference uses the fitted vocabulary, IDF weights, and coefficients |
+| `metrics.json` | every development candidate, selected C, final test report | model selection and final evaluation remain distinguishable |
+| `predictions.json` | ordered texts, class order, probabilities, tolerance | fixed offline outputs make reload and serving parity testable |
+| `manifest.json` | schema, exact runtime versions, file digests, source digest | binds the model, data, protocol, and interface into one release record |
+
+This fixture contains no private data. A real release should not automatically
+embed raw training texts or customer identifiers in downloadable bundles. Store
+access-controlled references and approved redacted prediction fixtures when the
+data policy requires them. Hashes of sensitive texts are not anonymization.
+
+### Split isolation is an executable property
+
+The task has three mutually exclusive labels: `account`, `billing`, and
+`delivery`. Each category has twelve synthetic incidents; every incident has two
+related messages. Splitting individual messages would allow the paired variant
+to land in another split. The fixed splitter instead assigns eight incident
+groups per class to training, two to development, and two to testing. The seed
+is 41, and all group IDs are saved.
+
+Training uses only the `text` field. IDs, group labels, and targets are never
+passed as separate predictive features. Every incident also has a unique neutral
+marker token. Tests verify that training markers occur in the fitted vocabulary,
+while development and test markers do not. Fitting `TfidfVectorizer` on all texts
+before the split would fail this check, even if no labels were passed to it:
+vocabulary and document-frequency statistics are learned state.
+
+The script fits three complete pipelines with `C` in `{0.5, 2.0, 8.0}` on the
+same training split. It chooses the smallest development log loss, with smaller
+`C` as a deterministic tie-breaker, then evaluates the selected model once on
+the test split. It deliberately does **not** refit on train plus development,
+so the train-only vocabulary invariant remains straightforward. A later refit
+is a different artifact: rerun the parity fixture and identify exactly which
+evaluation data remain untouched. Review [pipelines and cross-validation](./scikit-learn.md)
+and [text evaluation](../nlp/nlp-evaluation.md) for the wider protocol.
+
+This is a plumbing dataset, not a language understanding benchmark. Message
+templates repeat across incident groups, and category words make the task easy.
+The reproduced fixture yields macro-F1 of 1.0 on just twelve test messages, four
+per class; development and test losses are also equal because of the symmetric
+templates. These values diagnose whether the example is wired correctly. They
+do not establish generalization, calibration, statistical significance, or
+robustness to new organizations, topics, languages, or time periods.
+
+### Trust is separate from a checksum
+
+`joblib` persists Python objects using pickle machinery, so loading a malicious
+artifact may execute code. An attacker who controls a model and its adjacent
+checksum can replace both. The loader therefore requires two explicit inputs:
+`trusted=True`, meaning the producer is trusted to supply executable objects, and
+an expected SHA-256 for the manifest obtained from an independent trusted
+release channel. This example does not authenticate that channel or implement
+signatures. These constraints follow scikit-learn's [model persistence guidance](https://scikit-learn.org/stable/model_persistence.html).
+
+```python
+from artifact_capstone import train_artifact, load_artifact
+
+# A new artifact produced locally by code you have inspected.
+release = train_artifact("./another-ticket-artifact")
+model, manifest = load_artifact(
+    "./another-ticket-artifact",
+    trusted=True,
+    expected_manifest_sha256=release["manifest_sha256"],
+)
+probabilities = model.predict_proba(["please refund the invoice"])
+print(manifest["classes"], probabilities.tolist())
+```
+
+Before deserialization, the loader checks the manifest digest, supported format
+and input schema, exact runtime version map, fixed filenames, every file digest,
+and the model's content identity. It reads the model bytes once, verifies those
+bytes, and deserializes that same in-memory buffer. Reopening the pathname after
+verification would introduce a replacement race. Fixed filenames also prevent
+a manifest from directing the loader to arbitrary paths.
+
+After loading, it checks the expected Pipeline steps and class ordering, then
+warms up the probability path. These post-load checks catch incompatible trusted
+artifacts; they do not make unpickling untrusted bytes safe. For different trust
+boundaries, consider an appropriately inspected safer format or a supported
+runtime export, and test prediction parity again. Cross-version scikit-learn
+loading is unsupported; the example deliberately rejects version differences
+rather than relying on a successful deserialization as proof of compatibility.
+
+`artifact_version` identifies the serialized model bytes. The manifest digest
+identifies the broader release, including evaluation and data references.
+Identical predictions need not imply identical serialized bytes across runtimes;
+preserve both content identity and behavioral fixtures. The source-code digest
+records provenance but is not a complete environment or supply-chain attestation.
+
+### An explicit HTTP contract
+
+The request is a JSON object with exactly one field, `texts`, holding 1 to 32
+strict strings. Each string must contain non-whitespace content and be at most
+4,000 Python characters. Extra fields, numeric coercions, nulls, empty lists,
+oversized batches, and oversized strings receive HTTP 422. Character limits
+are not encoded-byte limits or tokenizer limits; an ingress proxy still needs
+its own request-body budget.
+
+```json
+{"texts": ["please refund the invoice", "reset my password"]}
+```
+
+The response includes `schema_version`, `artifact_version`, ordered `classes`,
+and one prediction per input in the same order. Every probability vector uses
+the returned class ordering. Never assume column one means the business-positive
+class: map through `classes_`. The test compares saved, reloaded, and served
+probabilities with `rtol=0` and `atol=1e-12`, appropriate for this unchanged CPU
+pipeline. A quantized or exported runtime needs a separately justified tolerance
+and task-level quality checks.
+
+The app loads once in its lifespan context, then warms up before setting
+readiness. `/health` is a process-level liveness response; `/ready` returns 503
+before initialization and 200 with the model version after success. Missing or
+corrupted artifacts abort startup. Shutdown clears readiness and the model
+reference. In the tests, entering `with TestClient(app)` executes startup and
+shutdown; constructing the client alone does not. This follows FastAPI's
+[lifespan](https://fastapi.tiangolo.com/advanced/events/) and
+[testing guidance](https://fastapi.tiangolo.com/advanced/testing-events/).
+
+### Failure cases and worked checks
+
+| Deliberate failure | Expected result | What it teaches |
+|---|---|---|
+| Fit TF-IDF before splitting | held-out marker invariant fails | unsupervised preprocessing can leak information |
+| Omit explicit artifact trust or trusted digest | rejection before deserialization | integrity metadata alone is not a trust decision |
+| Change model bytes or prediction fixture | digest rejection before deserialization | evaluation fixtures are part of the release too |
+| Change manifest without changing trusted expected digest | manifest rejected | the manifest itself needs integrity protection |
+| Change runtime/schema version in a newly trusted manifest | contract rejection | a trusted producer can still produce incompatible artifacts |
+| Reverse the declared classes | class-order rejection | matching array shape does not prove semantic compatibility |
+| Start with a missing model | startup fails, readiness stays false | do not serve a silently substituted fallback |
+| Submit whitespace, numbers, extra keys, or an oversized batch | HTTP 422 | validation is part of the model interface |
+| Submit an entirely unseen word | valid finite class probabilities | a closed-set model does not automatically recognize unsupported requests |
+
+The repository's `site/test_artifact_capstone.py` checks these boundaries, a
+fresh-process reload, deterministic predictions on repeat training, preserved
+batch order, HTTP parity, lifecycle behavior, CLI execution, and refusal to
+overwrite existing output. The standalone `demo` command provides a smaller
+smoke test without requiring the repository test harness.
+
+**Why is the unseen-word result not an exception?** TF-IDF maps an all-OOV text
+to a zero feature row. Logistic regression can still return intercept-driven
+probabilities and an argmax label. That answer is mathematically valid but may
+be inappropriate for the application. Monitor OOV coverage and design a validated
+abstention policy on realistic unsupported inputs; never infer reliability solely
+from `predict_proba` being available. See [classification robustness](../nlp/text-classification.md#robustness).
+
+**Does parity prove that the model is useful?** No. It proves that these tested
+paths implement the same fitted computation within the chosen tolerance. A
+consistently wrong classifier can pass every artifact parity test. Quality,
+calibration, subgroup performance, and real service reliability need their own
+acceptance gates.
+
+### Extend toward a real deployment
+
+Replace synthetic incidents with a licensed, versioned corpus and an annotation
+guide. Group by the actual leakage boundary, such as conversation, customer, or
+source document, and use a time-based holdout when predicting future traffic.
+Deduplicate before splitting without letting evaluation labels guide cleaning.
+Retain split counts, uncertain labels, language and length slices, and an error
+review set. Compare this linear baseline against a stronger encoder only under
+the same frozen evaluation protocol.
+
+Next, measure calibration and cost-sensitive abstention on development data,
+then evaluate the frozen policy on held-out data with uncertainty intervals at
+the correct independent unit. Run the local ASGI server under a load generator to
+measure latency, concurrency, memory, startup time, overload behavior, timeouts,
+and graceful drain. An in-process TestClient neither measures network latency
+nor verifies multi-worker deployment or cancellation under load.
+
+Finally add authentication, authorization, TLS termination, request-size limits,
+rate limits, privacy-safe logs, release signing, dependency scanning, resource
+budgets, rollback, and monitored quality with delayed labels. This capstone does
+not implement those controls, a container, an online feature store, a registry,
+or an actual public deployment. Treat each as a separate testable requirement,
+not as a property conferred by having a `/predict` route.
+
 ## Self-check
 
 1. What is train/serve skew, and what property of a feature store prevents it?

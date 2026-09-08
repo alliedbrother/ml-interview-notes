@@ -919,6 +919,10 @@ def build() -> int:
     for source, name in (("requirements-examples.txt", "requirements.txt"),
                          ("requirements-boosters.txt", "requirements-boosters.txt")):
         shutil.copyfile(ROOT / "site" / source, example_assets / name)
+    standalone_examples = CONTENT / "notes" / "_examples"
+    if standalone_examples.is_dir():
+        shutil.copytree(standalone_examples, example_assets, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
     page_assets = CONTENT / "notes" / "_assets"
     if page_assets.is_dir():
         dest = assets / "pages"
