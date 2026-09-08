@@ -303,6 +303,23 @@ systematic rater bias, and the target definition before interpreting the number.
 every prompt tweak, model swap, and retrieval change from an argument into a
 measurement, and it takes an afternoon to build.
 
+### An evaluation manifest you can execute
+
+The [text-artifact capstone](../libraries/mlops-and-serving.md#capstone-train-package-reload-serve)
+writes the concrete records behind an evaluation claim: hashed dataset bytes,
+fixed group-level split membership, every development candidate, selected
+hyperparameters, a final per-class report, confusion-matrix counts, runtime and
+schema versions, and ordered prediction fixtures. Tests check that reloading and
+serving preserve the same probabilities. Its symmetric synthetic templates make
+development and test scores identical; that is explicitly a workflow fixture,
+not an independent demonstration of task generalization.
+
+On real data, extend the manifest with annotation revisions, document provenance,
+deduplication policy, subgroup counts, abstention decisions, and uncertainty at
+the appropriate sampling unit. Use a newly held-out collection when repeated
+decisions have made the old test set part of development. Artifact reproducibility
+and evaluation validity are different obligations; neither replaces the other.
+
 ## Self-check
 
 1. Why does ROUGE bias the field toward extractive summarisation?

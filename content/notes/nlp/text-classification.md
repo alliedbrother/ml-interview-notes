@@ -278,6 +278,24 @@ That last row is the highest-value production pattern: **active learning through
 the review queue**. The examples the model is least confident about are the most
 informative to label, and you are already paying a human to look at them.
 
+### From baseline to a reloadable service
+
+The [train/package/reload/serve capstone](../libraries/mlops-and-serving.md#capstone-train-package-reload-serve)
+implements the complete sparse-classifier path in one downloadable CPU script.
+It includes a group-disjoint synthetic support-message corpus, development-only
+selection of logistic-regression regularization, per-class test metrics, a
+fitted-vocabulary leakage check, and an artifact bundle whose probabilities are
+reproduced after reload and through FastAPI. The service rejects malformed or
+oversized text batches and returns explicit class ordering and model identity.
+
+The twelve-message holdout is intentionally too small and templated to establish
+production quality. Its perfect score is a plumbing assertion, not a reason to
+ship. Replace it with an independently collected, licensed corpus, preserve
+conversation/customer/time boundaries, and add ambiguous, unsupported, multilingual,
+and long-text slices before comparing the baseline with a fine-tuned encoder.
+The capstone also demonstrates why all-OOV input still produces a class: a
+closed-set probability interface is not an out-of-domain detector.
+
 ## Self-check
 
 ### Runnable grouped text baseline

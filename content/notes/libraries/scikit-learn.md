@@ -458,6 +458,18 @@ Four caveats that cause real incidents:
 For portability, ONNX (`skl2onnx`) exports many estimators to a runtime-agnostic
 graph, removing the Python dependency entirely.
 
+### Test persistence through the serving boundary
+
+The [complete artifact capstone](./mlops-and-serving.md#capstone-train-package-reload-serve)
+turns the persistence rules into an executable workflow. A grouped split keeps
+related messages together; vocabulary-marker assertions prove TF-IDF saw only
+training texts. Development log loss selects regularization, and a final test
+report is saved alongside the full Pipeline. A second process reloads it, then
+an HTTP client verifies the same ordered probabilities to an absolute tolerance
+of `1e-12`. Corrupted bytes, missing trust, incompatible schemas or runtimes, and
+class-order mismatches fail explicitly. Download the script to inspect the actual
+boundary rather than treating successful `joblib.load` as sufficient validation.
+
 ## Common bugs
 
 | Symptom | Cause |

@@ -6,6 +6,9 @@ correct. Unqualified paths outside engine-tagged blocks remain unresolved.
 """
 
 import argparse
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -63,11 +66,35 @@ def check_range(record, checkout):
     return 'range-exists' if record['last'] <= count else 'range-past-eof'
 
 
+def inventory_digest(records):
+    """Fingerprint inputs, excluding status and URLs added during verification."""
+    fields = ('page', 'path', 'first', 'last', 'engine')
+    canonical = [{key: record[key] for key in fields} for record in records]
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
+
+
+def summarize(records, checked_engines):
+    pages = defaultdict(Counter)
+    for record in records:
+        pages[record['page']][record['status']] += 1
+    return dict(
+        scope='Explicit path:line references in code and source headers only; not a complete bibliography or quote verifier',
+        checked_at_utc=datetime.now(timezone.utc).isoformat(),
+        pins=PINS,
+        checked_engines=sorted(checked_engines),
+        inventory_sha256=inventory_digest(records),
+        counts=dict(sorted(Counter(record['status'] for record in records).items())),
+        pages={page: dict(sorted(counts.items())) for page, counts in sorted(pages.items())},
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--vllm-root', type=Path)
     parser.add_argument('--sglang-root', type=Path)
     parser.add_argument('--strict', action='store_true', help='Fail on any unchecked or invalid citation')
+    parser.add_argument('--summary', action='store_true', help='Emit counts by page without individual records')
+    parser.add_argument('--output', type=Path, help='Write the JSON report to this path instead of stdout')
     args = parser.parse_args()
     roots = {'vllm': args.vllm_root, 'sglang': args.sglang_root}
     checked_roots = {}
@@ -88,9 +115,14 @@ def main():
         if engine:
             repo = 'vllm-project/vllm' if engine == 'vllm' else 'sgl-project/sglang'
             record['url'] = f"https://github.com/{repo}/blob/{PINS[engine]}/{record['path']}#L{record['first']}-L{record['last']}"
-    counts = {status: sum(r['status'] == status for r in records) for status in sorted({r['status'] for r in records})}
-    print(json.dumps(dict(scope='Explicit path:line references in code and source headers only; not a complete bibliography or quote verifier',
-                          pins=PINS, counts=counts, records=records), indent=2))
+    report = summarize(records, checked_roots)
+    if not args.summary:
+        report['records'] = records
+    output = json.dumps(report, indent=2) + '\n'
+    if args.output:
+        args.output.write_text(output, encoding='utf-8')
+    else:
+        print(output, end='')
     if args.strict and any(r['status'] != 'range-exists' for r in records):
         raise SystemExit(1)
 

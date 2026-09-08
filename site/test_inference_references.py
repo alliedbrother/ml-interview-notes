@@ -1,6 +1,7 @@
 """Local reference, citation-parser and script-publication regressions."""
 
 from pathlib import Path
+import json
 import tempfile
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from check_inference_citations import COURSE, check_range, inventory
+from check_inference_citations import COURSE, PINS, check_range, inventory, inventory_digest, summarize
 from test_build import is_local_markdown_link
 
 
@@ -102,6 +103,47 @@ class ReferenceTests(unittest.TestCase):
                 published = ROOT / '_site/courses/inference' / source.relative_to(COURSE)
                 self.assertTrue(published.is_file())
                 self.assertEqual(published.read_bytes(), source.read_bytes())
+
+    def test_citation_summary_preserves_unresolved_status(self):
+        records = [dict(page='lesson.html', path='vllm/test.py', first=1, last=2,
+                        engine='vllm', status='range-exists'),
+                   dict(page='lesson.html', path='test.py', first=1, last=2,
+                        engine=None, status='unresolved-engine')]
+        report = summarize(records, {'vllm'})
+        self.assertEqual(report['counts'], {'range-exists': 1, 'unresolved-engine': 1})
+        self.assertEqual(report['pages']['lesson.html'], report['counts'])
+        self.assertEqual(report['checked_engines'], ['vllm'])
+        self.assertEqual(inventory_digest(records), inventory_digest([
+            dict(record, status='checkout-not-provided') for record in records]))
+        self.assertNotEqual(inventory_digest(records), inventory_digest(records[:1]))
+
+    def test_pinned_range_audit_matches_current_inventory(self):
+        source = COURSE / 'assets/citation-range-audit.json'
+        report = json.loads(source.read_text())
+        records = inventory()
+        self.assertEqual(report['pins'], PINS)
+        self.assertEqual(report['checked_engines'], sorted(PINS))
+        self.assertEqual(report['inventory_sha256'], inventory_digest(records),
+                         'Citation inputs changed: rerun the pinned-checkout audit before updating its evidence.')
+        self.assertEqual(sum(report['counts'].values()), len(records))
+        self.assertEqual(sum(sum(page.values()) for page in report['pages'].values()), len(records))
+        published = ROOT / '_site/courses/inference/assets/citation-range-audit.json'
+        self.assertEqual(published.read_bytes(), source.read_bytes())
+
+    def test_summary_cli_writes_evidence_even_when_strict_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'audit.json'
+            result = subprocess.run([
+                sys.executable, str(ROOT / 'site/check_inference_citations.py'),
+                '--summary', '--strict', '--output', str(output),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(result.stdout, '')
+            report = json.loads(output.read_text())
+            self.assertNotIn('records', report)
+            self.assertEqual(report['checked_engines'], [])
+            self.assertGreater(report['counts']['checkout-not-provided'], 0)
+            self.assertGreater(report['counts']['unresolved-engine'], 0)
 
 
 if __name__ == '__main__':

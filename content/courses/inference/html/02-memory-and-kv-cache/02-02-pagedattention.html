@@ -1602,6 +1602,42 @@ flowchart TD
   <li>Zheng et al., <a href="https://arxiv.org/abs/2312.07104">SGLang: Efficient Execution of Structured Language Model Programs</a> (arXiv:2312.07104) &mdash; the token-level allocator and radix tree, from the other side.</li>
   <li>In this book: <a href="../02-memory-and-kv-cache/02-01-kv-cache-sizing.html">&sect;2.1</a> for the sizing arithmetic, <a href="../02-memory-and-kv-cache/02-03-prefix-caching-hash.html">&sect;2.3</a> for block hashing, <a href="../02-memory-and-kv-cache/02-04-radixattention.html">&sect;2.4</a> for SGLang's radix tree, <a href="../01-the-core-loop/01-04-the-scheduler.html">&sect;1.4</a> for what happens when <code>allocate_slots</code> returns <code>None</code>.</li>
 </ul></div></section>
+<section class="sec" id="cpu-ownership-model" style="--i:15"><div class="sec__h"><span class="sec__n">Lab</span><h2 class="sec__t">Executable ownership, sharing and delayed release</h2></div><div class="sec__body">
+<p>The <a href="../labs/scheduler_sim.py" download>CPU reference allocator</a> stores small integers instead of tensor rows, so every logical token can be inspected. It is a single-group ownership model, not vLLM's or SGLang's allocator. In particular, its <code>fork</code> operation is a pedagogical way to create shared prefixes; it does not imply that the pinned vLLM V1 request path supports beam forking. Run the following after downloading <code>scheduler_sim.py</code> into the same directory as your Python session.</p>
+<pre><code class="language-python" data-scheduler-example="ownership">from scheduler_sim import PagedKV
+
+pool = PagedKV(capacity=3, block_size=4)
+pool.create("a")
+pool.append("a", 10)
+pool.fork("a", "b")
+source, = pool.pin("a", "transfer-1")
+pool.append("b", 20)  # Partial shared tail: copy before writing.
+assert pool.read("a") == [10]
+assert pool.read("b") == [10, 20]
+pool.release("a")    # Cancellation removes ownership, not the transfer pin.
+assert source in pool.pages and source not in pool.free
+pool.unpin("transfer-1")
+assert source in pool.free
+pool.check()
+pool.release("b")
+assert len(pool.free) == 3
+print("shared prefix, copy-on-write, and transfer cleanup: OK")</code></pre>
+<h3>Two kinds of references</h3>
+<p>An <strong>owner reference</strong> means a live request's block table names that physical page. A <strong>transfer pin</strong> means an outstanding operation may still read its storage. Cancellation removes the request's references; it cannot revoke an already-issued read. A page returns to the free heap only when both sets are empty. Transfer handles are unique, and completing an unknown or already-completed transfer raises an error rather than accidentally freeing an unrelated page.</p>
+<p>In the example, page zero initially has two owners and one pin. Appending to <code>b</code> allocates a fresh page containing the old token, redirects only <code>b</code>'s table, and appends token 20 there. Releasing <code>a</code> leaves page zero with no owners but one pin. Removing that pin finally makes it reusable. The test also covers a sole owner writing a pinned partial page: it must copy too, because the transfer's source snapshot is immutable. Copy-on-write here is synchronous; the pin models an independent outstanding read, not an asynchronous copy-completion engine.</p>
+<h3>What should every allocator mutation preserve?</h3>
+<ul>
+<li>The free set and allocated set are disjoint and together cover every usable physical page exactly once.</li>
+<li>Every page named in a request table exists, and its owner set names that request. Every owner entry has the corresponding reverse table reference.</li>
+<li>Each page is retained by at least one owner or transfer pin. Every pin has a live transfer record, and every transfer record has matching page pins.</li>
+<li>A request table contains no duplicate physical page IDs. Every non-tail page is full; a tail contains between one and <code>block_size</code> tokens.</li>
+<li>A failed allocation leaves the original logical sequence intact. When a one-page pool cannot copy a shared partial tail, the append raises <code>MemoryError</code>; neither branch is silently modified.</li>
+</ul>
+<p><code>PagedKV.check()</code> checks these structural invariants. The randomized test compares every request's decoded page contents with an independent Python-list oracle after every mutation. It also freezes the contents of every transfer-pinned page and checks they never change. Twenty-five fixed seeds execute 200 create, append, fork, pin, unpin or release choices each. Fixed seeds make failures replayable, but do not constitute exhaustive verification or a concurrent race detector.</p>
+<h3>Tail waste has a distribution</h3>
+<p>For lengths 1, 15, 16 and 17 with 16-token pages, the unused tail slots are respectively 15, 1, 0 and 15. The observed mean is 7.75 slots only if those four cases are equally likely. In general the expectation is the sum, over workload lengths, of their probability times <code>(B - (length % B)) % B</code>. A uniform residue distribution gives <code>(B - 1) / 2</code>, but real tokenizer and template lengths need not have uniform residues. Shared pages must be counted once physically, not once per logical request.</p>
+<p>This allocator has no zero-reference prefix index: an unpinned page with zero owners becomes free immediately. Add an eviction reference or explicit cached state before using it to investigate prefix-cache hit rates. It also excludes heterogeneous cache groups, sliding-window reclamation, asynchronous copies, failures during writes, address-generation fences, distributed transfer acknowledgements and real GPU data. The <a href="../01-the-core-loop/01-04-the-scheduler.html#cpu-scheduler-model">scheduler model</a> uses the same private-page allocator and adds conservative admission credits and terminal cleanup delays; its reservations do not yet support shared-prefix discounts.</p>
+</div></section>
 <div class="pager"><a href="02-01-kv-cache-sizing.html"><div class="pager__k">← Previous</div><div class="pager__t">The KV cache size formula</div></a><a class="pager__next" href="02-03-prefix-caching-hash.html"><div class="pager__k">Next →</div><div class="pager__t">Prefix caching by hash (vLLM)</div></a></div>
 <footer class="foot">
 <p>The Inference Engineering Course · code read at
@@ -1624,7 +1660,8 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#hands-on">Hands-on</a>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>
-<a href="#further-reading">Further reading</a></aside>
+<a href="#further-reading">Further reading</a>
+<a href="#cpu-ownership-model">CPU ownership and delayed release</a></aside>
 </div>
 <script>
 /* scroll-spy for the right-hand TOC + mobile nav toggle */

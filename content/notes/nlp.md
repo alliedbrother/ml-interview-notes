@@ -105,3 +105,10 @@ near duplicates, minority-language slices, and malformed input cases. Freeze the
 evaluation protocol before repeated prompt/model selection. Record quality,
 uncertainty, latency and cost together; a polished output on one example is not
 an evaluation dashboard.
+
+Start the executable portion with the [text-classifier artifact capstone](./libraries/mlops-and-serving.md#capstone-train-package-reload-serve).
+It trains and evaluates a sparse baseline, saves its data/split/schema manifest,
+reloads the full pipeline, and checks served probabilities against a fixed
+prediction fixture. The corpus is intentionally synthetic and offline. Extraction,
+retrieval, grounded generation, and real multilingual benchmark slices are not
+claimed by that narrower acceptance test.
