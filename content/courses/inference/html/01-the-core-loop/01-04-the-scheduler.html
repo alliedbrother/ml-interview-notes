@@ -1509,6 +1509,15 @@ curl -s localhost:8000/metrics | grep -E 'num_preemptions|kv_cache_usage'</code>
 <p>The executable checks cover exact prefill/decode counts, one-token outputs, delayed release, queued and active cancellations, completion/cancellation races, over-capacity rejection, deterministic replay and 60 seeded finite workloads. The next extensions are preemption/recompute, cached-prefix-aware reservations, priority/deadline policies, static and dynamic batch formation, and a hardware-calibrated cost model. Those mechanisms are intentionally absent rather than silently approximated.</p>
 </div></section>
 <div class="pager"><a href="01-03-continuous-batching.html"><div class="pager__k">← Previous</div><div class="pager__t">Static, dynamic, and continuous batching</div></a><a class="pager__next" href="01-05-chunked-prefill.html"><div class="pager__k">Next →</div><div class="pager__t">Chunked prefill</div></a></div>
+<section class="sec" id="cpu-recompute-contract" style="--i:14"><div class="sec__h"><span class="sec__n">Lab</span><h2 class="sec__t">Execute the recomputation contract</h2></div><div class="sec__body">
+<p>The conservative reservation simulator above does not preempt. Its companion <a href="../labs/scheduler_faults.py" download>CPU lifecycle model</a> makes manual preemption and recovery executable without claiming to reproduce either engine's victim-selection policy. Keep <a href="../labs/scheduler_sim.py" download>scheduler_sim.py</a> beside it, then follow <a href="../labs/03-continuous-batching-effects/README.html#cpu-preemption-recompute">the worked recomputation lab</a>. All token IDs are stand-ins for KV rows, and call order is a serialized control-plane trace, not a timing model.</p>
+<h3>Retain logical progress, discard physical residency</h3>
+<p>For prompt <code>[10, 11, 12]</code> and emitted output <code>[20, 21]</code>, only <code>[10, 11, 12, 20]</code> has entered the model. The newest sampled output, 21, is pending feedback. Recompute restores those four committed rows, emits nothing, and leaves 21 to be consumed exactly once on the next step. The client then receives one new output, not a replay of its previous response. Logical progress and page residency must therefore be separate fields.</p>
+<p>The model's preemption transition releases the request's page-table references but keeps its prompt and emitted-token history. A failed reconstruction rolls back all partial allocations and leaves the request suspended. Repeated successful reconstruction adds to an explicit replay-row counter; it does not advance the output index. A cancelled request cannot resume, and repeated cancellation is harmless. These contracts are verified independently of any scheduling heuristic.</p>
+<h3>Why a selected victim may not provide capacity</h3>
+<p>A request owner is not necessarily the final owner of physical storage. Shared prefixes may still be referenced elsewhere, and an asynchronous transfer can pin both source and destination pages. In the four-page test, preempting the producer and aborting its transfer leaves zero free pages until a drain acknowledgement. Consequently, victim ranking by logical context length need not rank immediately recoverable capacity. Admission must inspect the allocator's reusable pool after ownership and transport obligations are resolved.</p>
+<p>To extend this into an actual policy experiment, define a victim score, the dispatch cost of reconstruction, an admission order for resumed versus new requests, and a bound on repeated preemption. Record client-visible latency separately from successful and wasted reconstruction work. The current tests establish safety and deterministic state transitions, not starvation freedom, engine equivalence, or a throughput advantage. For output equivalence with a real model, add positions, masks, adapter identity, sampling-state restoration and speculative accepted-history tests.</p>
+</div></section>
 <footer class="foot">
 <p>The Inference Engineering Course · code read at
 <code>vllm@a556f3fccb</code> and
@@ -1529,7 +1538,8 @@ See <a href="../SOURCES.html">SOURCES</a> for the full provenance record.</p>
 <a href="#exercises">Exercises</a>
 <a href="#takeaways">Key takeaways</a>
 <a href="#further-reading">Further reading</a>
-<a href="#cpu-scheduler-model">CPU admission and cancellation</a></aside>
+<a href="#cpu-scheduler-model">CPU admission and cancellation</a>
+<a href="#cpu-recompute-contract">CPU recomputation contract</a></aside>
 </div>
 <script>
 /* scroll-spy for the right-hand TOC + mobile nav toggle */

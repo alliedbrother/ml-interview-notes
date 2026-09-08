@@ -547,6 +547,60 @@ configuration; custom optimizer/scaler behavior may need an explicit success
 signal. A learning-rate schedule based on samples rather than successful steps
 must make that alternate clock deliberate.
 
+## Structured solves still need error checks
+
+An algebraic identity and a numerically reliable implementation are separate
+claims. The [spectral/update lab](/assets/examples/spectral_updates.py) applies
+this distinction to [Woodbury solves and generalized eigenproblems](./linear-algebra.md#low-rank-updates-sherman-morrison-and-woodbury).
+It uses the existing NumPy 1.26.4 and SciPy 1.11.4 teaching environment, makes no
+network requests, and compares multiple independently expressed calculations.
+
+For an updated system $Mx=b$, the lab reports a scaled residual
+
+$$
+\eta=\frac{\|Mx-b\|}{\|M\|\|x\|+\|b\|}.
+$$
+
+Its array-norm convention is Euclidean for vectors and Frobenius for matrices.
+This is an aggregate normwise residual diagnostic, not a componentwise guarantee
+or a separate bound for every column of a multiple-right-hand-side solve. A small
+value does not bound forward error independently of conditioning. Always use
+the actual updated matrix in the residual; testing $Ax\approx b$ checks the wrong
+problem after an update.
+
+There is a subtle scalar trap in reduced systems. Set
+
+$$
+A=I_2,\quad U=V=(1,0)^T,\quad C=-1+\epsilon.
+$$
+
+Then the updated matrix is $\operatorname{diag}(\epsilon,1)$ and the reduced
+Woodbury core is the scalar matrix $K=[\epsilon]$. For nonzero $\epsilon$, its
+normwise condition number is always one, while the updated matrix has condition
+number $1/\epsilon$ when $0<\epsilon<1$. The core is obtained by cancellation,
+$1+(-1+\epsilon)$; relative accuracy in its construction is not guaranteed just
+because the final scalar equation has condition number one.
+
+The lab records the reduced core's smallest singular value and the condition
+number of the updated matrix as well as its residual. In this tiny example,
+$\epsilon=10^{-8}$ exhibits the discrepancy directly. These diagnostics involve
+dense matrices and SVDs; they are a testing aid, not a proposed cheap monitoring
+routine for every large training step. Repeated-update production workloads
+need a cost-aware error strategy and occasional trusted refactorizations.
+
+For generalized eigenvectors, check both the defining equation and the correct
+normalization: $AX\approx BX\Lambda$ and $X^TBX\approx I$. For Schur form, check
+$QTQ^T\approx A$ and $Q^TQ\approx I$. Neither comparison should fail merely
+because another correct solver flips eigenvector signs or rotates a repeated
+eigenspace. Conversely, matching eigenvalues alone does not validate the
+returned vectors or a claimed transient-growth bound.
+
+The regression suite tests singular base/updated systems, a singular update
+coefficient matrix that is still valid, non-SPD metrics, repeated eigenvalues,
+complex-conjugate pairs in real Schur form, and both continuous and discrete
+stable systems with transient amplification. Those checks establish these
+contracts on controlled CPU examples, not universal numerical stability.
+
 ## Self-check
 
 1. Why is loss scaling commonly useful for fp16 and often unnecessary for bf16? Distinguish exponent range, subnormal representation and hardware flush-to-zero.

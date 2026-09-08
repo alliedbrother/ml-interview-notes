@@ -45,6 +45,19 @@ def main():
     if transformers.find(id="source-material") or "Source material" in transformers.get_text():
         errors.append("Transformers overview: removed source material section remains")
 
+    download_roots = (
+        (ROOT / "content/notes/_examples", OUT / "assets/examples"),
+        (ROOT / "content/courses/transformers/code", OUT / "courses/transformers/code"),
+    )
+    for standalone, destination in download_roots:
+        for source in standalone.rglob("*"):
+            if (not source.is_file() or "__pycache__" in source.parts
+                    or source.suffix == ".pyc" or source.name == ".DS_Store"):
+                continue
+            published = destination / source.relative_to(standalone)
+            if not published.is_file() or published.read_bytes() != source.read_bytes():
+                errors.append(f"{source.name}: standalone download missing or different from source")
+
     preserved = 0
     source = ROOT / "content/courses/inference/html"
     for path in source.rglob("*.html"):

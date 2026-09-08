@@ -706,9 +706,9 @@ flowchart TD
 <code>fetch_to_registers(k+1)</code> before <code>matmul(k)</code>, so the loads and the LOP3 conversions for
 tile $k{+}1$ are in flight while the tensor cores chew on tile $k$. This is classic software pipelining;
 what is unusual is that a whole <em>numeric format conversion</em> has been hidden inside the slack.</p></div></section>
-<section class="sec" id="what-the-tensor-cores-provide" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What the tensor cores actually provide</h2></div><div class="sec__body"><p>The definitive statement of which formats exist in hardware is not a marketing slide &mdash; it is the
-list of inline-PTX strings a kernel is willing to emit. Marlin's <code>mma</code> wrapper is that list, and
-it is short:</p>
+<section class="sec" id="what-the-tensor-cores-provide" style="--i:2"><div class="sec__h"><span class="sec__n">§3</span><h2 class="sec__t">What the tensor cores actually provide</h2></div><div class="sec__body"><p>The inline-PTX strings in Marlin's <code>mma</code> wrapper identify the instructions this
+kernel emits. They are evidence for this implementation, not an exhaustive inventory of every format
+the GPU ISA supports. The wrapper is short:</p>
 
 <div class="code-file">
   <div class="code-file__hd">
@@ -743,12 +743,15 @@ it is short:</p>
   } else if (k_size == 32) {</code></pre>
 </div>
 
-<p>Four operand types &mdash; fp16, bf16, e4m3 FP8, s8 &mdash; and one shape family, $m16n8k$ with $k \in
-\{8, 16, 32\}$ depending on element width (<code>m16n8k8</code> on SM75, <code>m16n8k32</code> for FP8 and
-INT8 at <code>marlin_mma.h:L93-L133</code>). All accumulate in fp32 (or s32), all take A from registers and
-B from registers. <strong>There is no INT4 entry.</strong> And even if the ISA offered an s4&times;s4 op, W4A16
-could not use it: the A operand is bf16 activations, and tensor-core instructions require both operands
-to share a type.</p>
+<p>The wrapper covers fp16, bf16, e4m3 FP8 and s8 operands, mostly through the $m16n8k$
+family with $k \in \{8,16,32\}$. SM75 uses <code>m16n8k8</code> for fp16 and an
+<code>m8n8k16</code> sequence for the INT8 k32 case. Floating-point paths accumulate in
+fp32 except for the explicit fp16-accumulation option; INT8 paths accumulate in s32
+(<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin_mma.h" data-source-symbol="m16n8k32">marlin_mma.h:L23-L133</code>).
+Both operands come from registers. <strong>This wrapper has no INT4 entry.</strong>
+A hypothetical s4&times;s4 instruction would not directly implement W4A16 either:
+the activation operand remains fp16 or bf16, so that instruction would require
+an additional activation quantization step and a different numerical contract.</p>
 
 <div class="table-wrap">
   <div class="table-wrap__cap">Format &times; hardware support, read out of the kernels that emit the instructions. "Native" means a tensor-core instruction takes the stored type directly.</div>
@@ -756,11 +759,11 @@ to share a type.</p>
     <table class="dt">
       <thead><tr><th>W&times;A pair</th><th>Instruction</th><th>Native?</th><th>Source</th></tr></thead>
       <tbody>
-        <tr><td>fp16 / bf16 &times; same</td><td><code>mma.m16n8k16.f32.{f16,bf16}.…f32</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L39</code>, <code>:L71</code></td></tr>
+        <tr><td>fp16 / bf16 &times; same</td><td><code>mma.m16n8k16.f32.{f16,bf16}.…f32</code></td><td><span class="pill pill--verified">native</span></td><td><code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin_mma.h" data-source-symbol="mma.sync.aligned.m16n8k16">marlin_mma.h:L39</code>, <code>:L71</code></td></tr>
         <tr><td>INT8 &times; INT8</td><td><code>mma.m16n8k{16,32}.s32.s8.s8.s32.satfinite</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L87</code>, <code>:L127</code></td></tr>
         <tr><td>FP8 e4m3 &times; e4m3</td><td><code>mma.m16n8k{16,32}.f32.e4m3.e4m3.f32</code></td><td><span class="pill pill--verified">native</span></td><td><code>marlin_mma.h:L79</code>, <code>:L97</code></td></tr>
-        <tr><td>Hopper FP8/bf16, warpgroup</td><td><code>wgmma</code> via <code>GMMA::rs_op_selector</code> (A from registers)</td><td><span class="pill pill--verified">native</span></td><td><code>machete_prepacked_layout.cuh:L100-L103</code></td></tr>
-        <tr><td>NVFP4 &times; NVFP4, SM100</td><td><code>OpClassBlockScaledTensorOp</code> on <code>nv_float4_t&lt;float_e2m1_t&gt;</code></td><td><span class="pill pill--verified">native</span></td><td><code>nvfp4_scaled_mm_kernels.cu:L77-L98</code></td></tr>
+        <tr><td>Hopper FP8/bf16, warpgroup</td><td><code>wgmma</code> via <code>GMMA::rs_op_selector</code> (A from registers)</td><td><span class="pill pill--verified">native</span></td><td><code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/machete/machete_prepacked_layout.cuh" data-source-symbol="rs_op_selector">machete_prepacked_layout.cuh:L100-L103</code></td></tr>
+        <tr><td>NVFP4 &times; NVFP4, SM100</td><td><code>OpClassBlockScaledTensorOp</code> on <code>nv_float4_t&lt;float_e2m1_t&gt;</code></td><td><span class="pill pill--verified">native</span></td><td><code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu" data-source-symbol="OpClassBlockScaledTensorOp">nvfp4_scaled_mm_kernels.cu:L77-L98</code></td></tr>
         <tr><td>INT4 &times; bf16 (W4A16)</td><td>none &mdash; upconvert to bf16 first</td><td><span class="pill pill--blocked">emulated</span></td><td><code>dequant.h:L107-L119</code></td></tr>
         <tr><td>INT4 &times; FP8 (W4A8)</td><td>none &mdash; upconvert to e4m3, then <code>m16n8k32</code></td><td><span class="pill pill--blocked">emulated</span></td><td><code>marlin_int4_fp8_preprocess.cu</code></td></tr>
       </tbody>
@@ -768,11 +771,15 @@ to share a type.</p>
   </div>
 </div>
 
-<p>The table is the chapter. Everything below the double line needs a conversion inside the GEMM; everything
-above it needs only a scale in the epilogue. Blackwell's block-scaled tensor op is the one place where a
-sub-byte format is genuinely native &mdash; the scale factors are a second tensor input laid out by
-<code>Sm100BlkScaledConfig::tile_atom_to_shape_SFA</code> (<code>nvfp4_scaled_mm_kernels.cu:L155-L168</code>),
-so the hardware applies the per-16-element scale itself.</p></div></section>
+<p>The table separates formats consumed directly by the listed tensor-core instructions from
+stored weight formats that these kernels first convert. Native operand support does not imply
+epilogue-only scaling: a scale independent of the reduction index can be factored outside the sum,
+but a scale varying along K must participate inside that reduction. Among these listed
+implementations, Blackwell's block-scaled tensor op consumes the sub-byte NVFP4 operands natively,
+with block-scale tensors laid out by
+<code>Sm100BlkScaledConfig::tile_atom_to_shape_SFA</code> (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu" data-source-symbol="tile_atom_to_shape_SFA">nvfp4_scaled_mm_kernels.cu:L155-L168</code>),
+so the hardware incorporates the per-16-element block scales into the multiplication. This
+is distinct from applying one global output multiplier in an epilogue.</p></div></section>
 <section class="sec" id="dequant-inside-the-pipeline" style="--i:3"><div class="sec__h"><span class="sec__n">§4</span><h2 class="sec__t">Dequantising inside the pipeline</h2></div><div class="sec__body"><p>Converting int4 to fp16 the obvious way costs a shift, a mask, an integer-to-float convert and a multiply
 per value. The trick vLLM inherits from FasterTransformer costs roughly one instruction per <em>pair</em> of
 values, by constructing the fp16 bit pattern directly:</p>
@@ -801,7 +808,7 @@ __device__ inline void dequant&lt;half2, vllm::kU4B8.id(), true&gt;(int q,
 yields $1024 + v$ exactly, for $v \in [0,15]$, with no rounding. One <code>LOP3.LUT</code> instruction &mdash;
 a single three-input lookup on the ALU &mdash; produces <em>two</em> such fp16 values packed in one register.
 The $-1024$ correction and the $-8$ zero point are then folded into one <code>__hsub2</code> against the
-constant <code>0x64086408</code> (<code>dequant.h:L121-L143</code>), and the group scale into one
+constant <code>0x64086408</code> (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/dequant.h" data-source-symbol="__hsub2">dequant.h:L121-L143</code>), and the group scale into one
 <code>__hmul2</code>. Cost: about 4 ALU instructions per 4 weights, issued on pipes the tensor cores are not
 using.</p>
 
@@ -862,7 +869,7 @@ $M > 16$; CUTLASS's FP8 dispatcher has boundaries at 16, 64, 128; Machete's gene
 16, 32, 64, 128, 256. The hardware ratio puts the interesting region at a few tens of rows, and that is
 where the tuning effort goes.</p></div></section>
 <section class="sec" id="marlin" style="--i:4"><div class="sec__h"><span class="sec__n">§5</span><h2 class="sec__t">Marlin: making the layout do the work</h2></div><div class="sec__body"><p>Marlin (Elias Frantar, IST-DASLab; the vLLM copy carries <em>"Adapted from
-https://github.com/IST-DASLab/marlin"</em> at <code>marlin_template.h:L19</code>) starts from an observation
+https://github.com/IST-DASLab/marlin"</em> at <code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin_template.h" data-source-symbol="IST-DASLab/marlin">marlin_template.h:L19</code>) starts from an observation
 about the <code>mma.m16n8k16</code> B fragment. For a $16(k) \times 8(n)$ B tile, lane $t$ of the warp owns
 exactly four elements: column $n = t/4$, rows $k \in \{2r,\, 2r{+}1,\, 2r{+}8,\, 2r{+}9\}$ where $r = t \bmod 4$.
 That is a strided, interleaved scatter &mdash; nothing like row-major order.</p>
@@ -1038,12 +1045,12 @@ static constexpr int tile_size = 16;
 static constexpr int max_par = 16;</code></pre>
 </div>
 
-<p>Shared-memory demand is computed exactly, not guessed, in <code>marlin.cu:L193-L226</code>:
+<p>Shared-memory demand is computed exactly, not guessed, in <code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin.cu" data-source-symbol="sh_b_size">marlin.cu:L193-L226</code>:
 <code>sh_b_size = stages * (tb_k * tb_n / pack_factor) * 4</code>. For the default 128&times;128 tile at 4 bits
 that is $4 \times (128 \times 128 / 8) \times 4 = 32{,}768$ bytes of packed B plus
 $4 \times (16 \times 128) \times 2 = 16{,}384$ bytes of bf16 A &mdash; 48&nbsp;KB against the 228&nbsp;KB/SM
 Hopper ceiling <a href="../00-foundations/00-03-gpu-architecture.html">§0.3</a> quotes. That headroom buys
-four stages instead of two. <code>is_valid_config</code> (<code>marlin.cu:L229-L260</code>) rejects any tile
+four stages instead of two. <code>is_valid_config</code> (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin.cu" data-source-symbol="is_valid_config">marlin.cu:L229-L260</code>) rejects any tile
 whose computed <code>cache_size</code> exceeds the device limit &mdash; which is why a too-large tile shows up
 as a kernel-selection failure rather than a launch error. The overlap itself is in the main loop:</p>
 
@@ -1074,7 +1081,7 @@ as a kernel-selection failure rather than a launch error. The overlap itself is 
 shared&rarr;register one k-step ahead, and the <code>matmul</code> consuming the buffer filled last iteration.
 <code>wait_for_stage()</code> waits on <code>cp_async_wait&lt;stages - 2&gt;</code> with the comment
 <em>"We only have <code>stages - 2</code> active fetches since we are double buffering"</em>
-(<code>marlin_template.h:L924-L931</code>).</p>
+(<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin_template.h" data-source-symbol="wait_for_stage">marlin_template.h:L924-L931</code>).</p>
 
 <h3>Tile tables, and what happens when your shape does not fit</h3>
 
@@ -1104,7 +1111,7 @@ thread_config_t large_batch_thread_configs[] = {
 
 <p>Small batch prefers deep K (128) and moderate N; large batch prefers wide N (256), so each loaded A
 fragment is reused across more output columns. <code>determine_exec_config</code>
-(<code>marlin.cu:L276-L325</code>) takes the first entry that both divides the problem and fits in shared
+(<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin.cu" data-source-symbol="determine_exec_config">marlin.cu:L276-L325</code>) takes the first entry that both divides the problem and fits in shared
 memory. Divisibility is the constraint that bites. The Python guard is stricter than the CUDA one &mdash;
 <code>GPTQ_MARLIN_MIN_THREAD_K = 128</code> against the kernel's <code>min_thread_k = 64</code> &mdash; because
 a usable tile family needs $n \bmod 64 = 0$ <em>and</em> $k \bmod 128 = 0$, or the transposed pair:</p>
@@ -1141,7 +1148,7 @@ a usable tile family needs $n \bmod 64 = 0$ <em>and</em> $k \bmod 128 = 0$, or t
 
 <p>As of <code>a556f3f</code>, an awkward shape gets zero-padded rather than rejected. Two cases still cannot
 be padded away: act-order (<code>g_idx</code>) couples K to the whole-model group layout, so the strict check
-stays (<code>mixed_precision/marlin.py:L62-L69</code>); and a group straddling a tensor-parallel boundary is
+stays (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/marlin.py" data-source-symbol="check_marlin_supports_shape">mixed_precision/marlin.py:L62-L69</code>); and a group straddling a tensor-parallel boundary is
 fatal, because the rank does not hold a whole group. The strict check produces the error you will see:</p>
 
 <div class="code-file">
@@ -1175,7 +1182,7 @@ fatal, because the rank does not hold a whole group. The strict check produces t
 <code>--quantization gptq</code> takes exactly the same path and raises exactly the same error. The real
 fallback is the rest of the priority list &mdash; ExLlama or Triton W4A16 &mdash; reached only if the shape
 check passes and the faster kernels decline for another reason. The supported quantisation grid is narrow by
-design: <code>MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]</code> at <code>marlin_utils.py:L36</code>,
+design: <code>MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]</code> at <code data-source-engine="vllm" data-source-path="vllm/model_executor/layers/quantization/utils/marlin_utils.py" data-source-symbol="MARLIN_SUPPORTED_GROUP_SIZES">marlin_utils.py:L36</code>,
 and a group-96 checkpoint has no Marlin kernel at any shape.</p></div></section>
 <section class="sec" id="machete" style="--i:5"><div class="sec__h"><span class="sec__n">§6</span><h2 class="sec__t">Machete: the Hopper successor</h2></div><div class="sec__body"><p>Marlin is an Ampere-era kernel: <code>cp.async</code>, warp-level <code>mma</code>, hand-written PTX.
 Hopper added two things it cannot use &mdash; the TMA (a hardware descriptor-driven bulk copy engine) and
@@ -1225,12 +1232,12 @@ gets 4&times; the load width because it has 4&times; the threads cooperating on 
     <code>tma_alignment_bytes</code> (<code>:L196-L198</code>). Scales come in via
     <code>SM90_TMA_LOAD</code> with each stage 128-byte aligned (<code>:L248</code>, <code>:L403</code>).</p></div>
   <div class="ve-card"><span class="ve-card__k">wgmma</span><h4>Register-source A</h4>
-    <p><code>GMMA::rs_op_selector</code> (<code>machete_prepacked_layout.cuh:L100-L103</code>) picks a
+    <p><code>GMMA::rs_op_selector</code> (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/machete/machete_prepacked_layout.cuh" data-source-symbol="rs_op_selector">machete_prepacked_layout.cuh:L100-L103</code>) picks a
     <em>register-source</em> warpgroup MMA. That is what makes dequant-in-registers legal at all on Hopper:
     the upconverted operand can be handed straight to <code>wgmma</code>.</p></div>
   <div class="ve-card"><span class="ve-card__k">Swap</span><h4>C&#7488; = B&#7488;A&#7488;</h4>
     <p>Because only the A operand may come from registers, the quantised weights must <em>be</em> A. The
-    kernel computes the transposed product instead (<code>machete_prepacked_layout.cuh:L81-L86</code>) so
+    kernel computes the transposed product instead (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/machete/machete_prepacked_layout.cuh" data-source-symbol="Ct = Bt * At">machete_prepacked_layout.cuh:L81-L86</code>) so
     the weights flow through registers and the activations through shared memory.</p></div>
 </div>
 
@@ -1242,7 +1249,7 @@ gets 4&times; the load width because it has 4&times; the threads cooperating on 
     <table class="dt">
       <thead><tr><th></th><th>Marlin</th><th>Machete</th></tr></thead>
       <tbody>
-        <tr><td>Compute capability</td><td>&ge; 75 (<code>mixed_precision/marlin.py:L36-L38</code>)</td><td><b>exactly 90</b> (<code>mixed_precision/machete.py:L35-L36</code>)</td></tr>
+        <tr><td>Compute capability</td><td>&ge; 75 (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/marlin.py" data-source-symbol="get_min_capability">mixed_precision/marlin.py:L36-L38</code>)</td><td><b>exactly 90</b> (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/machete.py" data-source-symbol="is_device_capability">mixed_precision/machete.py:L35-L36</code>)</td></tr>
         <tr><td>Group sizes</td><td>&minus;1, 32, 64, 128</td><td>&minus;1, 64, 128 (fp16/bf16 acts)</td></tr>
         <tr><td>in_features</td><td>% 128 (or % 64 in the other family), else zero-padded</td><td>% 64, hard requirement</td></tr>
         <tr><td>out_features</td><td>% 64 (or % 128), else zero-padded</td><td>% 128, hard requirement</td></tr>
@@ -1297,9 +1304,9 @@ struct ScaledEpilogue
 accumulator after the k-loop has finished, with the scale tensors streamed as an epilogue broadcast.
 <code>ColOrScalarLoad</code> and <code>RowOrScalarLoad</code> are the same code path for per-tensor (a scalar)
 and per-token / per-channel (a vector) &mdash; which is why vLLM converts a fused QKV module's per-tensor
-scales to per-channel at load time (<code>scaled_mm/cutlass.py:L58-L69</code>) rather than specialising the
+scales to per-channel at load time (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/scaled_mm/cutlass.py" data-source-symbol="convert_to_channelwise">scaled_mm/cutlass.py:L58-L69</code>) rather than specialising the
 kernel. The comment above the struct states the requirement: <em>"A and B must have symmetric quantization
-(zero point == 0)"</em> (<code>scaled_mm_epilogues_c3x.hpp:L141</code>). Asymmetric INT8 needs a separate
+(zero point == 0)"</em> (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp" data-source-symbol="symmetric quantization">scaled_mm_epilogues_c3x.hpp:L141</code>). Asymmetric INT8 needs a separate
 azp epilogue and a separate kernel file.</p>
 
 <p>Block-wise FP8 (DeepSeek-V3's 128&times;128 weight blocks) breaks the factoring argument the same way
@@ -1360,12 +1367,16 @@ Marlin is decided per layer, at weight-creation time, by capability. The decisio
             self._kernel_backends_being_used.add(kernel_type.__name__)</code></pre>
 </div>
 
-<p><code>AutoAWQConfig</code> does the identical thing at <code>auto_awq.py:L430-L448</code>, differing only in
+<p><code>AutoAWQConfig</code> does the identical thing at <code data-source-engine="vllm" data-source-path="vllm/model_executor/layers/quantization/auto_awq.py" data-source-symbol="MPLinearLayerConfig">auto_awq.py:L430-L448</code>, differing only in
 <code>zero_points=self.quant_config.zero_point</code>. That <code>logger.info("Using %s …")</code> line, emitted
-once per distinct backend, is the only place the engine tells you which kernel it chose. There is no flag that
-forces the answer; there is only <code>VLLM_DISABLED_KERNELS</code>, which removes candidates. One check does
+once per distinct backend, reports the selected implementation for this linear method.
+At this pin, <code>--linear-backend</code> filters the candidate family, while
+<code>VLLM_DISABLED_KERNELS</code> removes named candidates. The backend filter falls back to the
+unfiltered list with a warning when that family has no kernel for the layer type
+(<code>vllm/model_executor/kernels/linear/__init__.py:L353-L383</code>); an explicit preference
+therefore does not bypass capability and shape checks or guarantee every layer uses that family. One check does
 run earlier: <code>AutoGPTQLinearMethod.__init__</code> calls <code>verify_marlin_supported</code>
-(<code>auto_gptq.py:L320-L324</code>), so a checkpoint whose type or group size is outside Marlin's grid fails
+(<code data-source-engine="vllm" data-source-path="vllm/model_executor/layers/quantization/auto_gptq.py" data-source-symbol="verify_marlin_supported">auto_gptq.py:L320-L324</code>), so a checkpoint whose type or group size is outside Marlin's grid fails
 at config time, before any kernel gets a vote.</p>
 
 <p>Below that, vLLM's linear kernels declare their own eligibility through a two-method protocol:
@@ -1393,10 +1404,10 @@ a hand-ordered list:</p>
 </div>
 
 <p>If nothing matches, the raised <code>ValueError</code> concatenates every kernel's refusal reason
-(<code>kernels/linear/__init__.py:L826-L837</code>) &mdash; the single most useful diagnostic in the whole
+(<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/__init__.py" data-source-symbol="failure_reasons">kernels/linear/__init__.py:L826-L837</code>) &mdash; the single most useful diagnostic in the whole
 quantisation stack, because it tells you in one message why each of eight kernels declined.
 <code>VLLM_DISABLED_KERNELS</code> knocks one out by class name to see what the next choice does
-(<code>kernels/linear/__init__.py:L809-L813</code>).</p>
+(<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/__init__.py" data-source-symbol="VLLM_DISABLED_KERNELS">kernels/linear/__init__.py:L809-L813</code>).</p>
 
 <p>That selection happens <em>once, at load time</em>. The M-bucketing happens per call, inside the chosen
 kernel. CUTLASS FP8 on Hopper dispatches on both M and N:</p>
@@ -1637,7 +1648,7 @@ The auto backend order is explicit:</p>
 <code>deep_gemm.fp8_gemm_nt(lhs, rhs, out)</code> at
 <code>python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py:L189-L193</code> &mdash; with the interesting
 work in the gating: SM &ge; 90 required, SM120 explicitly excluded (<em>"DeepGEMM requires TMEM/tcgen05
-(SM100+datacenter), not available on SM120"</em>, <code>configurer.py:L21-L23</code>), and
+(SM100+datacenter), not available on SM120"</em>, <code data-source-engine="sglang" data-source-path="python/sglang/srt/layers/deep_gemm_wrapper/configurer.py" data-source-symbol="sm_version">configurer.py:L21-L23</code>), and
 <code>DEEPGEMM_SCALE_UE8M0</code> switched on for Blackwell &mdash; the UE8M0 power-of-two block scale that
 <a href="../00-foundations/00-05-numerics.html">§0.5</a> describes.</p>
 
@@ -1645,7 +1656,7 @@ work in the gating: SM &ge; 90 required, SM120 explicitly excluded (<em>"DeepGEM
   <span class="callout__k">Unverified</span>
   <p>DeepGEMM's kernels are not in either repository. Claims about its internal tiling, its FP32 promotion
   scheme for block-wise scales, or its measured throughput cannot be checked here. The likely location is
-  the external <code>deep-gemm</code> package that <code>deep_gemm_wrapper/configurer.py:L27-L31</code>
+  the external <code>deep-gemm</code> package that <code data-source-engine="sglang" data-source-path="python/sglang/srt/layers/deep_gemm_wrapper/configurer.py" data-source-symbol="deep_gemm">deep_gemm_wrapper/configurer.py:L27-L31</code>
   imports. Similarly, SGLang's compiled non-JIT kernels ship in the external <code>sgl_kernel</code> package
   and are unreadable at this SHA.</p>
 </div>
@@ -1684,24 +1695,24 @@ layer: full shape $N = 8192$, $K = 28672$; per rank $K_{\text{part}} = 14336$.</
 <ol>
   <li><b><code>AutoGPTQLinearMethod.create_weights</code></b> (<code>auto_gptq.py:L340-L358</code>) builds an
   <code>MPLinearLayerConfig</code> from the partitioned shapes and calls
-  <b><code>choose_mp_linear_kernel</code></b> (<code>kernels/linear/__init__.py:L775-L837</code>), which walks
+  <b><code>choose_mp_linear_kernel</code></b> (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/__init__.py" data-source-symbol="choose_mp_linear_kernel">kernels/linear/__init__.py:L775-L837</code>), which walks
   <code>_POSSIBLE_KERNELS[CUDA]</code>. <code>CutlassW4A8LinearKernel</code> declines (activations are bf16,
   not fp8).</li>
-  <li><b><code>MacheteLinearKernel.can_implement</code></b> (<code>mixed_precision/machete.py:L30-L64</code>):
+  <li><b><code>MacheteLinearKernel.can_implement</code></b> (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/machete.py" data-source-symbol="can_implement">mixed_precision/machete.py:L30-L64</code>):
   cc is 90 &check;, weight type <code>uint4b8</code> &check;, group 128 &check;, then
   <code>check_machete_supports_shape(14336, 8192)</code> &mdash; $14336 \bmod 64 = 0$ &check;,
   $8192 \bmod 128 = 0$ &check;. <strong>Machete wins.</strong></li>
-  <li><b><code>process_weights_after_loading</code></b> (<code>machete.py:L70-L104</code>) calls
+  <li><b><code>process_weights_after_loading</code></b> (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/machete.py" data-source-symbol="machete_prepack_B">machete.py:L70-L104</code>) calls
   <code>permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)</code> and then
   <code>ops.machete_prepack_B(...)</code>, which rewrites the packed int4 tensor into 128&times;64 prepacked
   blocks whose per-thread slices are 128-bit contiguous.</li>
   <li><b>Decode step, M = 1.</b> <code>machete_mm</code> enters the generated
-  <code>mm_dispatch_&lt;type_sig&gt;</code> (template at <code>generate.py:L45-L57</code>), reads
+  <code>mm_dispatch_&lt;type_sig&gt;</code> (template at <code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/machete/generate.py" data-source-symbol="mm_dispatch_">generate.py:L45-L57</code>), reads
   <code>M = args.A.size(0)</code>, falls through every condition to the <code>None</code> default, and
   selects tile <code>(128, 16)</code> with cluster <code>(1,1,1)</code>.</li>
   <li><b>Inside the kernel:</b> TMA loads the prepacked B block into shared memory; each thread pulls a
   128-bit slice into registers; the upconvert runs (interleaved layout, since 4-bit and not converting to
-  fp8/int8 &mdash; <code>machete_prepacked_layout.cuh:L56-L59</code>); <code>wgmma</code> with register-source A
+  fp8/int8 &mdash; <code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/machete/machete_prepacked_layout.cuh" data-source-symbol="should_interleave">machete_prepacked_layout.cuh:L56-L59</code>); <code>wgmma</code> with register-source A
   applies group scales during upconversion/inner reduction when they vary along K; the GEMM accumulates in fp32 and the epilogue stores bf16. Such group scales cannot be applied just once after the full K sum.</li>
   <li><b>Prefill step, M = 2048.</b> Same weights, same kernel object, <em>different compiled schedule</em>:
   <code>"M &gt; 256"</code> matches first, giving tile <code>(128, 256)</code> cluster <code>(2,1,1)</code>.</li>
@@ -1720,10 +1731,10 @@ the logs says "you lost Machete"; the only signal is the one-off
     divided K below the tile granularity. Reduce TP; ignore the second half of the message, which suggests
     <code>--quantization gptq</code> &mdash; that alias now resolves to the same <code>AutoGPTQConfig</code>
     and fails identically. Only the act-order path still raises; non-act-order shapes pad instead
-    (<code>marlin_utils.py:L179-L196</code>, <code>mixed_precision/marlin.py:L62-L69</code>).</p></div>
+    (<code>marlin_utils.py:L179-L196</code>, <code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/marlin.py" data-source-symbol="check_marlin_supports_shape">mixed_precision/marlin.py:L62-L69</code>).</p></div>
   <div class="ve-card"><span class="ve-card__k">Symptom</span><h4>Group size straddles a TP rank</h4>
     <p><code>"in_features per partition {n} is not divisible by group_size = {g}"</code>
-    (<code>mixed_precision/marlin.py:L76-L81</code>). Padding cannot help &mdash; the rank does not own a whole
+    (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mixed_precision/marlin.py" data-source-symbol="group_size">mixed_precision/marlin.py:L76-L81</code>). Padding cannot help &mdash; the rank does not own a whole
     quantisation group, so the scale is meaningless. Only re-quantising at a smaller group size, or a
     different TP degree, fixes it.</p></div>
   <div class="ve-card"><span class="ve-card__k">Silent</span><h4>Marlin picked instead of Machete</h4>
@@ -1734,14 +1745,14 @@ the logs says "you lost Machete"; the only signal is the one-off
     <p><code>marlin_padded_nk</code> warns once, at load, then every forward pads activations and slices
     outputs. A local dimension 1200 from a divisible global dimension 6000 at TP=5 can require padding to a 128-wide tile boundary, 1280: a 6.7% expansion on that axis in this illustrative layout. Actual supported shapes must also satisfy head and quantization-group constraints; nonintegral sharding is not padding.</p></div>
   <div class="ve-card"><span class="ve-card__k">Perf</span><h4>atomicAdd reduce is off by default</h4>
-    <p><code>should_use_atomic_add_reduce</code> (<code>marlin_utils.py:L633-L654</code>) would help when
+    <p><code>should_use_atomic_add_reduce</code> (<code data-source-engine="vllm" data-source-path="vllm/model_executor/layers/quantization/utils/marlin_utils.py" data-source-symbol="should_use_atomic_add_reduce">marlin_utils.py:L633-L654</code>) would help when
     <code>n &lt; 2048 and k &gt;= 2048</code> &mdash; the split-K decode shape &mdash; but returns False unless
     <code>VLLM_MARLIN_USE_ATOMIC_ADD=1</code>. On sm8x with bf16 it is refused outright: no native bf16
     atomicAdd.</p></div>
   <div class="ve-card"><span class="ve-card__k">Perf</span><h4>Triton tile that spills</h4>
     <p>The ROCm MXFP8 selector documents a real regression: a 256&times;128&times;256 tile "was faster only on
     triton 3.6; on triton 3.7 its large BLOCK_M register/LDS footprint spills or hits <em>out of
-    resources</em>" (<code>rocm_native.py:L165-L170</code>). Tile tables are tuned against a compiler version,
+    resources</em>" (<code data-source-engine="vllm" data-source-path="vllm/model_executor/kernels/linear/mxfp8/rocm_native.py" data-source-symbol="BLOCK_M">rocm_native.py:L165-L170</code>). Tile tables are tuned against a compiler version,
     not just a GPU.</p></div>
 </div></div></section>
 <p class="prose"><a href="../labs/quant_parallel_checks.py" download>Download the CPU quantization and parallelism reference checks</a>. Run <code>python quant_parallel_checks.py</code>: byte ledgers, GPTQ correction, scaling, nibble layouts, paired accuracy, TP projection algebra, PP schedules, routing and semantic-order checks. These test mathematical contracts, not CUDA kernels or engine performance.</p>
@@ -1793,7 +1804,7 @@ VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor
   <details class="fold"><summary>Answer</summary><div class="fold__body">
   <p>The permutation exists to match the <em>dequant</em>, not the mma. For 4 bits, the LOP3 with mask
   <code>0x000f000f</code> extracts nibbles 0 and 4 together, so the packing must interleave with stride 4.
-  For 8 bits (<code>dequant.h:L226-L250</code>) the extraction masks bytes at a different stride, and one
+  For 8 bits (<code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/dequant.h" data-source-symbol="kU8B128">dequant.h:L226-L250</code>) the extraction masks bytes at a different stride, and one
   uint32 holds only 4 values, so the fragment needs two words. Same destination lanes, different byte
   arithmetic to get there.</p></div></details></li>
 
@@ -1856,7 +1867,7 @@ VLLM_DISABLED_KERNELS=MacheteLinearKernel vllm serve &lt;gptq-model&gt; --tensor
 </ul></div></section>
 <section class="sec" id="further-reading" style="--i:14"><div class="sec__h"><span class="sec__n">§15</span><h2 class="sec__t">Further reading</h2></div><div class="sec__body"><ul>
   <li><a href="https://github.com/IST-DASLab/marlin">IST-DASLab/marlin</a> &mdash; the original kernel and its
-  README, cited in vLLM's header at <code>marlin_template.h:L19</code>. The README carries the authors'
+  README, cited in vLLM's header at <code data-source-engine="vllm" data-source-path="csrc/libtorch_stable/quantization/marlin/marlin_template.h" data-source-symbol="IST-DASLab/marlin">marlin_template.h:L19</code>. The README carries the authors'
   own batch-size sweep and the "batch sizes up to 16&ndash;32" framing that the M-bucketing inherits.</li>
   <li><a href="https://github.com/vllm-project/vllm/pull/7174">vLLM PR #7174</a> &mdash; Machete: the
   Hopper-optimised mixed-precision GEMM. The discussion is the best available account of why prepacking to a

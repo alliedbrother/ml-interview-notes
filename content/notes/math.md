@@ -37,6 +37,18 @@ Use the numbered path for first learning. For interview revision, solve each sel
 | [Discrete Mathematics](./math/discrete-math.md) | intermediate | combinatorics, graphs and the Laplacian, recurrences, complexity, dynamic programming, logic |
 | [Numerical Computing](./math/numerical-methods.md) | advanced | floating point, catastrophic cancellation, log-sum-exp, conditioning, mixed precision, quantization, reproducibility |
 
+## Advanced numerical labs
+
+- [Low-rank updates](./math/linear-algebra.md#low-rank-updates-sherman-morrison-and-woodbury): derive Woodbury without requiring an invertible middle factor, solve multiple right-hand sides, and diagnose nearly singular updates.
+- [Generalized eigenproblems](./math/linear-algebra.md#generalized-eigenvectors-use-a-different-metric) and [Schur dynamics](./math/linear-algebra.md#schur-form-survives-when-diagonalization-fails): use the correct metric, preserve matrix structure, and separate asymptotic stability from transient amplification.
+- [Hessian-vector products](./math/calculus.md#curvature-without-constructing-the-hessian): compare automatic differentiation routes, finite differences, and matrix-free curvature solves.
+- [Implicit differentiation](./math/optimization.md#implicit-differentiation-through-a-stationary-solution): derive the adjoint equation and compare stationary, unrolled, and finite-difference hypergradients.
+
+Each linked lab includes executable CPU checks and its numerical assumptions.
+Read the [structured-solve diagnostics](./math/numerical-methods.md#structured-solves-still-need-error-checks)
+before treating a small residual or agreement between two implementations as a
+general accuracy guarantee.
+
 ## How these fit together
 
 ```mermaid

@@ -350,10 +350,18 @@ $$\mathrm{prox}_{\eta\lambda\|\cdot\|_1}(v)_i = \mathrm{sign}(v_i)\max(|v_i|-\et
 | K-FAC | Kronecker-factored Fisher | practical | genuine speedups on some networks |
 | Hessian-free | CG on Hessian-vector products | practical | needs no explicit $H$ |
 
-The trick that makes several of these possible is that a **Hessian-vector
-product costs one extra backward pass**, no explicit Hessian required:
+The trick that makes several of these possible is a **Hessian-vector product
+without constructing the full Hessian**. For a sufficiently smooth scalar loss
+and a direction held fixed during differentiation:
 
 $$Hv = \nabla_\theta\bigl(\nabla_\theta f \cdot v\bigr)$$
+
+This can be implemented by differentiating a differentiable gradient graph or
+by a JVP of the gradient. Work and saved intermediates depend on the chosen
+composition and supported operators, so "one extra backward pass" is not a
+universal runtime or memory guarantee. The [calculus HVP lab](./calculus.md#curvature-without-constructing-the-hessian)
+derives both implementations and compares them with analytic and numerical
+references.
 
 L-BFGS deserves a specific warning: it assumes a deterministic objective. With
 minibatch noise its curvature pairs are garbage. Use it for full-batch problems
@@ -569,6 +577,230 @@ print("ISTA coefficients:", w, "Armijo step:", alpha)
 
 For the theorem assumptions, see [Boyd and Vandenberghe's text](https://web.stanford.edu/~boyd/cvxbook/).
 The numerical checks test these examples, not convergence on arbitrary neural networks.
+
+## Implicit differentiation through a stationary solution
+
+Sometimes the object you want to differentiate is not a fixed neural-network
+layer but the result of an optimization problem. Examples include learning a
+regularization strength, differentiating a fitted linear model, and sensitivity
+analysis around an equilibrium. The [shared CPU lab](/assets/examples/implicit_hvp.py)
+uses a ridge problem with a unique stationary solution so every derivative can
+be checked against a direct solve. Its environment is Python 3.11, NumPy 1.26.4,
+SciPy 1.11.4, and PyTorch 2.8.0; the existing
+[example requirements](/assets/examples/requirements.txt) provide those pins.
+
+### Differentiate the equation defining the solution
+
+Let the inner objective be $L(w,\lambda)$, with weights $w\in\mathbb R^d$ and
+hyperparameters $\lambda\in\mathbb R^p$. A stationary solution satisfies
+
+$$
+F(w^*(\lambda),\lambda)=0,
+\qquad F(w,\lambda)=\nabla_w L(w,\lambda).
+$$
+
+Assume $F$ is continuously differentiable in a neighborhood and its Jacobian
+with respect to $w$ is nonsingular at the solution. The implicit function theorem
+then supplies a locally differentiable solution branch. Differentiating its
+defining equation gives
+
+$$
+H\frac{\partial w^*}{\partial\lambda}+B=0,
+\qquad
+H=\frac{\partial F}{\partial w}\in\mathbb R^{d\times d},
+\quad
+B=\frac{\partial F}{\partial\lambda}\in\mathbb R^{d\times p}.
+$$
+
+Thus the sensitivity matrix solves $H S=-B$, where
+$S=\partial w^*/\partial\lambda\in\mathbb R^{d\times p}$. Writing
+$S=-H^{-1}B$ explains the algebra; implementation should solve the system instead
+of constructing an inverse. A nonsingular Hessian alone does not imply a minimum:
+a smooth stationary saddle may also have a differentiable local branch.
+
+For a scalar outer objective $V(w^*(\lambda),\lambda)$, the total hypergradient is
+
+$$
+\nabla_\lambda V
+=\partial_\lambda V+S^T\nabla_w V
+=\partial_\lambda V-B^Ta,
+\qquad H^Ta=\nabla_w V.
+$$
+
+The adjoint $a\in\mathbb R^d$ lets one linear solve produce a scalar outer
+objective's derivative with respect to many hyperparameters. Compute $B^Ta$ as
+a mixed-derivative VJP when $B$ is too large to materialize. Multiple independent
+outer objectives require additional right-hand sides. For an arbitrary
+equilibrium equation, its Jacobian need not be symmetric, so the transpose in
+the adjoint solve matters even though smooth scalar-loss Hessians are symmetric.
+
+### Ridge regression with all scaling factors visible
+
+Use training data $X\in\mathbb R^{n\times d}$, $y\in\mathbb R^n$, and a separate
+development set $Z\in\mathbb R^{m\times d}$, $t\in\mathbb R^m$. The example has
+no intercept and regularizes every coefficient:
+
+$$
+L(w,\lambda)=\frac{1}{2n}\|Xw-y\|^2+\frac\lambda2\|w\|^2,
+\qquad \lambda>0.
+$$
+
+Stationarity is $Aw=b$, with
+
+$$
+A=\frac{X^TX}{n}+\lambda I,
+\qquad b=\frac{X^Ty}{n}.
+$$
+
+Since $A$ is SPD for every positive $\lambda$, even rank-deficient $X$ gives a
+unique solution. Here $H=A$ and $B=w$ for the scalar hyperparameter. The forward
+sensitivity therefore solves $A\,dw^*/d\lambda=-w^*$. For outer squared error
+with an optional direct penalty,
+
+$$
+V(w,\lambda)=\frac{1}{2m}\|Zw-t\|^2+\frac\rho2\lambda^2,
+\qquad g_V=\frac{Z^T(Zw-t)}m,
+$$
+
+$$
+A^Ta=g_V,
+\qquad \frac{dV}{d\lambda}=\rho\lambda-a^Tw.
+$$
+
+The direct term $\rho\lambda$ must not disappear when applying the chain rule.
+It vanishes only if the outer objective has no explicit dependence on
+$\lambda$. The script tests both cases. A different convention for the training
+loss, such as an unnormalized residual sum, changes the scaling of the ridge
+coefficient; do not transfer this value directly to a library estimator without
+checking that estimator's objective.
+
+```python
+import numpy as np
+
+def hypergradient(X, y, Z, t, lam, rho=0.0):
+    A = X.T @ X / len(X) + lam * np.eye(X.shape[1])
+    w = np.linalg.solve(A, X.T @ y / len(X))
+    g_outer = Z.T @ (Z @ w - t) / len(Z)
+    adjoint = np.linalg.solve(A.T, g_outer)
+    return rho * lam - adjoint @ w
+```
+
+The complete downloadable version validates input shapes, finite values, and
+positive regularization, and records stationarity and adjoint residuals. It
+compares the result with autograd through
+[`torch.linalg.solve`](https://docs.pytorch.org/docs/2.8/generated/torch.linalg.solve.html) and a central
+difference that recomputes the inner optimum at $\lambda+h$ and $\lambda-h$.
+Keeping $w$ fixed in that finite difference would check only the explicit outer
+term and miss the quantity of interest.
+
+For the supplied 12-training-row, 7-development-row, 4-feature fixture,
+$\lambda=0.3$ and $\rho=0.1$, the implicit derivative and solve-autograd derivative
+are approximately **0.08515544605**. The finite-difference result agrees within
+about $6\times10^{-11}$ in the reproduced environment. The direct term is 0.03;
+the remainder comes through the fitted weights. These are numerical correctness
+checks on a synthetic problem, not a hyperparameter-search benchmark.
+
+### Implicit and unrolled derivatives answer different questions
+
+Suppose training uses a fixed number of gradient-descent updates:
+
+$$
+w_{k+1}=w_k-\eta\nabla_w L(w_k,\lambda).
+$$
+
+Differentiating this computation gives the derivative of the *finite training
+procedure*, including its initialization and update rule. With fixed $\eta$ and
+$w_0$ independent of $\lambda$, the ridge sensitivity recurrence is
+
+$$
+S_{k+1}=(I-\eta A)S_k-\eta w_k,
+\qquad S_0=0.
+$$
+
+At the first step from zero, the ridge gradient's penalty term is zero, so
+$S_1=0$. Nevertheless, the converged optimum generally depends on $\lambda$.
+The lab's test observes this mismatch after one step, then observes convergence
+to the implicit derivative after 300 stable full-batch steps. This is possible
+here because the SPD quadratic is contractive for a suitable fixed step size.
+It is not a guarantee for arbitrary optimizers or nonconvex training.
+
+Unrolling stores or recomputes update history and correctly captures early
+stopping as part of the algorithm. Implicit differentiation avoids that history
+but assumes a solution of the defining equation and requires solving a derivative
+system. Applying the stationary formula to an unconverged iterate introduces
+approximation error; a small training loss is not a stationarity certificate.
+If the initialization, step size, data sampling, or optimizer state depends on
+the hyperparameter, their derivatives belong in the unrolled calculation too.
+
+### Matrix-free solves, damping, and conditioning
+
+For large $d$, use the [HVP operator](./calculus.md#curvature-without-constructing-the-hessian)
+inside a linear solver instead of storing $H$. The lab wraps the PyTorch HVP in
+a SciPy `LinearOperator` and uses the library's
+[conjugate-gradient implementation](https://docs.scipy.org/doc/scipy-1.11.4/reference/generated/scipy.sparse.linalg.cg.html).
+The SciPy 1.11.4 API uses `tol`; newer releases use `rtol`, so run the pinned
+environment rather than mixing signatures. The returned CG status and an
+explicit relative residual are both checked. Insufficient iteration budgets
+raise an error instead of silently returning an inaccurate solution.
+
+Ordinary CG requires a fixed SPD operator. An exact neural-network Hessian can
+be indefinite; stochastic HVPs can vary between calls. A small residual does not
+prove SPD, and the lab does not claim to certify it for an arbitrary callable.
+For a known symmetric matrix, adding $\delta I$ shifts every eigenvalue by
+$\delta$; if negative eigenvalues remain, nonnegative damping alone is not enough.
+For SPD $H$ with eigenvalues in $[\mu,L]$,
+
+$$
+\kappa_2(H+\delta I)=\frac{L+\delta}{\mu+\delta},
+\qquad \delta\ge0.
+$$
+
+This improves the condition number when $L>\mu$ and $\delta>0$, but changes the
+linear system. Damping the adjoint equation while keeping the original optimum
+generally produces an approximate hypergradient, not the exact derivative of
+the unchanged objective. Changing the actual ridge penalty changes both the
+optimum and its sensitivity. Keep those operations distinct.
+
+For an approximate adjoint $\hat a$, define residual
+$r=g_V-H^T\hat a$. Then $a-\hat a=H^{-T}r$, and the induced hypergradient error
+obeys
+
+$$
+\|\widehat{\nabla_\lambda V}-\nabla_\lambda V\|
+\le\|B\|\,\|H^{-T}\|\,\|r\|.
+$$
+
+Small residuals can therefore coexist with appreciable derivative error near
+singularity. A residual tolerance should reflect conditioning and the outer
+accuracy requirement, not only a solver default. For this tiny ridge fixture,
+dense solves provide a reference. At large scale, preconditioning, multiple
+right-hand sides, HVP memory, and stopping policies require separate experiments.
+
+### Boundaries and worked checks
+
+**What fails at a nonunique optimum?** The stationary Jacobian can be singular,
+so a unique differentiable branch need not exist. Picking a pseudoinverse without
+specifying the selected solution does not restore the theorem's assumptions.
+This lab requires $\lambda>0$ rather than silently interpreting the boundary.
+
+**What changes with constraints or active sets?** Differentiate the relevant
+KKT system, including constraints and multipliers, under its regularity and
+active-set assumptions. A changing active set, nonsmooth penalty, or discrete
+model choice can make an ordinary derivative fail to exist. The unconstrained
+ridge formula does not automatically cover these cases.
+
+**Can development hypergradients choose a deployable model?** They can guide
+selection, but repeated use makes that data part of training the selection
+procedure. Keep a final untouched test set for quality reporting. This lab's
+second dataset is development data for a mathematical outer objective, not a
+claimed unbiased test benchmark.
+
+**What is actually tested?** Both HVP modes, full/analytic Hessian agreement,
+fixed-direction behavior, linear and constant objectives, finite-difference
+sweeps, invalid shapes and values, negative curvature, damped solves, CG
+nonconvergence, ridge sensitivities, direct outer terms, solve-autograd parity,
+unrolled-versus-stationary derivatives, and the standalone CLI. The script neither
+inverts a dense matrix nor implements a custom autodiff engine or custom CG solver.
 
 ## Self-check
 

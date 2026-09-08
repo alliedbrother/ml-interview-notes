@@ -4,7 +4,7 @@ import argparse
 import math
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 
 def main():
@@ -24,7 +24,7 @@ def main():
         assert page.locator('#dot-product-val').inner_text() == '11.00'
         page.locator('#vec-a-x').fill('0')
         page.locator('#vec-a-y').fill('0')
-        assert page.locator('#angle-val').inner_text() == 'Undefined'
+        expect(page.locator('#angle-val')).to_have_text('Undefined')
         assert 'undefined' in page.locator('#dot-product-explanation').inner_text()
         for field, value in [('vec-a-x', '1'), ('vec-b-x', '0'), ('vec-b-y', '1')]:
             page.locator('#' + field).fill(value)
