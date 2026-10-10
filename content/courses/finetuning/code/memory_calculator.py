@@ -125,7 +125,7 @@ def estimate(c, method="lora", r=16, targets=ALL_LINEAR, batch=1, seq=2048,
              optimizer="adamw", checkpointing=True, flash=True, fused_ce=False,
              grad_accum_buffer=False, exact=False, overhead_gb=1.5):
     n = exact_params(c) if exact else c.nominal
-    out = {}
+    out = {"adapter_weights": 0}
     if method == "full":
         out["weights"] = 2 * n
         out["grads"] = 2 * n + (2 * n if grad_accum_buffer else 0)
@@ -138,14 +138,15 @@ def estimate(c, method="lora", r=16, targets=ALL_LINEAR, batch=1, seq=2048,
         out["weights"] = n * bits / 8
         adapters = lora_params(c, r, targets)
         out["grads"] = 2 * adapters
-        out["master"] = 4 * adapters + 2 * adapters  # fp32 master + bf16 copy
+        out["adapter_weights"] = 2 * adapters  # bf16 adapter copy used in forward
+        out["master"] = 4 * adapters           # fp32 master
         opt = 8.0 if optimizer == "adafactor" else optimizer_bytes_per_param(optimizer)
         out["optimizer"] = opt * adapters
     out["activations"] = activation_bytes(c, batch, seq, flash, checkpointing)
     out["logits"] = 0 if fused_ce else batch * seq * c.vocab * 4
     out["overhead"] = overhead_gb * GB
     gb = {k: v / GB for k, v in out.items()}
-    gb["state_total"] = sum(gb[k] for k in ("weights", "grads", "master", "optimizer"))
+    gb["state_total"] = sum(gb[k] for k in ("weights", "adapter_weights", "grads", "master", "optimizer"))
     gb["total"] = sum(gb[k] for k in out)
     gb["adapter_params"] = adapters
     return gb
@@ -153,9 +154,9 @@ def estimate(c, method="lora", r=16, targets=ALL_LINEAR, batch=1, seq=2048,
 
 def print_table(title, gb):
     print(f"\n{title}")
-    for k in ("weights", "grads", "master", "optimizer", "state_total",
+    for k in ("weights", "adapter_weights", "grads", "master", "optimizer", "state_total",
               "activations", "logits", "overhead", "total"):
-        print(f"  {k:<12} {gb[k]:9.3f} GB")
+        print(f"  {k:<15} {gb[k]:9.3f} GB")
 
 
 def smoke():

@@ -5,32 +5,21 @@
 > truncate), align them with DPO and GRPO, survey audio fine-tuning, and train
 > embedding and reranker models with contrastive losses.
 
-Two requests now dominate "fine-tune it for us" work outside plain chat. The first
-is a vision-language model (VLM) that reads documents: receipts, invoices, charts,
-screenshots, forms. TRL, Unsloth and Axolotl all support VLM SFT, DPO and GRPO, and
-most of what you learned in modules 05, 06, 12 and 13 carries over. A few
-VLM-specific traps do not, and they fail silently or with confusing shape errors.
-The second request is "make our RAG retrieval better", which means fine-tuning an
-**embedding model or a reranker**. That is a different model family with a different
-loss family: contrastive, not next-token. Audio sits between the two and gets a
-survey here. Read this after [module 05](./05-supervised-fine-tuning.md) (SFT) and
-[module 06](./06-lora-and-qlora.md) (LoRA); the alignment sections assume
-[module 12](./12-preference-optimization.md) and [module 13](./13-rl-with-verifiable-rewards.md),
-and the framework surface is compared in [module 08](./08-frameworks-and-tooling.md).
+Two requests dominate fine-tuning work outside plain chat. The first is a vision-language
+model (VLM) that reads documents: receipts, invoices, charts, screenshots. Most of
+[module 05](./05-supervised-fine-tuning.md) carries over, but a few VLM traps fail silently or
+with confusing shape errors. The second is "make our RAG retrieval better", which means
+fine-tuning an **embedding model or a reranker**: a different model family with a contrastive
+loss. Audio sits between the two and gets a survey.
 
 ---
 
 ## 16.1 How a VLM is put together
 
-Almost every open VLM in 2026 has the same three parts:
-
-1. A **vision encoder**: a ViT, often initialised from SigLIP or trained natively at
-   dynamic resolution. It turns an image into a grid of patch vectors.
-2. A **projector** (also called the connector or merger): an MLP, or a cross-attention
-   resampler in older designs, that maps patch vectors into the LLM's embedding space
-   and usually compresses them.
-3. An **LLM decoder**: an ordinary causal LM (module 02) that sees the projected
-   image vectors as if they were token embeddings.
+Almost every open VLM in 2026 has three parts: a **vision encoder** (a ViT, often from
+SigLIP) that turns an image into patch vectors; a **projector** (connector, merger), usually
+an MLP that maps and compresses those vectors into the LLM's embedding space; and an ordinary
+causal **LLM decoder** (module 02) that treats them as token embeddings.
 
 ```mermaid
 flowchart LR
@@ -45,23 +34,19 @@ flowchart LR
     L --> O["next-token logits"]
 ```
 
-The splice is the part that matters for fine-tuning. The text contains a placeholder
-token (`<|image_pad|>` in the Qwen family) repeated **once per image token**. The model
-computes image features, then overwrites the embeddings at exactly those positions. If
-the number of placeholder positions differs from the number of feature vectors, the
-forward pass fails with a "tokens do not match features" error.
+The splice is what matters for fine-tuning. The text holds a placeholder (`<|image_pad|>` in
+Qwen) repeated **once per image token**, and the model overwrites those embeddings with image
+features. If placeholder count and feature count differ, the forward pass fails with a
+"tokens do not match features" error.
 
 ### Dynamic resolution and the token budget
 
-Older VLMs (LLaVA 1.5, [Liu et al., 2023](https://arxiv.org/abs/2304.08485)) resized every
-image to a fixed square, so every image cost the same number of tokens. The Qwen2-VL line
-([Wang et al., 2024](https://arxiv.org/abs/2409.12191)) instead patchifies at **native
-resolution**: the image is resized only to the nearest size divisible by the token side,
-then cut into 14×14 patches, and each 2×2 block of neighbouring patches is merged into
-one token. So one image token covers 28×28 pixels in Qwen2.5-VL
-([Bai et al., 2025](https://arxiv.org/abs/2502.13923)). Qwen3-VL
-([Qwen Team, 2025](https://arxiv.org/abs/2511.21631)) keeps the 2×2 merge but uses 16-px
-patches, so one token covers 32×32 pixels (`patch_size: 16, merge_size: 2` in the
+LLaVA 1.5 ([Liu et al., 2023](https://arxiv.org/abs/2304.08485)) resized every image to a fixed
+square, so every image cost the same tokens. The Qwen2-VL line
+([Wang et al., 2024](https://arxiv.org/abs/2409.12191)) patchifies at **native resolution**:
+resize to the nearest multiple of the token side, cut 14×14 patches, merge each 2×2 block into
+one token. One token covers 28×28 pixels in Qwen2.5-VL ([Bai et al., 2025](https://arxiv.org/abs/2502.13923))
+and 32×32 in Qwen3-VL ([Qwen Team, 2025](https://arxiv.org/abs/2511.21631); `patch_size: 16, merge_size: 2` in the
 [Qwen3-VL-8B processor config](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/blob/0c351dd01ed87e9c1b53cbc748cba10e6187ff3b/preprocessor_config.json)).
 
 The resize rule is `smart_resize` in Transformers
@@ -71,28 +56,21 @@ With $f = \text{patch} \times \text{merge} = 28$:
 $$\bar h = f \cdot \text{round}(h/f), \qquad \bar w = f \cdot \text{round}(w/f), \qquad N_{\text{img}} = \frac{\bar h}{14}\cdot\frac{\bar w}{14}\cdot\frac{1}{4}$$
 
 If $\bar h \bar w$ exceeds `max_pixels`, both sides are scaled down by
-$\beta=\sqrt{hw/\text{max\_pixels}}$ and floored to multiples of $f$; if it falls below
+$\lambda=\sqrt{hw/\text{max\_pixels}}$ and floored to multiples of $f$; if it falls below
 `min_pixels`, they are scaled up and ceiled. Worked through for a 1024×1024 scan:
 1024/28 = 36.57, which rounds to 37, so the image becomes 1036×1036, a 74×74 patch grid,
 and **37 × 37 = 1,369 image tokens**. A 448×448 crop costs 16 × 16 = 256 tokens.
 
 The budget depends on the checkpoint's processor config, not only the class. The
 `Qwen2.5-VL-3B-Instruct` [preprocessor config](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/66285546d2b821cf421d4f5eb2576359d3770cd3/preprocessor_config.json)
-sets `max_pixels: 12845056`, so the 1024×1024 image keeps all 1,369 tokens. The
-Transformers class default is much tighter (`longest_edge = 28*28*1280` = 1,003,520
-pixels), under which the same image is scaled to 980×980 and costs 1,225 tokens.
-**Always compute the budget from the processor you will actually load.**
+sets `max_pixels: 12845056`, so the image keeps all 1,369 tokens; under the class default
+(`longest_edge = 28*28*1280` = 1,003,520 pixels) it shrinks to 980×980 and 1,225 tokens.
+**Compute the budget from the processor you will actually load.**
 
-Video is the same mechanism along time: frames are sampled, consecutive pairs are
-grouped (`temporal_patch_size: 2`), and positions carry a time coordinate as well as
-height and width. Qwen2-VL introduced multimodal RoPE (M-RoPE), which splits the rotary
-dimensions into temporal, height and width sections; Qwen3-VL's report describes an
-"interleaved-MRoPE" and replaces Qwen2.5-VL's absolute time encoding with textual
-timestamps. RoPE itself is in
-[Transformers module 05](../transformers/05-positional-encodings.md); for the
-architecture family see
-[module 15 of the Transformers course](../transformers/15-modern-architecture-case-studies.md),
-and for the vision side's convolutional ancestry, the [CNNs note](../../notes/deep-learning/cnns.md).
+Video is the same mechanism along time: frames are sampled and consecutive pairs grouped
+(`temporal_patch_size: 2`). Qwen2-VL's multimodal RoPE (M-RoPE) splits the rotary dimensions
+into temporal, height and width sections, so each position carries all three coordinates
+(RoPE itself is in [Transformers module 05](../transformers/05-positional-encodings.md)).
 
 ### Processors, not tokenizers
 
@@ -105,38 +83,32 @@ loaded with `AutoProcessor.from_pretrained(...)`, which bundles three things:
 | Tokenizer | text to ids, special tokens | same as module 02 |
 | Chat template | renders each `{"type": "image"}` block as vision-start, one image-pad placeholder, vision-end | the processor then **expands** the placeholder into $N_{\text{img}}$ copies |
 
-In Transformers v5 the image processors are the fast torchvision-backed ones
-(the Qwen2-VL class subclasses `TorchvisionBackend` as of v5.19). The pixel budget is set with
-`min_pixels`/`max_pixels` (the processor maps them onto `size={"shortest_edge",
-"longest_edge"}`; Qwen3-VL's config uses the `size` dict directly). Lowering
-`max_pixels` is the single biggest memory lever in VLM fine-tuning: activation memory is
-linear in sequence length (attention scores are not materialised with FlashAttention or
-SDPA, module 03), and one high-resolution page can cost more tokens than the whole
-conversation around it. For a receipt-extraction task, 512 to 1,024 tokens per image
-(`max_pixels = 1024*28*28`) is a reasonable starting range; check by eye that small print
-survives the resize on your own documents before you train.
+In Transformers v5 the image processors are the fast torchvision-backed ones (the Qwen2-VL
+class subclasses `TorchvisionBackend` as of v5.19). Set the budget with `min_pixels`/`max_pixels`
+(mapped onto `size={"shortest_edge", "longest_edge"}`; Qwen3-VL's config uses `size` directly).
+**Lowering `max_pixels` is the biggest memory lever in VLM fine-tuning**: activation memory is
+linear in sequence length (FlashAttention and SDPA's fused kernels never materialise the scores,
+module 03). For receipts, 512 to 1,024 tokens per image (`max_pixels = 1024*28*28`) is a
+reasonable start; check by eye that small print survives the resize.
 
 ### Never truncate image tokens
 
 TRL's `SFTConfig.max_length` defaults to **1024** (as of TRL v1.15,
 [`sft_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L201-L210)).
-Now add a 1024×1024 receipt (1,369 image tokens) to a 60-token prompt. The sequence is
-already longer than 1,024 before the answer starts. Truncating at 1,024 cuts off the last
-405 image tokens. `pixel_values` still holds features for 1,369 tokens, but the
-text now has only 964 placeholders, so the model either crashes on the mismatch or,
-worse, trains with no answer tokens at all. The TRL docs are explicit: "For VLMs,
-truncating may remove image tokens, leading to errors during training. To avoid this, set
-`max_length=None`"
-([SFT trainer docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)).
-The same advice is repeated for `DPOConfig`. TRL v1.15 also refuses
-`truncation_mode="keep_end"` for vision datasets, because cutting from the left removes
-the prompt where the images live.
+A 60-token prompt plus a 1024×1024 receipt (1,369 image tokens) is already past 1,024 before the
+answer starts. Cutting at 1,024 leaves 964 placeholders against 1,369 feature vectors, so the
+forward pass raises the tokens-versus-features mismatch. In a slightly shorter example where the
+image fits, truncation fails silently instead: it cuts the answer, and the row trains on no target
+tokens. The TRL docs are explicit: "For VLMs, truncating may remove image tokens, leading to errors
+during training. To avoid this, set `max_length=None`" ([SFT trainer docs,
+v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)). The same advice is repeated for
+`DPOConfig`. TRL v1.15 also refuses `truncation_mode="keep_end"` for vision datasets, because
+cutting from the left removes the prompt where the images live.
 
-**The fix is `max_length=None` plus a bounded pixel budget.** You control sequence length
-through `max_pixels` and through filtering over-long text, not by cutting tokens.
-
-The check below implements `smart_resize` with the Qwen2.5-VL-3B constants and proves the
-numbers in this section, including that cutting at 1,024 breaks the placeholder count.
+**The fix is `max_length=None` plus a bounded pixel budget**: control length through
+`max_pixels` and by filtering over-long text, never by cutting tokens. The check below
+implements `smart_resize` with the Qwen2.5-VL-3B constants and proves this section's numbers,
+including that cutting at 1,024 breaks the placeholder count.
 
 ```python finetuning-check
 import math
@@ -185,45 +157,37 @@ kept = truncate(seq, None)
 assert kept.count(IMG) == features_expected
 ```
 
-It does not prove anything about other model families: LLaVA-style fixed-resolution
-models, Gemma 3 and Idefics use different resize and token rules, so read their
-processor source before you set a budget.
+It proves nothing about other families: LLaVA-style models, Gemma 3 and Idefics use different
+resize and token rules, so read their processor source before you set a budget.
 
 ---
 
 ## 16.2 What to train
 
-A VLM has three separately freezable parts, and the right choice depends on where
-your domain shift is. For `Qwen2.5-VL-3B-Instruct` the split is 632M vision-encoder
-parameters, 37M merger parameters, and 3.09B language-model parameters including the
-tied embeddings (counted on the meta device from the
+Which of the three parts to train depends on where your domain shift is. For
+`Qwen2.5-VL-3B-Instruct` the split is 632M vision-encoder parameters, 37M merger parameters, and
+3.09B language-model parameters including the tied embeddings (counted on the meta device from the
 [config](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/66285546d2b821cf421d4f5eb2576359d3770cd3/config.json)).
-For `Qwen3-VL-8B-Instruct` it is 416M vision, 161M across the merger and DeepStack
-mergers, and 8.2B language model.
 
-The memory column below uses module 03's mixed-precision AdamW accounting: 16 bytes per
-**trainable** parameter (bf16 weight and gradient, fp32 master weight and two Adam
-moments), plus 2 bytes per frozen bf16 parameter, for Qwen2.5-VL-3B. LoRA here means
-$r=16$ on all seven linear projections of all 36 decoder layers:
-$r(d_{in}+d_{out})$ summed per layer is
-$16\cdot[2(2048+2048) + 2(2048+256) + 3(2048+11008)] = 831{,}488$, times 36 layers
-$\approx 29.9$M parameters.
+The memory column uses module 03's mixed-precision AdamW accounting: 16 bytes per
+**trainable** parameter, 2 per frozen bf16 parameter. LoRA means $r=16$ on all seven linear
+projections of all 36 decoder layers: $r(d_{in}+d_{out})$ summed per layer is
+$16\cdot[2(2048+2048) + 2(2048+256) + 3(2048+11008)] = 831{,}488$, times 36 $\approx 29.9$M.
 
 | Component trained | When | Extra state (Qwen2.5-VL-3B) | Main risk |
 |---|---|---|---|
 | LLM LoRA only (vision + projector frozen) | default; new output format, extraction schema, domain vocabulary, reasoning style | 29.9M × 16 B ≈ 0.48 GB | cannot fix what the encoder cannot see (tiny print, unusual modality) |
 | LLM LoRA + projector (full) | images are in-distribution but the mapping to language is off (new chart types, dense layouts) | + 37M × 16 B ≈ 0.59 GB | small; projector overfits on tiny datasets |
-| + vision tower (LoRA or full) | genuine pixel-level domain shift: medical scans, satellite, microscopy, handwriting in a new script | full: + 632M × 16 B ≈ 10.1 GB; LoRA: tens of MB | forgetting general visual skills; vLLM cannot serve LoRA on vision layers |
+| + vision tower (LoRA or full) | genuine pixel-level domain shift: medical scans, satellite, microscopy, handwriting in a new script | full: + 632M × 16 B ≈ 10.1 GB; LoRA: tens of MB | forgetting general visual skills; vLLM serves vision-tower LoRA only behind the experimental `enable_tower_connector_lora` flag (some models, e.g. the Qwen-VL series) |
 | Full fine-tune of everything | large in-domain corpus, T2+ hardware | 3.75B × 16 B ≈ 60 GB before activations | catastrophic forgetting (module 19), cost |
 
-The base weights add about 7.5 GB in bf16 (or roughly 2.5 GB with 4-bit QLoRA), and the
-activations of a 1,400-token multimodal sequence come on top. **LLM-only LoRA is the right
-first experiment for document extraction**; you move the vision tower only after an error
-analysis shows the model misreads pixels rather than mis-formats answers.
+The base weights add about 7.5 GB in bf16. With 4-bit QLoRA the 3.09B language model takes
+about 1.6 GB in NF4, plus about 1.3 GB if the 669M vision encoder and merger stay bf16: roughly
+2.5 to 3 GB, with activations on top. **LLM-only LoRA is the right first experiment for document
+extraction**; move the vision tower only after error analysis shows the model misreads pixels.
 
-In Unsloth the switches are explicit
-([vision fine-tuning docs](https://unsloth.ai/docs/basics/vision-fine-tuning), as of
-October 2026). All four default to `True`:
+In Unsloth the switches are explicit and all four default to `True`
+([vision fine-tuning docs](https://unsloth.ai/docs/basics/vision-fine-tuning), October 2026):
 
 ```python
 # Teaching fragment: not executed (needs unsloth and a GPU).
@@ -232,18 +196,16 @@ from unsloth import FastVisionModel
 model, processor = FastVisionModel.from_pretrained("unsloth/Qwen2.5-VL-3B-Instruct", load_in_4bit=True)
 model = FastVisionModel.get_peft_model(
     model,
-    finetune_vision_layers=False,     # keep the ViT frozen (and vLLM-servable)
+    finetune_vision_layers=False,     # keep the ViT frozen (vLLM tower LoRA is experimental)
     finetune_language_layers=True,
     finetune_attention_modules=True,
     finetune_mlp_modules=True,
-    r=16, lora_alpha=16, lora_dropout=0, bias="none",
+    r=16, lora_alpha=32, lora_dropout=0, bias="none",
 )
 ```
 
-With PEFT directly, express the same choice with a regex over module names, for
-example `target_modules=r".*language_model.*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)"`,
-and add the merger to `modules_to_save` if you want it fully trained. Module 06 covers
-the LoRA mechanics.
+With plain PEFT, use the `target_modules` regex in the 16.3 fragment, and add the merger to
+`modules_to_save` to train it fully ([module 06](./06-lora-and-qlora.md) covers the mechanics).
 
 ---
 
@@ -256,7 +218,7 @@ column (a list). Messages carry **content blocks**, so the template knows where 
 goes ([dataset formats, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/dataset_formats)):
 
 ```json
-{"images": ["<PIL.Image 1036x1036>"],
+{"images": ["<PIL.Image 1024x1024>"],
  "messages": [
    {"role": "user", "content": [
      {"type": "image"},
@@ -265,34 +227,29 @@ goes ([dataset formats, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/data
      {"type": "text", "text": "{\"merchant\": \"Cafe Lumen\", \"total\": 45500, ...}"}]}]}
 ```
 
-The $k$-th `{"type": "image"}` block binds to `images[k]`, which is how multi-image and
-interleaved examples work (two pages of an invoice, a before/after pair). Grounding
-targets are just text, but the **coordinate convention is model-specific**: Qwen2.5-VL
-emits absolute pixel coordinates in the *resized* image, Qwen3-VL is reported to use
-coordinates normalised to [0, 1000], and PaliGemma uses `<locXXXX>` location tokens.
-Train in the convention your base model was pretrained on, or you spend data teaching it a
-new one. For general instruction data, LLaVA-Instruct-style mixes such as
-[`trl-lib/llava-instruct-mix`](https://huggingface.co/datasets/trl-lib/llava-instruct-mix)
-are the standard source; mixing 10 to 30 percent of general data into a narrow task set is
-the usual guard against forgetting (module 19 has the evidence).
+The $k$-th `{"type": "image"}` block binds to `images[k]`, which is how multi-image examples
+work. Grounding targets are text, but the **coordinate convention is model-specific**:
+Qwen2.5-VL emits absolute pixels in the *resized* image, Qwen3-VL is reported to use [0, 1000]
+normalised coordinates, and PaliGemma uses `<locXXXX>` tokens. Train in your base model's
+convention. Mixing some general data back in, such as
+[`trl-lib/llava-instruct-mix`](https://huggingface.co/datasets/trl-lib/llava-instruct-mix),
+guards against forgetting (10 to 30 percent is a common starting heuristic, not a measured
+optimum; module 19 has the evidence).
 
 ### SFTTrainer and DataCollatorForVisionLanguageModeling
 
-VLM data cannot be pre-tokenised the way text data is, because the token count depends on
-the image processor. TRL therefore **skips dataset preparation for vision datasets** and does
-everything in `DataCollatorForVisionLanguageModeling`
-([source at v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L249-L292)).
-Per batch it renders the chat template, runs the processor (which expands placeholders and
-builds `pixel_values` and `image_grid_thw`), pads, and builds `labels`.
+The token count depends on the image processor, so TRL **skips dataset preparation for vision
+datasets** and does everything per batch in `DataCollatorForVisionLanguageModeling`
+([source at v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L249-L292)):
+render the template, run the processor (expanding placeholders, building `pixel_values` and
+`image_grid_thw`), pad, build `labels`.
 
-Be precise about what it masks. As of v1.15 the language-modelling path sets labels to
--100 for **padding**, and additionally for every non-assistant token when
-`assistant_only_loss=True`; the prompt-completion path masks the prompt when
-`completion_only_loss` is on (the default for prompt-completion data). Image tokens sit in
-the user turn, so they leave the loss **only through one of those masks**. With a plain
-`messages` dataset and `assistant_only_loss=False`, the loss includes every placeholder
-position, a target the model can never predict usefully. So turn on assistant-only loss.
-For vision datasets it requires `transformers>=5.18.0` (the trainer raises otherwise) and a
+As of v1.15 it sets labels to -100 for **padding**, plus every non-assistant token when
+`assistant_only_loss=True` (the prompt-completion path masks the prompt under
+`completion_only_loss`). Image tokens sit in the user turn, so they leave the loss **only
+through one of those masks**. Without them, the loss includes every placeholder position, a
+target the model can never predict usefully. So turn on assistant-only loss. For vision
+datasets it requires `transformers>=5.18.0` (the trainer raises otherwise) and a
 chat template with `{% generation %}` markers. TRL patches the template automatically for some
 known families (its docs name Qwen3); for any other VLM, check the template yourself.
 
@@ -320,10 +277,7 @@ trainer.train()
 ```
 
 Three other v1.15 constraints: `packing=True` and `padding_free=True` both raise on vision
-datasets, and the trainer refuses a vision dataset paired with a text-only model. Unsloth's
-docs add a practical one: with multi-image rows, build the training list with a
-Python list comprehension instead of `Dataset.map`, which applies stricter Arrow
-standardisation to nested image columns.
+datasets, and the trainer refuses a vision dataset paired with a text-only model.
 
 ### Task patterns
 
@@ -338,32 +292,28 @@ standardisation to nested image columns.
 
 ## 16.4 VLM preference optimisation and RL
 
-The DPO, GRPO and RLOO trainers accept the same `image`/`images` columns as SFT, and the
-same `max_length=None` rule applies to `DPOConfig`
+The DPO, GRPO and RLOO trainers accept the same `image`/`images` columns as SFT, and the same
+`max_length=None` rule applies to `DPOConfig`
 ([DPO docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/dpo_trainer)). The losses are
-unchanged: [module 12](./12-preference-optimization.md) derives DPO and its implicit reward
-([Rafailov et al., 2023](https://arxiv.org/abs/2305.18290)), and [module 13](./13-rl-with-verifiable-rewards.md) derives the
-group-normalised advantages, $\hat A_i = (r_i - \text{mean}(r))/\text{std}(r)$ in the original
-GRPO form. What changes is the data and which failure you are attacking.
+unchanged ([module 12](./12-preference-optimization.md) for DPO,
+[module 13](./13-rl-with-verifiable-rewards.md) for GRPO); the data and the target failure change.
 
-**Hallucination is the dominant VLM failure.** The model describes objects, text or fields
-that are not in the image. RLAIF-V ([Yu et al., 2024](https://arxiv.org/abs/2405.17220))
-builds preference pairs aimed at it without human labels: sample several responses, split
-each into atomic claims, have an open-source MLLM verify each claim against the image, and
-prefer the response with fewer unsupported claims. The resulting
-[`openbmb/RLAIF-V-Dataset`](https://huggingface.co/datasets/openbmb/RLAIF-V-Dataset) is
-licensed CC-BY-NC-4.0, so it is fine for research and not for a commercial model; TRL ships a
-pre-formatted copy, `HuggingFaceH4/rlaif-v_formatted`, in its DPO docs example. The general
-lesson transfers: **for VLM DPO, the rejected answer should differ from the chosen one in
+**Hallucination is the dominant VLM failure**: the model describes objects or fields that are
+not in the image. RLAIF-V ([Yu et al., 2024](https://arxiv.org/abs/2405.17220)) builds
+preference pairs against it without human labels: split sampled responses into atomic claims,
+have an open MLLM verify each against the image, and prefer the response with fewer unsupported
+claims. [`openbmb/RLAIF-V-Dataset`](https://huggingface.co/datasets/openbmb/RLAIF-V-Dataset) is
+CC-BY-NC-4.0 (research only); TRL's DPO docs use a pre-formatted copy,
+`HuggingFaceH4/rlaif-v_formatted`. The lesson transfers: **for VLM DPO, the rejected answer should differ from the chosen one in
 grounding, not in style**.
 
-**MPO (Mixed Preference Optimization)**
-([Wang et al., 2024](https://arxiv.org/abs/2411.10442)) addresses two problems the authors
-observed in multimodal reasoning: SFT alone suffers distribution shift, and DPO alone can
-produce incoherent or repetitive rationales. MPO sums three losses: the DPO sigmoid
-preference loss, a BCO quality loss (each response judged good or bad on its own), and an SFT
-loss on the chosen answer. In TRL it is a configuration of `DPOTrainer`, since `loss_type`
-accepts a list (module 12 lists the loss types):
+**MPO (Mixed Preference Optimization)** ([Wang et al., 2024](https://arxiv.org/abs/2411.10442))
+targets two observed problems: SFT alone suffers distribution shift, and DPO alone can produce
+incoherent rationales. It sums the DPO sigmoid loss, a BCO quality loss (each response judged
+on its own) and an SFT loss on the chosen answer; the authors report 6.2 points on MathVista from the switch
+(relayed in the HF [VLM alignment post](https://huggingface.co/blog/trl-vlm-alignment)), a
+result on their model and data. In TRL it is a configuration of `DPOTrainer`, since
+`loss_type` accepts a list (module 12 lists the loss types):
 
 ```python
 # Teaching fragment: not executed.
@@ -375,24 +325,19 @@ mpo_config = DPOConfig(
 )
 ```
 
-The HF [VLM alignment post](https://huggingface.co/blog/trl-vlm-alignment) relays the
-paper's claim that switching to this combined loss gave 6.2 points on MathVista; that is
-the authors' result on their model and data, not a guarantee for yours.
-
-**GRPO for visual reasoning** works whenever the answer is checkable: a number for a
-geometry figure, a multiple-choice letter, a JSON object that must match. The reference
-recipe is TRL's `grpo_visual_math.py` on
-[`lmms-lab/multimodal-open-r1-8k-verified`](https://huggingface.co/datasets/lmms-lab/multimodal-open-r1-8k-verified)
-(7,689 image/problem/solution rows) with Qwen2.5-VL-3B, a format reward and an accuracy
-reward checked with `math_verify`. Advantages are the group-normalised rewards of
-module 13; nothing about them is visual. The practical differences are memory (every one of
-the $G$ completions re-encodes the image's tokens in the policy forward pass) and serving:
-the TRL GRPO docs list Gemma 3, LLaVA-NeXT, Qwen2-VL, Qwen2.5-VL and SmolVLM2 as tested, and
-Unsloth's vision-RL guide warns that **vLLM does not support LoRA on vision layers**, so set
-`finetune_vision_layers=False` when generation runs in vLLM. Unsloth added multi-image
-GRPO in May 2026 ([PR #5197](https://github.com/unslothai/unsloth/pull/5197)), which
-matters for tasks such as "compare these two pages". GRPO tools can also return images
-to the model mid-rollout (screenshots, plots), the basis for VLM agent RL (module 15).
+**GRPO for visual reasoning** works whenever the answer is checkable: a number, a
+multiple-choice letter, a JSON object. TRL's reference recipe, `grpo_visual_math.py` (lab
+L16.2), uses 7,689 verified image/problem/solution rows with a format reward and a
+`math_verify` accuracy reward. Nothing about the advantages is visual. The differences are
+memory (each of the $G$ completions re-encodes the image tokens) and serving. Unsloth's
+vision-RL guide recommends `finetune_vision_layers=False` when generation runs in vLLM, because
+vLLM's LoRA for the vision tower and connector is **experimental and off by default**
+(`enable_tower_connector_lora=False`); as of v0.31 it covers only some multimodal models, such
+as the Qwen-VL series
+([vLLM LoRA config](https://docs.vllm.ai/en/v0.31.0/api/vllm/config/lora/),
+[LoRA adapters docs](https://docs.vllm.ai/en/v0.31.0/features/lora/)). Unsloth added
+multi-image GRPO in May 2026 ([PR #5197](https://github.com/unslothai/unsloth/pull/5197)),
+which matters for tasks such as "compare these two pages".
 
 ---
 
@@ -401,12 +346,11 @@ to the model mid-rollout (screenshots, plots), the basis for VLM agent RL (modul
 [Module 09](./09-evaluating-fine-tuned-models.md) owns evaluation design. Three things are
 specific to VLMs.
 
-**Task metric: field-level precision, recall and F1.** Exact-match on the whole JSON object
-is too harsh (one wrong digit zeroes a 20-field receipt), and string similarity is too
-lenient. Score each field as a unit after **normalisation**: strip and lowercase strings,
-collapse whitespace, parse money to a number (`"45,500"` and `"45500"` agree), parse dates
-to ISO. A list field such as `items` contributes one unit per element, matched as a
-multiset. Then count over every unit in the eval set:
+**Task metric: field-level precision, recall and F1.** Whole-object exact match is too harsh
+(one wrong digit zeroes a 20-field receipt); string similarity is too lenient. Score each field
+as a unit after **normalisation**: strip, lowercase, collapse whitespace, parse money to a
+number (`"45,500"` = `"45500"`), dates to ISO. A list field such as `items` contributes one unit
+per element, matched as a multiset. Then count over every unit:
 
 - true positive: predicted field present and equal to gold after normalisation;
 - false positive: a predicted field that is wrong, **or present when gold has no such field**
@@ -485,25 +429,20 @@ assert (tp2, fp2, fn2) == (9, 2, 2)
 assert P2 < P and R2 == R and round(P2, 4) == 0.8182
 ```
 
-It does not prove your normalisation rules are right for your documents (currencies with
-"." thousands separators, dates in day-month order); write them per field and test them
-on real disagreements.
+It does not prove your normalisation rules fit your documents ("." thousands separators,
+day-month dates); write them per field and test them on real disagreements.
 
 **Capability regression: MMMU and ChartQA.** A narrow fine-tune can quietly damage general
-visual reasoning. lm-evaluation-harness has `hf-multimodal` and `vllm-vlm` model types with
-an `mmmu_val` group (accuracy over 900 validation questions, some multi-image) and a
-`chartqa` task (exact match, with `chartqa_llama` variants)
-([task READMEs at v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/tree/v0.4.13/lm_eval/tasks/mmmu)).
-Its README still describes multimodal support as a prototype and points to
-[lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval) for broader coverage. Run the
-same harness, prompt and image budget before and after; the delta matters, not the
-absolute number.
+visual reasoning. lm-evaluation-harness (`hf-multimodal`, `vllm-vlm` model types) has an
+`mmmu_val` group (900 validation questions) and a `chartqa` task
+([task READMEs at v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/tree/v0.4.13/lm_eval/tasks/mmmu));
+its README calls multimodal support a prototype and points to
+[lmms-eval](https://github.com/EvolvingLMMs-Lab/lmms-eval). Run the same harness, prompt and
+image budget before and after; the delta matters, not the absolute number.
 
-**Hallucination checks.** Count fields and objects the model asserts that are not in the
-image. For extraction, the per-field FP rate on fields absent from gold (the `tax` case
-above) is the direct measure. For captioning or VQA, sample outputs, extract claimed
-objects, and check them against annotations or a stronger judge. Report it separately
-from F1, because a model can gain F1 while hallucinating more.
+**Hallucination checks.** For captioning or VQA, sample outputs, extract claimed objects, and
+check them against annotations or a stronger judge. Report hallucinations separately from F1,
+because a model can gain F1 while hallucinating more.
 
 ---
 
@@ -513,110 +452,93 @@ Audio follows the same encoder-plus-decoder logic; the [speech and audio note](.
 covers the signal-processing basics.
 
 **ASR with Whisper.** Whisper ([Radford et al., 2022](https://arxiv.org/abs/2212.04356)) is an
-encoder-decoder transformer trained on 680k hours of weakly supervised audio. Input is a
-30-second window converted to a log-Mel spectrogram (80 bins; 128 in large-v3); the
-decoder generates text with special tokens for language and task. Fine-tuning is plain
-seq2seq cross-entropy on (audio, transcript) pairs with `WhisperProcessor` (feature
-extractor plus tokenizer) and `Seq2SeqTrainer`; common reasons are an under-served
-language, accents, or domain vocabulary such as drug names. The metric is **word error
-rate**, $\text{WER} = (S + D + I)/N$ (substitutions, deletions, insertions over reference
-words), computed after the same text normalisation on both sides. Freezing the encoder and
-training the decoder (or LoRA on both) is the usual low-memory recipe.
+encoder-decoder transformer over 30-second log-Mel spectrograms (80 bins; 128 in large-v3).
+Fine-tuning is plain seq2seq cross-entropy on (audio, transcript) pairs with
+`WhisperProcessor` and `Seq2SeqTrainer`. The metric is **word error rate**,
+$\text{WER} = (S + D + I)/N$ (substitutions, deletions, insertions over reference words),
+after the same text normalisation on both sides. Freezing the encoder and training the
+decoder (or LoRA on both) is the usual low-memory recipe.
 
-**TTS.** Speaker or style adaptation fine-tunes a pretrained TTS model on minutes to hours
-of one voice. Modern open TTS models are LLMs over discrete audio-codec tokens, so the
-training step is ordinary next-token SFT on codec tokens; quality is judged by listening
-tests and by the WER of an ASR model run on the output. Consent and voice-cloning misuse
-belong in module 19's checklist.
+**TTS.** Speaker or style adaptation fine-tunes a pretrained TTS model on minutes to hours of
+one voice. Many recent open TTS models are LLMs over discrete audio-codec tokens; for those,
+the training step is ordinary next-token SFT on codec tokens. Judge quality by listening tests
+and by the WER of an ASR model run on the output. Consent and voice-cloning misuse belong in
+module 19's checklist.
 
-**Audio-LLMs.** Models such as Voxtral ([Mistral, 2025](https://arxiv.org/abs/2507.13264);
-3B and 24B, Apache-2.0) put an audio encoder and projector in front of an LLM, exactly like a
-VLM. Axolotl has a [Voxtral guide](https://docs.axolotl.ai/docs/models/voxtral.html) with
-text-only and text-plus-audio QLoRA configs in OpenAI-style multi-content messages. As of
-October 2026 that guide lists preference tuning and RL for Voxtral as future work, so treat
-audio-LLM fine-tuning as SFT-only in Axolotl.
+**Audio-LLMs.** Voxtral ([Mistral, 2025](https://arxiv.org/abs/2507.13264); 3B and 24B,
+Apache-2.0) puts an audio encoder and projector in front of an LLM, exactly like a VLM.
+Axolotl's [Voxtral guide](https://docs.axolotl.ai/docs/models/voxtral.html) has QLoRA SFT
+configs and, as of October 2026, lists preference tuning and RL as future work.
 
 ---
 
 ## 16.7 Embedding models
 
 An embedding model maps a text (or image) to one vector so that cosine similarity tracks
-relevance. RAG retrieval quality is mostly decided here (see the
-[RAG and retrieval note](../../notes/nlp/rag-and-retrieval.md) and
-[text representation note](../../notes/nlp/text-representation.md)). Off-the-shelf
-embedders are trained on web-scale pairs; on your domain (internal tickets, legal
-clauses, part numbers) they often rank a near-miss above the answer. Fine-tuning fixes that
-with a few thousand (query, relevant passage) pairs, which you can mine from logs or
-synthesise with an LLM (module 04).
+relevance; RAG retrieval quality is mostly decided here
+([RAG and retrieval note](../../notes/nlp/rag-and-retrieval.md),
+[text representation note](../../notes/nlp/text-representation.md)). On your domain (tickets,
+legal clauses, part numbers) off-the-shelf embedders often rank a near-miss above the answer.
+A few thousand (query, passage) pairs, mined from logs or synthesised (module 04), fix that.
 
 ### MultipleNegativesRankingLoss: InfoNCE with in-batch negatives
 
 The [contrastive learning note](../../notes/deep-learning/self-supervised-learning.md) has the
-general idea. Concretely: a batch holds $B$ pairs $(q_i, d_i)$. Every other document in the
-batch serves as a negative for $q_i$, so you get $B-1$ negatives per query for free. With
-scale $s$:
+general idea. A batch holds $B$ pairs $(q_i, d_i)$, and every other document in the batch is a
+negative for $q_i$, so you get $B-1$ negatives per query for free. With scale $s$:
 
 $$\mathcal{L}_{\text{MNRL}} = -\frac{1}{B}\sum_{i=1}^{B} \log \frac{\exp\big(s\cos(q_i,d_i)\big)}{\sum_{j=1}^{B}\exp\big(s\cos(q_i,d_j)\big)}$$
 
-This is cross-entropy over a $B\times B$ similarity matrix with the diagonal as the target
-class. In Sentence Transformers, `MultipleNegativesRankingLoss` defaults to `scale=20.0`,
-equivalent to temperature 0.05, with cosine similarity
-([source at v6.1.0](https://github.com/huggingface/sentence-transformers/blob/b0bf39968ba461c34b29372144794eff1be06f6d/sentence_transformers/sentence_transformer/losses/multiple_negatives_ranking.py#L17-L31)).
-The scale matters because cosines live in $[-1,1]$: without it, the softmax is nearly
-uniform and gradients are weak.
+This is cross-entropy over a $B\times B$ similarity matrix with the diagonal as the target.
+Sentence Transformers' `MultipleNegativesRankingLoss` defaults to cosine with `scale=20.0`
+(temperature 0.05) ([source at v6.1.0](https://github.com/huggingface/sentence-transformers/blob/b0bf39968ba461c34b29372144794eff1be06f6d/sentence_transformers/sentence_transformer/losses/multiple_negatives_ranking.py#L17-L31)).
+Cosines live in $[-1,1]$, so without the scale the softmax is nearly uniform and gradients weak.
 
-**Why batch size matters.** The loss is a $B$-way classification. With $B=8$ the model only
-has to beat 7 random passages; with $B=256$ it has to beat 255, and the hardest of them start
-to look like real competitors. Larger batches give harder, more informative negatives, which
-is why embedding papers train with batches in the thousands. Two consequences:
+**Why batch size matters.** With $B=8$ the model only has to beat 7 random passages; with
+$B=256$ it beats 255, and the hardest start to look like real competitors. That is why
+embedding papers train with batches in the thousands. Two consequences:
 
 - **Duplicates poison the batch.** If two rows share a positive, one row's positive is the
   other's "negative". Use `batch_sampler=BatchSamplers.NO_DUPLICATES`.
 - **Memory caps $B$.** `CachedMultipleNegativesRankingLoss` implements GradCache
-  ([Gao et al., 2021](https://arxiv.org/abs/2101.06983)): embed the whole batch without
-  gradients in mini-batches (`mini_batch_size=32` by default), compute the loss and the
-  gradient with respect to the **embeddings**, then re-run each mini-batch with gradients and
-  backpropagate those cached embedding gradients. The result matches the large-batch loss
-  with roughly mini-batch memory, at the cost of about one extra forward pass. On a single
-  T4 this is how you train with $B=1024$.
+  ([Gao et al., 2021](https://arxiv.org/abs/2101.06983)): embed the batch without gradients in
+  mini-batches (`mini_batch_size=32` by default), compute the gradient with respect to the
+  **embeddings**, then re-run each mini-batch with gradients and backpropagate those cached
+  gradients. Same loss as the large batch at roughly mini-batch memory, for about one extra
+  forward pass; on a single T4 this is how you train with $B=1024$.
 
 ### Hard negatives and the false-negative trap
 
-Random in-batch negatives become easy quickly. **Hard negatives** are passages that look
-relevant but are not: the same product's other manual page, the clause from the previous
-contract version. Adding one per row turns the batch into $(q_i, d_i, n_i)$, and the
-denominator now runs over $2B$ candidates: all positives and all hard negatives.
-`sentence_transformers.util.mine_hard_negatives` retrieves top candidates with an existing
-embedder (optionally rescored by a cross-encoder) and writes them as new columns; key
-arguments are `range_min`/`range_max` (which ranks to sample from), `num_negatives`,
-`absolute_margin`/`relative_margin`, and `sampling_strategy`.
+Random in-batch negatives become easy quickly. **Hard negatives** look relevant but are not:
+the same product's other manual page, last year's version of a clause. One per row makes the
+batch $(q_i, d_i, n_i)$, and the denominator runs over $2B$ candidates.
+`sentence_transformers.util.mine_hard_negatives` retrieves them with an existing embedder
+(optionally rescored by a cross-encoder); key arguments are `range_min`/`range_max`,
+`num_negatives`, `absolute_margin`/`relative_margin` and `sampling_strategy`.
 
-The danger is the **false negative**: your corpus contains a second passage that also answers
-the query, but only one is labelled. Mining it as a negative teaches the model to push away a
-correct answer. Two standard filters: skip the very top ranks (`range_min=10`), and require
-the negative to score clearly below the positive (a margin, e.g. `relative_margin=0.05` keeps
-only candidates scoring under 95 percent of the positive's similarity). The lab's smoke run
-skips candidates within an absolute margin of 0.05.
+The danger is the **false negative**: a second, unlabelled passage that also answers the query.
+Mining it teaches the model to push away a correct answer. Two filters: skip the top ranks
+(`range_min=10`), and require a margin below the positive (`relative_margin=0.05` keeps only
+candidates under 95 percent of the positive's similarity; the smoke run uses an absolute 0.05).
 
 ### Matryoshka embeddings
 
 Storage and search cost scale with dimension. Matryoshka Representation Learning
 ([Kusupati et al., 2022](https://arxiv.org/abs/2205.13147)) trains the first $m$ coordinates
-to work as an embedding on their own, for several $m$ at once:
+to work as an embedding on their own, for several $m$ at once (dims shown for the 384-d
+`bge-small` below; a 768-d model would start at 768):
 
-$$\mathcal{L}_{\text{Matryoshka}} = \sum_{m \in \{768, 512, 256, 128, 64\}} c_m \,\mathcal{L}_{\text{MNRL}}\big(q_{1:m},\, d_{1:m}\big)$$
+$$\mathcal{L}_{\text{Matryoshka}} = \sum_{m \in \{384, 256, 128, 64\}} c_m \,\mathcal{L}_{\text{MNRL}}\big(q_{1:m},\, d_{1:m}\big)$$
 
-where $q_{1:m}$ is truncated **then** re-normalised inside the cosine. `MatryoshkaLoss(model,
-base_loss, matryoshka_dims=[...], matryoshka_weights=[...])` wraps any base loss this way. At
-serving time you truncate to 256 or 128 dimensions and lose a little quality instead of a lot.
+where $c_m$ is the per-dimension weight (`matryoshka_weights`, all 1 by default) and $q_{1:m}$
+is truncated **then** re-normalised inside the cosine. `MatryoshkaLoss(model, base_loss,
+matryoshka_dims=[...])` wraps any base loss this way; at serving time you truncate and lose a
+little quality instead of a lot.
 
 ### The trainer
 
-Sentence Transformers v3 replaced `model.fit` with `SentenceTransformerTrainer`, a
-Transformers-`Trainer` subclass taking a `datasets.Dataset`, a loss, and
-`SentenceTransformerTrainingArguments`. v4 brought the same design to `CrossEncoderTrainer`,
-v5 added `SparseEncoder`, and v6 (August 2026) added `MultiVectorEncoder` and moved to
-Transformers v5. In v6 the losses import from `sentence_transformers.sentence_transformer.losses`
+Sentence Transformers v3+ trains with `SentenceTransformerTrainer`; as of v6 (August 2026)
+losses import from `sentence_transformers.sentence_transformer.losses`
 ([training overview](https://sbert.net/docs/sentence_transformer/training_overview.html)).
 
 ```python
@@ -627,6 +549,7 @@ from sentence_transformers.sentence_transformer.training_args import BatchSample
 from sentence_transformers.util import mine_hard_negatives
 
 model = SentenceTransformer("BAAI/bge-small-en-v1.5")            # 384-dim
+# pairs: Dataset with "anchor", "positive" columns
 train = mine_hard_negatives(pairs, model, num_negatives=1, range_min=10, range_max=50,
                             relative_margin=0.05, output_format="triplet")   # anchor, positive, negative
 loss = MatryoshkaLoss(model, MultipleNegativesRankingLoss(model), matryoshka_dims=[384, 256, 128, 64])
@@ -653,8 +576,8 @@ rank order `[0, 3, 0, 2, 0, 1, 0, 0, 2, 0]`): DCG = 6.9678, IDCG = 10.8235,
 (`[3, 2, 0, 1, 0, 0, 2, 0, 0, 0]`) gives 0.9538.
 
 The check below computes MNRL by hand and against `F.cross_entropy`, shows that pulling a
-query toward its positive lowers the loss and adding a hard-negative column raises it, and
-reproduces both NDCG numbers.
+query toward its positive lowers the loss, and that adding negative columns always raises the
+loss, a hard negative more than a random one. It also reproduces both NDCG numbers.
 
 ```python finetuning-check
 import math
@@ -682,11 +605,15 @@ q_moved = q.clone()
 q_moved[0] = 0.5 * q[0] + 0.5 * docs[0]
 assert mnrl(q_moved, docs) < mnrl(q, docs)
 
-# a hard negative for query 0 (close to its positive) adds a column and raises the loss
-hard = docs[0] + 0.1 * torch.randn(d)
-negs = torch.stack([hard] + [torch.randn(d) for _ in range(B - 1)])
-with_hard = F.cross_entropy(s * cos_matrix(q, torch.cat([docs, negs])), torch.arange(B))
-assert with_hard > mnrl(q, docs)
+# extra negative columns always enlarge the softmax denominator, so any of them raise the loss;
+# a hard negative (one that scores high for query 0) raises it more than a random one
+hard = q[0] + 0.1 * torch.randn(d)
+easy = torch.randn(B, d)                              # random negatives, one per query
+hard_negs = easy.clone()
+hard_negs[0] = hard                                   # same columns, except query 0's is hard
+with_easy = F.cross_entropy(s * cos_matrix(q, torch.cat([docs, easy])), torch.arange(B))
+with_hard = F.cross_entropy(s * cos_matrix(q, torch.cat([docs, hard_negs])), torch.arange(B))
+assert with_hard > with_easy > mnrl(q, docs)
 
 def ndcg_at_k(rels, k=10):
     dcg = sum((2 ** r - 1) / math.log2(i + 2) for i, r in enumerate(rels[:k]))
@@ -699,8 +626,8 @@ assert round(dcg, 4) == 6.9678 and round(idcg, 4) == 10.8235 and round(ndcg, 4) 
 assert round(ndcg_at_k([3, 2, 0, 1, 0, 0, 2, 0, 0, 0])[2], 4) == 0.9538
 ```
 
-It does not prove that a larger batch or mined negatives improve *your* retriever; that is an
-empirical question you answer with NDCG@10 on held-out queries, as in the lab.
+It does not prove that a larger batch or mined negatives improve *your* retriever; answer that
+with NDCG@10 on held-out queries, as in the lab.
 
 | Loss | Data format | Use when |
 |---|---|---|
@@ -715,8 +642,8 @@ empirical question you answer with NDCG@10 on held-out queries, as in the lab.
 
 ## 16.8 Rerankers, sparse and late-interaction models
 
-Retrieval stacks usually combine a fast first stage with a slower, sharper second stage.
-Four model types, all trainable in Sentence Transformers v6:
+Retrieval stacks pair a fast first stage with a slower, sharper second. Four model types, all
+trainable in Sentence Transformers v6:
 
 | Model | Scores | Index | Cost per query | Train with |
 |---|---|---|---|---|
@@ -725,30 +652,25 @@ Four model types, all trainable in Sentence Transformers v6:
 | Sparse (SPLADE) | dot product of vocab-sized sparse vectors | inverted index | one encode + sparse lookup | `SparseEncoder`, `SpladeLoss` |
 | Late interaction (ColBERT) | MaxSim over token vectors | one vector per token | encode + MaxSim over candidates | `MultiVectorEncoder` (v6) |
 
-**Cross-encoders** read query and document together, so every query token can attend to every
-document token. They are the most accurate and cannot be pre-computed, so you use them to
-rerank the top 50 to 100 from a first stage. Training uses `BinaryCrossEntropyLoss` on
-(query, passage, label) rows, `CachedMultipleNegativesRankingLoss`, or listwise losses
-(`ListNetLoss`, `LambdaLoss`) over a candidate list, usually with mined hard negatives as
-the 0-labelled rows.
+**Cross-encoders** read query and document together with joint attention. They are the most
+accurate and cannot be pre-computed, so they rerank the top 50 to 100 from a first stage.
+Train with `BinaryCrossEntropyLoss` on (query, passage, label) rows,
+`CachedMultipleNegativesRankingLoss`, or listwise losses (`ListNetLoss`, `LambdaLoss`), with
+mined hard negatives as the 0-labelled rows.
 
-**SPLADE** ([Formal et al., 2021](https://arxiv.org/abs/2107.05720)) uses the MLM head to put a
-weight on every vocabulary entry, so a document about "car" also lights up "vehicle". To keep
-the vectors sparse enough for an inverted index, training adds a **FLOPS regulariser**, the sum
-over vocabulary terms of the squared mean activation across the batch, which penalises terms
-that fire often. In Sentence Transformers, `SpladeLoss` wraps a ranking loss plus
-`FlopsLoss` with separate query and document regulariser weights. Sparse models are strong on
-exact identifiers and out-of-domain text, and they compose naturally with BM25-style
-infrastructure. Note that the popular `naver/splade-v3` checkpoint is CC-BY-NC-SA-4.0.
+**SPLADE** ([Formal et al., 2021](https://arxiv.org/abs/2107.05720)) uses the MLM head to weight
+every vocabulary entry, so "car" also lights up "vehicle". A **FLOPS regulariser** (sum over
+terms of the squared mean activation across the batch) penalises terms that fire often and
+keeps vectors sparse enough for an inverted index; `SpladeLoss` wraps a ranking loss plus
+`FlopsLoss`. Sparse models are strong on exact identifiers and fit BM25-style infrastructure.
+The popular `naver/splade-v3` checkpoint is CC-BY-NC-SA-4.0.
 
 **ColBERT** ([Khattab and Zaharia, 2020](https://arxiv.org/abs/2004.12832)) keeps one vector
-per token and scores with $\text{MaxSim}(Q,D) = \sum_i \max_j Q_i\cdot D_j$. The Sentence
-Transformers v6 release reports a controlled comparison: LightOn's LateOn (multi-vector, 128-d)
-and DenseOn (dense, 768-d), same ModernBERT backbone, data and size, average NDCG@10 0.6868 vs
-0.6764 over 13 NanoBEIR sets, with LateOn winning 9 of 13. The cost was index size: about 125
-token vectors per Natural Questions passage, so the float32 index was roughly 20 to 40 times
-larger than the dense baselines in the same table. That is the trade-off in one line: about a
-point of NDCG for a much bigger index.
+per token and scores with $\text{MaxSim}(Q,D) = \sum_i \max_j Q_i\cdot D_j$. The
+[Sentence Transformers v6.0.0 release notes](https://github.com/huggingface/sentence-transformers/releases/tag/v6.0.0)
+report a controlled comparison on one ModernBERT backbone: multi-vector LateOn averages NDCG@10
+0.6868 against dense DenseOn's 0.6764 over 13 NanoBEIR sets and wins 9 of 13, with an index 20
+to 40 times larger. About a point of NDCG for a much bigger index.
 
 **How to choose.** Start with a fine-tuned bi-encoder; add a cross-encoder reranker when
 top-10 precision matters more than latency; consider SPLADE or hybrid BM25 when queries hinge
@@ -756,32 +678,23 @@ on exact codes and names; consider ColBERT when you can afford the index and nee
 matching, including on page images. Decide with NDCG@10 and Recall@100 on your held-out
 queries, measured end to end (first stage plus reranker), plus p95 latency.
 
-**Classifiers and reward heads.** `AutoModelForSequenceClassification` on an LLM backbone (a
-pooled last-token head) is the same "score, don't generate" idea;
-[module 05](./05-supervised-fine-tuning.md) covers LoRA for classification heads and module 12 covers reward models.
-
 **Frontier awareness: diffusion LMs.** TRL v1.15 ships an
 [`sft_diffusion_gemma.py` example](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/examples/sft_diffusion_gemma/sft_diffusion_gemma.py)
-for `google/diffusiongemma-26B-A4B-it`, a block-diffusion LM: a causal encoder reads the clean
-context, and a bidirectional decoder denoises a block of response tokens ("the canvas")
-corrupted by replacing tokens with random vocabulary tokens at a sampled rate. The loss is
-cross-entropy against the clean block, plus an autoregressive co-loss on the encoder; LoRA
-rank 16 on attention and dense-MLP linears, with experts and the vision tower frozen. You do
-not need this for production in 2026, but it shows SFT's data and masking ideas surviving a
-change of generative objective.
+for a block-diffusion LM: a bidirectional decoder denoises a randomly corrupted block of
+response tokens, trained with cross-entropy against the clean block. SFT's data and masking
+ideas survive the change of objective.
 
-For serving, embedders and rerankers are "pooling models" in vLLM
-([inference course: LoRA and pooling models](/courses/inference/07-architectures/07-05-lora-and-pooling-models.html)),
-and VLMs have their own serving constraints
-([multimodal serving](/courses/inference/07-architectures/07-04-multimodal-serving.html));
-[module 20](./20-production-serving-and-cost.md) covers adapter deployment.
+Serving: embedders and rerankers are vLLM "pooling models"
+([LoRA and pooling models](/courses/inference/07-architectures/07-05-lora-and-pooling-models.html)),
+VLMs have their own constraints ([multimodal serving](/courses/inference/07-architectures/07-04-multimodal-serving.html)),
+and [module 20](./20-production-serving-and-cost.md) covers adapter deployment.
 
 ---
 
 ## 16.9 Lab: receipts with a VLM, and a domain retriever
 
-Two scripts, each with a CPU smoke path and a GPU full path:
-[`vlm_sft.py`](./code/vlm_sft.py) and [`embedding_finetune.py`](./code/embedding_finetune.py).
+Two scripts with CPU smoke and GPU full paths: [`vlm_sft.py`](./code/vlm_sft.py) and
+[`embedding_finetune.py`](./code/embedding_finetune.py).
 
 ### L16.1 VLM LoRA SFT on receipts (T0/T1)
 
@@ -791,62 +704,68 @@ Two scripts, each with a CPU smoke path and a GPU full path:
 - **Data:** [`naver-clova-ix/cord-v2`](https://huggingface.co/datasets/naver-clova-ix/cord-v2)
   (CC-BY-4.0): 800 train, 100 validation, 100 test receipts; `ground_truth` holds a `gt_parse`
   JSON with `menu` items (`nm`, `cnt`, `price`) and `total`.
-- **Steps:** convert each row to `images` + `messages` with the target JSON as the assistant
-  turn; set `max_pixels` for about 1,024 image tokens; LoRA $r=16$ on the language model only;
-  `max_length=None`, `assistant_only_loss=True`; train 2 epochs; generate greedily on the test
-  split and score field-level micro P/R/F1 with the normalisation from 16.5.
-- **Smoke first.** The CPU path checks the token budget (1,369 and 256 tokens), builds
-  assistant-only labels and asserts that no image or padding token reaches the loss, confirms
-  the truncation guard rejects `max_length=1024` for a 1024×1024 image, and trains a toy VLM
-  with a frozen vision encoder until it reads a colour from the image (accuracy 1.00).
+- **Steps:** score the base model; convert rows to `images` + `messages`; `max_pixels` for about
+  1,024 image tokens; LoRA $r=16$ on the language model; `max_length=None`,
+  `assistant_only_loss=True`; 2 epochs; score again with the 16.5 normalisation, adapted to
+  CORD's "." thousands separator (see the script). `--eval-only` stops after the base score.
+- **Smoke first.** `--smoke` checks the token budget, the masks and the truncation guard, then
+  trains a toy VLM with a frozen vision encoder.
 
 ```bash
 python content/courses/finetuning/code/vlm_sft.py --smoke
-python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct
-python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen3-VL-8B-Instruct --qlora
+python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct --qlora   # T0
+python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct           # T1
+python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen3-VL-8B-Instruct --qlora     # T1
+python content/courses/finetuning/code/vlm_sft.py --full --eval-only    # base-model score only
 ```
 
-**Record:** base-model F1 vs fine-tuned F1, per-field P/R, the FP count on fields absent from
-gold, peak memory, and tokens per image. **Expect** a large jump in JSON validity and field F1
-over the zero-shot base model, mostly from the schema; remaining errors concentrate in item
-names and small print. If they do, raise the pixel budget before touching the vision tower.
+**Record** (all printed by the script): base vs fine-tuned micro F1, per-field P/R/F1, JSON
+validity, FP on fields absent from gold, peak training memory, mean image tokens per receipt.
+**Expect** a large jump in JSON validity and F1 over the base model, mostly from the schema;
+if remaining errors sit in item names and small print, raise the pixel budget before touching
+the vision tower.
 
 ### L16.2 VLM GRPO on visual math (T1/T2)
 
-Run TRL's reference recipe on
+Run the [GRPO docs' VLM quick start](https://huggingface.co/docs/trl/v1.15.0/en/grpo_trainer) on
 [`lmms-lab/multimodal-open-r1-8k-verified`](https://huggingface.co/datasets/lmms-lab/multimodal-open-r1-8k-verified)
-with `Qwen/Qwen2.5-VL-3B-Instruct`, LoRA on the language model, colocated vLLM and
-`max_completion_length=1024`, following the
-[GRPO docs' VLM section](https://huggingface.co/docs/trl/v1.15.0/en/grpo_trainer) (the script is
-`examples/grpo_visual_math/grpo_visual_math.py` in the TRL repository at v1.15.0). The CPU
-smoke for the GRPO mechanics lives in module 13. **Record** accuracy reward, format reward,
-completion length and the fraction of groups with zero reward variance. **Expect** the format
-reward to saturate early and accuracy to move slowly; on a 3B model treat it as a mechanics lab.
+from the root of a TRL v1.15.0 checkout. Its `q_proj v_proj` targets are the docs' choice;
+module 06 explains why all-linear usually does better.
+
+```bash
+accelerate launch --config_file=examples/accelerate_configs/deepspeed_zero3.yaml \
+  examples/grpo_visual_math/grpo_visual_math.py \
+  --model_name_or_path Qwen/Qwen2.5-VL-3B-Instruct --output_dir grpo-Qwen2.5-VL-3B-Instruct \
+  --learning_rate 1e-5 --dtype bfloat16 --max_completion_length 1024 \
+  --use_vllm --vllm_mode colocate --use_peft --lora_target_modules q_proj v_proj --log_completions
+```
+
+The CPU smoke for GRPO lives in module 13. **Record** accuracy and format reward, completion
+length and the fraction of zero-variance groups. **Expect** format reward to saturate early and
+accuracy to move slowly; on a 3B model treat it as a mechanics lab.
 
 ### L16.3 Embedding fine-tune with MNRL and hard negatives (T0)
 
 - **Model:** `BAAI/bge-small-en-v1.5` (MIT, 384-d).
 - **Data:** [`philschmid/finanical-rag-embedding-dataset`](https://huggingface.co/datasets/philschmid/finanical-rag-embedding-dataset)
-  (7,000 question/context pairs from a 10-K filing; the card states no licence, so use it for
-  learning only). Hold out 10 percent of questions; retrieve over all 7,000 contexts.
-- **Steps:** NDCG@10 of the base model with `InformationRetrievalEvaluator`; mine one hard
-  negative per pair (`range_min=10`, `relative_margin=0.05`); train MNRL inside
-  `MatryoshkaLoss` with `NO_DUPLICATES` batches of 64 for 3 epochs; NDCG@10 again, at 384 and at
-  64 dimensions.
-- **Smoke first.** The CPU path trains a bag-of-embeddings encoder on a synthetic corpus where
-  queries use synonyms of the document tokens. It asserts NDCG@10 on held-out queries rises
-  from under 0.35 (0.107 in the reference run) to over 0.80 (0.903), and that 16-dimensional
-  Matryoshka truncation still scores over 0.70 (0.893).
+  (7,000 question/context pairs from a 10-K; no licence stated, so learning only). Hold out 10
+  percent of questions; retrieve over all 7,000 contexts.
+- **Steps:** NDCG@10 of the base model at 384 and 64 dims; mine one hard negative per pair
+  (`range_min=10`, `relative_margin=0.05`); MNRL inside `MatryoshkaLoss`, `NO_DUPLICATES`
+  batches of 64, 3 epochs; NDCG@10 again at both dims. `--no-hard-negatives` trains on pairs.
+- **Smoke first.** `--smoke` trains a bag-of-embeddings encoder on a synthetic synonym corpus
+  and asserts NDCG@10 rises from under 0.35 (0.107) to over 0.80 (0.903), with 16-dim
+  truncation over 0.70 (0.893).
 
 ```bash
 python content/courses/finetuning/code/embedding_finetune.py --smoke
 python content/courses/finetuning/code/embedding_finetune.py --full
+python content/courses/finetuning/code/embedding_finetune.py --full --no-hard-negatives
 ```
 
-**Record:** NDCG@10 before and after, with and without mined negatives, and at each Matryoshka
-dimension. **Expect** a clear gain on held-out in-domain questions, a smaller gain from hard
-negatives than from fine-tuning itself (the smoke run shows the same pattern: 0.900 after pairs,
-0.903 after hard negatives), and a modest drop at 64 dimensions.
+**Record:** NDCG@10 at 384 and 64 dims, before and after, with and without mined negatives.
+**Expect** a clear in-domain gain, a smaller gain from hard negatives than from fine-tuning
+itself (smoke: 0.900 after pairs, 0.903 after negatives), and a modest drop at 64 dims.
 
 ---
 
@@ -854,21 +773,18 @@ negatives than from fine-tuning itself (the smoke run shows the same pattern: 0.
 
 - **A VLM is encoder + projector + LLM, joined at placeholder tokens.** One placeholder per
   image token; feature count and placeholder count must match or training breaks.
-- **Image tokens are often most of the sequence.** Qwen2.5-VL spends one token per 28×28 pixels:
-  1,369 tokens for a 1024×1024 page under the 3B checkpoint's budget, versus 256 for 448×448.
-- **Set `max_length=None` for VLM SFT and DPO, and bound length with `max_pixels`.** TRL's default
-  of 1,024 would cut image tokens mid-image.
-- **The processor, not the tokenizer, owns the sequence length.** Compute budgets from the
-  checkpoint's processor config, which can differ from the class default (1,369 vs 1,225 tokens).
-- **Start with LLM-only LoRA.** About 30M trainable parameters on Qwen2.5-VL-3B; train the
-  projector next, and the vision tower only for real pixel-level domain shift.
-- **Use assistant-only loss for vision chat data.** TRL's VLM collator masks padding; image and
-  prompt tokens leave the loss only through assistant-only or completion-only masking
-  (`transformers>=5.18` for vision).
+- **Set `max_length=None` for VLM SFT/DPO and bound length with the processor's `max_pixels`.**
+  One Qwen2.5-VL token covers 28×28 px, so a 1024×1024 page is 1,369 tokens under the 3B
+  checkpoint's config (1,225 under the class default); TRL's default 1,024 would cut mid-image.
+- **Start with LLM-only LoRA and assistant-only loss.** About 30M trainable parameters on
+  Qwen2.5-VL-3B; train the projector next and the vision tower only for real pixel-level shift.
+  TRL's VLM collator masks padding; image tokens leave the loss only through assistant-only or
+  completion-only masking (`transformers>=5.18` for vision).
 - **VLM preference data should target grounding.** RLAIF-V pairs differ in unsupported claims, and
   MPO adds BCO and SFT terms to DPO to keep rationales coherent.
-- **VLM GRPO is module 13's GRPO with images in the prompt.** You need a checkable answer, and if
-  rollouts run in vLLM, the vision layers have to stay frozen.
+- **VLM GRPO is module 13's GRPO with images in the prompt.** You need a checkable answer. If
+  rollouts run in vLLM, keep the vision layers frozen unless you have enabled and tested vLLM's
+  experimental tower LoRA (`enable_tower_connector_lora`).
 - **Score extraction with normalised, micro-averaged field-level F1, and report hallucinations as
   their own number.** Hallucinated fields lower precision and leave recall unchanged.
 - **MNRL is a $B$-way softmax over scaled cosines.** Bigger batches mean more negatives, and

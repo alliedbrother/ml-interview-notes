@@ -23,7 +23,12 @@ What it does
       PEFT `add_weighted_adapter` (linear, cat, svd, ties, dare_ties), writes
       merged bf16 checkpoints, writes mergekit YAML configs for a TIES merge and
       for the L18.2 instruct-recovery sweep, and prints the lm-evaluation-harness
-      commands to score gsm8k, mbpp and ifeval on every candidate.
+      commands to score gsm8k, mbpp and ifeval on every candidate. The adapter
+      block runs only when --math-adapter and --code-adapter are given; the
+      recovery block runs only when --domain and --instruct are given.
+      --resize-vocab N resizes the base embeddings before loading adapters that
+      were trained with an extended vocabulary (the PEFT guide's TinyLlama
+      adapters need 32005). --dtype float16 for T4 (no bf16 before Ampere).
 
 Hardware tier for --full: T0 (T4 16 GB, fp16) for 0.6B/1.7B merges and evals;
     T1 (24 GB, bf16) for the 4B recovery sweep. Merging itself runs on CPU.
@@ -36,6 +41,8 @@ Run from the repository root:
     python content/courses/finetuning/code/merge_lab.py --full \
         --base Qwen/Qwen3-1.7B --math-adapter ./out/math-lora \
         --code-adapter ./out/code-lora --out ./merges/
+    python content/courses/finetuning/code/merge_lab.py --full \
+        --domain ./out/qwen3-4b-domain --instruct Qwen/Qwen3-4B --out ./merges-4b/
 """
 
 import argparse
@@ -340,7 +347,7 @@ models:
 parameters:
   normalize: true
   int8_mask: true
-dtype: bfloat16
+dtype: {dtype}
 tokenizer:
   source: base
 """
@@ -353,50 +360,56 @@ models:
   - model: {instruct}
     parameters:
       weight: {w_inst}
-dtype: bfloat16
+dtype: {dtype}
 tokenizer:
   source: base
 """
 
 
 def full(args):
-    import torch as _torch
-    from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
     os.makedirs(args.out, exist_ok=True)
-    tok = AutoTokenizer.from_pretrained(args.base)
-    recipes = {
-        "linear": dict(combination_type="linear"),
-        "cat": dict(combination_type="cat"),
-        "svd": dict(combination_type="svd", svd_rank=args.svd_rank),
-        "ties": dict(combination_type="ties", density=args.density),
-        "dare_ties": dict(combination_type="dare_ties", density=args.density),
-    }
-    for name, kwargs in recipes.items():
-        # Fresh bf16 base each time: merge_and_unload folds the active adapter into it.
-        base = AutoModelForCausalLM.from_pretrained(args.base, dtype=_torch.bfloat16)
-        model = PeftModel.from_pretrained(base, args.math_adapter, adapter_name="math")
-        model.load_adapter(args.code_adapter, adapter_name="code")
-        model.add_weighted_adapter(["math", "code"], [args.w_math, args.w_code],
-                                   adapter_name=f"merge_{name}", **kwargs)
-        model.set_adapter(f"merge_{name}")
-        merged = model.merge_and_unload()
-        path = os.path.join(args.out, f"peft-{name}")
-        merged.save_pretrained(path)
-        tok.save_pretrained(path)
-        print("wrote", path)
 
-    # mergekit: TIES over merged full checkpoints of each single-task model.
-    for task, adapter in (("math", args.math_adapter), ("code", args.code_adapter)):
-        base = AutoModelForCausalLM.from_pretrained(args.base, dtype=_torch.bfloat16)
-        single = PeftModel.from_pretrained(base, adapter).merge_and_unload()
-        single.save_pretrained(os.path.join(args.out, f"single-{task}"))
-        tok.save_pretrained(os.path.join(args.out, f"single-{task}"))
-    with open(os.path.join(args.out, "ties.yml"), "w") as f:
-        f.write(TIES_YAML.format(base=args.base, math=os.path.join(args.out, "single-math"),
-                                 code=os.path.join(args.out, "single-code")))
-    print(f"mergekit-yaml {args.out}/ties.yml {args.out}/mk-ties --lazy-unpickle")
+    if args.math_adapter and args.code_adapter:
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        def load_base():
+            # Fresh base each time: merge_and_unload folds the active adapter into it.
+            base = AutoModelForCausalLM.from_pretrained(args.base, dtype=getattr(torch, args.dtype))
+            if args.resize_vocab:
+                # Adapters trained after adding tokens carry a larger embedding table.
+                base.resize_token_embeddings(args.resize_vocab)
+            return base
+
+        tok = AutoTokenizer.from_pretrained(args.math_adapter if args.resize_vocab else args.base)
+        recipes = {
+            "linear": dict(combination_type="linear"),
+            "cat": dict(combination_type="cat"),
+            "svd": dict(combination_type="svd", svd_rank=args.svd_rank),
+            "ties": dict(combination_type="ties", density=args.density),
+            "dare_ties": dict(combination_type="dare_ties", density=args.density),
+        }
+        for name, kwargs in recipes.items():
+            model = PeftModel.from_pretrained(load_base(), args.math_adapter, adapter_name="math")
+            model.load_adapter(args.code_adapter, adapter_name="code")
+            model.add_weighted_adapter(["math", "code"], [args.w_math, args.w_code],
+                                       adapter_name=f"merge_{name}", **kwargs)
+            model.set_adapter(f"merge_{name}")
+            merged = model.merge_and_unload()
+            path = os.path.join(args.out, f"peft-{name}")
+            merged.save_pretrained(path)
+            tok.save_pretrained(path)
+            print("wrote", path)
+
+        # mergekit: TIES over merged full checkpoints of each single-task model.
+        for task, adapter in (("math", args.math_adapter), ("code", args.code_adapter)):
+            single = PeftModel.from_pretrained(load_base(), adapter).merge_and_unload()
+            single.save_pretrained(os.path.join(args.out, f"single-{task}"))
+            tok.save_pretrained(os.path.join(args.out, f"single-{task}"))
+        with open(os.path.join(args.out, "ties.yml"), "w") as f:
+            f.write(TIES_YAML.format(base=args.base, math=os.path.join(args.out, "single-math"),
+                                     code=os.path.join(args.out, "single-code"), dtype=args.dtype))
+        print(f"mergekit-yaml {args.out}/ties.yml {args.out}/mk-ties --lazy-unpickle")
 
     # L18.2: interpolate a domain fine-tune with the original instruct model.
     if args.domain and args.instruct:
@@ -404,11 +417,11 @@ def full(args):
             cfg = os.path.join(args.out, f"recover-{w:.1f}.yml")
             with open(cfg, "w") as f:
                 f.write(RECOVERY_YAML.format(domain=args.domain, instruct=args.instruct,
-                                             w=w, w_inst=round(1 - w, 2)))
+                                             w=w, w_inst=round(1 - w, 2), dtype=args.dtype))
             print(f"mergekit-yaml {cfg} {args.out}/recover-{w:.1f} --lazy-unpickle")
 
-    print("\nScore every candidate (singles, PEFT merges, mergekit outputs, recovery sweep):")
-    print("lm_eval --model hf --model_args pretrained=<path>,dtype=bfloat16 "
+    print("\nScore every candidate (base, singles, merges, recovery sweep):")
+    print(f"lm_eval --model hf --model_args pretrained=<path>,dtype={args.dtype} "
           "--tasks gsm8k,mbpp,ifeval --confirm_run_unsafe_code --batch_size auto "
           "--output_path <path>/eval")
 
@@ -427,11 +440,18 @@ def main():
     ap.add_argument("--w-code", type=float, default=1.0)
     ap.add_argument("--density", type=float, default=0.5)
     ap.add_argument("--svd-rank", type=int, default=None)
+    ap.add_argument("--resize-vocab", type=int, default=None,
+                    help="resize base embeddings before loading adapters (32005 for the TinyLlama ones)")
+    ap.add_argument("--dtype", choices=("bfloat16", "float16"), default="bfloat16",
+                    help="float16 on T4 (sm_75 has no bf16)")
     ap.add_argument("--out", default="./merges")
     args = ap.parse_args()
     if args.full:
-        if not (args.math_adapter and args.code_adapter):
-            ap.error("--full needs --math-adapter and --code-adapter")
+        adapters = bool(args.math_adapter and args.code_adapter)
+        recovery = bool(args.domain and args.instruct)
+        if not (adapters or recovery):
+            ap.error("--full needs --math-adapter and --code-adapter, "
+                     "or --domain and --instruct, or both")
         full(args)
     else:
         smoke()

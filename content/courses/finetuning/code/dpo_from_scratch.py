@@ -14,6 +14,8 @@ Purpose
               SFT adapter you trained in module 05 (the reference becomes a frozen copy of that
               adapter) or from a fresh LoRA on the base model (reference = adapter disabled).
               Pass --loss-type sigmoid / ipo / sigmoid_norm / apo_zero for the L12.2 ablation.
+              Pass --dataset onpolicy_pairs.jsonl (written by reward_model_bt.py --step rank) to
+              train one round of iterative DPO on your own on-policy pairs (L12.3).
 
 Module      content/courses/finetuning/12-preference-optimization.md
 Hardware    smoke: any CPU, a few seconds.  full: T1 (24 GB) for Qwen3-1.7B or Qwen3-4B + LoRA.
@@ -24,6 +26,7 @@ Run (from the repository root)
     python content/courses/finetuning/code/dpo_from_scratch.py --smoke
     python content/courses/finetuning/code/dpo_from_scratch.py --full --model Qwen/Qwen3-1.7B --loss-type sigmoid
     python content/courses/finetuning/code/dpo_from_scratch.py --full --sft-adapter ./sft-out --loss-type ipo --beta 0.5
+    python content/courses/finetuning/code/dpo_from_scratch.py --full --dataset onpolicy_pairs.jsonl --output-dir dpo-iter1
 """
 
 from __future__ import annotations
@@ -163,7 +166,12 @@ def full(args) -> None:
     from peft import AutoPeftModelForCausalLM, LoraConfig
     from trl import DPOConfig, DPOTrainer
 
-    dataset = load_dataset("trl-lib/ultrafeedback_binarized")
+    if args.dataset.endswith((".jsonl", ".json")):
+        # Local preference pairs ({"prompt", "chosen", "rejected"}), e.g. the L12.3 on-policy JSONL.
+        dataset = load_dataset("json", data_files=args.dataset, split="train").train_test_split(
+            test_size=0.05, seed=0)
+    else:
+        dataset = load_dataset(args.dataset)
     loss_types = args.loss_type.split(",")
     weights = [float(w) for w in args.loss_weights.split(",")] if args.loss_weights else None
     config = DPOConfig(
@@ -197,7 +205,7 @@ def full(args) -> None:
         model=model,
         args=config,
         train_dataset=dataset["train"],
-        eval_dataset=dataset["test"].select(range(500)),
+        eval_dataset=dataset["test"].select(range(min(500, len(dataset["test"])))),
         peft_config=peft_config,
     )
     trainer.train()
@@ -211,6 +219,8 @@ def main() -> None:
     ap.add_argument("--full", action="store_true", help="TRL DPOTrainer + LoRA on UltraFeedback (GPU)")
     ap.add_argument("--model", default="Qwen/Qwen3-1.7B")
     ap.add_argument("--sft-adapter", default=None, help="path to the module-05 SFT LoRA adapter")
+    ap.add_argument("--dataset", default="trl-lib/ultrafeedback_binarized",
+                    help="Hub preference dataset id, or a local .jsonl of prompt/chosen/rejected rows")
     ap.add_argument("--loss-type", default="sigmoid", help="comma-separated, e.g. sigmoid,bco_pair,sft")
     ap.add_argument("--loss-weights", default=None, help="comma-separated weights, e.g. 0.8,0.2,1.0")
     ap.add_argument("--beta", type=float, default=0.1)

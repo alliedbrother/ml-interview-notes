@@ -18,7 +18,8 @@ Purpose
     --full  : lab L16.3 with Sentence Transformers v6: BAAI/bge-small-en-v1.5
               on philschmid/finanical-rag-embedding-dataset (question, context)
               pairs, mine_hard_negatives, MNRL inside MatryoshkaLoss, NDCG@10
-              before and after with InformationRetrievalEvaluator.
+              before and after with InformationRetrievalEvaluator at 384 and
+              64 dims. --no-hard-negatives trains on pairs only (the ablation).
 
 Module      content/courses/finetuning/16-multimodal-and-embedding-fine-tuning.md
 Hardware    smoke: any CPU, < 60 s.  full: T0 (free T4 16 GB, fp16), ~10 minutes.
@@ -29,6 +30,7 @@ Versions    smoke: Python 3.11+, torch 2.x (no other dependency).
 Run (from the repository root)
     python content/courses/finetuning/code/embedding_finetune.py --smoke
     python content/courses/finetuning/code/embedding_finetune.py --full
+    python content/courses/finetuning/code/embedding_finetune.py --full --no-hard-negatives
 """
 
 from __future__ import annotations
@@ -247,17 +249,23 @@ def run_full(args) -> None:  # pragma: no cover - needs downloads (GPU recommend
     queries = {str(i): q for i, q in zip(test["id"], test["anchor"])}
     relevant = {str(i): {str(i)} for i in test["id"]}
     evaluator = InformationRetrievalEvaluator(queries, corpus, relevant, name="fin", ndcg_at_k=[10])
+    evaluator64 = InformationRetrievalEvaluator(queries, corpus, relevant, name="fin-64", ndcg_at_k=[10],
+                                                truncate_dim=64)  # first 64 of 384 dims
+
+    def ndcg10(ev, m):
+        res = ev(m)
+        return res[next(k for k in res if k.endswith("ndcg@10"))]
 
     model = SentenceTransformer(args.model)
-    before = evaluator(model)
-    key = next(k for k in before if k.endswith("ndcg@10"))
-    print(f"before: {key} = {before[key]:.4f}")
+    print(f"before: NDCG@10 = {ndcg10(evaluator, model):.4f} (384-d), {ndcg10(evaluator64, model):.4f} (64-d)")
 
-    train = st_mine(
-        train.select_columns(["anchor", "positive"]), model,
-        num_negatives=1, range_min=10, range_max=50,  # skip the top 10: likely unlabelled positives
-        relative_margin=0.05, sampling_strategy="top", output_format="triplet",
-    )
+    train = train.select_columns(["anchor", "positive"])
+    if not args.no_hard_negatives:
+        train = st_mine(
+            train, model,
+            num_negatives=1, range_min=10, range_max=50,  # skip the top 10: likely unlabelled positives
+            relative_margin=0.05, sampling_strategy="top", output_format="triplet",
+        )
     dims = [384, 256, 128, 64]
     loss = MatryoshkaLoss(model, MultipleNegativesRankingLoss(model), matryoshka_dims=dims,
                           matryoshka_weights=[1] * len(dims))
@@ -278,8 +286,9 @@ def run_full(args) -> None:  # pragma: no cover - needs downloads (GPU recommend
     trainer = SentenceTransformerTrainer(model=model, args=targs, train_dataset=train, loss=loss,
                                          evaluator=evaluator)
     trainer.train()
-    after = evaluator(model)
-    print(f"after:  {key} = {after[key]:.4f}")
+    tag = "pairs only" if args.no_hard_negatives else "with mined negatives"
+    print(f"after ({tag}): NDCG@10 = {ndcg10(evaluator, model):.4f} (384-d), "
+          f"{ndcg10(evaluator64, model):.4f} (64-d)")
     model.save_pretrained(args.output_dir)
 
 
@@ -289,6 +298,8 @@ def main() -> None:
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--model", default="BAAI/bge-small-en-v1.5")
     ap.add_argument("--output-dir", default="bge-small-fin-mnrl")
+    ap.add_argument("--no-hard-negatives", action="store_true",
+                    help="full mode: skip mining and train MNRL on (anchor, positive) pairs only")
     args = ap.parse_args()
     if args.full:
         run_full(args)

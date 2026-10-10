@@ -13,9 +13,11 @@ The running example is the course's support-email extraction task from [module 0
 
 ## 2.1 The decoder-only model, seen by a fine-tuner
 
-A decoder-only LM maps token ids to embeddings, sends them through $L$ identical blocks, applies a final norm, and projects to vocabulary logits with the LM head. Each block is pre-norm attention followed by a pre-norm MLP, each with a residual connection. The Transformers course derives every piece: [block anatomy](../transformers/06-transformer-block-anatomy.md) covers the residual stream and RMSNorm, and the [end-to-end forward pass](../transformers/16-end-to-end-forward-pass.md) traces shapes from token to logit. What a fine-tuner needs on top of that is **the names**. PEFT configs, FSDP wrap policies, quantization skip-lists and merge tools all refer to modules by their attribute names in the Hugging Face modeling code. Llama, Qwen, Mistral and most 2026 dense decoders use the same names.
+A decoder-only LM maps token ids to embeddings, sends them through $L$ identical blocks, applies a final norm, and projects to vocabulary logits with the LM head. Each block is pre-norm attention followed by a pre-norm MLP, each with a residual connection. The Transformers course derives every piece: [block anatomy](../transformers/06-transformer-block-anatomy.md) covers the residual stream and RMSNorm, and the [end-to-end forward pass](../transformers/16-end-to-end-forward-pass.md) traces shapes from token to logit. What a fine-tuner needs on top of that is **the names**. PEFT configs, FSDP wrap policies, quantization skip-lists and merge tools all refer to modules by their attribute names in the Hugging Face modeling code.
 
 The table uses the published [Qwen3-4B config](https://huggingface.co/Qwen/Qwen3-4B/blob/1cfa9a7208912126459214e8b04321603b3df60c/config.json): $d = 2560$, $d_{ff} = 9728$, $L = 36$, 32 query heads and 8 KV heads of size $d_h = 128$, $V = 151{,}936$, and `tie_word_embeddings: true`. Shapes are written as input → output. `nn.Linear` stores the weight transposed, as `(out, in)`. Here $d_q = n_h d_h = 4096$ and $d_{kv} = n_{kv} d_h = 1024$. Qwen3-4B is a reminder that $d_q$ need not equal $d$.
+
+**Table 1.** Module names and Qwen3-4B shapes
 
 | Module name (HF) | Shape (in → out) | Qwen3-4B | What it does | Usual PEFT target? |
 |---|---|---|---|---|
@@ -32,7 +34,7 @@ The table uses the published [Qwen3-4B config](https://huggingface.co/Qwen/Qwen3
 | `norm` | $(d)$ | 2560 | final RMSNorm | no |
 | `lm_head` | $d \to V$ | 2560 → 151936 | logits; **tied** to `embed_tokens` here | no (`modules_to_save` if you must) |
 
-Qwen3 also has per-head `q_norm` and `k_norm` of size $d_h$ (QK-norm). The other models in this family do not.
+Qwen3 (and Gemma 3) also have per-head `q_norm` and `k_norm` of size $d_h$ (QK-norm); Llama 3 and Mistral do not.
 
 Per block, the four attention projections hold $2 \cdot 2560 \cdot 4096 + 2 \cdot 2560 \cdot 1024 = 26.2$M parameters. The three MLP projections hold $3 \cdot 2560 \cdot 9728 = 74.7$M, which is **74% of the block**. Over 36 blocks that comes to 3.63B, and the tied embedding adds another 0.39B, for about 4.02B in total. Two things follow. MLP projections hold most of the parameters, which is why [module 06](./06-lora-and-qlora.md) targets `all-linear` rather than only `q_proj`/`v_proj`. And because the embedding is tied, any change to `embed_tokens` also changes the output layer. Module 06 owns weight tying and `ensure_weight_tying`.
 
@@ -84,7 +86,9 @@ Transformers v5 made two changes that affect old tutorials. **It is PyTorch-only
 | UNK | byte-level BPE never needs it; SentencePiece vocabularies keep one | n/a |
 | added/special | control tokens (`<\|im_start\|>`, `<think>`, tool tags), never split | parsed by the server for roles, reasoning and tool calls |
 
-These conventions differ between families more than most people expect. Table 2 was read directly from each repository's `tokenizer_config.json` and `generation_config.json` at a pinned revision. The Llama and Gemma repositories are gated, so you need to log in to view their files.
+Table 2 was read directly from each repository's `tokenizer_config.json` and `generation_config.json` at a pinned revision. The Llama and Gemma repositories are gated, so you need to log in to view their files.
+
+**Table 2.** Special tokens by family (pinned revisions)
 
 | Family (checkpoint, revision) | BOS | Tokenizer EOS | Turn-end token | PAD default | `generation_config.eos_token_id` |
 |---|---|---|---|---|---|
@@ -110,7 +114,7 @@ tok.add_special_tokens({"additional_special_tokens": ["<ticket>", "</ticket>"]})
 model.resize_token_embeddings(len(tok), pad_to_multiple_of=64)   # (V', d), V' rounded up to a multiple of 64
 ```
 
-`pad_to_multiple_of=64` rounds the new vocabulary up so the LM-head matmul stays tensor-core friendly. The new rows are not random. With the default `mean_resizing=True`, Transformers samples them from a Gaussian with the old embeddings' mean and covariance ([`resize_token_embeddings` at v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/modeling_utils.py#L2634-L2670)). This follows [Hewitt's analysis](https://nlp.stanford.edu/~johnhew/vocab-expansion.html): mean initialization keeps the next-token distribution almost unchanged, so the new token does not hog probability mass before training. **Mean initialization only makes the new token harmless. It does not make the token mean anything.** A frozen-base LoRA run never updates those rows, and the model will never learn to emit `</ticket>` at the right time. Train them explicitly, with `trainable_token_indices` or `modules_to_save` ([module 06](./06-lora-and-qlora.md)), or as part of full or continued pretraining ([module 05](./05-supervised-fine-tuning.md)). Often the better choice is to add no tokens at all and express the structure in plain text the tokenizer already handles well.
+`pad_to_multiple_of=64` rounds the new vocabulary up so the LM-head matmul stays tensor-core friendly. The new rows are not random. With the default `mean_resizing=True`, Transformers samples them from a Gaussian with the old embeddings' mean and covariance (Hewitt: the mean plus small noise) ([`resize_token_embeddings` at v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/modeling_utils.py#L2634-L2670)). This follows [Hewitt's analysis](https://www.cs.columbia.edu/~johnhew/vocab-expansion.html): mean initialization keeps the next-token distribution almost unchanged, so the new token does not hog probability mass before training. **Mean initialization only makes the new token harmless. It does not make the token mean anything.** A frozen-base LoRA run never updates those rows, and the model will never learn to emit `</ticket>` at the right time. Train them explicitly, with `trainable_token_indices` or `modules_to_save` ([module 06](./06-lora-and-qlora.md)), or as part of full or continued pretraining ([module 05](./05-supervised-fine-tuning.md)). Often the better choice is to add no tokens at all and express the structure in plain text the tokenizer already handles well.
 
 ### Perplexity depends on the tokenizer
 
@@ -126,7 +130,7 @@ $$
 \text{BPB} = \frac{\sum_j \ell_j}{\ln 2 \cdot \text{bytes}}
 $$
 
-Here is a worked example on the same 100-byte support email. Tokenizer A splits it into 25 tokens with total NLL 50 nats: PPL $= e^{2.0} = 7.39$ and BPB $= 50 / (100 \ln 2) = 0.721$. Tokenizer B splits it into 40 tokens with total NLL 52 nats: PPL $= e^{1.3} = 3.67$ and BPB $= 0.750$. **B halves the perplexity while compressing the text worse.** Model A is the better model of this text.
+Here is a worked example on the same 100-byte support email. Tokenizer A splits it into 25 tokens with total NLL 50 nats: PPL $= e^{2.0} = 7.39$ and BPB $= 50 / (100 \ln 2) = 0.721$. Tokenizer B splits it into 40 tokens with total NLL 52 nats: PPL $= e^{1.3} = 3.67$ and BPB $= 0.750$. **B halves the perplexity while compressing the text worse.** System A (model plus tokenizer A) assigns this text the higher probability.
 
 The check below confirms the arithmetic and the reversal.
 
@@ -165,13 +169,13 @@ $$
 
 The [Transformers course](../transformers/13-training-considerations.md) introduces this as the pretraining objective. Fine-tuning changes only $\mathcal{M}$. In Hugging Face code **you pass `labels` aligned with `input_ids`, unshifted, and the model shifts them internally.** `ForCausalLMLoss` right-pads `labels` with one `-100`, takes `labels[..., 1:]`, upcasts logits to fp32, and calls `cross_entropy(..., ignore_index=-100)` ([`loss_utils.py` at v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/loss/loss_utils.py#L49-L71)). That is equivalent to scoring `logits[:, :-1]` against `labels[:, 1:]`. If you shift the labels yourself before passing them in, the model shifts again and every position is trained to predict two tokens ahead. The loss still goes down, but more slowly, and nothing errors.
 
-Take a 6-token tail of an assistant turn: `<|im_start|> assistant {"ok": true} <|im_end|> <pad>`. Only the content and the closing `<|im_end|>` are trained, so `labels = [-100, -100, id, id, id, -100]`.
+Take a 6-token tail of an assistant turn: `<|im_start|> assistant {"refund_requested": true} <|im_end|> <pad>`. Only the content and the closing `<|im_end|>` are trained, so `labels = [-100, -100, id, id, id, -100]`.
 
 | Position $t$ | Input token | `labels[t]` (stored) | Target used at $t$ (`labels[t+1]`) | In loss? |
 |---|---|---|---|---|
 | 0 | `<\|im_start\|>` | -100 | `assistant` → -100 | no |
-| 1 | `assistant` | -100 | `{"ok":` | **yes** |
-| 2 | `{"ok":` | id | `true}` | **yes** |
+| 1 | `assistant` | -100 | `{"refund_requested":` | **yes** |
+| 2 | `{"refund_requested":` | id | `true}` | **yes** |
 | 3 | `true}` | id | `<\|im_end\|>` | **yes** |
 | 4 | `<\|im_end\|>` | id | `<pad>` → -100 | no |
 | 5 | `<pad>` | -100 | (padded -100) | no |
@@ -280,9 +284,9 @@ This is the real Qwen3 rendering, at the pinned revision above, of our two-turn 
 <|im_start|>system
 Extract the ticket as JSON.<|im_end|>
 <|im_start|>user
-Hi, order 1142 arrived broken. Ana<|im_end|>
+Hi, order ORD-01142 arrived broken. Ana<|im_end|>
 <|im_start|>assistant
-{"order_id": "1142", "issue_type": "damaged"}<|im_end|>
+{"order_id": "ORD-01142", "issue_type": "defect"}<|im_end|>
 <|im_start|>user
 Add whether I want a refund: yes.<|im_end|>
 <|im_start|>assistant
@@ -329,8 +333,8 @@ def tokenize(text):
 
 convo = [
     {"role": "system", "content": "Extract JSON."},
-    {"role": "user", "content": "Order 1142 arrived broken."},
-    {"role": "assistant", "content": '{"order_id": "1142", "issue_type": "damaged"}'},
+    {"role": "user", "content": "Order ORD-01142 arrived broken."},
+    {"role": "assistant", "content": '{"order_id": "ORD-01142", "issue_type": "defect"}'},
     {"role": "user", "content": "Refund please."},
     {"role": "assistant", "content": '{"refund_requested": true}'},
 ]
@@ -353,7 +357,7 @@ assert len(ends) == 5 and len(trained_ends) == 2               # only assistant 
 assert all(labels[k] == ids[k] for k in trained_ends)
 assert all(k == len(tokens) - 1 or tokens[k + 1] == "<|im_start|>" for k in trained_ends)
 assert [tokens[k] for k in range(len(tokens)) if mask[k]] == [
-    '{"order_id":', '"1142",', '"issue_type":', '"damaged"}', "<|im_end|>",
+    '{"order_id":', '"ORD-01142",', '"issue_type":', '"defect"}', "<|im_end|>",
     '{"refund_requested":', "true}", "<|im_end|>"]
 
 prompt = "".join(p for p, _ in render(convo[:4], add_generation_prompt=True))
@@ -367,11 +371,11 @@ It does not prove that a real BPE tokenizer splits at the same boundaries. Byte-
 
 ### Pitfall 1: double BOS
 
-The Llama and Gemma templates start with `{{ bos_token }}`. Their tokenizers also prepend BOS by default: Llama through a `TemplateProcessing` post-processor, Gemma through `add_bos_token: true`. Render with `tokenize=False`, tokenize the string with a plain `tok(text)` call, and you get **two BOS tokens**. On the pinned revisions this gives 94 ids instead of 93 for Llama 3.2 and 76 instead of 75 for Gemma 3. Qwen3 has no BOS and is unaffected. The model never saw `<bos><bos>` in pretraining, so every training example begins out of distribution, and inference with the correct single BOS then differs from training. The Transformers docs state the fix directly: "make sure you set `add_special_tokens=False` if you tokenize later ... This isn't an issue if you use `apply_chat_template(tokenize=True)`" ([chat templating docs](https://huggingface.co/docs/transformers/v5.19.0/en/chat_templating)). TRL's trainers tokenize conversational data through the template, so the bug shows up mainly in hand-written preprocessing.
+The Llama and Gemma templates start with `{{ bos_token }}`. Their tokenizers also prepend BOS by default: Llama through a `TemplateProcessing` post-processor, Gemma through `add_bos_token: true`. Render with `tokenize=False`, tokenize the string with a plain `tok(text)` call, and you get **two BOS tokens**. On the pinned revisions this gives 97 ids instead of 96 for Llama 3.2 and 81 instead of 80 for Gemma 3 (rendered on 10 October 2026; Llama's date line can shift the count by a token). Qwen3 has no BOS and is unaffected. The model never saw `<bos><bos>` in pretraining, so every training example begins out of distribution, and inference with the correct single BOS then differs from training. The Transformers docs state the fix directly: "make sure you set `add_special_tokens=False` if you tokenize later ... This isn't an issue if you use `apply_chat_template(tokenize=True)`" ([chat templating docs](https://huggingface.co/docs/transformers/v5.19.0/en/chat_templating)). TRL's trainers tokenize conversational data through the template, so the bug shows up mainly in hand-written preprocessing.
 
 ### Pitfall 2: EOS alignment and pad = eos
 
-Many tokenizers ship without a pad token. The usual fix is `tok.pad_token = tok.eos_token`, and TRL itself falls back to the EOS token when no pad is set (`SFTTrainer` `processing_class` docs). On its own that is harmless. **The damage comes from the collator.** The classic causal-LM collator builds labels by copying `input_ids` and setting every position equal to `pad_token_id` to -100. Transformers' own `DataCollatorForLanguageModeling(mlm=False)` still does exactly this ([`data_collator.py` at v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/data/data_collator.py#L791-L795)). If pad and EOS share an id, the real EOS at the end of each example is masked too. The model never receives a gradient toward stopping, so at inference it keeps going: it produces another turn, another JSON object, or filler until `max_new_tokens`.
+Many tokenizers ship without a pad token. The usual fix is `tok.pad_token = tok.eos_token`, and TRL itself falls back to the EOS token when no pad is set ([`SFTTrainer` `processing_class`, TRL v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer#trl.SFTTrainer)). On its own that is harmless. **The damage comes from the collator.** The classic causal-LM collator builds labels by copying `input_ids` and setting every position equal to `pad_token_id` to -100. Transformers' own `DataCollatorForLanguageModeling(mlm=False)` still does exactly this ([`data_collator.py` at v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/data/data_collator.py#L791-L795)). If pad and EOS share an id, the real EOS at the end of each example is masked too. The model never receives a gradient toward stopping, so at inference it keeps going: it produces another turn, another JSON object, or filler until `max_new_tokens`.
 
 TRL's collator avoids this by construction. It builds labels before padding and pads them with -100, so the mask depends on *position*, not on *id* ([TRL `DataCollatorForLanguageModeling`, v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L169-L216)). The check below reproduces both behaviors, and the double-BOS bug, on toy ids.
 
@@ -421,6 +425,8 @@ A template is **prefix-preserving** if rendering turns $1..k$ always produces a 
 
 The Qwen3 rendering above breaks the property. Its template prints the `<think>...</think>` block only for assistant turns after the last user query: the original reads `{%- if loop.index0 > ns.last_query_index %}` and then `{%- if loop.last or ... %}`. When the conversation ends at assistant turn 1, that turn carries a `<think>` block. Append a user message or a tool response, render again, and turn 1 loses the block. Many reasoning templates follow the same pattern of stripping old reasoning, and they all break prefix preservation. TRL's patched `qwen3_training.jinja` drops that conditional "so the thinking block is always emitted", and TRL exposes `is_chat_template_prefix_preserving` to test a template ([TRL chat templates](https://huggingface.co/docs/trl/v1.15.0/en/chat_templates); [`chat_template_utils.py` L854](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/chat_template_utils.py#L854)). [Module 15](./15-agentic-and-tool-use-fine-tuning.md) builds on this for tool-use RL.
 
+**Table 3.** Template pitfalls
+
 | Pitfall | Symptom at train time | Symptom at inference | Fix |
 |---|---|---|---|
 | Double BOS | none visible; per-token table shows two BOS ids at position 0–1 | slightly worse quality; train/serve mismatch | `add_special_tokens=False` after `tokenize=False`, or `apply_chat_template(tokenize=True)` |
@@ -442,7 +448,7 @@ Batches need rectangular tensors, so short sequences get padding, and **which si
 
 **Left padding is required for batched generation.** `generate` appends each new token after the *last column* of the batch. With right padding, a short prompt's last column is a pad token, so the model would continue from padding. With left padding, every row's last column is its real final token, usually the end of `<|im_start|>assistant\n`. This is why trainers that generate, such as GRPO/RLOO rollouts, online preference methods ([module 12](./12-preference-optimization.md)) and evaluation loops, pad prompts on the left (`tok.padding_side = "left"`), while the scoring forward passes can still use any side.
 
-Left padding needs correct **position ids**. If a prompt has 3 pad tokens, its first real token must get position 0, not 3, or RoPE rotates every token by the wrong angle. Transformers' `generate` derives positions from the attention mask: `position_ids = attention_mask.cumsum(-1) - 1`, with pad positions clamped. Custom rollout code that passes `input_ids` without `attention_mask` silently gets positions offset by the pad count, and padded keys are attended to as well.
+Left padding needs correct **position ids**. If a prompt has 3 pad tokens, its first real token must get position 0, not 3, or RoPE rotates every token by the wrong angle. Transformers' `generate` derives positions from the attention mask: `position_ids = attention_mask.cumsum(-1) - 1`, with pad positions filled with a dummy value (they are masked anyway). Custom rollout code that passes `input_ids` without `attention_mask` silently gets positions offset by the pad count, and padded keys are attended to as well.
 
 **Packed sequences** go one step further. Several short examples are concatenated into one row with no padding, and position ids **reset to 0 at each example boundary** (`[0,1,2,3,0,1,2,0,1,...]`). The resets tell the attention backend where documents end (section 2.1), and the first label of each packed example is masked so no example learns to predict across the boundary. [Module 05](./05-supervised-fine-tuning.md) covers packing strategies (`bfd`, `bfd_split`, `wrapped`), and [module 03](./03-training-mechanics-and-memory-math.md) covers what padding-free saves.
 
@@ -451,6 +457,8 @@ Left padding needs correct **position ids**. If a prompt has 3 pad tokens, its f
 ## 2.6 Numerical formats a fine-tuner must know
 
 The [Transformers course section on mixed precision](../transformers/13-training-considerations.md#133-mixed-precision) explains why bf16 replaced fp16 for pretraining: the same 8-bit exponent as fp32, so no overflow and no loss scaling. Table 4 adds the formats you meet in 2026 fine-tuning. The [inference course numerics chapter](/courses/inference/00-foundations/00-05-numerics.html) covers them from the serving side.
+
+**Table 4.** Numerical formats
 
 | Format | Bits | Sign/exp/mantissa | Max finite value | Typical use in fine-tuning |
 |---|---|---|---|---|
@@ -465,7 +473,7 @@ The [Transformers course section on mixed precision](../transformers/13-training
 
 Sources: FP8 formats from [Micikevicius et al. (2022)](https://arxiv.org/abs/2209.05433), MXFP4 from the [OCP Microscaling spec v1.0](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf), and NVFP4 from [NVIDIA Transformer Engine docs (release 2.18)](https://docs.nvidia.com/deeplearning/transformer-engine-releases/release-2.18/user-guide/features/low_precision_training/nvfp4/nvfp4.html).
 
-**The T4 case.** Free Colab and Kaggle T4s are compute capability 7.5 ([NVIDIA CUDA GPU list](https://developer.nvidia.com/cuda-gpus)), and native bf16 tensor-core math starts at 8.0 (Ampere). Check `torch.cuda.get_device_capability() >= (8, 0)` rather than `torch.cuda.is_bf16_supported()`, which can report emulated support. On a T4, train in **fp16 with dynamic loss scaling**. fp16's 5-bit exponent underflows small gradients to zero, so `torch.amp.GradScaler` multiplies the loss by a large factor $S$ before `backward()`, unscales the gradients before the optimizer step, skips any step whose gradients contain `inf`/`nan`, and halves $S$ when that happens ([PyTorch AMP docs](https://docs.pytorch.org/docs/stable/amp.html)). In Trainer terms this means `fp16=True`. TRL's `SFTConfig` defaults `bf16` to `True` only when `fp16` is not set, so passing `fp16=True` turns the bf16 default off. Check the logged config anyway. [Module 03](./03-training-mechanics-and-memory-math.md) owns mixed-precision mechanics and master weights, and [module 11](./11-quantization-qat-and-fp8.md) owns FP8 training and the 4-bit formats.
+**The T4 case.** Free Colab and Kaggle T4s are compute capability 7.5 ([NVIDIA CUDA GPU list](https://developer.nvidia.com/cuda-gpus)), and native bf16 tensor-core math starts at 8.0 (Ampere). Check `torch.cuda.get_device_capability() >= (8, 0)` rather than `torch.cuda.is_bf16_supported()`, which can report emulated support. On a T4, train in **fp16 with dynamic loss scaling**. fp16's 5-bit exponent underflows small gradients, so it needs dynamic loss scaling (`torch.amp.GradScaler`; module 03 shows the mechanics). In Trainer terms this means `fp16=True`. TRL's `SFTConfig` defaults `bf16` to `True` only when `fp16` is not set, so passing `fp16=True` turns the bf16 default off. Check the logged config anyway. [Module 03](./03-training-mechanics-and-memory-math.md) owns mixed-precision mechanics and master weights, and [module 11](./11-quantization-qat-and-fp8.md) owns FP8 training and the 4-bit formats.
 
 **Loading.** In Transformers v5, `torch_dtype=` became `dtype=`, and `from_pretrained` **infers the dtype from the checkpoint config** when you do not pass one. A bf16 checkpoint loads as bf16. TRL trainers that receive a model *name* deliberately differ: "If `dtype` is not specified in `args.model_init_kwargs`, it defaults to `float32`" ([TRL `SFTTrainer` docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)). A 4B model then takes 16 GB of weights before any optimizer state.
 
@@ -508,9 +516,9 @@ Evaluation and RL both sample from your model, so the decoding settings belong t
 
 Two rules. **Evaluation uses greedy decoding, or a fixed temperature with $n$ samples per prompt and a reported mean** (pass@k and its variance are in [module 09](./09-evaluating-fine-tuned-models.md)). **RL rollouts sample at the temperature the policy-gradient math assumes.** Sampling with top-$p$ or a penalty that the trainer's log-prob computation does not apply makes the importance ratio wrong ([module 13](./13-rl-with-verifiable-rewards.md)). Model repositories ship defaults in `generation_config.json`. Qwen3 ships `temperature=0.6, top_p=0.95, top_k=20` (pinned file above). `generate()` uses those unless you override them, so "I evaluated with defaults" means different settings for different models.
 
-**Stop tokens.** `generation_config.eos_token_id` can be a list, and for all three families in Table 2 it is. A Python `model.generate` call reads the list. A serving stack, eval harness or hand-rolled loop that takes `tokenizer.eos_token_id` gets one id. For Qwen3 hybrid that id happens to be the right one (`<|im_end|>`). For a Qwen3 *base* model fine-tuned on ChatML, it is `<|endoftext|>`, so the server streams through `<|im_end|>` and invents the next user turn. This is the classic "works in Python, rambles in the server" bug. Check that the fine-tuned checkpoint's `generation_config.json` lists your template's turn-end token, and that the server reads it ([module 20](./20-production-serving-and-cost.md); the [inference course detokenization chapter](/courses/inference/09-serving-system/09-02-tokenization-and-detokenization.html) covers stop handling on the server side).
+**Stop tokens.** `generation_config.eos_token_id` can be a list, and for all three families in Table 2 it is. A Python `model.generate` call reads the list. A serving stack, eval harness or hand-rolled loop that takes `tokenizer.eos_token_id` gets one id. For Qwen3 hybrid that id happens to be the right one (`<|im_end|>`). For a Qwen3 base model trained on ChatML it is the wrong id (section 2.4, Pitfall 2), which is the classic "works in Python, rambles in the server" bug. Check that the fine-tuned checkpoint's `generation_config.json` lists your template's turn-end token, and that the server reads it ([module 20](./20-production-serving-and-cost.md); the [inference course detokenization chapter](/courses/inference/09-serving-system/09-02-tokenization-and-detokenization.html) covers stop handling on the server side).
 
-**KV cache.** Generation is one token at a time. Without a cache, step $t$ would recompute keys and values for all $t$ previous tokens. With a cache, each step computes K and V for one new token and attends over the stored ones, so the per-token cost is roughly constant in compute. But the cache grows linearly in memory: $2 \cdot L \cdot n_{kv} \cdot d_h$ values per token. For Qwen3-4B in bf16 that is $2 \cdot 36 \cdot 8 \cdot 128 \cdot 2 = 147{,}456$ bytes, about 0.15 MB, per token. One GRPO prompt with $G = 8$ completions of 4,096 tokens holds $8 \cdot 4096 \cdot 0.147\text{ MB} \approx 4.8$ GB of cache. That is why RL rollouts are memory-bound and why TRL's GRPO can hand generation to vLLM's paged cache ([module 13](./13-rl-with-verifiable-rewards.md)). The [decode loop and KV cache chapter](/courses/inference/00-foundations/00-02-decode-loop-and-kv-cache.html) derives this in detail.
+**KV cache.** Generation is one token at a time. Without a cache, step $t$ would recompute keys and values for all $t$ previous tokens. With a cache, each step computes K and V for one new token and attends over the stored ones, so each step does the weight matmuls for one token only; attention still reads all $t$ cached K/V, so its cost grows linearly with position. The cache grows linearly in memory: $2 \cdot L \cdot n_{kv} \cdot d_h$ values per token. For Qwen3-4B in bf16 that is $2 \cdot 36 \cdot 8 \cdot 128 \cdot 2 = 147{,}456$ bytes, about 0.15 MB, per token. One GRPO prompt with $G = 8$ completions of 4,096 tokens holds $8 \cdot 4096 \cdot 0.147\text{ MB} \approx 4.8$ GB of cache. That is why RL rollouts are memory-bound and why TRL's GRPO can hand generation to vLLM's paged cache ([module 13](./13-rl-with-verifiable-rewards.md)). The [decode loop and KV cache chapter](/courses/inference/00-foundations/00-02-decode-loop-and-kv-cache.html) derives this in detail.
 
 ---
 
@@ -539,7 +547,7 @@ Tokenize each rendered string with `add_special_tokens=True` and then `False`, a
 
 ### Step 3: build the assistant mask
 
-The script first asks for `return_assistant_tokens_mask=True`. On these shipped templates it returns all zeros. That is your evidence that the markers are missing. It then falls back to offsets: it finds each assistant header in the rendered string, marks characters from the header's end through the turn-end token, and maps tokens to characters with `return_offsets_mapping`. It prints the per-token table and the trained-token count per template. On the pinned revisions the counts are 30, 24 and 28 for Qwen3, Llama 3.2 and Gemma 3, and Qwen's count includes the empty `<think>` block on the last turn. The script also flags any template where rendering turns $1..k$ is not a prefix of rendering turns $1..k{+}1$. Qwen3 gets flagged.
+The script first asks for `return_assistant_tokens_mask=True`. On these shipped templates it returns all zeros. That is your evidence that the markers are missing. It then falls back to offsets: it finds each assistant header in the rendered string, marks characters from the header's end through the turn-end token, and maps tokens to characters with `return_offsets_mapping`. It prints the per-token table and the trained-token count per template. On the pinned revisions the counts are 33, 26 and 31 for Qwen3, Llama 3.2 and Gemma 3, and Qwen's count includes the empty `<think>` block on the last turn. The script also flags any template where rendering turns $1..k$ is not a prefix of rendering turns $1..k{+}1$. Qwen3 gets flagged.
 
 ### Step 4: simulate pad = eos
 
@@ -549,9 +557,9 @@ The script sets `pad_token = eos_token`, pads a 3-example batch on the right, an
 
 With `Qwen/Qwen3-0.6B` weights, the script runs the 3-example position-masked batch, recomputes the loss from the returned logits with `log_softmax` + `gather` over shifted, unmasked targets, and asserts agreement with `model(**batch).loss` to $10^{-4}$.
 
-**Smoke mode** runs the same logic with a hand-written ChatML renderer and a toy word-level vocabulary. It asserts the mask, the double BOS and the pad=eos label loss, checks the hand loss against a reimplementation of HF's pad-and-shift loss on a tiny random model, and then trains two tiny GRU language models on toy sequences, one with labels masked by id and one with labels masked by position. Only the position-masked model emits EOS under greedy decoding.
+**Smoke mode** reproduces steps 2-5 with a toy ChatML renderer and vocabulary, and adds a tiny GRU never-stop demo (only the position-masked model emits EOS).
 
-**Optional extension (`--never-stop`, T0).** This trains `Qwen/Qwen3-0.6B-Base` for 100 steps on ChatML-formatted support-email examples, using `pad_token = <|im_end|>` and id-based masking, then again with a distinct pad and position masking. It generates 20 replies from each and reports how many stop on `<|im_end|>` before `max_new_tokens`. Expect the fixed run to stop reliably. The id-masked run never receives a gradient toward `<|im_end|>`, so whether it stops depends on what the base model already knew about that token. Expect fewer stops, not necessarily zero, and record the gap. The counts depend on hardware and seed.
+**Optional extension (`--never-stop`, T0).** This trains `Qwen/Qwen3-0.6B-Base` for 100 steps on ChatML-formatted support-email examples, using `pad_token = <|im_end|>` and id-based masking, then again with a distinct pad and position masking. It generates 20 replies from each and reports how many stop on `<|im_end|>` before `max_new_tokens`. Expect the fixed run to stop reliably. Expect fewer stops in the id-masked run, not necessarily zero, and record the gap. The counts depend on hardware and seed.
 
 **What to record.** BOS counts per template, trained-token counts, prefix-preservation flags, the number of EOS targets under each masking scheme, the hand-vs-model loss difference, and (with the extension) stop rates.
 

@@ -12,17 +12,13 @@ format, and distillation is SFT with a teacher writing the data. The
 line (maximise the likelihood of demonstrations); this module turns modules 02 to 04
 into a recipe that works, and shows where it silently does not.
 
-All defaults below are from **TRL v1.15.0** (October 2026), read from the
-[pinned `SFTConfig` source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py)
-and the [v1.15.0 SFT docs](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer). For
-`Trainer` and PEFT basics, the [Hugging Face note](../../notes/libraries/huggingface.md)
-is the recap.
+Defaults are from **TRL v1.15.0** ([SFT docs](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)); the [Hugging Face note](../../notes/libraries/huggingface.md) recaps `Trainer` and PEFT.
 
 ---
 
 ## 5.1 SFTTrainer end to end
 
-Here is the whole recipe for a LoRA SFT run. Every argument is doing something.
+Here is the whole recipe for a LoRA SFT run.
 
 Teaching fragment: not executed (needs `trl`, `peft`, a GPU and downloads).
 
@@ -63,22 +59,20 @@ trainer.train()
 | `processing_class` | the tokenizer (or a processor for VLMs) | `tokenizer=` is the stale name ([module 08](./08-frameworks-and-tooling.md)); if `pad_token` is unset TRL falls back to `eos_token` |
 | `model_init_kwargs` | forwarded to `from_pretrained` | `{"dtype": ..., "attn_implementation": ..., "use_kernels": True}` live here |
 | `peft_config` | wraps the model in a PEFT adapter | the LoRA knobs are [module 06](./06-lora-and-qlora.md) |
-| `formatting_func` | maps a raw row to one string | converts the dataset to **language-modelling** type, so it is rejected with `completion_only_loss=True` |
-| `quantization_config` | a `BitsAndBytesConfig` used when `model` is a string | with `peft_config` this is QLoRA |
 
-The trainer also accepts **pre-tokenised** data. A row needs `input_ids`. If it has
-`labels` (with `-100` on ignored tokens), they are used as is. Otherwise TRL builds labels
-from an optional `completion_mask` column (honoured only when `completion_only_loss=True`)
-and an optional `assistant_masks` column, then drops those columns
-([TRL `SFTTrainer` docstring](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L554-L560)).
-Pre-tokenising is how you take full control of masking when no template trick fits.
-Label shifting and `-100` are explained in
-[module 02](./02-tokens-templates-and-the-causal-lm-objective.md).
+`formatting_func` maps a raw row to one string, which makes the dataset language-modelling
+type and so is rejected with `completion_only_loss=True`. `quantization_config` takes a
+`BitsAndBytesConfig` for a string `model`; with `peft_config` that is QLoRA.
+
+**Pre-tokenised** rows need `input_ids`; `labels` (with `-100`) are used as is, otherwise
+TRL builds them from optional `completion_mask` and `assistant_masks` columns
+([docstring](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L554-L560)).
+That is full control of masking when no template trick fits ([module 02](./02-tokens-templates-and-the-causal-lm-objective.md) explains `-100`).
 
 ### SFTConfig defaults that differ from TrainingArguments
 
-`SFTConfig` subclasses `TrainingArguments` through a TRL base config and overrides several
-defaults. **Know these before you copy a hyperparameter from an old tutorial.**
+`SFTConfig` subclasses `TrainingArguments` and overrides several defaults. **Know these
+before you copy a hyperparameter from an old tutorial.**
 
 | Field | `SFTConfig` (TRL v1.15.0) | `TrainingArguments` | Why it matters |
 |---|---|---|---|
@@ -88,53 +82,47 @@ defaults. **Know these before you copy a hyperparameter from an old tutorial.**
 | `logging_steps` | `10` | `500` | you see the loss curve early |
 | `max_length` | `1024` | n/a | longer rows are truncated `keep_start`; VLMs need `None` ([module 16](./16-multimodal-and-embedding-fine-tuning.md)) |
 | `packing` | `False` | n/a | strategy defaults to `"bfd"` when on |
-| `padding_free` | `False` | n/a | forced on by `packing_strategy="bfd"` |
+| `padding_free` | `False` | n/a | forced on by `packing=True` with `bfd` or `bfd_split` |
 | `completion_only_loss` | `None`: True for prompt-completion, full sequence for LM data | n/a | the most common silent default |
 | `assistant_only_loss` | `False` | n/a | conversational data trains on **every** token unless you set it |
 | `loss_type` | `"nll"` (also `"dft"`) | n/a | `"chunked_nll"` is a deprecated alias of `"nll"` |
 | model dtype (string `model`) | float32 unless `model_init_kwargs["dtype"]` | n/a | a 4B model in fp32 is 16 GB of weights alone |
 
 Sources: [`sft_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L128-L134)
-and [`base_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/base_config.py#L55-L75)
-at the v1.15.0 commit. The deprecated `truncation_mode="keep_end"`, `pad_token=` and
-`compute_loss_func=` all warn and go away in TRL v2.0; truncation itself is
-[module 04](./04-data-curation-and-synthesis.md)'s topic.
+and [`base_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/base_config.py#L55-L75).
+`truncation_mode="keep_end"`, `pad_token=` and `compute_loss_func=` are deprecated (gone in TRL v2.0).
 
 ### Dataset formats SFTTrainer accepts
 
-Three types, each in a standard (plain text) or conversational (message list) flavour;
-[module 04](./04-data-curation-and-synthesis.md) has the schema table. What matters here is
-how each one is tokenised and which tokens get loss by default.
+Two types, language modelling and prompt-completion, each in a standard (plain text) or
+conversational (message list) format; [module 04](./04-data-curation-and-synthesis.md) has
+the schema table. What matters here is how each is tokenised and which tokens get loss.
 
-| Type | Columns | Tokenisation | Default loss |
+| Type, format | Columns | Tokenisation | Default loss |
 |---|---|---|---|
-| Language modelling | `text` or `messages` | `text` as is; `messages` through the chat template | every token |
-| Prompt-completion | `prompt`, `completion` | prompt and completion tokenised, concatenated, `completion_mask` recorded | completion only |
-| Conversational | `messages` (list of role/content dicts) | `apply_chat_template` on the whole list | every token, unless `assistant_only_loss=True` |
+| Language modelling, standard | `text` | as is | every token |
+| Language modelling, conversational | `messages` (role/content dicts) | `apply_chat_template` on the whole list | every token, unless `assistant_only_loss=True` |
+| Prompt-completion (either format) | `prompt`, `completion` | each tokenised (templated if conversational), concatenated, `completion_mask` recorded | completion only |
 
-The conversational prompt-completion form (`prompt` is a list of messages, `completion`
-is the assistant message) is the cleanest way to train single-turn tasks: templated,
-and completion-only by default. The running JSON-extraction task uses it.
+Conversational prompt-completion (`prompt` a message list, `completion` the assistant
+message) is templated and completion-only by default; the running JSON task uses it.
 
 ### Gradient checkpointing with a frozen base
 
-Checkpointing is on by default, and LoRA freezes the base. Together they can produce
+Reentrant checkpointing (the old Transformers default, and what TRL forces for PEFT under
+DeepSpeed ZeRO-3) plus a frozen base can produce
 `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn`.
-The cause is the **reentrant** checkpoint implementation: it only builds a backward graph
-for a segment if at least one of its *inputs* requires grad. The input to the first
-decoder layer is the output of a frozen embedding, so it does not; the LoRA matrices
-inside the segment are never seen by autograd, and the loss has no `grad_fn`.
+Reentrant checkpointing builds a backward graph for a segment only if one of its *inputs*
+requires grad. The first decoder layer's input comes from a frozen embedding, so autograd
+never sees the LoRA matrices inside the segment.
 
-The fix is `model.enable_input_require_grads()`, which registers a forward hook that
-marks the embedding output as requiring grad. PEFT calls it when it prepares a model for
-checkpointing, and TRL v1.15 calls it explicitly for every PEFT model with checkpointing
-on, because of a Transformers bug that stopped `Trainer` from doing so
-([`sft_trainer.py` L866-L869](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L866-L869)).
-You hit the error when you write your own loop or wrap the model yourself. Selective
-checkpointing and the memory accounting are [module 03](./03-training-mechanics-and-memory-math.md).
+The fix is `model.enable_input_require_grads()`, a forward hook that marks the embedding
+output as requiring grad. TRL v1.15 calls it for every PEFT model with checkpointing on
+([`sft_trainer.py` L866-L869](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L866-L869)),
+so you hit the error in your own loop. Checkpointing memory is [module 03](./03-training-mechanics-and-memory-math.md)'s.
 
-This check proves the failure and both fixes on a two-matrix "adapter" inside a
-checkpointed segment.
+This check proves the failure and the fix on a two-matrix "adapter" inside a checkpointed
+segment.
 
 ```python finetuning-check
 import warnings
@@ -175,44 +163,32 @@ out = checkpoint(segment, emb(ids), use_reentrant=True)
 out.sum().backward()
 assert lora_A.grad is not None and lora_A.grad.abs().sum() > 0
 handle.remove()
-
-# Non-reentrant checkpointing does not need the hook.
-lora_A.grad = None
-out = checkpoint(segment, emb(ids), use_reentrant=False)
-out.sum().backward()
-assert lora_A.grad is not None and lora_A.grad.abs().sum() > 0
 print("frozen-base checkpointing behaviour verified")
 ```
 
-It does not prove anything about memory or speed: the hook costs nothing measurable, and
-the choice between reentrant and non-reentrant is made by the framework (TRL forces
-reentrant for PEFT under DeepSpeed ZeRO-3).
+It does not prove anything about memory or speed; non-reentrant checkpointing avoids the
+problem without the hook.
 
 ---
 
 ## 5.2 Loss masking
 
-The objective is the same next-token cross-entropy as pretraining; **the mask decides what
-you are teaching**. Unmasked prompt tokens teach the model to write user messages and
-system prompts. Masked prompt tokens still shape the gradient, because completion tokens
-attend to them; they just are not targets.
+The objective is pretraining's next-token cross-entropy; **the mask decides what you are
+teaching**. Masked prompt tokens still shape the gradient (completion tokens attend to
+them); they are just not targets.
 
 ### completion_only_loss
 
-For prompt-completion data, TRL records a `completion_mask` (0 on the prompt, 1 on the
-completion) and sets the label to `-100` wherever it is 0. Because `completion_only_loss`
-defaults to `None`, this happens automatically for prompt-completion data and never for
-language-modelling data. Set it to `False` to ablate (lab L5.2 does).
+For prompt-completion data TRL sets the label to `-100` wherever `completion_mask` is 0.
+With the default `completion_only_loss=None` this is automatic for prompt-completion data
+and never applies to language-modelling data. Set it to `False` to ablate (lab L5.2 does).
 
 ### assistant_only_loss and {% generation %}
 
-Conversational data has no prompt/completion split, so TRL asks the tokenizer which
-characters the assistant wrote: it calls `apply_chat_template(...,
-return_assistant_tokens_mask=True)`. Transformers can only answer if the template marks
-assistant output with `{% generation %}` and `{% endgeneration %}`; the
-[`apply_chat_template` docstring](https://github.com/huggingface/transformers/blob/v5.19.0/src/transformers/tokenization_utils_base.py#L3065-L3068)
-says the mask "is only available for chat templates that support it via the
-`{% generation %}` keyword". A minimal ChatML template with the markers:
+For conversational data TRL calls `apply_chat_template(..., return_assistant_tokens_mask=True)`.
+The mask "is only available for chat templates that support it via the
+`{% generation %}` keyword" ([docstring](https://github.com/huggingface/transformers/blob/v5.19.0/src/transformers/tokenization_utils_base.py#L3065-L3068)).
+A minimal ChatML template with the markers:
 
 ```jinja
 {%- for message in messages %}
@@ -229,23 +205,20 @@ says the mask "is only available for chat templates that support it via the
 {%- if add_generation_prompt %}{{- "<|im_start|>assistant\n" }}{%- endif %}
 ```
 
-Rendered on a two-turn chat, Transformers' renderer returns exactly the spans
-`Hello!<|im_end|>` and `Ciao<|im_end|>` as generation spans (we ran it with Transformers
-5.5). Note the design choice: **the header sits outside the block and the turn-end token
-inside it**. The header is a prompt cue the server writes; `<|im_end|>` is how the model
-learns to stop. SmolLM3's template puts the header inside the block
-([lines 76-82](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/a07cc9a04f16550a088caea529712d1d335b0ac1/chat_template.jinja#L76-L82)),
-which also trains three header tokens per turn. Harmless, but know it.
+On a two-turn chat the generation spans are exactly `Hello!<|im_end|>` and `Ciao<|im_end|>`.
+**The header sits outside the block and the turn-end token inside it**: the server writes
+the header; `<|im_end|>` is how the model learns to stop. SmolLM3's template puts the
+header inside ([lines 76-82](https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/a07cc9a04f16550a088caea529712d1d335b0ac1/chat_template.jinja#L76-L82)),
+which trains three header tokens per turn. Harmless, but know it.
 
-Most shipped templates lack the markers. **What happens then?** In TRL v1.15, two
-safety nets: for recognised families (Qwen3 including Instruct-2507, Llama 3.x, Gemma,
-DeepSeek-V3, GPT-OSS and others) TRL swaps in a patched training template when
-`assistant_only_loss=True` ([TRL chat templates](https://huggingface.co/docs/trl/v1.15.0/en/chat_templates));
-for anything else, an example with no assistant tokens raises a `RuntimeError` naming the
-missing keyword ([source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L1385-L1391)).
-Older stacks and hand-rolled loops have neither net: a template without markers yields an
-all-zero mask, and depending on the code you get no training signal or, worse, a fallback
-to full-sequence loss that nobody notices. **Always decode the trained tokens of one batch
+Most shipped templates lack the markers. TRL v1.15 has two safety nets: for recognised
+families (Qwen3 including Instruct-2507, Llama 3.x, Gemma, DeepSeek-V3, GPT-OSS and
+others) it swaps in a patched training template
+([TRL chat templates](https://huggingface.co/docs/trl/v1.15.0/en/chat_templates)); for
+anything else, an example with no assistant tokens raises a `RuntimeError`
+([source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L1385-L1391)).
+Hand-rolled loops have neither: an all-zero mask gives no signal or, worse, a silent
+fallback to full-sequence loss. **Always decode the trained tokens of one batch
 before a long run.**
 
 Unsloth's alternative is string matching:
@@ -261,32 +234,20 @@ further rule, mask tool outputs too, which is [module 15](./15-agentic-and-tool-
 The misconception is "train on the whole conversation, more tokens is more signal". For
 typical instruction data the prompt tokens are the user's distribution, not the behaviour
 you want, and they dilute the loss (in the example below, three quarters of the targets
-are not the final answer). Training on prompts helps in narrow cases:
-
-- **Very short completions** (a label, a yes/no) with long prompts in a tiny dataset,
-  where the prompt loss acts as a regulariser on domain text.
-- **CPT-like data**, where the "prompt" is itself domain text you want modelled.
-- **Very small datasets** where the extra tokens reduce overfitting to the completion
-  style; measure it, do not assume it.
+are not the final answer). Training on prompts helps only in narrow cases: tiny datasets
+with very short completions (a label) where prompt loss regularises on domain text, and
+CPT-like data where the prompt is itself text you want modelled. Measure it.
 
 Dettmers et al. (2023), [QLoRA](https://arxiv.org/abs/2305.14314) (Appendix B, Table 10),
 found target-only training beat source-plus-target on all four instruction datasets they
 tried, a 7B model scoring 38.6 vs 37.5 mean 5-shot MMLU. They did not measure chat quality
-for this ablation. Treat target-only as the default and the bullets as ablations.
+for this ablation. Treat target-only as the default and prompt loss as an ablation.
 
 ### What each scheme trains, counted
 
 Take one ChatML conversation with these token counts: system turn 12, user turn 20,
 assistant header 3, assistant answer 31 (content plus `<|im_end|>`), second user turn 15,
 header 3, second answer 26. Total 110 tokens, so 109 next-token targets after the shift.
-
-```mermaid
-flowchart LR
-    C["system 12, user 20, hdr 3, asst 31,<br/>user 15, hdr 3, asst 26<br/>110 tokens, 109 targets"]
-    C --> A["(a) full sequence<br/>109 targets"]
-    C --> B["(b) completion-only<br/>prompt = all but last answer<br/>26 targets"]
-    C --> D["(c) assistant-only<br/>both answers<br/>31 + 26 = 57 targets"]
-```
 
 | Scheme | Trained targets | Share | What the model learns |
 |---|---|---|---|
@@ -295,8 +256,7 @@ flowchart LR
 | (c) assistant-only, multi-turn | 57 | 52% | every assistant turn, including the stop token |
 
 With a SmolLM3-style template, (c) would be 63 (the two headers count). Scheme (b) wastes
-the first answer as a target; scheme (c) is why multi-turn data is worth keeping
-conversational.
+the first answer as a target, which is why multi-turn data stays conversational.
 
 ---
 
@@ -306,8 +266,8 @@ conversational.
 
 Take seven examples of lengths `[7, 5, 4, 3, 3, 2, 1]` (25 real tokens) and
 `max_length=8`. Padded to the longest in one batch, you compute $7 \times 7 = 49$
-positions for 25 tokens: **24 pad tokens**, nearly half the batch. Real SFT sets have
-long-tailed lengths, so the waste is usually worse.
+positions for 25 tokens: **24 pad tokens**, nearly half the batch, and real long-tailed
+SFT sets waste more.
 
 **Packing** puts several examples into one row. TRL v1.15 offers three strategies
 ([reducing memory usage](https://huggingface.co/docs/trl/v1.15.0/en/reducing_memory_usage)):
@@ -320,25 +280,14 @@ long-tailed lengths, so the waste is usually worse.
 
 If no example exceeds `max_length`, `bfd` and `bfd_split` are identical.
 
-**Best-fit decreasing**: sort lengths descending; put each into the open bin with the
-least room that still fits; open a new bin if none fits. On our lengths: 7 opens bin A
-(room 1); 5 opens B (room 3); 4 opens C (room 4); 3 fills B exactly; 3 goes to C (room
-1); 2 fits nowhere and opens D; 1 tops up A. Bins `[7,1]`, `[5,3]`, `[4,3]`, `[2]`.
+**Best-fit decreasing** sorts lengths descending and puts each into the open bin with the
+least room that still fits. Our lengths give bins `[7,1]`, `[5,3]`, `[4,3]`, `[2]`.
 
 ```mermaid
-flowchart TD
-    subgraph Naive["Pad to longest: 7 rows x 7 = 49 slots, 24 pad"]
-        N["7, 5+2pad, 4+3pad, 3+4pad,<br/>3+4pad, 2+5pad, 1+6pad"]
-    end
-    subgraph BFD["BFD into bins of 8: 4 rows"]
-        B1["7 + 1"]
-        B2["5 + 3"]
-        B3["4 + 3 + 1pad"]
-        B4["2 + 6pad"]
-    end
-    Naive --> P["padded to 8: 32 - 25 = 7 pad"]
-    BFD --> P
-    P --> F["padding-free: rows concatenated, 0 pad"]
+flowchart LR
+    N["pad to longest:<br/>7 rows x 7, 24 pad"] -. "pack instead" .-> B["BFD into bins of 8:<br/>7+1, 5+3, 4+3+1pad, 2+6pad"]
+    B --> P["padded to 8:<br/>32 - 25 = 7 pad"]
+    P --> F["padding-free:<br/>rows concatenated, 0 pad"]
 ```
 
 Four rows padded to 8 is $32 - 25 = 7$ pad tokens. **Padding-free** goes further: the
@@ -383,24 +332,20 @@ assert padding_free_waste == 0
 print("BFD packing arithmetic verified")
 ```
 
-It does not prove a wall-clock speed-up: that depends on the attention kernel and on
-whether your GPU was compute-bound on pad tokens in the first place.
+It does not prove a wall-clock speed-up, which depends on the kernel and the GPU.
 
 ### Packing does not contaminate examples
 
-The misconception is that packed examples attend to each other. Naive concatenation did
-exactly that, and position ids kept counting across the boundary. Modern packing fixes
-both: **position ids restart at 0 for each example**, and the attention kernel uses the
-resets as boundaries. FlashAttention 2/3's variable-length path takes cumulative sequence
-lengths (`cu_seqlens`) and computes a block-diagonal causal attention without
-materialising a mask ([Transformers module 11](../transformers/11-hardware-aware-attention.md)
-covers the kernel; [module 08](../transformers/08-encoder-decoder-masking.md) the masks).
-The label at each example's last token is also ignored, so no example is trained to
-predict the next one's first token.
+The misconception is that packed examples attend to each other. Naive concatenation did,
+with position ids counting across the boundary. Modern packing **restarts position ids at
+0 for each example**, and FlashAttention 2/3's variable-length path turns the resets into
+cumulative sequence lengths (`cu_seqlens`) and block-diagonal causal attention without a
+mask ([Transformers module 11](../transformers/11-hardware-aware-attention.md)
+covers the kernel; [Transformers module 08](../transformers/08-encoder-decoder-masking.md) the masks).
+Each example's last label is ignored, so none is trained to predict the next one's first token.
 
-This check packs two documents into one row with position ids `[0,1,2,0,1,2,3]`, builds a
-block-diagonal causal mask from the resets, applies RoPE by position id, and compares
-against running each document alone.
+This check packs two documents with position ids `[0,1,2,0,1,2,3]`, masks block-diagonally
+from the resets, and compares against each document run alone.
 
 ```python finetuning-check
 import torch
@@ -450,48 +395,42 @@ assert (leaky[3:] - alone2).abs().max() > 1e-3                     # doc 2 is co
 print("packed attention == per-document attention verified")
 ```
 
-It does not prove that *your* stack honours the resets. With an attention backend that
-ignores position-id boundaries (plain SDPA with a dense causal mask), you get the leaky
-case. That is why the TRL docs tie padding-free to FlashAttention.
+It does not prove that *your* stack honours the resets: a backend with a dense causal mask
+gives the leaky case.
 
 ### padding_free and pad_to_multiple_of
 
 `padding_free=True` without packing flattens each sampled batch into one sequence,
-keeping every example whole. It is **only supported with FlashAttention 2 or 3**
-(`model_init_kwargs={"attn_implementation": "kernels-community/flash-attn2"}` in the TRL
-docs); with other backends you risk exactly the contamination above. `packing_strategy="bfd"`
-turns it on regardless of the flag. `pad_to_multiple_of=8` (or 64) rounds padded
+keeping every example whole. Padding-free needs attention that respects example
+boundaries: **in TRL that means FlashAttention-2 or 3**
+(`model_init_kwargs={"attn_implementation": "kernels-community/flash-attn2"}`); with other
+backends you risk exactly the contamination above. `packing=True` with `bfd` or
+`bfd_split` turns it on regardless of the flag. `pad_to_multiple_of=8` (or 64) rounds padded
 lengths up for tensor-core-friendly shapes when you do pad. Hardware support is
 [module 03](./03-training-mechanics-and-memory-math.md)'s topic.
 
 ### What "Fewer Truncations" showed
 
 Ding et al. (2024), [Fewer Truncations Improve Language Modeling](https://huggingface.co/papers/2404.10830),
-compared concatenate-and-split (what `wrapped` does) with best-fit packing that never
-splits documents unnecessarily. In pretraining, best-fit packing improved reading
-comprehension (+4.7% relative), context following (+16.8%) and program synthesis (+9.2%),
-and reduced closed-domain hallucination by up to 58.3%, at the same training efficiency.
-**What it establishes:** truncation is not free, because a model trained on documents
-whose beginnings are cut learns to continue text without its grounding. **What it does
-not:** the experiments are pretraining-scale, not SFT; transferring the result to SFT is
-an inference, which TRL's `bfd_split` builds on.
+replaced concatenate-and-split (what `wrapped` does) with best-fit packing in pretraining:
+reading comprehension +4.7% relative, context following +16.8%, program synthesis +9.2%,
+closed-domain hallucination down by up to 58.3%. **It establishes** that truncation is not
+free; **it does not** test SFT, so applying it there (as `bfd_split` does) is an inference.
 
 ---
 
 ## 5.4 Instruction-tuning a base model
 
-Base and instruct checkpoints differ in exactly what this section adds
-([module 01](./01-when-to-fine-tune.md)). A base model saw raw text; it has no notion
-of turns, and often no stop behaviour after an answer. Turning it into a chat model needs
-four decisions.
+A base model saw raw text: no turns, often no stop behaviour
+([module 01](./01-when-to-fine-tune.md)). Making it a chat model takes four decisions.
 
 **1. A chat template.** Many base models ship none. `SFTConfig(chat_template_path=...)`
 accepts either a Jinja file or a model/tokenizer id. Given an id, TRL calls
 `clone_chat_template`, which copies the template, adds the source tokenizer's special
 tokens, sets the EOS token, and resizes the embeddings (rounded up to a multiple of 64 by
 default) ([TRL source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/chat_template_utils.py#L48-L93)).
-Given a raw Jinja file, you must add the referenced special tokens and resize yourself.
-Templates themselves are [module 02](./02-tokens-templates-and-the-causal-lm-objective.md).
+Given a raw Jinja file, you add the special tokens and resize yourself
+([module 02](./02-tokens-templates-and-the-causal-lm-objective.md) covers templates).
 
 **2. The EOS token.** This is the decision that breaks things. `Qwen/Qwen3-0.6B-Base`
 ships a ChatML template, but its EOS is `<|endoftext|>` (id 151643), and its
@@ -507,10 +446,8 @@ Compare Qwen's own instruct model, whose
 lists `[151645, 151643]`: `<|im_end|>` first, `<|endoftext|>` second. The pad-equals-EOS
 trap is [module 02](./02-tokens-templates-and-the-causal-lm-objective.md)'s.
 
-**3. New special tokens.** Any token a template adds needs an embedding row and an LM-head
-row. `resize_token_embeddings` creates them (Transformers initialises new rows from the
-mean and covariance of the old ones); [module 02](./02-tokens-templates-and-the-causal-lm-objective.md)
-covers tokenizer mechanics.
+**3. New special tokens** need embedding and LM-head rows, which `resize_token_embeddings`
+creates (initialised from the mean and covariance of the old rows; [module 02](./02-tokens-templates-and-the-causal-lm-objective.md)).
 
 **4. Training those rows.** A new row is useless until trained, and LoRA on linear layers
 does not touch embeddings. Two options: `trainable_token_indices` in PEFT trains only the
@@ -521,37 +458,30 @@ template's tokens already exist in the vocabulary (Qwen's ChatML tokens do), the
 still be under-trained in a base model; assistant-only loss on `<|im_end|>` is what
 teaches it.
 
-The TRL docs' own example converts `Qwen/Qwen3-0.6B-Base` into a chat model on
-`trl-lib/Capybara` with `chat_template_path="HuggingFaceTB/SmolLM3-3B"`. That is lab L5.1.
+The TRL docs' example (`Qwen/Qwen3-0.6B-Base`, `trl-lib/Capybara`,
+`chat_template_path="HuggingFaceTB/SmolLM3-3B"`) is lab L5.1.
 
 ### Fine-tuning an already-instruct model
 
-The more common job: you have `Qwen/Qwen3-4B-Instruct-2507` and want it to do your task
-better. Different risks, different rules.
+The more common job is making `Qwen/Qwen3-4B-Instruct-2507` better at your task. The rules:
 
-| Rule | Why |
-|---|---|
-| Keep its template byte-for-byte; never clone another | the model's behaviour is conditioned on its exact tokens; a mismatch at serving time silently degrades it |
-| Keep its system-prompt conventions and thinking flags | the instruct model has learned what they mean |
-| Low LR: at most about `1e-5` full, `1e-4` LoRA | you are nudging a converged policy, not teaching chat |
-| Small, targeted data; 1 to 3 epochs | more steps buy more regression, not more task skill |
-| Mix in some general instruction data | limits loss of general ability ([module 04](./04-data-curation-and-synthesis.md) on mixing) |
-| Re-run a general and a safety eval after | narrow SFT can erode refusals and broad skills ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)) |
+- **Keep its template, system-prompt conventions and thinking flags byte-for-byte.** The
+  model is conditioned on those exact tokens; a mismatch at serving time degrades it silently.
+- **Low LR, small data:** at most about `1e-5` full or `1e-4` LoRA, 1 to 3 epochs. You are
+  nudging a converged policy; more steps buy regression, not task skill.
+- **Mix in general instruction data** ([module 04](./04-data-curation-and-synthesis.md) on mixing).
+- **Re-run a general and a safety eval after**: narrow SFT can erode refusals and broad
+  skills ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)).
 
 ---
 
 ## 5.5 Reasoning-format SFT
 
-Reasoning models put a trace between `<think>` and `</think>` before the answer. You can
-store it in two ways, and the template decides which works:
-
-- **Inline in `content`**: `"<think>\n...\n</think>\n\nanswer"`. Works with any template
-  that passes content through. The TRL docs format
-  `FreedomIntelligence/medical-o1-reasoning-SFT` this way (`Complex_CoT` inside the
-  tags, `Response` after).
-- **A separate `reasoning_content` field**, which templates such as Qwen3's render into
-  the think block. Check the template: if it ignores the field, the trace is silently
-  dropped.
+Reasoning models put a trace between `<think>` and `</think>` before the answer. Store it
+**inline in `content`** (`"<think>\n...\n</think>\n\nanswer"`, how the TRL docs format
+`FreedomIntelligence/medical-o1-reasoning-SFT`), or in a **`reasoning_content` field** that
+templates such as Qwen3's render into the think block; if the template ignores the field,
+the trace is silently dropped.
 
 Two traps. First, **stock templates often strip history**: Qwen3's template drops the
 reasoning from assistant turns before the last user query, and DeepSeek-R1-Distill's
@@ -561,16 +491,14 @@ target. TRL's patched training templates fix both and always emit the think bloc
 Second, **the thinking toggle**. Qwen3's hybrid checkpoints switch with
 `enable_thinking`; the Qwen3 report describes "thinking mode fusion", training both modes
 together with non-thinking samples carrying an *empty* think block (Yang et al. 2025,
-[Qwen3 Technical Report](https://huggingface.co/papers/2505.09388)). If you fine-tune a
-hybrid model only on traces, the non-thinking mode degrades or disappears. Keep both kinds
-of example, render non-thinking ones with the empty block exactly as the template does at
-inference, and evaluate both modes. Single-mode checkpoints such as
-`Qwen3-4B-Instruct-2507` (non-thinking) should be trained only in their mode.
+[Qwen3 Technical Report](https://huggingface.co/papers/2505.09388)). Fine-tune a hybrid
+model only on traces and the non-thinking mode degrades. Keep both kinds of example,
+render non-thinking ones with the empty block as the template does at inference, and
+evaluate both modes. Train single-mode checkpoints such as `Qwen3-4B-Instruct-2507` only
+in their mode.
 
-Trace length matters too: medical-o1 traces run to thousands of tokens, so check the
-truncation rate at your `max_length` before training (a truncated trace teaches the model
-to stop mid-thought). Where traces come from and how to distil them is
-[module 14](./14-distillation-and-reasoning.md).
+Measure the truncation rate at your `max_length` first: a truncated trace teaches the
+model to stop mid-thought. Where traces come from is [module 14](./14-distillation-and-reasoning.md).
 
 ---
 
@@ -585,8 +513,12 @@ $$
 \nabla_\theta \mathcal{L}_{\text{SFT}} = -\,\mathbb{E}_{y \sim \pi_\theta}\!\left[\frac{\mathbf{1}[y = y^{\star}]}{\pi_\theta(y \mid x)}\,\nabla_\theta \log \pi_\theta(y \mid x)\right].
 $$
 
-Read it as on-policy RL with a sparse reward $r = \mathbf{1}[y=y^{\star}]$ and an importance
-weight $1/\pi_\theta(y^{\star}\mid x)$. The weight is the problem: **the less likely the model
+Check: the indicator keeps only $y=y^\star$, so the expectation equals
+$\pi_\theta(y^\star\mid x)\cdot\frac{1}{\pi_\theta(y^\star\mid x)}\nabla_\theta\log\pi_\theta(y^\star\mid x)=\nabla_\theta\log\pi_\theta(y^\star\mid x)$,
+and the right-hand side is $-\nabla_\theta\log\pi_\theta(y^\star\mid x)$, the ordinary SFT
+gradient. Read it as on-policy RL (policy gradients:
+[module 13](./13-rl-with-verifiable-rewards.md)) with a sparse reward
+$r = \mathbf{1}[y=y^{\star}]$ and an importance weight $1/\pi_\theta(y^{\star}\mid x)$. The weight is the problem: **the less likely the model
 finds the demonstration, the larger the update**, which the paper argues makes SFT's
 implicit reward ill-posed and its gradients high-variance on low-probability tokens. The
 fix cancels the weight by multiplying with its stop-gradient inverse, applied per token:
@@ -638,44 +570,31 @@ assert bool((p < 1).all()) and dft.item() <= ce.item()
 print("DFT loss and gradient verified")
 ```
 
-It does not prove DFT generalises better. The paper's evidence is math reasoning
-(100k NuminaMath-CoT examples on Qwen2.5-Math 1.5B/7B, Llama 3.x and DeepSeekMath), where
-it reports large gains over SFT; it also reports DFT **losing** to SFT on a
-factual-knowledge benchmark (Natural Questions) and flags that it under-weights hard or
-rare examples by construction. Use it when the target behaviour is already plausible to
-the model (reasoning style), not for teaching new facts or tokens.
+It does not prove DFT generalises better. The paper's gains are on math reasoning (100k
+NuminaMath-CoT examples; Qwen2.5-Math, Llama 3.x, DeepSeekMath); it also reports DFT
+**losing** to SFT on Natural Questions, since it under-weights hard or rare tokens by
+construction. Use it when the behaviour is already plausible to the model, not for new facts.
 
 ### Label smoothing, NEFTune, filtered SFT
 
-- **Label smoothing** (`label_smoothing_factor` from `TrainingArguments`) mixes the
-  one-hot target with a uniform distribution. It works in `SFTTrainer` but needs full
-  logits, so TRL computes it outside the fused LM-head path; little evidence it helps
-  LLM SFT.
-- **NEFTune** adds noise to embeddings during SFT; it is a regulariser covered in
-  [module 03](./03-training-mechanics-and-memory-math.md)
-  ([Jain et al. 2023](https://arxiv.org/abs/2310.05914)).
-- **TailSFT** (Malladi et al. 2026, [TailSFT](https://huggingface.co/papers/2608.25756))
-  is a filtered SFT aimed at what comes after SFT. At each step it compares every
-  sequence's current loss with its loss under the initial policy and drops the fraction
-  $\gamma$ whose loss has fallen most, training only on the rest. The goal is to keep
-  coverage (pass@k) for a later RL stage instead of collapsing onto the demonstrations.
-  On OLMo-3 7B math and code SFT it improved pass@16 in 15 of 18 dataset-benchmark pairs,
-  with mixed pass@1, and GRPO started from TailSFT checkpoints reached higher pass@1 in all
-  five matched comparisons. TRL lists it in its paper index with an example built by
-  subclassing `SFTTrainer`, not as a config flag
-  ([paper index](https://huggingface.co/docs/trl/v1.15.0/en/paper_index)). Awareness level:
-  if SFT is a warm-up for RL, the SFT objective that maximises pass@1 may not be the one
-  you want.
+- **Label smoothing** (`label_smoothing_factor`) works in `SFTTrainer` but needs full
+  logits, so it runs outside the fused LM-head path; little evidence it helps LLM SFT.
+- **NEFTune** (embedding noise, [Jain et al. 2023](https://arxiv.org/abs/2310.05914)) is
+  a regulariser covered in [module 03](./03-training-mechanics-and-memory-math.md).
+- **TailSFT** ([Malladi et al. 2026](https://huggingface.co/papers/2608.25756)) drops
+  the sequences whose loss has fallen most since the initial policy, to keep pass@k
+  coverage for a later RL stage. On OLMo-3 7B it improved pass@16 in 15 of 18 pairs, and
+  GRPO from its checkpoints won pass@1 in 5 of 5. If SFT is a warm-up for RL, the SFT
+  objective that maximises pass@1 may not be the one you want.
 
 ---
 
 ## 5.7 Continued pretraining
 
-Continued pretraining (CPT) is the language-modelling objective on raw text, every token a
-target, run on an existing base model. It is how you move **stable** knowledge and
-vocabulary into a model: a new language or script, a field's terminology, a code base's
-idioms. It is not a way to inject volatile facts (retrieval wins there,
-[module 01](./01-when-to-fine-tune.md)).
+Continued pretraining (CPT) runs the language-modelling objective on raw domain text from
+an existing base model. It moves **stable** knowledge into a model (a new language, a
+field's terminology, a code base's idioms), not volatile facts, where retrieval wins
+([module 01](./01-when-to-fine-tune.md)).
 
 | Knob | CPT | SFT |
 |---|---|---|
@@ -686,88 +605,69 @@ idioms. It is not a way to inject volatile facts (retrieval wins there,
 | Embeddings / LM head | trained, at a smaller LR | frozen unless new tokens |
 | Packing | `bfd_split` or `wrapped` (documents are long) | `bfd` |
 
-**Train `embed_tokens` and `lm_head`, but slower.** CPT on a new domain shifts token
-statistics, and for a new script the tokenizer itself may need new tokens. Unsloth's CPT
-recipe adds `embed_tokens` and `lm_head` to the trained modules and gives them a separate
-`embedding_learning_rate` "2-10x smaller than learning_rate" (their example: `5e-5` and
-`5e-6`, through `UnslothTrainingArguments`;
-[Unsloth CPT docs](https://unsloth.ai/docs/basics/continued-pretraining)). The reason:
-embedding rows of frequent tokens receive gradient on almost every step, and a large LR
-there disrupts the representation every layer reads. In plain PyTorch or TRL the same
-thing is two optimizer parameter groups, which the lab script builds and asserts.
+**Train `embed_tokens` and `lm_head`, but slower.** Unsloth's CPT recipe trains both with
+an `embedding_learning_rate` "2-10x smaller than learning_rate" (their example: `5e-5` and
+`5e-6`; [Unsloth CPT docs](https://unsloth.ai/docs/basics/continued-pretraining)).
+Frequent tokens' rows get gradient almost every step, and a large LR there disrupts the
+representation every layer reads. In PyTorch or TRL this is two optimizer parameter
+groups, which the lab script builds and asserts.
 
 **Mix in general text.** A domain-only stream is the fastest route to catastrophic
-forgetting. Replay a fraction of general web text (10 to 30% is a common starting point,
-not a law) and track general perplexity alongside domain perplexity; the evidence on
-replay is [module 04](./04-data-curation-and-synthesis.md)'s and
-[module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)'s.
+forgetting. Replay general web text (10 to 30% for raw-text CPT, more than the 5–20% heuristic for SFT
+mixes in [module 04](./04-data-curation-and-synthesis.md)) and track general perplexity
+beside domain perplexity; [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)
+has the forgetting evidence.
 
-**Vocabulary extension** for a new language: train new tokens on domain text, add them,
-resize, initialise new rows from the mean (or from the average of the old sub-token
-embeddings each new token replaces), and train embeddings first or with a higher weight
-on new rows. Then **a short SFT** restores instruction following, because CPT on raw text
-erodes chat behaviour.
+**Vocabulary extension** for a new language: add tokens trained on domain text, resize,
+initialise new rows from the mean of their old sub-token embeddings, and train embeddings
+first. Then **a short SFT** restores the chat behaviour raw-text CPT erodes.
 
-**When CPT before SFT pays:**
-
-- you have a lot of stable domain text (rule of thumb: far more tokens than your SFT set,
-  typically hundreds of millions or more);
-- the target language or script is under-represented, so the tokenizer fragments it into
-  many tokens per word;
-- the domain's terminology tokenises badly or the model's perplexity on domain text is
-  much worse than on general text.
-
-When none holds, go straight to SFT. Long-document CPT for context extension is
+**CPT before SFT pays** when you have far more stable domain text than SFT data (hundreds
+of millions of tokens or more), when the language or terminology tokenises into many
+pieces per word, or when domain perplexity is much worse than general perplexity.
+Otherwise go straight to SFT. Long-document CPT for context extension is
 [module 17](./17-long-context-extension.md).
 
 ---
 
 ## 5.8 Beyond chat: multi-task, multi-turn, and classification heads
 
-**Multi-task SFT** trains one model on several tasks at once. Balance by tokens, not
-examples (a long-answer task otherwise dominates), and give each task an unambiguous
-instruction so the model can tell them apart at inference.
+**Multi-task SFT**: balance tasks by tokens, not examples, and give each an unambiguous
+instruction. **Multi-turn SFT**: keep conversations conversational with assistant-only
+loss (scheme (c) in section 5.2); a conversation truncated after a user turn trains
+nothing at its end. **System-prompt diversity**: a single training system prompt becomes
+a trigger string, so sample paraphrases (and some rows with none) when serving prompts
+will vary. The running task's labs keep module 01's prompt fixed so that scores compare.
 
-**Multi-turn SFT** keeps conversations conversational and uses assistant-only loss, so
-every assistant turn is a target (scheme (c) in section 5.2). Truncate with care: a
-conversation cut after a user turn trains nothing at its end.
-
-**System-prompt diversity.** Train with a single system prompt and the model learns that
-string as a trigger: paraphrase it at serving time and quality drops. Sample from several
-paraphrases (and include examples with no system prompt) so the behaviour attaches to the
-task, not the wording. The same applies to the running task's extraction instruction.
-
-**Classification heads.** When the output is a fixed label set, a generative model is
-often the wrong tool. `AutoModelForSequenceClassification` puts a linear `score` head on
-the last token's hidden state; with LoRA, the head is new and must be trained in full.
+**Classification heads.** For a fixed label set, `AutoModelForSequenceClassification`
+puts a linear `score` head on the last token's hidden state; with LoRA, train it in full.
 
 Teaching fragment: not executed.
 
 ```python
 from peft import LoraConfig, TaskType, get_peft_model
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 model = AutoModelForSequenceClassification.from_pretrained(
     "Qwen/Qwen3-0.6B", num_labels=5, dtype="bfloat16")       # issue_type, 5 classes
-model.config.pad_token_id = model.config.eos_token_id         # pick the last real token
+model.config.pad_token_id = tok.pad_token_id  # must match the id the tokenizer pads with
 cfg = LoraConfig(task_type=TaskType.SEQ_CLS, r=16, lora_alpha=32,
                  target_modules="all-linear", modules_to_save=["score"])
 model = get_peft_model(model, cfg)                             # LoRA body, full head
 ```
 
-PEFT 0.21.2 appends `classifier` and `score` to `modules_to_save` automatically for
-sequence classification ([source](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/peft_model.py#L1827-L1836));
-naming it explicitly documents intent. **A head beats generative SFT when** the label
-set is fixed, you need calibrated scores (a softmax over labels rather than token
-probabilities you must parse), and latency matters: one forward pass, no decoding, no
-parse failures. Generative SFT wins when outputs are structured (the running task's JSON
-has free-text fields) or labels change. The broader classification ladder is in the
+The model pools the last non-pad token, found via `pad_token_id`; Qwen3's config EOS
+(`<|im_end|>`) is not the id its tokenizer pads with, so copying EOS would pool padding.
+PEFT 0.21.2 adds `score` to `modules_to_save` itself ([source](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/peft_model.py#L1827-L1836)).
+**A head beats generative SFT** for a fixed label set: one forward pass, calibrated
+scores, no parse failures. Generative SFT wins for structured outputs (the running task's
+JSON has free-text fields) or changing labels. The broader classification ladder is in the
 [text classification note](../../notes/nlp/text-classification.md); embedding and
 reranker heads are [module 16](./16-multimodal-and-embedding-fine-tuning.md).
 
-**Tool-calling SFT** is SFT on conversations with `tool_calls` and `tool` messages plus a
-`tools` column of JSON schemas, which `SFTTrainer` supports directly; the masking and
-trajectory questions are [module 15](./15-agentic-and-tool-use-fine-tuning.md).
+**Tool-calling SFT** (`tool_calls`, `tool` messages and a `tools` column, supported by
+`SFTTrainer`) is [module 15](./15-agentic-and-tool-use-fine-tuning.md)'s.
 
 ---
 
@@ -775,18 +675,15 @@ trajectory questions are [module 15](./15-agentic-and-tool-use-fine-tuning.md).
 
 ### Monitor
 
-- **Two eval sets**: held-out in-domain examples and a general set (a few hundred
-  instruction prompts). In-domain loss falling while general loss rises is forgetting in
-  real time.
-- **Generations every N steps**: a `TrainerCallback` whose `on_evaluate` decodes five
-  fixed prompts with the serving template and greedy decoding. Loss curves do not show a
-  model that never stops; samples do.
-- **`mean_token_accuracy`**, logged by `SFTTrainer`: the share of unmasked tokens where
-  the top-1 prediction equals the target. Near 1.0 on training data with flat eval
-  accuracy means memorisation. Also logged: `entropy` and `num_tokens`.
-- Task metrics on the golden set: for the running task, the four from module 01 (JSON
-  parse rate, schema validity, per-field exact match, all-fields exact match). Evaluation
-  design is [module 09](./09-evaluating-fine-tuned-models.md).
+- **Two eval sets**, in-domain and general: in-domain loss falling while general loss
+  rises is forgetting in real time.
+- **Generations every N steps** (a `TrainerCallback` decoding five fixed prompts with the
+  serving template): loss curves do not show a model that never stops; samples do.
+- **`mean_token_accuracy`** (logged by `SFTTrainer`) near 1.0 with flat eval accuracy
+  means memorisation.
+- **Task metrics** on the golden set: for the running task, module 01's parse rate, schema
+  validity, per-field and all-fields exact match ([module 09](./09-evaluating-fine-tuned-models.md)
+  designs evals).
 
 ### Save the whole contract, not just weights
 
@@ -798,9 +695,8 @@ trajectory questions are [module 15](./15-agentic-and-tool-use-fine-tuning.md).
 | `generation_config.json` with the EOS **list** | the server stops on these ids; a missing turn-end id means a model that never stops |
 | Model card | base model, data, template, intended use, evals |
 
-`trainer.save_model()` saves the adapter (or model) and the processing class. Check that
-the saved `generation_config.json` lists your turn-end id. Push and serving strategy is
-[module 20](./20-production-serving-and-cost.md); what the card must say is
+`trainer.save_model()` saves the adapter and the processing class; check the saved EOS
+list. Serving is [module 20](./20-production-serving-and-cost.md); the card is
 [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md).
 
 ### Failure modes
@@ -818,22 +714,17 @@ the saved `generation_config.json` lists your turn-end id. Push and serving stra
 
 ## 5.10 Lab: from base to instruct, and task SFT
 
-**Goal:** run the four SFT shapes of this module and see the masking, packing and
-template decisions in the numbers. Scripts:
-[sft_lab.py](./code/sft_lab.py) (L5.1, L5.2, L5.4) and
-[continued_pretraining.py](./code/continued_pretraining.py) (L5.3).
+**Goal:** see the masking, packing and template decisions in the numbers. Scripts:
+[sft_lab.py](./code/sft_lab.py) (L5.1, L5.2, L5.4) and [continued_pretraining.py](./code/continued_pretraining.py) (L5.3).
 
 ### Step 0: the CPU rehearsal
 
-The smoke modes need only torch. `sft_lab.py --smoke` trains a 2-layer toy causal LM for
-30 steps on synthetic support-email to JSON strings with completion-only labels and BFD
-packing with position-id resets. It asserts that the loss falls, that every masked
-position has exactly zero gradient at the logits, and that a packed row gives the same
-logits as each example run alone. `continued_pretraining.py --smoke` extends a toy
-vocabulary with three domain tokens, trains with embeddings at a 10x smaller LR, and
-asserts the two learning rates and that the new rows moved.
+The smoke modes need only torch and assert masking, BFD packing isolation and the two CPT
+learning rates on toy models (the docstrings list each check). Given module 01's files,
+`sft_lab.py --smoke` also loads them and checks its prompt and scorer against module 01's.
 
 ```bash
+python content/courses/finetuning/code/fit_or_not_baseline.py --data-only
 python content/courses/finetuning/code/sft_lab.py --smoke
 python content/courses/finetuning/code/continued_pretraining.py --smoke
 ```
@@ -843,21 +734,21 @@ python content/courses/finetuning/code/continued_pretraining.py --smoke
 `Qwen/Qwen3-0.6B-Base` on [`trl-lib/Capybara`](https://huggingface.co/datasets/trl-lib/Capybara/tree/e235e846458bff3398a88aed812347f7f0756520)
 with `chat_template_path="HuggingFaceTB/SmolLM3-3B"` (the TRL docs' recipe), QLoRA, fp16
 on a T4. Then score the result on module 01's golden set with the same prompt as the
-prompting baseline.
+prompting baseline (the script copies module 01's `SYSTEM_PROMPT` verbatim).
 
 ```bash
 python content/courses/finetuning/code/sft_lab.py --full --task base2instruct
+python content/courses/finetuning/code/sft_lab.py --full --task base2instruct --eval-only --adapter qwen3-0.6b-base-capybara
 ```
 
-Record: whether generations stop at `<|im_end|>`; the four task metrics against module
-01's zero-shot baseline. Expect a model that follows the chat format and stops; do not
-expect it to beat a real instruct model on the task.
+Record: whether generations stop at `<|im_end|>`, and the four task metrics against module
+01's zero-shot baseline. Expect chat format and stopping, not a real instruct model's score.
 
 ### L5.2 Task SFT with ablations (T1)
 
-`Qwen/Qwen3-4B-Instruct-2507` + LoRA on the running task's training split (the JSONL
-files module 01's script writes under `ft_data/`), as conversational prompt-completion
-data. Four runs: completion-only vs full-sequence loss, packing off vs on.
+`Qwen/Qwen3-4B-Instruct-2507` + LoRA on `ft_data/train.jsonl`, scored on
+`ft_data/eval.jsonl` (module 01's `{"id", "email", "gold"}` rows), as conversational
+prompt-completion data. Four runs: completion-only vs full-sequence loss, packing off vs on.
 
 ```bash
 python content/courses/finetuning/code/sft_lab.py --full --task task
@@ -866,27 +757,25 @@ python content/courses/finetuning/code/sft_lab.py --full --task task --packing
 python content/courses/finetuning/code/sft_lab.py --full --task task --full-sequence-loss --packing
 ```
 
-Record: JSON parse rate, schema validity, per-field EM, all-fields EM, and wall-clock time
-per run. Expect SFT to beat the prompting baseline on all-fields EM, packing to cut wall
-time with little metric change, and full-sequence loss to be no better (often slightly
-worse) on this prompt-heavy task.
+Record the four metrics and wall-clock time per run. Expect SFT to beat the prompting
+baseline on all-fields EM, packing to cut wall time with little metric change, and
+full-sequence loss to be no better (often slightly worse) on this prompt-heavy task.
 
 ### L5.3 Continued pretraining then SFT (T1/T2)
 
 `Qwen/Qwen3-1.7B-Base`, CPT on public-domain US case law
-([`common-pile/caselaw_access_project_filtered`](https://huggingface.co/datasets/common-pile/caselaw_access_project_filtered),
-from the Common Pile, which includes only public-domain documents per its card) mixed 80:20
-with `HuggingFaceFW/fineweb-edu` (ODC-By), LoRA r=128 plus fully trained embeddings at a
-10x smaller LR, `bfd_split` packing. Then a short SFT with `sft_lab.py`, and an MMLU-Pro
-subset through module 09's harness before and after.
+([`common-pile/caselaw_access_project_filtered`](https://huggingface.co/datasets/common-pile/caselaw_access_project_filtered))
+mixed 80:20 with `HuggingFaceFW/fineweb-edu`, LoRA r=128 plus embeddings at a 10x smaller
+LR, `bfd_split` packing. Then a short SFT with `sft_lab.py`, and an MMLU-Pro subset with
+`lm_eval` before and after (module 09 explains the harness and error bars).
 
 ```bash
 python content/courses/finetuning/code/continued_pretraining.py --full --max-steps 2000
 ```
 
-Record: domain and general perplexity before and after, MMLU-Pro subset accuracy. Expect
-domain perplexity to drop clearly and general perplexity and MMLU-Pro to move a little;
-rerun without the general mix to see the difference forgetting makes.
+Record domain and general perplexity and MMLU-Pro accuracy. Expect domain perplexity to
+drop clearly and the general numbers to move a little; rerun without the general mix to
+see forgetting.
 
 ### L5.4 Reasoning SFT (T0)
 
@@ -898,32 +787,27 @@ QLoRA on `Qwen/Qwen3-0.6B`.
 python content/courses/finetuning/code/sft_lab.py --full --task reasoning
 ```
 
-Record: truncation rate at `max_length=2048`; ten samples with thinking on and ten with
-thinking off. Expect fluent medical traces with thinking on; if non-thinking answers now
-include traces, you have just reproduced the toggle failure of section 5.5, and the fix is
-to add non-thinking examples with empty think blocks.
+Record the truncation rate the script prints for `max_length=2048` and its ten held-out
+samples with thinking on and ten off (`thinking_samples.json`, plus a count of outputs
+containing a trace). If non-thinking answers now include traces, you have reproduced the
+toggle failure of section 5.5; the fix is non-thinking examples with empty think blocks.
 
 ---
 
 ## Key takeaways
 
-- **The mask is the curriculum.** Completion-only and assistant-only loss decide what the
-  model learns; in the worked conversation they train 26 and 57 of 109 targets.
-- **`completion_only_loss` is automatic, `assistant_only_loss` is not.** Prompt-completion
-  data is masked by default; conversational data trains every token unless you opt in.
-- **Assistant-only loss needs `{% generation %}` markers.** TRL patches known families and
-  raises otherwise; hand-rolled stacks can fail silently, so decode the trained tokens.
+- **The mask is the curriculum.** Prompt-completion data is masked by default; conversational
+  data trains every token unless you set `assistant_only_loss=True`, which needs
+  `{% generation %}` markers. In the worked conversation the schemes train 109, 26 and 57
+  targets; decode the trained tokens of one batch before a long run.
 - **SFTConfig defaults are not TrainingArguments defaults.** LR `2e-5`, checkpointing on,
   bf16 on, `max_length=1024`, and float32 weights unless you set `dtype`.
-- **Frozen bases plus reentrant checkpointing need `enable_input_require_grads()`.**
-  Without it the adapter is invisible to autograd and the backward pass errors.
-- **Packing with BFD removes padding without mixing examples.** Position-id resets plus
-  varlen attention give exactly per-example outputs; on the worked lengths, 24 pad tokens
-  become 7 (padded rows) or 0 (padding-free).
-- **Truncation is a training signal.** Fewer Truncations shows cut documents hurt; prefer
-  `bfd_split` and measure truncation before long-trace SFT.
+- **Packing with BFD removes padding without mixing examples, and truncation is a training
+  signal.** Position-id resets plus varlen attention give per-example outputs (24 pad tokens
+  become 7 or 0); prefer `bfd_split` and measure truncation before long-trace SFT.
 - **A base-to-chat conversion is a template, an EOS, and trained token rows.** Get the
-  turn-end token into the loss and into `generation_config` or the model never stops.
+  turn-end token into the loss and into `generation_config`, and ship adapter, tokenizer,
+  template, EOS list and model card together, or the model never stops in production.
 - **Instruct models need gentle SFT.** Keep the template, LR at most `1e-4` LoRA, small
   data, general replay, and re-run general and safety evals.
 - **Hybrid reasoning models need both modes in the data.** Empty think blocks keep the
@@ -934,8 +818,6 @@ to add non-thinking examples with empty think blocks.
   embeddings 2 to 10x slower, general replay, then a short SFT.
 - **Use a classification head for fixed labels.** One forward pass, calibrated scores,
   no parsing; LoRA body with the `score` head trained in full.
-- **Save the contract.** Adapter or bf16-merged weights, tokenizer, template, EOS list
-  and a model card travel together.
 
 ## Self-check
 

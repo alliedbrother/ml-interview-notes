@@ -1,6 +1,6 @@
 # 11 — Quantization Across the Lifecycle: QLoRA, QAT, FP8, and Export
 
-> **Prerequisites:** module 06.
+> **Prerequisites:** modules 06, 09.
 > **You will learn:** where quantization enters the fine-tuning lifecycle (to fit training, to
 > train for low precision with QAT and FP8, to ship with PTQ and GGUF) and how
 > each interacts with adapters.
@@ -73,7 +73,7 @@ def quant_asym(x, g):                        # int4 asymmetric, q in [0, 15]
 per_tensor = quant_sym(x, 128)
 per_group = quant_sym(x, 32)
 zeros = int((per_tensor[normal] == 0).sum())
-assert zeros >= 120 and zeros == 127         # every normal weight is flushed to 0
+assert zeros == 127                          # every normal weight is flushed to 0
 
 outside = torch.ones(128, dtype=torch.bool)
 outside[:32] = False                         # the 96 values not sharing the outlier's group
@@ -106,10 +106,10 @@ Table 1: formats, granularity, hardware.
 | int4 weight-only (W4A16) | 4 | per-group, $g$ = 32–128 | dequant kernels (Marlin) | dequant kernels | dequant kernels | serve (GPTQ, AWQ, GGUF) |
 | NF4 | 4 | per-block of 64 + double-quantized scales | dequant to bf16 | dequant to bf16 | dequant to bf16 | train (QLoRA base) |
 | FP8 E4M3 / E5M2 | 8 | per-tensor, per-row or 1×128 tiles | no FP8 tensor cores | FP8 tensor cores | FP8 tensor cores | train (FP8 mixed precision) and serve (W8A8-FP8) |
-| MXFP4 | 4 (+8-bit scale per 32) | E8M0 per 32 | no | weight-only kernels | native | serve (gpt-oss ships MXFP4 experts), QAT target |
+| MXFP4 | 4 (+8-bit scale per 32) | E8M0 per 32 | weight-only kernels (Marlin) | weight-only kernels (Marlin) | native | serve (gpt-oss ships MXFP4 experts), QAT target |
 | NVFP4 | 4 (+8-bit scale per 16, FP32 per tensor) | E4M3 per 16 | no | no | native | serve, QAT target, frontier training |
 
-The integer 4-bit tensor-core path ended with Ampere. PyTorch's QAT post notes that [Blackwell no longer supports int4 tensor cores](https://pytorch.org/blog/quantization-aware-training/), which is one reason 4-bit serving on new hardware is moving to NVFP4. The inference course's [Formats and kernels](/courses/inference/04-quantization/04-03-formats-and-kernels.html) chapter has the kernel-level view.
+The integer 4-bit tensor-core path ended with Ampere. PyTorch's QAT post notes that [Blackwell no longer supports int4 tensor cores](https://pytorch.org/blog/quantization-aware-training/), which is one reason 4-bit serving on new hardware is moving to NVFP4. MXFP4 has no native tensor-core path before Blackwell: vLLM serves gpt-oss on Ampere and Hopper through Marlin MXFP4 MoE kernels, which dequantize the weights ([vLLM gpt-oss recipe](https://docs.vllm.ai/projects/recipes/en/latest/OpenAI/GPT-OSS.html)). The inference course's [Formats and kernels](/courses/inference/04-quantization/04-03-formats-and-kernels.html) chapter has the kernel-level view.
 
 ### The lifecycle
 
@@ -253,7 +253,7 @@ train(model)                                               # your SFT loop or tr
 quantize_(model, QATConfig(base_config, step="convert"))   # real int4 weights
 ```
 
-As of torchao 0.16 the QAT blog lists four weight/activation pairings: int4 weight-only (`Int4WeightOnlyConfig`), FP8 activations + int4 weights (`Float8DynamicActivationInt4WeightConfig`), int8 activations + int4 weights for edge (`Int8DynamicActivationIntxWeightConfig`, the successor of the original "8da4w" quantizer), and NVFP4 + NVFP4 (prototype).
+The torchao QAT II blog (torchao 0.16) lists four weight/activation pairings, and the names are unchanged in 0.18: int4 weight-only (`Int4WeightOnlyConfig`), FP8 activations + int4 weights (`Float8DynamicActivationInt4WeightConfig`), int8 activations + int4 weights for edge (`Int8DynamicActivationIntxWeightConfig`, the successor of the original "8da4w" quantizer), and NVFP4 + NVFP4 (prototype).
 
 **QAT + LoRA.** Freeze the base, fake-quantize it (and optionally the activations), and train only the adapter. A PyTorch dev-discuss post by Andrew Or (December 2024) reports this was **1.89× faster than full QAT and used 36.1% less memory** on Llama-3-8B, 4×A100, Alpaca, rank 8, 8da4w ([post](https://dev-discuss.pytorch.org/t/speeding-up-qat-by-1-89x-with-lora/2700)). In that post's formulation the adapter itself is not fake-quantized. The 2026 torchao blog fake-quantizes the adapters as well, since they will be merged into the quantized weights. Either way, **the quantization scheme simulated during QAT must match the scheme you deploy.**
 
@@ -265,10 +265,10 @@ $$\text{recovered} = \frac{\text{metric}_{\text{QAT}} - \text{metric}_{\text{PTQ
 
 | Source | Model, scheme | Reported recovery vs PTQ |
 |---|---|---|
-| [PyTorch QAT blog](https://pytorch.org/blog/quantization-aware-training/) (Nov 2024) | Llama-3-8B, 8da4w (group 256), C4 fine-tune, 5,000 steps | up to **96%** of hellaswag accuracy degradation; 68% of wikitext word-perplexity degradation |
+| [PyTorch QAT blog](https://pytorch.org/blog/quantization-aware-training/) (Jul 2024) | Llama-3-8B, 8da4w (group 256), C4 fine-tune, 5,000 steps | up to **96%** of hellaswag accuracy degradation; 68% of wikitext word-perplexity degradation |
 | same | Llama-2-7B, 8da4w | 62% on hellaswag |
 | [Unsloth QAT docs](https://unsloth.ai/docs/blog/quantization-aware-training-qat) | int4 QAT + LoRA vs naive 4-bit PTQ | "up to **70%** of the lost accuracy", +1–3% on GPQA, MMLU-Pro |
-| [torchao QAT II](https://pytorch.org/blog/quantization-aware-training-in-torchao-ii/) (Mar 2026) | Gemma3-4B GPQA, int4 QAT + LoRA (Unsloth) | 66.9% (1.5 points lost, 1.0 recovered) |
+| [torchao QAT II](https://pytorch.org/blog/quantization-aware-training-in-torchao-ii/) (Mar 2026) | Gemma3-4B GPQA, int4 QAT + LoRA (Unsloth) | 66.9% of the lost GPQA accuracy recovered |
 | same | Gemma3-27B, NVFP4 QAT (Axolotl, B200) | 71.6% |
 
 Read these as **best cases reported by the tool authors** on the tasks they chose. The same blogs report much lower recovery elsewhere (36% on Qwen3-4B wikitext, 45.5% on Gemma3-12B BBH). The cost side is also real: PyTorch measured 8da4w QAT fine-tuning at about **34% lower throughput** than plain full fine-tuning on Llama-3-8B, with about 2.35 GB more memory per GPU.
@@ -299,7 +299,7 @@ FP8 mixed precision runs the big GEMMs in 8-bit floats (Micikevicius et al., 202
 
 ### Scaling is mandatory
 
-448 is a small number. Activations routinely exceed it, and many gradients sit below E4M3's smallest normal ($2^{-6}$). So every FP8 tensor carries a scale $s = \text{amax}/448$, and the cast is $x_{\text{fp8}} = \text{cast}(x/s)$. Recipes differ in **who shares $s$** and **when amax is measured**:
+448 is a small number. Activations routinely exceed it, and small gradients would underflow E4M3's smallest normal ($2^{-6}$), which is why gradients use E5M2. So every FP8 tensor carries a scale $s = \text{amax}/448$, and the cast is $x_{\text{fp8}} = \text{cast}(x/s)$. Recipes differ in **who shares $s$** and **when amax is measured**:
 
 - **Delayed scaling** (Transformer Engine's original recipe) uses the max of an amax history from previous steps. It is cheap, but a sudden spike overflows.
 - **Current (dynamic) scaling** computes amax from the tensor being cast. It is robust and costs one reduction. torchao's float8 training uses dynamic scaling.
@@ -364,7 +364,7 @@ FP8 hurts or does not help in four situations. **Small models and small matmuls*
 
 ### FP8 for RL
 
-RL is dominated by generation. Unsloth reports that RL steps spend "<4%" of the time training and 96% in vLLM inference. So FP8 earns more in rollouts than in the backward pass. Unsloth's FP8 RL (late November 2025; [docs](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide/fp8-reinforcement-learning)) runs vLLM rollouts in FP8, reported **about 1.4× faster than bf16**. It stores the frozen base weights in FP8, shared with vLLM's buffers, applies dynamic FP8 quantization to activations, and keeps LoRA adapters and optimizer state in bf16. It is enabled by `load_in_fp8=True` and runs on RTX 40/50-series as well as H100/B200, but not on T4. Treat the "no loss in accuracy" claim as Unsloth's own benchmark. Research on FP8 rollouts (Jet-RL, [arXiv 2601.14243](https://arxiv.org/abs/2601.14243)) reports that bf16-training + FP8-rollout setups can destabilize on long-horizon tasks, because the rollout policy no longer matches the trained one. That is the same train/serve precision mismatch as section 11.6, appearing inside the RL loop. [Module 13](./13-rl-with-verifiable-rewards.md) covers the importance-sampling corrections.
+RL is dominated by generation. Unsloth reports that RL steps spend "<4%" of the time training and 96% in vLLM inference. So FP8 earns more in rollouts than in the backward pass. Unsloth's FP8 RL ([docs](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide/fp8-reinforcement-learning)) runs vLLM rollouts in FP8, reported **about 1.4× faster than bf16**. It stores the frozen base weights in FP8, shared with vLLM's buffers, applies dynamic FP8 quantization to activations, and keeps LoRA adapters and optimizer state in bf16. It is enabled by `load_in_fp8=True` and runs on RTX 40/50-series as well as H100/B200, but not on T4. Treat the "no loss in accuracy" claim as Unsloth's own benchmark. Research on FP8 rollouts (Jet-RL, [arXiv 2601.14243](https://arxiv.org/abs/2601.14243)) reports that bf16-training + FP8-rollout setups can destabilize on long-horizon tasks, because the rollout policy no longer matches the trained one. That is the same train/serve precision mismatch as section 11.6, appearing inside the RL loop. [Module 13](./13-rl-with-verifiable-rewards.md) covers the importance-sampling corrections.
 
 ## 11.5 Post-training quantization for deployment
 
@@ -446,7 +446,7 @@ Then run `ollama create support-extractor -f Modelfile`. If the GGUF metadata al
 
 ## 11.7 Evaluating quantized fine-tunes
 
-**Run the same eval suite before and after every quantization step**: bf16 merged, int4, GGUF. Use the same prompts, template, decoding settings and scorer ([module 09](./09-evaluating-fine-tuned-models.md)). For the course's support-email extraction task, that means the 50-example golden set with field-level exact match and JSON validity. Report the deltas with confidence intervals. A 50-example set cannot resolve a one-point change.
+**Run the same eval suite before and after every quantization step**: bf16 merged, int4, GGUF. Use the same prompts, template, decoding settings and scorer ([module 09](./09-evaluating-fine-tuned-models.md)). For the course's support-email extraction task, that means the 50-example golden set (`ft_data/eval.jsonl`) scored by module 01's rules: all-fields exact match (the headline), per-field exact match, schema validity and parse rate. Report the deltas with confidence intervals. A 50-example set cannot resolve a one-point change.
 
 Accuracy is a coarse instrument. Two models can score the same while disagreeing on many individual examples, with the gains and losses cancelling. Dutta et al. (2024, [Accuracy is Not All You Need](https://arxiv.org/abs/2407.09141)) document exactly this in compressed models and propose counting **flips** (answers that change). The token-level signal is sharper. On held-out prompts, compute the full next-token distributions of the bf16 model $p$ and the quantized model $q$ at every position and report:
 
@@ -462,7 +462,7 @@ Two things are easy to forget. First, evaluate **through the serving engine**, b
 
 ## 11.8 Lab: fine-tune, merge, quantize, measure
 
-**Goal.** Measure how much of a fine-tune survives each export path, and whether QAT and FP8 earn their cost. **Model:** `Qwen/Qwen3-4B` (base). **Task:** the course's support-email JSON extraction with its 50-example golden eval set. **Scripts:** [`quantize_and_eval.py`](./code/quantize_and_eval.py) and [`fp8_parity.py`](./code/fp8_parity.py).
+**Goal.** Measure how much of a fine-tune survives each export path, and whether QAT and FP8 earn their cost. **Model:** `Qwen/Qwen3-4B` (hybrid post-trained; thinking off). **Task:** the course's support-email JSON extraction with its 50-example golden eval set (`ft_data/eval.jsonl` from [module 01](./01-when-to-fine-tune.md); create it on CPU with `python content/courses/finetuning/code/fit_or_not_baseline.py --data-only`). **Scripts:** [`quantize_and_eval.py`](./code/quantize_and_eval.py) and [`fp8_parity.py`](./code/fp8_parity.py).
 
 Start with the CPU smoke runs. They exercise the same math on toys: int4 group quantization, PTQ vs QAT with STE on an MLP, token KL, the adapter/base mismatch, FP8 casts, delayed vs current scaling, and simulated-FP8 training parity.
 
@@ -474,17 +474,17 @@ python content/courses/finetuning/code/fp8_parity.py --smoke
 ### L11.1 (T1): bf16 LoRA → merge → GPTQ and GGUF
 
 1. Train a bf16 LoRA on `Qwen/Qwen3-4B` for the extraction task (module 05/06 recipe: `target_modules="all-linear"`, completion-only loss).
-2. Run the full mode. It merges into bf16, quantizes to GPTQ int4 (g=128) with GPTQModel, reports token KL (mean, p99) and top-1 agreement on held-out prompts, and prints the llama.cpp commands for Q4_K_M with an imatrix:
+2. Run the full mode. It merges into bf16, quantizes to GPTQ int4 (g=128) with GPTQModel, reports token KL (mean, p99) and top-1 agreement on the 50 eval emails (course system prompt, chat template, thinking off), and prints the llama.cpp commands for Q4_K_M with an imatrix:
 
 ```bash
 python content/courses/finetuning/code/quantize_and_eval.py --full \
     --base Qwen/Qwen3-4B --adapter ./out/qwen3-4b-lora \
-    --prompts ./data/eval_prompts.jsonl --llama-cpp ./llama.cpp --out ./quant/
+    --eval ft_data/eval.jsonl --llama-cpp ./llama.cpp --out ./quant/
 ```
 
 3. Run the 50-example eval on `merged-bf16`, `gptq-int4` and the Q4_K_M GGUF (through llama.cpp or Ollama with the correct template).
 
-**Record:** field-level exact match, JSON validity, KL mean/p99, top-1 agreement and file size for each artefact. Expect a small but measurable KL for GPTQ and Q4_K_M. Task deltas are often within noise at 4B and 4-bit, and larger when calibration text is off-distribution. Try GPTQ calibrated on web text vs on your prompts.
+**Record:** all-fields exact match, per-field exact match, schema validity and parse rate (module 01's scorer), KL mean/p99, top-1 agreement and file size for each artefact. Expect a small but measurable KL for GPTQ and Q4_K_M. Task deltas are often within noise at 4B and 4-bit, and larger when calibration text is off-distribution. Try GPTQ calibrated on web text vs on your prompts.
 
 ### L11.2 (T1/T2): QAT targeting int4
 

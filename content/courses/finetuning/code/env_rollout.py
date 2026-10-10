@@ -1,7 +1,8 @@
 """Stateful environments, group advantages and observation masking for agentic RL.
 
 Purpose
-    Labs L15.2 and L15.3 of module 15 (Agentic and Tool-Use Fine-Tuning).
+    Lab L15.2 of module 15 (Agentic and Tool-Use Fine-Tuning). L15.3 uses the TRL
+    examples/async_grpo_harbor example; this script does not cover it.
     --smoke builds the whole multi-turn RL loop in miniature on CPU: a stateful
     number-guessing environment with reset()/guess()/get_reward() (the same
     contract TRL's environment_factory expects), a scripted policy, and a tiny

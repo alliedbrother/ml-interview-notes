@@ -8,10 +8,9 @@
 SFT teaches a model what a good answer looks like. It cannot teach the model which of two
 plausible answers is *better*, because it never sees the worse one. Preference optimization
 is the standard second stage after SFT for chat quality and policy behavior: refusals, tone,
-verbosity, instruction adherence. The notes
-([LLM prompting and alignment](../../notes/nlp/llm-prompting-and-alignment.md)) already state
-the Bradley-Terry loss, the DPO loss and a method table. This module derives them, takes their
-gradients, walks the whole TRL loss zoo, and tells you how to read a run's metrics.
+verbosity, instruction adherence. The [alignment notes](../../notes/nlp/llm-prompting-and-alignment.md)
+state the Bradley-Terry and DPO losses; this module derives them, takes their gradients, walks
+the TRL loss zoo, and tells you how to read a run's metrics.
 
 All TRL defaults below are from **TRL v1.15.0** (October 2026), checked against the
 [v1.15.0 DPO docs](https://huggingface.co/docs/trl/v1.15.0/en/dpo_trainer) and the source at
@@ -29,12 +28,11 @@ $$
 \max_{\pi}\; \mathbb{E}_{x\sim\mathcal{D},\,y\sim\pi(\cdot\mid x)}\big[r(x,y)\big]\;-\;\beta\,\mathrm{KL}\big(\pi(\cdot\mid x)\,\|\,\pi_{\text{ref}}(\cdot\mid x)\big)
 $$
 
-**The KL term is doing three jobs at once.** It keeps the policy near the SFT model, which
-already writes fluent, well-formatted text. It limits reward hacking: the reward is a learned
-proxy, and an unconstrained optimizer finds its blind spots (hedging, flattery, length). And
-it preserves diversity, since a reward-maximizing policy without the KL collapses onto the
-single highest-scoring response. $\beta$ is the exchange rate between reward and drift. (KL
-itself is covered in [information theory](../../notes/math/information-theory.md).)
+**The KL term does three jobs.** It keeps the policy near the SFT model, which already writes
+fluent text. It limits reward hacking: the reward is a learned proxy whose blind spots
+(hedging, flattery, length) an unconstrained optimizer finds. And it preserves diversity, since
+without it the policy collapses onto the single highest-scoring response. $\beta$ is the
+exchange rate between reward and drift ([KL in the notes](../../notes/math/information-theory.md)).
 
 ### The InstructGPT pipeline
 
@@ -43,29 +41,24 @@ three stages: (1) SFT on labeler demonstrations; (2) a reward model trained on l
 rankings of several model outputs per prompt; (3) PPO against that reward model, with a
 **per-token KL penalty folded into the reward**,
 $r_t = r_\phi(x,y)\,\mathbb{1}[t=T] - \beta\log\frac{\pi(y_t\mid x,y_{<t})}{\pi_{\text{ref}}(y_t\mid x,y_{<t})}$.
-Their headline result: labelers preferred the 1.3B InstructGPT model's outputs to the 175B
-GPT-3's.
+Labelers preferred the 1.3B InstructGPT model's outputs to the 175B GPT-3's.
 
 **PPO is expensive for structural reasons, not tuning reasons.** You hold four networks: the
 policy (trained), the reference (frozen, for the KL), the reward model (frozen) and a value
-model (trained, for advantages). Generation runs inside the training loop, so every step pays
-for autoregressive sampling. PPO's clipped surrogate and GAE are derived in
-[the deep-RL notes](../../notes/deep-learning/deep-rl.md) and applied to LLMs in
-[module 13](./13-rl-with-verifiable-rewards.md); this module does not repeat them. Where the
-KL lives (in the reward, as above, or in the loss) and how it is estimated (the k3 estimator,
-bias correction) is also module 13's topic.
+model (trained, for advantages), and every step pays for autoregressive sampling. PPO's clipped
+surrogate and GAE are derived in [the deep-RL notes](../../notes/deep-learning/deep-rl.md);
+their LLM form, and where the KL lives and how it is estimated, are
+[module 13](./13-rl-with-verifiable-rewards.md)'s topic.
 
 **`PPOTrainer`, `PPOConfig` and the value-head model classes were removed from TRL in
-[v1.13](https://github.com/huggingface/trl/releases/tag/v1.13.0)** (September 2026). The
-release notes cite near-zero usage and no maintenance. Treat RLHF-with-PPO as a concept you
-must understand; in practice, online RL on LLMs in TRL means GRPO or RLOO (module 13), or a
-dedicated RL framework.
+[v1.13](https://github.com/huggingface/trl/releases/tag/v1.13.0)** (September 2026), citing
+near-zero usage. Treat RLHF-with-PPO as a concept; online RL in TRL now means GRPO or RLOO
+(module 13).
 
 ### Best-of-N: the baseline every trained method must beat
 
-Sample $N$ responses from $\pi_{\text{ref}}$, score them with the reward model, return the
-best. No training at all. The commonly quoted KL of the best-of-$N$ policy from the base
-policy is
+Sample $N$ responses from $\pi_{\text{ref}}$, return the one the reward model scores highest.
+No training. The commonly quoted KL of the best-of-$N$ policy from the base policy is
 
 $$
 \mathrm{KL}_{\text{BoN}} \;=\; \log N - \frac{N-1}{N}.
@@ -82,28 +75,16 @@ is still useful for budgeting:
 The KL grows only logarithmically in $N$, and in Gao et al. (2022),
 [Scaling Laws for Reward Model Overoptimization](https://arxiv.org/abs/2210.10760), best-of-$N$
 reached a given gold reward at a much smaller KL than RL did (they caution that KL is an
-imperfect common currency across methods). **That makes
-best-of-$N$ a strong baseline:** if your DPO model does not beat best-of-16 from the SFT model
-under the same reward model, the training bought you nothing except lower inference cost.
-Best-of-$N$ distillation (SFT or DPO on the selected samples) is how you keep that quality and
-drop the $N\times$ inference cost.
-
-```mermaid
-flowchart LR
-    SFT["SFT model<br/>(pi_ref)"] --> A["(a) online RL"]
-    SFT --> B["(b) offline DPO family"]
-    SFT --> C["(c) Best-of-N at inference"]
-    A --> A1["RM or verifier scores<br/>fresh samples"] --> A2["PPO / GRPO / RLOO update<br/>(module 13)"]
-    B --> B1["fixed preference pairs<br/>(chosen, rejected)"] --> B2["DPO / IPO / KTO / ORPO / SimPO<br/>supervised-style loss"]
-    C --> C1["sample N, rank by RM,<br/>return the best"] --> C2["optional: distill the<br/>winners back via SFT/DPO"]
-```
+imperfect common currency). **If your DPO model does not beat best-of-16 from the SFT model
+under the same reward model, the training bought you only lower inference cost.** Best-of-$N$
+distillation (SFT or DPO on the selected samples) keeps that quality without the $N\times$ cost.
 
 ## 12.2 Reward models
 
 ### Bradley-Terry
 
-Humans are more consistent at "which of these two is better" than at "rate this 1 to 10". The
-Bradley-Terry model turns pairwise judgments into a scalar score:
+Humans judge "which is better" more reliably than "rate this 1 to 10". Bradley-Terry turns
+pairwise judgments into a scalar score:
 
 $$
 P(y_w \succ y_l \mid x) = \sigma\big(r_\phi(x,y_w) - r_\phi(x,y_l)\big),
@@ -114,11 +95,9 @@ $$
 where $m \ge 0$ is an optional per-pair margin (for example, larger when annotators were more
 confident). **This is logistic regression on reward differences:** the label is always 1, the
 logit is $r_w - r_l$ (the logistic link is reviewed in [probability](../../notes/math/probability.md)).
-Two consequences follow. Only differences matter, so adding a constant to
-every reward changes nothing and the scale is pinned by $\sigma$'s slope; and because the
-offset is free, a reward model can drift to large mean values that hurt downstream RL.
-Eisenstein et al. (2023) add a **centering** term
-$\eta\,\mathbb{E}[(r_w + r_l)^2]$ to pin the mean near zero.
+Only differences matter, so adding a constant to every reward changes nothing; because the
+offset is free, a reward model can drift to large means that hurt downstream RL. Eisenstein et
+al. (2023) add a **centering** term $\eta\,\mathbb{E}[(r_w + r_l)^2]$ to pin the mean near zero.
 
 The architecture is a causal LM with its LM head replaced by a scalar head that reads the hidden
 state at the **last non-padding token**: `AutoModelForSequenceClassification` with
@@ -129,23 +108,12 @@ conversational, implicit or explicit prompt), accepts an optional `margin` colum
 `learning_rate=1e-4`, and exposes centering as `center_rewards_coefficient` (recommended 0.01;
 [loss lines](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/reward_trainer.py#L766-L773)).
 
-The check below shows that the BT loss is literally binary cross-entropy on the reward
-difference, and that gradient descent recovers a known linear reward from 64 pairs.
+The check below fits a known linear reward from 64 pairs by gradient descent and confirms the BT
+loss is literally binary cross-entropy on the reward difference.
 
 ```python finetuning-check
 import torch
 import torch.nn.functional as F
-
-torch.manual_seed(0)
-r_w = torch.tensor([1.3, -0.2, 0.7, 2.0])
-r_l = torch.tensor([0.4, 0.5, 0.7, -1.0])
-bt = -F.logsigmoid(r_w - r_l)
-bce = F.binary_cross_entropy_with_logits(r_w - r_l, torch.ones(4), reduction="none")
-torch.testing.assert_close(bt, bce)
-# P(w > l) + P(l > w) = 1 for every pair
-torch.testing.assert_close(torch.sigmoid(r_w - r_l) + torch.sigmoid(r_l - r_w), torch.ones(4))
-# Shifting every reward by a constant changes nothing
-torch.testing.assert_close(-F.logsigmoid((r_w + 5.0) - (r_l + 5.0)), bt)
 
 # Fit a 3-feature linear reward model on 64 synthetic pairs from a known weight vector
 g = torch.Generator().manual_seed(0)
@@ -164,6 +132,9 @@ for _ in range(300):
 cos = F.cosine_similarity(w.detach(), w_true, dim=0).item()
 assert cos > 0.95, cos
 assert ((x_w @ w) > (x_l @ w)).float().mean().item() > 0.95
+diff = (x_w @ w - x_l @ w).detach()                     # BT == BCE with label 1; shift-invariant
+torch.testing.assert_close(-F.logsigmoid(diff), F.binary_cross_entropy_with_logits(diff, torch.ones(64), reduction="none"))
+torch.testing.assert_close(-F.logsigmoid((diff + 5.0) - 5.0), -F.logsigmoid(diff))
 print("Bradley-Terry == BCE on differences; linear RM recovered, cosine", round(cos, 4))
 ```
 
@@ -173,38 +144,30 @@ no spurious correlates (length, style) for the model to latch onto.
 ### Over-optimization and ensembles
 
 **The reward model is a proxy, and optimizing a proxy hard enough makes the true objective
-worse.** Gao et al. (2022) trained proxy RMs on labels from a fixed "gold" RM and optimized
-policies against the proxy with RL and best-of-$N$. As the policy moves away from the
-initial model (measured by $d=\sqrt{\mathrm{KL}}$), the proxy score keeps rising while the gold
-score rises, peaks and falls, with coefficients that scale smoothly with RM size. Larger RMs
-and more RM data push the peak further out; they do not remove it.
+worse.** Gao et al. (2022) trained proxy RMs on labels from a fixed "gold" RM. As the policy
+moves away from the initial model ($d=\sqrt{\mathrm{KL}}$), the proxy score keeps rising while
+the gold score rises, peaks and falls. Larger RMs and more RM data push the peak out; they do
+not remove it.
 
-The mitigation with the best evidence is an **ensemble**. Coste et al. (2023),
-[Reward Model Ensembles Help Mitigate Overoptimization](https://arxiv.org/abs/2310.02743),
-optimize against conservative aggregates (worst-case or uncertainty-weighted). Eisenstein et
-al. (2023), [Helping or Herding?](https://arxiv.org/abs/2312.09244), find ensembles whose
-members differ in pretraining seed generalize better than ones differing only in fine-tuning
-seed, but that **ensembles mitigate and do not eliminate** reward hacking: when all members
-share an error, the policy exploits it. Pair ensembles with a KL budget and periodic human or
-strong-judge spot checks ([module 09](./09-evaluating-fine-tuned-models.md)).
+The best-evidenced mitigation is an **ensemble**: Coste et al. (2023), [Reward Model
+Ensembles](https://arxiv.org/abs/2310.02743), optimize against worst-case or
+uncertainty-weighted aggregates. Eisenstein et al. (2023), [Helping or
+Herding?](https://arxiv.org/abs/2312.09244), find pretraining-seed diversity beats
+fine-tuning-seed diversity, but **ensembles mitigate and do not eliminate** reward hacking: a
+shared error gets exploited. Pair ensembles with a KL budget and periodic human or strong-judge
+spot checks ([module 09](./09-evaluating-fine-tuned-models.md)).
 
 ### Outcome, process and generative rewards
 
-An **outcome reward model** (ORM) scores the final response. A **process reward model** (PRM)
-scores each intermediate reasoning step, which gives denser credit assignment and catches
-right-answer-wrong-reasoning. Uesato et al. (2022),
-[process- and outcome-based feedback](https://arxiv.org/abs/2211.14275), found similar final
-accuracy but far fewer reasoning errors with process supervision; Lightman et al. (2023),
-[Let's Verify Step by Step](https://arxiv.org/abs/2305.20050), found a PRM beat an ORM at
-selecting best-of-$N$ solutions on MATH. PRMs need step-level labels, which are expensive.
+An **outcome reward model** (ORM) scores the final response; a **process reward model** (PRM)
+scores each reasoning step, which gives denser credit and catches right-answer-wrong-reasoning.
+Lightman et al. (2023), [Let's Verify Step by Step](https://arxiv.org/abs/2305.20050), found a
+PRM beat an ORM at selecting best-of-$N$ solutions on MATH, but step labels are expensive, and
 **TRL's experimental `PRMTrainer` was removed in
-[v1.14](https://github.com/huggingface/trl/releases/tag/v1.14.0)** (September 2026); train a
-PRM with your own token-classification loop if you need one.
-
-The third option is a **generative reward**: prompt a strong LLM to judge. It needs no reward
-training and transfers across tasks, but inherits judge biases (position, verbosity,
-self-preference), covered in [module 09](./09-evaluating-fine-tuned-models.md). Where a
-programmatic verifier exists, it beats all three; that is module 13.
+[v1.14](https://github.com/huggingface/trl/releases/tag/v1.14.0)** (September 2026). A
+**generative reward** prompts a strong LLM to judge: no reward training, but it inherits judge
+biases ([module 09](./09-evaluating-fine-tuned-models.md)). A programmatic verifier, where one
+exists, beats all three; that is module 13.
 
 ## 12.3 DPO: derivation
 
@@ -265,14 +228,13 @@ $$
 \nabla_\theta\mathcal{L}_{\text{DPO}} = -\beta\,\mathbb{E}\Big[\underbrace{\sigma(\hat r_l - \hat r_w)}_{\text{weight}}\big(\nabla_\theta\log\pi_\theta(y_w\mid x) - \nabla_\theta\log\pi_\theta(y_l\mid x)\big)\Big].
 $$
 
-Read it term by term. The bracket raises the chosen log-likelihood and lowers the rejected
-one. The weight $\sigma(\hat r_l - \hat r_w)$ is near 1 for pairs the implicit reward ranks
-**wrong** and near 0 for pairs it already ranks right by a wide margin. **DPO is a self-paced
-curriculum: pairs it has learned stop contributing.** At initialization $\pi_\theta =
-\pi_{\text{ref}}$, so every log-ratio is 0: the loss is $\log 2 \approx 0.6931$ and the weight
-is $\sigma(0)=0.5$, giving gradients of $-\beta/2 = -0.05$ on the chosen sequence log-prob and
-$+0.05$ on the rejected one at $\beta=0.1$. At a margin $h = 2$ the weight drops to
-$\sigma(-2) = 0.1192$.
+The bracket raises the chosen log-likelihood and lowers the rejected one. The weight
+$\sigma(\hat r_l - \hat r_w)$ is near 1 for pairs the implicit reward ranks **wrong** and near
+0 for pairs it already ranks right by a wide margin. **DPO is a self-paced curriculum: pairs it
+has learned stop contributing.** At initialization $\pi_\theta = \pi_{\text{ref}}$, so every
+log-ratio is 0: the loss is $\log 2 \approx 0.6931$ and the weight is $\sigma(0)=0.5$, giving
+gradients of $-\beta/2 = -0.05$ on the chosen sequence log-prob and $+0.05$ on the rejected one
+at $\beta=0.1$. At a margin $h = 2$ the weight drops to $\sigma(-2) = 0.1192$.
 
 The check builds a tiny token-level "policy" for one chosen and one rejected sequence, makes the
 reference a detached copy, and verifies those numbers with autograd.
@@ -326,9 +288,8 @@ move; that is the likelihood-displacement story in 12.9.
 In the objective, $\beta$ multiplies the KL penalty. In the loss, $\beta$ scales the log-ratios
 inside the sigmoid, so a given margin $h$ is reached with a log-ratio gap of only $h/\beta$:
 at $\beta = 0.5$ the loss saturates after the policy moves 5 times less than at $\beta = 0.1$,
-after which the weight $\sigma(-h)$ switches the gradient off. The TRL docstring says it
-directly: "Higher β means less deviation from the reference model." The DPO paper used 0.1 and
-0.5; TRL's default is 0.1.
+and then $\sigma(-h)$ switches the gradient off. The DPO paper used 0.1 and 0.5; TRL's default
+is 0.1.
 
 ### Assumptions and limits
 
@@ -337,16 +298,7 @@ $\pi_{\text{ref}}$, with the true reward. In practice: the policy is a finite ne
 $\pi_\theta$ cannot equal $\pi^*$ and a gradient on one pair moves others; the data is finite,
 so the loss is minimized by driving $h\to\infty$ on training pairs (overfitting, which IPO
 targets); and the pairs are **off-policy**, sampled from some other model, so DPO never sees
-what the current policy would actually say. These three gaps explain most of the variants
-below.
-
-```mermaid
-flowchart TD
-    S1["Step 1: KL-regularized objective<br/>closed-form optimum<br/>pi* = pi_ref exp(r/beta) / Z"] --> S2["Step 2: invert<br/>r = beta log(pi*/pi_ref) + beta log Z"]
-    S2 --> S3["Step 3: plug into Bradley-Terry<br/>Z cancels in r_w - r_l<br/>replace pi* by pi_theta"]
-    S3 --> S4["Step 4: gradient<br/>weight sigma(r_l - r_w) on<br/>grad log pi(y_w) - grad log pi(y_l)"]
-    S4 --> L["Loss = -log sigma(h)<br/>implicit reward = beta log(pi_theta/pi_ref)"]
-```
+what the current policy would say. These gaps explain most of the variants below.
 
 ## 12.4 DPO in TRL
 
@@ -357,8 +309,7 @@ flowchart TD
 |---|---|---|
 | `beta` | `0.1` | for `ipo` it is IPO's $\tau$ |
 | `learning_rate` | `1e-6` | full fine-tuning; TRL's docs suggest about `1e-5` for adapters |
-| `loss_type` | `["sigmoid"]` | **a list**; combine several with `loss_weights` |
-| `loss_weights` | `None` | equal weights `1.0` when unset |
+| `loss_type` | `["sigmoid"]` | **a list**; `loss_weights` (default `None`) weights each, `1.0` when unset |
 | `max_length` | `1024` | prompt + completion; `truncation_mode="keep_start"` (`keep_end` deprecated) |
 | `precompute_ref_log_probs` | `False` | one reference pass before training |
 | `label_smoothing` | `0.0` | used by `robust` and `exo_pair` |
@@ -369,8 +320,7 @@ flowchart TD
 | `padding_free` | `False` | **temporarily unavailable** after the DPO refactor; `True` warns and falls back to padding |
 | `gradient_checkpointing`, `bf16` | `True`, `True` | differ from `TrainingArguments` |
 
-There are no separate prompt/completion length caps in v1.15's `DPOConfig`; `max_length` is the
-only truncation knob. `use_liger_kernel=True` is deprecated in `DPOTrainer`; pass
+`max_length` is v1.15's only truncation knob. `use_liger_kernel=True` is deprecated in `DPOTrainer`; pass
 `model_init_kwargs={"use_kernels": True}` instead. A PEFT adapter targeting `lm_head` raises,
 because log-probs are computed from `lm_head.weight` directly by the fused LM head; use
 `modules_to_save=["lm_head"]`.
@@ -389,34 +339,38 @@ memory.** TRL picks the cheapest source available:
 | `sync_ref_model=True` (TR-DPO) | a separate reference updated as $\pi_{\text{ref}} \leftarrow \alpha\pi_\theta + (1-\alpha)\pi_{\text{ref}}$ every $\tau$ steps | 2x weights |
 
 The "continue an existing adapter" row is the SFT-then-DPO path of the lab: load the SFT
-adapter with `is_trainable=True`, and the reference is the SFT policy, not the base model.
+adapter with `is_trainable=True`, and the reference is the SFT policy, not the base model
+([dpo_from_scratch.py](./code/dpo_from_scratch.py)'s `full()` shows both PEFT paths).
 `precompute_ref_log_probs` is incompatible with `sync_ref_model` (a moving reference makes
-cached values stale) and with `IterableDataset`. TR-DPO
-([Gorbatovski et al. 2024](https://arxiv.org/abs/2404.09656)) argues a reference that slowly
-tracks the policy lets you train longer before over-optimization; `sync_ref_model` is not
-supported with PEFT models that have no standalone reference. A related experimental option
-replaces the hard sync with a bias-corrected exponential moving average:
-`trl.experimental.bema_for_ref_model.BEMACallback(update_ref_model=True)`
-([docs](https://huggingface.co/docs/trl/v1.15.0/en/bema_for_reference_model)). Treat it as
-experimental: no stability guarantee.
+cached values stale) and with `IterableDataset`.
 
-The full-mode function of [dpo_from_scratch.py](./code/dpo_from_scratch.py) shows both PEFT
-paths against the v1.15 API (fresh `LoraConfig` versus a loaded SFT adapter).
+**Two ways to move the reference.** TR-DPO ([Gorbatovski et al. 2024](https://arxiv.org/abs/2404.09656))
+argues a reference that tracks the policy lets you train longer before over-optimization. It
+moves in jumps: frozen for $\tau$ steps, then mixed with $\alpha=0.6$, so it lags the policy and
+keeps 40% of the old reference after each sync (no PEFT support without a standalone
+reference). BEMA ([Block and Zhang 2025](https://arxiv.org/abs/2508.00180)) uses a bias-corrected
+running average of the policy's iterates: an EMA
+$\bar\theta_t = (1-\omega_t)\bar\theta_{t-1} + \omega_t\theta_t$, $\omega_t = (\rho+\gamma t)^{-\kappa}$,
+plus a correction, $\theta'_t = \bar\theta_t + a_t(\theta_t - \theta_0)$ with
+$a_t = (\rho+\gamma t)^{-\eta}$. A plain EMA lags the current weights because it averages old
+iterates; the $a_t(\theta_t-\theta_0)$ term cancels that lag and keeps the smoothing. The
+experimental `trl.experimental.bema_for_ref_model.BEMACallback(update_ref_model=True)` copies
+$\theta'_t$ into the reference every 400 steps by default
+([docs](https://huggingface.co/docs/trl/v1.15.0/en/bema_for_reference_model)).
 
 ### Padding
 
-In v1.15 the text DPO collator concatenates prompt and completion, **right-pads** the batch,
-and builds a `completion_mask` so only completion tokens enter the sequence log-prob. Left
-padding matters wherever you *generate*: sampling on-policy completions for iterative DPO or
-best-of-$N$ must use left padding, or new tokens are appended after pad tokens. Module 02
-covers why ([module 02](./02-tokens-templates-and-the-causal-lm-objective.md)).
+In v1.15 the text DPO collator **right-pads** prompt plus completion and builds a
+`completion_mask` so only completion tokens enter the sequence log-prob. Wherever you
+*generate* (iterative DPO, best-of-$N$), use left padding, or new tokens follow pad tokens
+([module 02](./02-tokens-templates-and-the-causal-lm-objective.md)).
 
 ## 12.5 The loss zoo
 
-`loss_type` accepts 15 values. Each is a different answer to "what function of the
-log-ratios should we minimize?" Notation: $\Delta_w = \log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}$,
-$\Delta_l$ likewise (summed over completion tokens), $\hat r_w = \beta\Delta_w$,
-$\hat r_l = \beta\Delta_l$, $h = \hat r_w - \hat r_l$, and $\bar\Delta = \Delta_w/\lvert y_w\rvert - \Delta_l/\lvert y_l\rvert$
+`loss_type` accepts 15 values, each a different function of the log-ratios. Notation:
+$\Delta_w = \log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)}$ and $\Delta_l$ likewise (summed
+over completion tokens), $\hat r_w = \beta\Delta_w$, $\hat r_l = \beta\Delta_l$,
+$h = \hat r_w - \hat r_l$, and $\bar\Delta = \Delta_w/\lvert y_w\rvert - \Delta_l/\lvert y_l\rvert$,
 the difference of **per-token average** log-ratios. Every formula below was read off
 [the v1.15.0 loss block](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/dpo_trainer.py#L1329-L1504).
 
@@ -437,20 +391,20 @@ the difference of **per-token average** log-ratios. Every formula below was read
 | `sft` | (NLL) | mean token NLL on $y_w$ | anchors the chosen likelihood; usually combined | no |
 | `sigmoid_norm` | [SimPO](https://arxiv.org/abs/2405.14734)-style | $-\log\sigma(\beta\bar\Delta)$ | length-normalized DPO: removes the reward for sheer length | yes |
 
-Three readings worth internalizing. **`ipo` is the only one that stops at a finite margin**:
-its minimum sits at $\bar\Delta = 1/(2\tau)$, so with the default $\beta=0.1$ it targets 5 nats
-per token, which is far too aggressive; IPO runs use a larger $\tau$ (0.5 gives a target of 1).
+Three things to notice. **`ipo` is the only one that stops at a finite margin**: its minimum
+sits at $\bar\Delta = 1/(2\tau)$, so with the default $\beta=0.1$ it targets 5 nats per token,
+which is far too aggressive; IPO runs use a larger $\tau$ (0.5 gives a target of 1).
 **`apo_zero`, `bco_pair` and `nca_pair` act on each response's own log-ratio**, so they can
 force the chosen likelihood up; `sigmoid`, `hinge` and `robust` only see the difference.
-**`sigmoid_norm` is not SimPO**: it still divides *reference* log-ratios by length, and has no
-margin $\gamma$. Exact, reference-free SimPO lives in the experimental CPO trainer (12.6).
+**`sigmoid_norm` is not SimPO**: it still uses the reference model (it length-normalizes
+$\log\pi_\theta/\pi_{\text{ref}}$), and has no margin $\gamma$. Exact, reference-free SimPO
+lives in the experimental CPO trainer (12.6).
 
 ### Multi-loss and variant knobs
 
-Pass several losses with weights; the per-pair losses are averaged and summed with those
-weights. The MPO recipe ([Wang et al. 2024](https://arxiv.org/abs/2411.10442)) combines
-preference, quality and generation terms, and is the standard VLM recipe in
-[module 16](./16-multimodal-and-embedding-fine-tuning.md):
+Several losses are averaged per pair and summed with `loss_weights`. MPO
+([Wang et al. 2024](https://arxiv.org/abs/2411.10442)), the standard VLM recipe in
+[module 16](./16-multimodal-and-embedding-fine-tuning.md), combines three:
 
 ```python
 DPOConfig(loss_type=["sigmoid", "bco_pair", "sft"], loss_weights=[0.8, 0.2, 1.0])  # MPO
@@ -464,12 +418,11 @@ Three knobs modify the log-ratios before any loss sees them:
 | `ld_alpha` | [LD-DPO](https://arxiv.org/abs/2409.06411) | sequence log-prob = (first $\min(\lvert y_w\rvert,\lvert y_l\rvert)$ tokens) + $\alpha\times$(the excess tokens of the longer response). $\alpha<1$ down-weights the verbose tail, so length alone earns less margin |
 | `use_weighting` | [WPO](https://arxiv.org/abs/2406.11827) | multiplies each pair's loss by $w_w w_l$, where each $w$ is the policy's (calibrated) per-token-average probability of that response. Pairs the current policy would plausibly generate count more, a cheap correction for off-policy data. Not supported with `aot` |
 
-The check evaluates five TRL losses, plus SimPO from 12.6, on one fixture, exactly as the
-tables write them. Fixture:
-$\beta=0.1$, $\Delta_w = 3$, $\Delta_l = -2$ (so $h=0.5$), $\lvert y_w\rvert = 20$,
-$\lvert y_l\rvert = 10$ (so $\bar\Delta = 0.35$). Values: sigmoid $0.4741$, hinge $0.5000$,
-robust ($\epsilon=0.1$) $0.4116$, IPO ($\tau=0.5$) $0.4225$, `sigmoid_norm` $0.6758$. For SimPO
-(12.6) with $\beta_s = 2.0$, $\gamma = 0.5$, policy log-probs $-12$ and $-9$: $0.6444$.
+The check evaluates five TRL losses, plus SimPO from 12.6, exactly as written. Fixture:
+$\beta=0.1$, $\Delta_w = 3$, $\Delta_l = -2$ (so $h=0.5$), $\lvert y_w\rvert = 20$, $\lvert
+y_l\rvert = 10$ (so $\bar\Delta = 0.35$). Values: sigmoid $0.4741$, hinge $0.5000$, robust
+($\epsilon=0.1$) $0.4116$, IPO ($\tau=0.5$) $0.4225$, `sigmoid_norm` $0.6758$. For SimPO (12.6)
+with $\beta_s = 2.0$, $\gamma = 0.5$, policy log-probs $-12$ and $-9$: $0.6444$.
 
 ```python finetuning-check
 import math
@@ -531,9 +484,10 @@ $$
 \mathcal{L}_{\text{ORPO}} = \mathcal{L}_{\text{NLL}}(y_w) \;-\; \lambda\,\log\sigma\Big(\log\frac{\mathrm{odds}(y_w)}{\mathrm{odds}(y_l)}\Big).
 $$
 
-The NLL term teaches the format; the odds-ratio term pushes the rejected style down at the
-same time. In TRL it is `trl.experimental.orpo.ORPOTrainer`, and `ORPOConfig.beta` is $\lambda$
-(default 0.1; [source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/orpo/orpo_trainer.py#L690-L697)).
+The NLL term teaches the format; the odds-ratio term pushes the rejected style down. In TRL it
+is `trl.experimental.orpo.ORPOTrainer`, and `ORPOConfig.beta` is $\lambda$ (default 0.1;
+[config](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/orpo/orpo_config.py#L90-L91),
+[loss](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/orpo/orpo_trainer.py#L690-L697)).
 Use it when you have preference data and a base model, and want one run instead of two.
 
 **SimPO** ([Meng et al. 2024](https://arxiv.org/abs/2405.14734)) drops the reference and uses
@@ -543,27 +497,26 @@ $$
 \mathcal{L}_{\text{SimPO}} = -\log\sigma\Big(\frac{\beta}{\lvert y_w\rvert}\log\pi_\theta(y_w\mid x) - \frac{\beta}{\lvert y_l\rvert}\log\pi_\theta(y_l\mid x) - \gamma\Big).
 $$
 
-Normalizing by length matches how the model generates (per-token likelihood) and removes the
-incentive to pad; $\gamma$ demands a gap rather than a mere ordering. SimPO's $\beta$ is on a
-per-token scale, so it is much larger than DPO's (the paper sweeps roughly 2 to 10). **In TRL,
-exact SimPO is `trl.experimental.cpo.CPOTrainer` with `loss_type="simpo"`, `cpo_alpha=0.0`, and
-`simpo_gamma` (default 0.5)** ([source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/cpo/cpo_trainer.py#L715-L722)).
+Length normalization removes the incentive to pad; $\gamma$ demands a gap, not just an
+ordering. SimPO's per-token $\beta$ is much larger than DPO's (the paper sweeps roughly 2 to
+10). **In TRL, exact SimPO is `trl.experimental.cpo.CPOTrainer` with `loss_type="simpo"`,
+`cpo_alpha=0.0`, and `simpo_gamma` (default 0.5)**
+([config](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/cpo/cpo_config.py#L132-L139),
+[loss](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/experimental/cpo/cpo_trainer.py#L715-L722)).
 DPO's `sigmoid_norm` is the nearest stable-trainer option, but it keeps the reference.
 
 **CPO** ([Xu et al. 2024](https://arxiv.org/abs/2401.08417)) came from machine translation:
 $-\log\sigma\big(\beta\log\pi_\theta(y_w) - \beta\log\pi_\theta(y_l)\big) + \alpha\,\mathcal{L}_{\text{NLL}}(y_w)$,
-a DPO loss with the reference dropped plus a behavior-cloning term (`cpo_alpha=1.0` by
-default). Setting `loss_type="simpo"` with a non-zero `cpo_alpha` gives the CPO-SimPO
-combination. All three trainers are **experimental**: importable from `trl.experimental`, with
-no API stability promise.
+reference-free DPO plus a behavior-cloning term (`cpo_alpha=1.0` by default); `loss_type="simpo"`
+with non-zero `cpo_alpha` gives CPO-SimPO. All three trainers are **experimental**
+(`trl.experimental`, no API stability promise).
 
 ## 12.7 KTO
 
-**Pairs are expensive; thumbs are free.** Production logs give you "this answer was good" or
-"bad", rarely two answers to the same prompt. KTO ([Ethayarajh et al. 2024](https://arxiv.org/abs/2402.01306))
-learns from that unpaired binary signal using a prospect-theory value function. With implicit
-reward $\hat r = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$ and a reference
-point $z_0$:
+**Pairs are expensive; thumbs are free.** Production logs say "good" or "bad", rarely two
+answers to one prompt. KTO ([Ethayarajh et al. 2024](https://arxiv.org/abs/2402.01306)) learns
+from that unpaired signal with a prospect-theory value function. With implicit reward $\hat r =
+\beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$ and a reference point $z_0$:
 
 $$
 v(x,y) =
@@ -578,67 +531,52 @@ $$
 where $\Delta$ is the log-ratio and $z_0$ is a **batch estimate of
 $\mathrm{KL}(\pi_\theta\,\|\,\pi_{\text{ref}})$**, computed on deliberately mismatched
 (prompt, completion) pairs from the same batch, clamped at 0 and detached. A desirable output
-only earns loss reduction for beating the policy's *typical* log-ratio, not for being likely in
-absolute terms. The sigmoid saturates in both directions, which is the "loss aversion" story
-and also why KTO is reported to be robust to noisy labels.
+earns loss reduction only for beating the policy's *typical* log-ratio. The sigmoid saturates
+in both directions, which is the "loss aversion" story and why KTO is reported robust to noisy
+labels.
 
 TRL's `KTOTrainer` is **stable** ([v1.15.0 docs](https://huggingface.co/docs/trl/v1.15.0/en/kto_trainer)).
 Data is `{"prompt", "completion", "label": True/False}`; a paired dataset is split
 automatically. `desirable_weight` and `undesirable_weight` (both 1.0) are $\lambda_D$,
-$\lambda_U$. The paper's guidance, which TRL warns on, is to keep
-$\frac{\lambda_D n_D}{\lambda_U n_U} \in [1, \tfrac{4}{3}]$: with 1,000 thumbs-up and 9,000
-thumbs-down, set `desirable_weight` between 9.0 and 12.0. Because the KL estimate pairs each
-prompt with a neighbor's completion, KTO needs `per_device_train_batch_size > 1` and the
-default sequential sampling. TRL's KTO docs advise a learning rate no higher than about 1e-6 at
-the default $\beta = 0.1$ for most models, and never outside 5e-7 to 5e-6. Use KTO for thumbs-up/down logs (see [module 04](./04-data-curation-and-synthesis.md)
-for building them); use DPO when you genuinely have pairs.
+$\lambda_U$; the paper's guidance, which TRL warns on, is
+$\frac{\lambda_D n_D}{\lambda_U n_U} \in [1, \tfrac{4}{3}]$, so with 1,000 thumbs-up and 9,000
+thumbs-down set `desirable_weight` between 9.0 and 12.0. The KL estimate pairs each prompt with
+a neighbor's completion, so KTO needs `per_device_train_batch_size > 1` and the default
+sequential sampling. TRL's KTO docs advise a learning rate of about 1e-6 at the default
+$\beta = 0.1$, and never outside 5e-7 to 5e-6. Use KTO for thumbs-up/down logs
+([module 04](./04-data-curation-and-synthesis.md)); use DPO when you genuinely have pairs.
 
 ## 12.8 Online and iterative preference learning
 
-**Offline DPO trains on responses the current policy would never write.** The fix is to
-generate fresh responses and label them during training.
+**Offline DPO trains on responses the current policy would never write.** Fix: label fresh ones.
 
 - **Online DPO** ([Guo et al. 2024](https://arxiv.org/abs/2402.04792)): each step, sample two
-  completions per prompt from the current policy, have a reward model or LLM judge pick the
-  winner, take a DPO step on that pair. They report it beats offline DPO and RLHF in human
-  evaluation. TRL: `trl.experimental.online_dpo.OnlineDPOTrainer`, with a reward model or
-  judge passed as `reward_funcs` ([docs](https://huggingface.co/docs/trl/v1.15.0/en/online_dpo_trainer)).
-- **Iterative DPO**: alternate rounds. Sample $k$ completions per prompt from the current
-  model, rank them with an RM, keep (best, worst) as a pair, run offline DPO, repeat. This is
-  the "rejection sampling plus DPO, in rounds" recipe of Llama 3 and the SFT, DPO, RLVR stack
-  of Tulu 3, both summarized in [module 01](./01-when-to-fine-tune.md). L12.3 runs one round.
+  completions per prompt from the current policy, have an LLM annotator pick the winner, take a
+  DPO step on that pair. They report it beats offline DPO and RLHF in human evaluation. TRL:
+  `trl.experimental.online_dpo.OnlineDPOTrainer`, which also accepts a reward model
+  ([docs](https://huggingface.co/docs/trl/v1.15.0/en/online_dpo_trainer)).
+- **Iterative DPO**: sample $k$ completions per prompt from the current model, rank them with
+  an RM, keep (best, worst), run offline DPO, repeat. This is the rounds recipe of Llama 3 and
+  Tulu 3 ([module 01](./01-when-to-fine-tune.md)). L12.3 runs one round.
 - **Self-rewarding loops** ([Yuan et al. 2024](https://arxiv.org/abs/2401.10020)): the model
-  generates candidates *and* judges them via an LLM-as-judge prompt, then trains on its own
-  preferences with DPO, for several iterations. The risk is a closed loop: the judge's biases
-  (verbosity, self-preference) become the training target, and nothing external catches
-  drift. Anchor such loops with a fixed external eval set and a held-out human or strong-judge
-  check every round.
-- **RLOO and REINFORCE-style methods** sit between online DPO and PPO: sample $k$ completions,
-  use the mean reward of the *other* $k-1$ as a baseline, and do a policy-gradient step. No
-  value model. `RLOOTrainer` is stable in TRL; RLOO and GRPO are
-  [module 13](./13-rl-with-verifiable-rewards.md), where GRPO's TRL default `beta=0.0` means no
-  reference model is even loaded.
+  generates candidates *and* judges them, then trains on its own preferences with DPO. The
+  judge's biases (verbosity, self-preference) become the target and nothing external catches
+  drift, so anchor every round with a fixed external eval set and a human or strong-judge check.
+- **RLOO** samples $k$ completions and uses the mean reward of the other $k-1$ as a baseline
+  for a policy-gradient step, with no value model; it and GRPO are
+  [module 13](./13-rl-with-verifiable-rewards.md).
 
-### RLAIF and Constitutional AI
+### RLAIF and beyond chat
 
-Bai et al. (2022), [Constitutional AI](https://arxiv.org/abs/2212.08073), replaced human
-harmlessness labels with AI feedback guided by a short list of written principles. Stage 1
-(supervised): the model critiques its own response against a principle, revises it, and is
-fine-tuned on the revisions. Stage 2 (RL from AI feedback, RLAIF): a model compares pairs of
-responses against the principles, those AI preferences train a preference model, and RL
-optimizes against it. The same idea now powers most synthetic preference data: an LLM judge
-scores several candidates and the dataset keeps (best, worst), as in UltraFeedback-style
-pipelines (construction and decontamination are [module 04](./04-data-curation-and-synthesis.md)).
-
-### Beyond chat
-
-Preference tuning works the same way for VLMs: RLAIF-V provides AI-labeled image preference
-data and MPO is the usual loss mix ([module 16](./16-multimodal-and-embedding-fine-tuning.md);
-see also the HF post on [VLM alignment in TRL](https://huggingface.co/blog/trl-vlm-alignment)).
-`DPOTrainer` takes an `image`/`images` column directly; set `max_length=None` so truncation
-cannot cut image tokens. For tool calling, DPO pairs carry a `tools` column of JSON schemas, and
-the rejected response is often a malformed or wrong call
-([module 15](./15-agentic-and-tool-use-fine-tuning.md)).
+**RLAIF** replaces human preference labels with AI feedback (Bai et al. 2022,
+[Constitutional AI](https://arxiv.org/abs/2212.08073); its safety use is
+[module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)). It now powers most synthetic
+preference data: an LLM judge scores several candidates and the dataset keeps (best, worst), as
+in UltraFeedback ([module 04](./04-data-curation-and-synthesis.md)). For VLMs, RLAIF-V supplies
+AI-labeled image pairs and MPO is the usual loss mix ([module 16](./16-multimodal-and-embedding-fine-tuning.md));
+`DPOTrainer` takes an `image`/`images` column, with `max_length=None` so truncation cannot cut
+image tokens. For tool calling, pairs carry a `tools` column of JSON schemas and the rejected
+response is often a malformed call ([module 15](./15-agentic-and-tool-use-fine-tuning.md)).
 
 ## 12.9 Diagnostics
 
@@ -653,38 +591,34 @@ the rejected response is often a malformed or wrong call
 | `rewards/accuracies` | fraction of pairs with $\hat r_w > \hat r_l$ |
 | `logps/chosen`, `logps/rejected` | policy **summed** sequence log-probs |
 
-A healthy start: rewards at 0, margins at 0, accuracy at 0 (ties count as wrong), loss at
-$\log 2$. A healthy run: margins rise smoothly, held-out accuracy climbs well above 0.5 and plateaus,
-loss falls without collapsing to zero, and samples improve under a judge.
+A healthy start: rewards and margins at 0, accuracy at 0 (ties count as wrong), loss $\log 2$.
+A healthy run: margins rise smoothly, held-out accuracy plateaus well above 0.5, loss falls
+without collapsing to zero, and samples improve under a judge.
 
 ### Both log-probs go down
 
-Watch `rewards/chosen` in almost any DPO run and you will see it go **negative**. The chosen
-response becomes *less* likely than under the reference, while the rejected one falls faster.
-TRL's own docs say DPO typically widens the margin "by suppressing the likelihood of
+In almost any DPO run `rewards/chosen` goes **negative**: the chosen response becomes *less*
+likely than under the reference, while the rejected one falls faster. TRL's own docs say DPO typically widens the margin "by suppressing the likelihood of
 dispreferred completions rather than by increasing the likelihood of preferred ones".
 
-**This is not a bug in your code; it is what the loss allows.** $\mathcal{L}_{\text{DPO}}$
-depends only on $h$. Moving both log-ratios down, the rejected one faster, lowers the loss as
-surely as moving the chosen one up. The worked fixture: chosen log-prob falls from $-20$ to
-$-22$ and rejected from $-20$ to $-30$ relative to the reference. Then
-`rewards/chosen` $= 0.1 \times (-2) = -0.2$, `rewards/rejected` $= -1.0$, margin $0.8$,
-accuracy 1, and the loss drops from $0.6931$ to $-\log\sigma(0.8) = 0.3711$.
+**This is not a bug; it is what the loss allows.** $\mathcal{L}_{\text{DPO}}$ depends only on
+$h$, so moving both log-ratios down, the rejected one faster, lowers it. The worked fixture:
+chosen log-prob falls from $-20$ to $-22$ and rejected from $-20$ to $-30$ relative to the
+reference. Then `rewards/chosen` $= 0.1 \times (-2) = -0.2$, `rewards/rejected` $= -1.0$,
+margin $0.8$, accuracy 1, and the loss drops from $0.6931$ to $-\log\sigma(0.8) = 0.3711$.
 
 **Where does the mass go?** Not to $y_w$ and $y_l$, so to other sequences. Pal et al. (2024),
 [Smaug / DPO-Positive](https://arxiv.org/abs/2402.13228), prove standard DPO can reduce the
 chosen likelihood whenever the relative probability increases, and see it most on pairs with
-small edit distance. Razin et al. (2024),
-[Likelihood Displacement](https://arxiv.org/abs/2410.08847), name the effect and show it can be
-**catastrophic**: training to prefer "No" over "Never" can sharply raise "Yes", and in a
+small edit distance. Razin et al. (2024), [Likelihood Displacement](https://arxiv.org/abs/2410.08847),
+show it can be **catastrophic**: training to prefer "No" over "Never" can sharply raise "Yes", and in a
 refusal-training experiment it cut Llama-3-8B-Instruct's refusal rate from 74.4% to 33.4%. The
 driver is preferences whose responses have **similar hidden embeddings**: the gradient pushing
 $y_l$ down also pushes $y_w$ down, and frees mass for whatever response loads most on the
 direction separating them.
 
-**When it is harmless:** the chosen log-prob falls a few nats, held-out judge win rate rises,
-samples look right. The policy got sharper and moved mass from both training responses to
-responses at least as good. **When it is harmful:** the chosen log-prob keeps sliding by tens
+**When it is harmless:** the chosen log-prob falls a few nats, judge win rate rises, samples
+look right. **When it is harmful:** the chosen log-prob keeps sliding by tens
 of nats, samples degrade, safety evals regress, or outputs drift to an unseen mode. Then
 intervene:
 
@@ -748,105 +682,81 @@ assert lp1[2].exp() > lp0[2].exp()                    # the mass went to the uns
 print("metrics fixture, both-fall pair and displacement step verified")
 ```
 
-It does not show whether the unseen response that gained mass is better or worse; only a judge
-or a human can tell you that, which is why diagnostics never replace evaluation.
+It does not show whether the unseen response that gained mass is better; only a judge or a
+human can tell you, which is why diagnostics never replace evaluation.
 
 ### Length exploitation
 
-Summed log-probs make long responses carry larger log-ratio magnitudes, and chosen responses
-in most preference sets are longer than rejected ones. DPO can widen the margin by learning
-"longer is better". Symptom: mean output length climbs every eval while win rate under a
-length-controlled judge stays flat. Measure with length-controlled AlpacaEval or a judge with
-explicit length control ([module 09](./09-evaluating-fine-tuned-models.md)); fix with
-`sigmoid_norm`, `ld_alpha` (sweep values below 1), SimPO, or by length-balancing the pairs.
+Summed log-probs give long responses larger log-ratios, and chosen responses are usually
+longer, so DPO can learn "longer is better". Symptom: mean output length climbs while a
+length-controlled judge's win rate stays flat ([module 09](./09-evaluating-fine-tuned-models.md)).
+Fix with `sigmoid_norm`, `ld_alpha` (sweep values below 1), SimPO, or length-balanced pairs.
 
 | Metric pattern | Interpretation | Action |
 |---|---|---|
 | accuracy stuck near 0.5, margins near 0 | no learning signal: LR too low, labels noisy, pairs near-identical | check data; raise LR within 5e-7 to 5e-6 (full FT) |
 | train accuracy 1.0 within a few hundred steps, eval accuracy flat | memorizing the pairs | fewer epochs, larger $\beta$, `ipo`, more data |
-| margins up, `rewards/chosen` slightly negative, judge win rate up | normal DPO dynamics | nothing |
-| margins up, `logps/chosen` falling by tens of nats, samples degrade | harmful likelihood displacement | add `sft` term, `apo_zero`, lower LR, dedupe pairs |
-| margins up, mean length up, LC win rate flat | length exploitation | `sigmoid_norm`, `ld_alpha`, length-balanced pairs |
 | loss spikes or NaN | LR too high or bf16 overflow in log-probs | lower LR, check grad norm, enable gradient clipping |
 | `rewards/rejected` collapsing towards very negative values, eval quality drops | over-optimization on off-policy pairs | stop early, iterative DPO with on-policy pairs |
 
 ## 12.10 Data issues and choosing a method
 
-Most failed preference runs are data failures. Five recur ([module 04](./04-data-curation-and-synthesis.md)
-covers construction):
+Most failed preference runs are data failures. Five recur (construction is [module 04](./04-data-curation-and-synthesis.md)):
 
-- **Off-policy pairs.** Responses generated by other models are text your policy would not
-  write. DPO learns to rank them, which transfers imperfectly to its own outputs. Mitigate with
-  WPO weighting, or regenerate responses with your own SFT model and label those.
-- **Noisy labels.** Even InstructGPT's trained labelers agreed with each other on only about
-  73% of comparisons ([Ouyang et al. 2022](https://arxiv.org/abs/2203.02155)). Use
-  `robust` with `label_smoothing` set to your estimated flip rate (0.1 is the paper's typical
-  value), or `ipo`, which does not chase infinite margins on wrong labels.
-- **Near-identical pairs.** If chosen and rejected differ by a word, the pair carries little
-  signal and, per Razin et al., drives likelihood displacement. Filter by edit distance or
-  embedding similarity.
-- **Chosen from a much stronger model.** A GPT-class chosen paired with your 1.7B model's
-  rejected teaches "be the stronger model", which the policy cannot do; the easy shortcut is
-  to push its own outputs down. Prefer pairs where both responses are on-policy or close to it.
+- **Off-policy pairs.** Text from other models is text your policy would not write; ranking it
+  transfers imperfectly. Use WPO weighting, or regenerate responses with your SFT model.
+- **Noisy labels.** InstructGPT's trained labelers agreed on only about 73% of comparisons
+  ([Ouyang et al. 2022](https://arxiv.org/abs/2203.02155)). Use `robust` with `label_smoothing`
+  at your estimated flip rate (0.1 is typical), or `ipo`, which does not chase infinite margins.
+- **Near-identical pairs.** A one-word difference carries little signal and, per Razin et al.,
+  drives likelihood displacement. Filter by edit distance or embedding similarity.
+- **Chosen from a much stronger model.** It teaches "be the stronger model", which the policy
+  cannot do, so the shortcut is to push its own outputs down. Keep both responses near on-policy.
 - **Length bias.** If chosen is systematically longer, the cheapest margin is verbosity.
-  Measure the length ratio before training.
 
 | Situation | Method | Why |
 |---|---|---|
 | cheap offline polish on existing pairs | DPO (`sigmoid`), maybe `+ sft` | stable, one trainer, LoRA reference is free |
 | thumbs-up/down logs, no pairs | KTO | uses unpaired binary labels directly |
 | no budget for reference log-probs, or want one stage from base | ORPO (one stage) or SimPO | reference-free |
-| noisy labels | `robust` or `ipo` | bounded response to wrong labels |
 | verifiable task (math, code, JSON validity) | online RL with GRPO/RLOO ([module 13](./13-rl-with-verifiable-rewards.md)) | on-policy, exact reward |
 | a reward model, no RL infrastructure | best-of-$N$ distillation or iterative DPO | on-policy data without an RL loop |
-| chat model that keeps getting longer | `sigmoid_norm`, `ld_alpha`, SimPO | removes the length reward |
 
-Whatever you pick, preference tuning can erode safety behavior learned upstream; re-run the
-safety evals from [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md) after every
-preference stage.
+Preference tuning can erode upstream safety behavior; re-run
+[module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)'s safety evals after every stage.
 
 ## 12.11 Lab: SFT → DPO, and the loss-type ablation
 
-**Goal:** run the post-training stage the course has been building towards, read its
-diagnostics, and measure what the loss choice does. **Tier:** CPU smoke for both scripts; T1
-(24 GB) for L12.1 to L12.3; T0 (free T4) for L12.4. **Models:** `Qwen/Qwen3-1.7B` (or
-`Qwen/Qwen3-4B` on T1 with LoRA). **Dataset:** `trl-lib/ultrafeedback_binarized`.
+**Goal:** run SFT → DPO, read its diagnostics, and measure what the loss choice does. **Tier:**
+CPU smoke for both scripts; T1 (24 GB) for L12.1 to L12.3; T0 (free T4) for L12.4. **Models:**
+`Qwen/Qwen3-1.7B` (or `Qwen/Qwen3-4B` on T1 with LoRA). **Dataset:**
+`trl-lib/ultrafeedback_binarized`.
 
-Scripts: [dpo_from_scratch.py](./code/dpo_from_scratch.py) and
-[reward_model_bt.py](./code/reward_model_bt.py). Run the smoke modes first:
+Scripts: [dpo_from_scratch.py](./code/dpo_from_scratch.py), [reward_model_bt.py](./code/reward_model_bt.py). Smoke first:
 
 ```bash
 python content/courses/finetuning/code/dpo_from_scratch.py --smoke
 python content/courses/finetuning/code/reward_model_bt.py --smoke
 ```
 
-The DPO smoke trains a tabular policy (16 prompts, 6 candidate responses each, frozen
-reference) on 48 synthetic pairs and prints the four reward metrics; it asserts accuracy
-reaches 1.0 and margins rise every logging interval. Notice that `rewards/chosen` goes negative
-even here: a response that is chosen in one pair is rejected in another. It then runs the
-designed both-fall fixture and asserts that chosen and rejected log-probs fall while the
-margin grows. The RM smoke fits a linear Bradley-Terry model and asserts held-out pairwise
-accuracy above 0.9.
+The DPO smoke trains a tabular policy (16 prompts, 6 responses each) on 48 synthetic pairs,
+asserts accuracy reaches 1.0 with margins rising every interval, then reproduces the both-fall
+fixture. `rewards/chosen` goes negative even here, because a response chosen in one pair is
+rejected in another. The RM smoke asserts held-out Bradley-Terry pairwise accuracy above 0.9.
 
 ### L12.1 SFT → DPO (T1)
 
-1. Take the SFT LoRA adapter from module 05's lab (or skip SFT and start from
-   `Qwen/Qwen3-1.7B`).
-2. Train DPO on top of it. With `--sft-adapter`, TRL loads a frozen `"ref"` copy of the adapter,
-   so the reference is your SFT policy:
+Train DPO on module 05's SFT LoRA adapter (or from `Qwen/Qwen3-1.7B`). With `--sft-adapter`, TRL
+loads a frozen `"ref"` copy of the adapter, so the reference is your SFT policy:
 
 ```bash
 python content/courses/finetuning/code/dpo_from_scratch.py --full --sft-adapter ./sft-out --loss-type sigmoid
 ```
 
-3. Record `rewards/margins`, `rewards/accuracies`, `logps/chosen` and `logps/rejected` every 10
-   steps, plus mean generated length on 200 held-out prompts at each eval.
-4. Evaluate the SFT and DPO models with module 09's tooling: a length-controlled pairwise judge
-   (AlpacaEval-style) and IFEval (`google/IFEval`).
-
-**Expect:** eval accuracy well above 0.5, chosen log-probs drifting down slowly, a judge win rate
-gain over SFT, and some length growth. Do not expect a specific number; report yours with the
-judge model and prompt set.
+Record `rewards/margins`, `rewards/accuracies` and both `logps/*` every 10 steps, plus mean
+generated length on 200 held-out prompts. Evaluate SFT and DPO with module 09's tooling: a
+length-controlled pairwise judge and IFEval (`google/IFEval`). **Expect:** eval accuracy well
+above 0.5, chosen log-probs drifting down slowly, a judge win-rate gain, some length growth.
 
 ### L12.2 Loss-type ablation (T1)
 
@@ -859,10 +769,10 @@ python content/courses/finetuning/code/dpo_from_scratch.py --full --loss-type si
 python content/courses/finetuning/code/dpo_from_scratch.py --full --loss-type apo_zero
 ```
 
-`ipo` and `sigmoid_norm` operate on per-token averages, so they need a larger $\beta$ than
-`sigmoid`. Plot **mean output length (x) against LC win rate (y)**, one point per arm. **Expect:**
-`sigmoid` longest; `sigmoid_norm` shorter at a similar win rate; `apo_zero` with the chosen
-log-prob rising instead of falling.
+`ipo` and `sigmoid_norm` use per-token averages, so they need a larger $\beta$. Plot **mean
+output length (x) against LC win rate (y)**, one point per arm. **Expect:** `sigmoid` longest;
+`sigmoid_norm` shorter at a similar win rate; `apo_zero` with the chosen log-prob rising
+instead of falling.
 
 ### L12.3 Reward model and one round of iterative DPO (T1)
 
@@ -872,20 +782,24 @@ python content/courses/finetuning/code/reward_model_bt.py --full --step rank --r
 ```
 
 The rank step samples 4 completions per prompt (left-padded), scores them with the RM, and
-writes (best, worst) pairs, skipping near-ties. Train DPO on those on-policy pairs (point the
-DPO trainer's `train_dataset` at the JSONL) and compare against the offline L12.1 model under
-the same judge. Also compare against best-of-4 from the starting model: if iterative DPO does
-not beat it, say so.
+writes (best, worst) pairs to `onpolicy_pairs.jsonl`, skipping near-ties. Train DPO on them:
+
+```bash
+python content/courses/finetuning/code/dpo_from_scratch.py --full --dataset onpolicy_pairs.jsonl --output-dir dpo-iter1
+```
+
+Compare against the offline L12.1 model and against best-of-4 from the starting model under
+the same judge. If iterative DPO does not beat best-of-4, say so.
 
 ### L12.4 KTO on simulated thumbs (T0)
 
 Take the module 01 support-email JSON extraction outputs, label each `True` when the JSON
 parses and every field matches the gold record, `False` otherwise, and train KTO with
-`Qwen/Qwen3-0.6B` in fp16 (T4 has no bf16). Teaching fragment (not executed):
+`Qwen/Qwen3-0.6B` in fp16 (T4 has no bf16). Teaching fragment (not executed); pass `args` to
+`KTOTrainer` with a LoRA `peft_config` exactly as for DPO:
 
 ```python
-from trl import KTOConfig, KTOTrainer
-from peft import LoraConfig
+from trl import KTOConfig
 
 # rows: {"prompt": [...messages...], "completion": [{"role": "assistant", "content": json_str}], "label": bool}
 n_good, n_bad = 1200, 4800
@@ -893,9 +807,6 @@ args = KTOConfig(output_dir="kto-thumbs", beta=0.1, learning_rate=5e-6,   # LoRA
                  per_device_train_batch_size=8,            # > 1: the KL estimate needs neighbors
                  desirable_weight=n_bad / n_good,          # 4.0: ratio lambda_D n_D / lambda_U n_U = 1
                  undesirable_weight=1.0, bf16=False, fp16=True)
-trainer = KTOTrainer(model="Qwen/Qwen3-0.6B", args=args, train_dataset=dataset,
-                     peft_config=LoraConfig(r=16, lora_alpha=32, target_modules="all-linear"))
-trainer.train()
 ```
 
 Record JSON validity and field accuracy on the 50-example golden set before and after.
@@ -904,25 +815,21 @@ Record JSON validity and field accuracy on the 50-example golden set before and 
 ## Key takeaways
 
 - **Every method here optimizes reward minus $\beta$ KL to a reference.** The KL keeps fluency,
-  limits reward hacking, and preserves diversity; $\beta$ prices drift.
-- **PPO-based RLHF is conceptually central but practically retired in TRL.** `PPOTrainer` was
-  removed in v1.13; online RL in TRL is GRPO/RLOO (module 13).
-- **Best-of-$N$ is the baseline to beat.** Its KL is at most $\log N - (N-1)/N$, and it is
-  very KL-efficient; distill it to drop the inference cost.
+  limits reward hacking and preserves diversity; higher $\beta$ means staying closer.
+- **PPO-based RLHF is conceptually central but removed from TRL (v1.13).** Online RL in TRL is
+  GRPO/RLOO (module 13).
+- **Best-of-$N$ is the baseline to beat.** Its KL is at most $\log N - (N-1)/N$; distill it to
+  drop the inference cost.
 - **A reward model is logistic regression on reward differences.** Only differences are
-  identified; centering pins the offset; ensembles mitigate but do not eliminate
-  over-optimization.
-- **DPO is exact algebra on an idealized problem.** The closed-form optimum inverts to an
-  implicit reward $\beta\log(\pi_\theta/\pi_{\text{ref}})$, and $Z(x)$ cancels in Bradley-Terry.
+  identified; ensembles mitigate but do not eliminate over-optimization.
+- **DPO is exact algebra on an idealized problem.** The implicit reward is
+  $\beta\log(\pi_\theta/\pi_{\text{ref}})$, and $Z(x)$ cancels in Bradley-Terry.
 - **The DPO gradient is self-paced.** Pairs are weighted by $\sigma(\hat r_l - \hat r_w)$: 0.5 at
-  initialization, near zero once a pair is learned.
-- **Higher $\beta$ means staying closer to the reference.** It is not a "learn harder" dial.
-- **Standard DPO needs reference log-probs, not necessarily a reference model.** LoRA disables
-  the adapter, `precompute_ref_log_probs` caches them; ORPO and SimPO need none.
-- **`loss_type` is a list.** Fifteen losses differ in whether they act on the margin or on each
-  log-ratio, and whether they stop at a finite target.
-- **`sigmoid_norm` is length-normalized DPO, not SimPO.** Exact SimPO is experimental
-  `CPOTrainer(loss_type="simpo", cpo_alpha=0)`.
+  initialization, near zero once learned.
+- **DPO needs reference log-probs, not necessarily a reference model.** LoRA disables the
+  adapter, `precompute_ref_log_probs` caches them; ORPO and SimPO need none.
+- **`loss_type` is a list of 15 losses.** They differ in acting on the margin or on each
+  log-ratio, and in stopping at a finite target. `sigmoid_norm` is not SimPO.
 - **KTO trades pairs for thumbs.** It needs class-ratio weighting and a batch size above 1.
 - **Falling chosen log-probs are normal; falling quality is not.** Likelihood displacement is
   driven by similar pairs; anchor with `sft`, `apo_zero` or better data.

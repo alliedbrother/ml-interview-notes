@@ -7,68 +7,49 @@
 
 Merging is the cheapest post-training operation there is. With no gradient steps and
 no GPU you can combine two skills, pull a specialised model back toward general
-ability, or turn a folder of adapters into one multi-task model. Open-weight releases
-and leaderboard entries use it all the time. It also fails silently: a merge always
-produces a checkpoint, and nothing in the file tells you whether the checkpoint is any
-good. This module teaches the methods, the one assumption they all rest on (a shared
-base), and the evaluation discipline that makes a merge a measured result rather than
-a lucky one.
+ability, or turn a folder of adapters into one multi-task model. It also fails
+silently: a merge always produces a checkpoint, and nothing in the file tells you
+whether the checkpoint is any good. This module teaches the methods, the one
+assumption they all rest on (a shared base), and how to evaluate a merge.
 
-The notes treat "merging" only as folding a LoRA update into its base matrix
+The notes treat "merging" only as folding one LoRA update into its base matrix
 ([transfer learning and fine-tuning](../../notes/deep-learning/transfer-learning-and-finetuning.md),
-"Initial gradients, merging and memory"). That is one adapter and one base. Here you
-combine several fine-tunes, and the algebra gets more interesting.
+"Initial gradients, merging and memory"). Here you combine several fine-tunes.
 
 ---
 
 ## 18.1 Why weight averaging works at all
 
-### The puzzle
+### The permutation puzzle and linear mode connectivity
 
-Take two networks with the same architecture, each trained to low loss on the same
-data, and average their weights. Usually you get garbage. Hidden units have no fixed
-identity: permute the neurons of one layer, and permute the next layer's input weights
-to match, and the function is unchanged. Two independently initialised networks
-arrive at their solutions under different, arbitrary permutations, so averaging them
-mixes neuron 7 of one with an unrelated neuron 7 of the other. Entezari et al. (2022)
-[conjecture](https://arxiv.org/abs/2110.06296) that most of the loss barrier between
-independent solutions disappears once you undo the permutation, and Ainsworth et al.
-(2023) [Git Re-Basin](https://arxiv.org/abs/2209.04836) align units explicitly before
-averaging. Fine-tuners never do this alignment. They don't need to.
-
-### Linear mode connectivity
+Average the weights of two independently initialised networks and you usually get
+garbage. Hidden units have no fixed identity, so the two arrive at their solutions
+under different permutations and averaging mixes unrelated neurons. Entezari et al.
+(2022) [conjecture](https://arxiv.org/abs/2110.06296) that undoing the permutation
+removes most of the barrier; Ainsworth et al. (2023) [Git Re-Basin](https://arxiv.org/abs/2209.04836)
+align units before averaging. Fine-tuners never need this alignment.
 
 Frankle et al. (2020) [Linear Mode Connectivity and the Lottery Ticket Hypothesis](https://arxiv.org/abs/1912.05671)
-define the test. Train two copies from the same starting point under different SGD
-noise (data order, augmentation). Then evaluate the loss along the straight line
-$\theta(t) = (1-t)\theta_a + t\theta_b$. If the loss never rises above the endpoints
-(no **barrier**), the two solutions are **linearly mode connected**. Frankle et al. find
-that vision networks become stable in this sense early in training. After that point
-the outcome is confined to one linearly connected region.
-
-Neyshabur et al. (2020) [What is being transferred in transfer learning?](https://arxiv.org/abs/2008.11687)
-make the observation that matters to you. Models fine-tuned from the **same pretrained
-checkpoint** stay in the same basin, and interpolating between them shows no barrier.
-Models trained from scratch from different random inits do not. Wortsman et al.
-(2022) [model soups](https://arxiv.org/abs/2203.05482) turned that into a recipe.
-Fine-tunes of CLIP and ViT-G that differ only in hyperparameters "often appear to lie
-in a single low error basin", so averaging them improves accuracy. Their greedy soup
-reached 90.94% ImageNet top-1 with ViT-G, at the inference cost of one model.
+define the test: train two copies from one starting point under different SGD noise,
+then evaluate the loss along $\theta(t) = (1-t)\theta_a + t\theta_b$. If the loss never
+rises above the endpoints (no **barrier**), the solutions are **linearly mode
+connected**. Neyshabur et al. (2020) [What is being transferred in transfer learning?](https://arxiv.org/abs/2008.11687)
+show that models fine-tuned from the **same pretrained checkpoint** stay in one basin
+with no barrier between them, while models trained from different random inits do not.
+Wortsman et al. (2022) [model soups](https://arxiv.org/abs/2203.05482) turned that into
+a recipe: fine-tunes of CLIP and ViT-G that differ only in hyperparameters "often
+appear to lie in a single low error basin", and their greedy soup reached 90.94%
+ImageNet top-1 with ViT-G at the inference cost of one model.
 
 **The pretrained checkpoint is the shared coordinate system.** Fine-tuning moves a
-short distance from it, and the neurons keep their identity. That is why merging
-works for LLM fine-tunes and why it fails for models with different lineages.
+short distance from it and the neurons keep their identity, so merging works for LLM
+fine-tunes and fails across lineages.
 
 ### Task vectors
 
 Ilharco et al. (2023) [Editing Models with Task Arithmetic](https://arxiv.org/abs/2212.04089)
-named the displacement. For a base $\theta_0$ and a fine-tune $\theta_i$ on task $i$:
-
-$$
-\tau_i = \theta_i - \theta_0
-$$
-
-Three operations follow.
+named the displacement $\tau_i = \theta_i - \theta_0$ for a base $\theta_0$ and a fine-tune
+$\theta_i$ on task $i$. Three operations follow.
 
 | Operation | Formula | What Ilharco et al. report |
 |---|---|---|
@@ -77,9 +58,9 @@ Three operations follow.
 | Analogy | $\theta = \theta_0 + \lambda(\tau_C + \tau_B - \tau_A)$ | "A is to B as C is to D" improves task D with no D data |
 
 The scale $\lambda$ is a real hyperparameter. Summing two task vectors at $\lambda=1$
-moves you twice as far from $\theta_0$ as either fine-tune did. The TIES paper's
-no-validation recipe uses $\lambda=0.4$ for plain task arithmetic and $\lambda=1$ for TIES
-(Yadav et al. 2023, section 5).
+moves you up to twice as far from $\theta_0$ as either fine-tune did ($\sqrt2$ times for
+orthogonal task vectors). The TIES paper's no-validation recipe uses $\lambda=0.4$ for
+plain task arithmetic and $\lambda=1$ for TIES (Yadav et al. 2023, section 5).
 
 ### The misconception to unlearn
 
@@ -89,47 +70,26 @@ fine-tunes that descend from the same initial weights. Two models trained on ide
 data from different random inits will not merge. Two models trained on completely
 different data from the same base usually will, and interference between their
 updates, not the difference in data, is what TIES and DARE are built to manage.
-
-So a Llama-3.1-8B fine-tune and a Qwen3-8B fine-tune cannot be merged. Two fine-tunes
-of Qwen3-8B can. Fine-tunes of Qwen3-8B-Base and of the post-trained Qwen3-8B share a
-lineage but sit much further apart, so expect more interference.
-
-```mermaid
-flowchart TD
-    B0["shared base theta_0"] --> FA["fine-tune A<br/>(math)"]
-    B0 --> FB["fine-tune B<br/>(code)"]
-    FA --> TA["task vector tau_A = theta_A - theta_0"]
-    FB --> TB["task vector tau_B = theta_B - theta_0"]
-    TA --> OPS["trim / elect sign /<br/>drop and rescale"]
-    TB --> OPS
-    OPS --> M["merged tau"]
-    M --> MM["merged model<br/>theta_0 + lambda * tau"]
-    B0 --> MM
-    MM --> E1["eval task A"]
-    MM --> E2["eval task B"]
-    MM --> E3["eval general ability"]
-```
+Fine-tunes of Qwen3-8B-Base and of the post-trained Qwen3-8B share a lineage but sit
+much further apart, so expect more interference.
 
 ---
 
 ## 18.2 The methods
 
-Every method below answers the same question differently: given two or more points in
-weight space that share an origin, which single point do you ship?
+Every method below picks one point to ship from several points that share an origin.
 
 ### Linear averaging and model soups
 
 The simplest merge is a weighted average, $\theta = \sum_i w_i\theta_i$ with
 $\sum_i w_i = 1$. Wortsman et al. call the uniform average a **uniform soup**. Their
 **greedy soup** sorts candidates by held-out accuracy and adds each one only if the
-held-out score of the running average improves. The greedy version matters because
-some fine-tunes sit outside the basin, and a uniform average drags the result toward
-them.
+running average improves, because some fine-tunes sit outside the basin and a uniform
+average drags the result toward them.
 
 A uniform soup of $n$ fine-tunes is task arithmetic with $\lambda = 1/n$:
-$\frac{1}{n}\sum_i \theta_i = \theta_0 + \frac{1}{n}\sum_i \tau_i$. That identity
-explains why linear merges of *different-task* models are weak. Each task's update is
-diluted by $1/n$.
+$\frac{1}{n}\sum_i \theta_i = \theta_0 + \frac{1}{n}\sum_i \tau_i$. So linear merges of
+*different-task* models are weak: each task's update is diluted by $1/n$.
 
 ### SLERP
 
@@ -142,13 +102,12 @@ $$
 $$
 
 where $\hat a = a/\lVert a\rVert$ and $t$ runs from model A ($t=0$) to model B ($t=1$).
-Why bother? For two unit vectors at angle $\Omega$ the chord midpoint has norm
+The reason is norm. For two unit vectors at angle $\Omega$ the chord midpoint has norm
 $\cos(\Omega/2)$, which is 0.707 at $\Omega = 90°$. **Linear interpolation shrinks the
 tensor**, and norm sets activation scale in every later layer. SLERP stays on the
-sphere for every $t$. Its direction matches normalised lerp only at
-$t\in\{0, \tfrac12, 1\}$. Near-parallel inputs make $\sin\Omega \to 0$ unstable, so
-implementations fall back to lerp. mergekit does so when $|\cos\Omega| > 0.9995$, and
-measures the angle per output row
+sphere for every $t$; for equal-norm inputs its direction matches normalised lerp only
+at $t\in\{0, \tfrac12, 1\}$. Near-parallel inputs make $\sin\Omega \to 0$ unstable, so
+mergekit falls back to lerp when $|\cos\Omega| > 0.9995$, measuring the angle per row
 ([`slerp.py`](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/mergekit/merge_methods/slerp.py)).
 SLERP takes exactly **two** models, and its norm guarantee is exact only when the two
 tensors have equal norms. For more models mergekit has `multislerp` and `karcher`.
@@ -156,27 +115,24 @@ tensors have equal norms. For more models mergekit has `multislerp` and `karcher
 ### Task arithmetic, TIES and DARE
 
 **Task arithmetic** is $\theta = \theta_0 + \lambda\sum_i w_i\tau_i$. It keeps each task's
-full update, but every coordinate where tasks disagree is a tug of war, and
-coordinates one task barely touched add noise to the others.
+full update, but coordinates where tasks disagree become a tug of war, and coordinates
+one task barely touched add noise. **TIES-Merging** (Yadav et al. 2023,
+[arXiv 2306.01708](https://arxiv.org/abs/2306.01708)) fixes these two sources of
+interference (redundant small updates, sign disagreement) in three steps.
 
-**TIES-Merging** (Yadav et al. 2023, [arXiv 2306.01708](https://arxiv.org/abs/2306.01708))
-names two sources of interference: redundant small updates, and sign disagreement. It
-fixes them in three steps.
-
-1. **Trim.** In each task vector keep the top $k\%$ of entries by magnitude and zero
-   the rest. The paper's default keeps 20%.
-2. **Elect sign.** For each parameter, sum the trimmed values across tasks. The sign of
-   the sum is the elected sign $\gamma$. A large update in one task outweighs several
-   small opposing ones.
+1. **Trim.** In each task vector keep the fraction `density` (written $d$) of entries
+   with the largest magnitude and zero the rest. The paper's default is $d = 0.2$.
+2. **Elect sign.** For each parameter, the sign of the summed trimmed values is the
+   elected sign $\gamma$, so one large update outweighs several small opposing ones.
 3. **Disjoint mean.** For each parameter, average only the trimmed values whose sign
    matches $\gamma$. Zeros and dissenters are excluded from the denominator.
 
-Then $\theta = \theta_0 + \lambda\,\tau_{\text{TIES}}$. The disjoint mean is the key step.
-A parameter that only one task moved keeps that task's full value instead of being
+Then $\theta = \theta_0 + \lambda\,\tau_{\text{TIES}}$. The disjoint mean is the key step: a
+parameter that only one task moved keeps that task's full value instead of being
 divided by $n$.
 
-Here is a worked example with three task vectors over six parameters. Trimming keeps the top 50% (three
-of six) by magnitude. $\tau_3$ has a tie at magnitude 0.2 (positions 2 and 4), broken
+Worked example: three task vectors over six parameters, trimmed at $d = 0.5$ (three of
+six by magnitude). $\tau_3$ has a tie at magnitude 0.2 (positions 2 and 4), broken
 in favour of the **lower index**, so position 2 survives.
 
 | | p0 | p1 | p2 | p3 | p4 | p5 |
@@ -193,29 +149,22 @@ in favour of the **lower index**, so position 2 survives.
 | **TIES merged** | **0.45** | **0.30** | **−0.60** | **−0.50** | **−0.35** | **0.00** |
 | plain mean $\frac13\sum\tau_i$ | 0.267 | 0.133 | −0.033 | −0.133 | −0.300 | 0.100 |
 
-Look at p2. Two tasks pushed it up a little, one pushed it down hard. The plain mean
-cancels to −0.033, a value no task wanted. Sign election, by summed mass rather than
-by vote count, picks "down", and the disjoint mean keeps −0.6. Look at p3. One task
-moved it, and TIES keeps the full −0.5 where the mean would dilute it to −0.133.
+At p2 two tasks pushed up a little and one pushed down hard. The plain mean cancels to
+−0.033, a value no task wanted; sign election by summed mass (not vote count) picks
+"down", and the disjoint mean keeps −0.6. At p3 one task moved it, and TIES keeps the
+full −0.5 where the mean dilutes it to −0.133.
 
 **DARE** (Yu et al. 2024, [arXiv 2311.03099](https://arxiv.org/abs/2311.03099))
 sparsifies randomly instead of by magnitude. Drop each delta with probability $p$ and
-rescale the survivors:
-
-$$
-\tilde\tau_j = \frac{m_j\,\tau_j}{1-p}, \qquad m_j \sim \text{Bernoulli}(1-p)
-$$
-
-The rescale makes it **unbiased**: $\mathbb{E}[\tilde\tau_j] = \frac{(1-p)\tau_j}{1-p} = \tau_j$.
-It is far from low-variance. $\text{Var}[\tilde\tau_j] = \tau_j^2\,\frac{p}{1-p}$, so at
-$p=0.9$ each surviving coordinate is ten times its original value and the
-per-coordinate standard deviation is $3|\tau_j|$. DARE works anyway because a layer's
-output sums thousands of coordinates and the noise averages out in that sum, *if* the
-deltas are small. Yu et al. report SFT deltas "typically small (within 0.002)" and
-that DARE can drop 90% or even 99% of them without hurting the SFT model. DARE is
-a preprocessing step, so it gets paired with a combiner: **DARE-linear** (task
-arithmetic on the dropped vectors) or **DARE-TIES** (sign election and disjoint mean
-on the dropped vectors).
+rescale the survivors, $\tilde\tau_j = m_j\,\tau_j/(1-p)$ with $m_j \sim \text{Bernoulli}(1-p)$.
+The rescale makes it **unbiased**, $\mathbb{E}[\tilde\tau_j] = \tau_j$, but not
+low-variance: $\text{Var}[\tilde\tau_j] = \tau_j^2\,\frac{p}{1-p}$, so at $p=0.9$ each
+survivor is ten times its original value and the per-coordinate standard deviation is
+$3|\tau_j|$. DARE works anyway because a layer's output sums thousands of coordinates
+and the noise averages out, *if* the deltas are small. Yu et al. report SFT deltas
+"typically small (within 0.002)" and drop 90% or even 99% of them without hurting the
+SFT model. DARE is a preprocessing step, paired with a combiner: **DARE-linear** (task
+arithmetic) or **DARE-TIES** (sign election and disjoint mean).
 
 ### Breadcrumbs, model stock, passthrough
 
@@ -225,28 +174,23 @@ outliers, which they find hurt merges. In mergekit, `gamma` is the fraction of l
 entries removed and `density` the fraction retained overall.
 
 **Model stock** (Jang et al. 2024, [arXiv 2403.19522](https://arxiv.org/abs/2403.19522))
-is for several fine-tunes of the *same* task, the model soup setting, and computes the
-interpolation weight from geometry instead of a sweep. With $k$ fine-tunes whose task
-vectors have average pairwise cosine $\cos\theta$, it interpolates between the base and
-the fine-tunes' average with
+is for several fine-tunes of the *same* task (the soup setting) and takes the
+interpolation weight from geometry instead of a sweep. With $n$ fine-tunes whose task
+vectors have average pairwise cosine $\cos\phi$, it uses
 
 $$
-t = \frac{k\cos\theta}{1 + (k-1)\cos\theta}, \qquad
+t = \frac{n\cos\phi}{1 + (n-1)\cos\phi}, \qquad
 \theta_{\text{merged}} = t\,\bar\theta_{\text{ft}} + (1-t)\,\theta_0
 $$
 
 per layer ([mergekit implementation](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/mergekit/merge_methods/model_stock.py)).
-Two fine-tunes at cosine 0.5 give $t = 1/1.5 = 0.67$. Nearly orthogonal fine-tunes give
-$t \to 0$ (stay near the base). Identical ones give $t = 1$.
+Two fine-tunes at cosine 0.5 give $t = 1/1.5 = 0.67$; nearly orthogonal ones give
+$t \to 0$ (stay near the base); identical ones give $t = 1$.
 
-**Passthrough and frankenmerges** are not averages at all. Passthrough copies tensors
-unchanged. Combined with mergekit's `slices`, it stacks layer ranges from one or more
-donor models into a deeper model. SOLAR 10.7B's "depth up-scaling" of a 32-layer
-model into a 48-layer one (Kim et al. 2023, [arXiv 2312.15166](https://arxiv.org/abs/2312.15166))
-is the best-known case. mergekit ships a layer-stacking example,
-`orcamini-platy-44layer.yml`. The result has a different depth, a different parameter
-count, and usually needs further training to repair the seams. Treat it as model
-surgery, not merging.
+**Passthrough and frankenmerges** copy tensors unchanged and, with mergekit's `slices`,
+stack layer ranges into a deeper model, as SOLAR 10.7B did by growing 32 layers to 48
+(Kim et al. 2023, [arXiv 2312.15166](https://arxiv.org/abs/2312.15166)). This is model
+surgery, not merging, and usually needs further training to repair the seams.
 
 ### Table 1: the method zoo
 
@@ -255,7 +199,7 @@ surgery, not merging.
 | Linear / soup | $\sum_i w_i\theta_i$, $\sum w_i = 1$ | ≥2 | `weight`, `normalize` | several fine-tunes of the same task; base-vs-fine-tune interpolation | `linear` |
 | SLERP | arc between $a$ and $b$ at $t$ | exactly 2 | `t` (can vary per layer) | blending two related models, norm-sensitive | `slerp` (`nuslerp`, `multislerp` for variants) |
 | Task arithmetic | $\theta_0 + \lambda\sum_i w_i\tau_i$ | ≥2 + base | `weight`, `lambda` | few tasks, little overlap; negation | `task_arithmetic` |
-| TIES | trim top-$k$, elect sign, disjoint mean | ≥2 + base | `density`, `weight`, `lambda` | several tasks with conflicting updates | `ties` |
+| TIES | keep fraction $d$, elect sign, disjoint mean | ≥2 + base | `density`, `weight`, `lambda` | several tasks with conflicting updates | `ties` |
 | DARE-TIES | drop $p$, rescale $\frac{1}{1-p}$, then TIES | ≥2 + base | `density` ($=1-p$), `weight` | LLM SFT deltas (small, redundant) | `dare_ties` |
 | DARE-linear | drop and rescale, then sum | ≥2 + base | `density`, `weight`, `rescale` | as above, no sign election | `dare_linear` |
 | Breadcrumbs | trim smallest and largest tails | ≥2 + base | `density`, `gamma` | many tasks, outlier-heavy deltas | `breadcrumbs`, `breadcrumbs_ties` |
@@ -266,12 +210,12 @@ Names are from mergekit's method registry at commit
 [`9eeb539`](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/mergekit/merge_methods/registry.py),
 which also registers `della`, `sce`, `karcher`, `nearswap`, `ram` and `arcee_fusion`.
 
-### Check 18.1: arithmetic, interpolation and SLERP
+### Check 18.1: soups, negation and SLERP
 
-This check verifies the task arithmetic and negation formulas, that lerp at
-$t=0.5$ is the mean, that SLERP of two unit vectors stays on the unit sphere while the
-chord midpoint shrinks to $\cos(\Omega/2)$, that SLERP's direction matches normalised
-lerp only at $t\in\{0, 0.5, 1\}$, and that it falls back to lerp for parallel inputs.
+This check verifies the soup-equals-task-arithmetic identity, negation returning to the
+base, that SLERP of unit vectors stays on the sphere while the chord midpoint shrinks to
+$\cos(\Omega/2)$, that its direction matches normalised lerp only at $t\in\{0, 0.5, 1\}$,
+and the lerp fallback for parallel inputs.
 
 ```python finetuning-check
 import math
@@ -279,14 +223,13 @@ import torch
 
 torch.manual_seed(0)
 theta0 = torch.randn(32, dtype=torch.float64)
-tau1, tau2 = (0.01 * torch.randn(32, dtype=torch.float64) for _ in range(2))
-lam = 0.4
-by_hand = torch.tensor([theta0[i] + lam * (tau1[i] + tau2[i]) for i in range(32)], dtype=torch.float64)
-torch.testing.assert_close(theta0 + lam * (tau1 + tau2), by_hand, atol=1e-12, rtol=0)
-theta1 = theta0 + tau1                                       # negation, lambda = -1
-torch.testing.assert_close(theta0 - 1.0 * (theta1 - theta0), theta0 - tau1, atol=1e-12, rtol=0)
-a_full, b_full = theta0 + tau1, theta0 + tau2                # lerp at t = 0.5 is the mean
-torch.testing.assert_close(0.5 * a_full + 0.5 * b_full, (a_full + b_full) / 2, atol=1e-12, rtol=0)
+taus = [0.01 * torch.randn(32, dtype=torch.float64) for _ in range(3)]
+n = len(taus)
+soup = torch.stack([theta0 + t for t in taus]).mean(0)      # uniform soup of 3 fine-tunes
+torch.testing.assert_close(soup, theta0 + sum(taus) / n, atol=1e-12, rtol=0)  # = task arithmetic, lambda = 1/n
+assert not torch.allclose(soup, theta0 + sum(taus), atol=1e-6)  # not lambda = 1
+theta1 = theta0 + taus[0]
+torch.testing.assert_close(theta1 - 1.0 * taus[0], theta0, atol=1e-12, rtol=0)  # negation returns to base
 
 def slerp(a, b, t, dot_threshold=0.9995):
     dot = torch.dot(a / a.norm(), b / b.norm()).clamp(-1.0, 1.0)
@@ -308,12 +251,11 @@ for t, same in ((0.0, True), (0.25, False), (0.5, True), (0.75, False), (1.0, Tr
     assert (abs(torch.dot(sl / sl.norm(), li / li.norm()).item() - 1.0) < 1e-9) == same, t
 w = 2.5 * u                                                  # parallel: falls back to lerp
 torch.testing.assert_close(slerp(u, w, 0.3), 0.7 * u + 0.3 * w, atol=1e-12, rtol=0)
-print("task arithmetic, negation, lerp and SLERP verified")
+print("soup identity, negation and SLERP verified")
 ```
 
-It does not show that SLERP merges *score* better than linear ones. Norm preservation
-is a geometric property, and whether it matters for a given pair of LLMs is an
-empirical question you answer with the evaluation in 18.6.
+It does not show that SLERP merges *score* better than linear ones; whether norm
+preservation matters for a given pair of LLMs is the evaluation question of 18.6.
 
 ### Check 18.2: TIES by hand
 
@@ -358,17 +300,15 @@ assert abs(plain_mean[2].item()) < 0.04 and merged[2].item() == -0.6   # cancell
 print("TIES hand example verified")
 ```
 
-It does not prove TIES helps on real models. The example shows the mechanics. Whether
-the trimmed 50% or 80% carried task knowledge is something only an evaluation sweep
-over `density` can tell you.
+It does not prove TIES helps on real models; only a `density` sweep can show whether the
+trimmed entries carried task knowledge.
 
 ### Check 18.3: DARE is unbiased, and noisy
 
-This check verifies that DARE at $p=0.9$ keeps about 10% of entries per draw, that the average
-of many draws converges to $\tau$, and that the convergence is slow in exactly the
-way the variance formula predicts. With 200 draws the relative error is about
-$\sqrt{2/\pi}\sqrt{9/200} \approx 0.17$. Getting under 5% needs thousands of draws.
-Skipping the rescale gives an estimate biased to $0.1\tau$.
+This check verifies that DARE at $p=0.9$ keeps about 10% of entries per draw, and that
+the mean of many draws converges to $\tau$ as slowly as the variance predicts: relative
+error $\sqrt{2/\pi}\sqrt{9/200} \approx 0.17$ after 200 draws, under 5% only after
+thousands. Skipping the rescale biases the estimate to $0.1\tau$.
 
 ```python finetuning-check
 import math
@@ -406,24 +346,18 @@ assert abs(ratio - 0.1) < 0.01, ratio
 print("DARE unbiasedness and variance verified")
 ```
 
-It does not show why one DARE draw works inside a network. That depends on the layer
-summing many noisy coordinates, which the lab's toy model exercises and this check
-does not.
-
----
+It does not show why one DARE draw works inside a network, which depends on the layer
+summing many noisy coordinates; the lab's toy model exercises that.
 
 ## 18.3 Tooling
 
 ### mergekit
 
 mergekit (Goddard et al. 2024, [arXiv 2403.13257](https://arxiv.org/abs/2403.13257))
-is the standard tool for full-checkpoint merges. A YAML file names the method, the
-models, a base, and per-model or global parameters. `mergekit-yaml config.yml out/`
-does the rest. It processes the merge tensor by tensor, loads weights lazily
-(`--lazy-unpickle` for lower memory use), and writes output in shards (5B parameters
-per shard by default), so large merges run on a CPU machine without ever holding whole
-models in memory. GPU execution (`--cuda`) is optional. Here is a TIES merge of
-two fine-tunes of the same base, following the repository's
+is the standard tool for full-checkpoint merges. A YAML file names the method, models,
+base and parameters; `mergekit-yaml config.yml out/` merges tensor by tensor, loads
+lazily (`--lazy-unpickle`) and writes 5B-parameter shards, so large merges run on a CPU
+machine (`--cuda` is optional). A TIES merge of two fine-tunes, following the repository's
 [`examples/ties.yml`](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/examples/ties.yml)
 and [README](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/README.md):
 
@@ -451,24 +385,20 @@ tokenizer:
 - **Parameters** sit on a slice, a model, or globally. A list is a gradient across
   layers, and a `filter:` entry targets tensors by name (`mlp` versus `self_attn`).
 - **Tokenizer.** The `tokenizer:` block picks the output vocabulary (`base`, `union`, or
-  a model path) and per-token embedding sources, which matters when fine-tunes added
-  special tokens. The legacy `tokenizer_source:` key is mutually exclusive with it. Set
-  `chat_template` deliberately when parents use different templates.
+  a model path) and per-token embedding sources, for fine-tunes that added special
+  tokens (the legacy `tokenizer_source:` key excludes it). Set `chat_template`
+  deliberately when parents differ.
 - **LoRA extraction.** `mergekit-extract-lora --model <ft> --base-model <base>
   --out-path <dir> --max-rank 64` turns a full fine-tune's (or a merge's) delta into a
   PEFT LoRA by truncated SVD.
-- **Evolutionary search.** `mergekit-evolve` (18.5).
 
-**License.** mergekit moved from LGPL-3.0 to the Business Source License in its v0.1
-release (February 2025) and returned to **LGPL-3.0** in v0.1.4 (October 31 2025,
-commit "Return to LGPL"). As of October 2026 the repository's
-[LICENSE](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/LICENSE)
-is LGPL-3.0. If your pipeline pins an older version, check which license that version carries.
+**License.** [LGPL-3.0](https://github.com/arcee-ai/mergekit/blob/9eeb539892c6753b032ea164e818b44a8c7a401b/LICENSE)
+as of v0.1.4 (Oct 2025); v0.1–v0.1.3 were BSL, so check pinned versions.
 
 ### PEFT `add_weighted_adapter`
 
-When your inputs are LoRA adapters on one base, you can merge at the adapter level and
-never materialise full checkpoints. As of PEFT v0.21.2 (October 2026) the signature is
+LoRA adapters on one base can be merged at the adapter level, with no full checkpoints.
+As of PEFT v0.21.2 (October 2026) the signature is
 ([`LoraModel.add_weighted_adapter`](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/tuners/lora/model.py#L786-L935)):
 
 ```python
@@ -493,10 +423,8 @@ model.set_adapter("math_code")
 merged = model.merge_and_unload()    # returns the base with the adapter folded in
 ```
 
-The full `combination_type` list is `svd`, `linear`, `cat`, `ties`, `ties_svd`,
-`dare_ties`, `dare_linear`, `dare_ties_svd`, `dare_linear_svd`, `magnitude_prune`, and
-`magnitude_prune_svd`. The defaults and constraints are in the source, not the
-prose docs:
+The eleven `combination_type` values group as follows (constraints from the source,
+not the prose docs):
 
 | `combination_type` | Operates on | Rank of result | Rank constraint |
 |---|---|---|---|
@@ -505,30 +433,25 @@ prose docs:
 | `ties`, `dare_ties`, `dare_linear`, `magnitude_prune` | $A$ and $B$ factors, separately | $r$ | all ranks equal |
 | `svd` and the `*_svd` variants | the full $\Delta W_i$, then truncated SVD | `svd_rank` or $\max_i r_i$ | none |
 
-The second row is the trap. Plain `ties` on LoRA adapters trims and elects signs **on
-the factor matrices**, not on $\Delta W$. Use `ties_svd` if you want TIES semantics on the
-actual weight update. The new adapter is created with `lora_alpha = r`, so its scaling
-is 1, and each source adapter's own $\alpha/r$ is folded into the combined factors.
+The third row is the trap. Plain `ties` (and `dare_*`, `magnitude_prune`) on LoRA
+adapters trims and elects signs **on the factor matrices**, not on $\Delta W$. Use
+`ties_svd` if you want TIES semantics on the actual weight update. The new adapter is
+created with `lora_alpha = r`, so under standard LoRA scaling its scale is 1 and each
+source adapter's own $\alpha/r$ is folded into the combined factors. (If the source
+adapters used rsLoRA, the copied config gives scaling $\sqrt r$; check
+`model.peft_config[name].use_rslora` before trusting the merged scale.)
 The PEFT [model merging guide](https://huggingface.co/docs/peft/v0.21.0/en/developer_guides/model_merging)
-shows TIES and DARE-TIES on three public TinyLlama adapters. For TIES it recommends
-weights of 1.0 or more because they "preserve the correct scale". The disjoint mean
-already averages, so weights that sum to 1 would shrink the update a second time. Arrow
-(learned routing over a library of LoRAs) and GenKnowSub (a refinement of those LoRAs
-before routing) live in the same LoRA tuner and are covered in
-[module 07](./07-the-wider-peft-landscape.md). The un-merge lifecycle
-(`merge_and_unload` returns a new model, `merge_adapter`/`unmerge_adapter` toggle in
-place) is [module 06](./06-lora-and-qlora.md)'s.
-
----
+shows TIES and DARE-TIES on three public TinyLlama adapters and recommends TIES weights
+of 1.0 or more because they "preserve the correct scale": the disjoint mean already
+averages, so weights that sum to 1 would shrink the update a second time.
 
 ## 18.4 Merging adapters versus full models
 
 ### Why `linear` on LoRA factors is not linear in $\Delta W$
 
-A LoRA update is a product, $\Delta W_i = s_i B_i A_i$ with $s_i = \alpha_i/r_i$,
-$B_i \in \mathbb{R}^{d_{out}\times r}$ and $A_i\in\mathbb{R}^{r\times d_{in}}$. Here $B$ is
-the LoRA up-projection, not a batch size. The merge you want is
-$\sum_i w_i s_i B_iA_i$. Averaging the factors does not give it.
+A LoRA update is $\Delta W_i = s_i B_i A_i$ with $s_i = \alpha_i/r_i$, up-projection (not
+batch size) $B_i \in \mathbb{R}^{d_{out}\times r}$ and $A_i\in\mathbb{R}^{r\times d_{in}}$.
+You want $\sum_i w_i s_i B_iA_i$; averaging the factors does not give it.
 
 PEFT's `linear` uses a square-root convention so that one adapter alone round-trips
 exactly. With $c_i = w_i s_i$ it builds
@@ -546,9 +469,8 @@ $$
 
 The last term is the error. $B_1A_2$ routes adapter 2's input directions through adapter
 1's output directions, an update neither adapter learned. With $w = 0.5$ and $s = 1$
-for both, the cross term has coefficient 0.5, as large as the terms you wanted.
-PEFT's docstring calls `linear` "a very rough approximation". The method also
-requires equal ranks, because it adds $A_1$ and $A_2$ elementwise.
+the cross term has coefficient 0.5, as large as the wanted terms. PEFT's docstring calls
+`linear` "a very rough approximation", and it needs equal ranks to add $A_1$ and $A_2$.
 
 ### `cat` is exact
 
@@ -561,31 +483,28 @@ A' = \begin{bmatrix} c_1 A_1 \\ c_2 A_2 \end{bmatrix}, \qquad
 B'A' = c_1B_1A_1 + c_2B_2A_2
 $$
 
-Block multiplication has no cross terms. The cost is rank: two rank-16 adapters give a
-rank-32 adapter, and ten give rank 160. That matters for serving (vLLM's
-`max_lora_rank`, see [module 20](./20-production-serving-and-cost.md)). `cat` merges
-adapters of **different ranks** without complaint.
+Block multiplication has no cross terms. The cost is rank: two rank-16 adapters give
+rank 32, and ten give rank 160, which matters for serving (vLLM's `max_lora_rank`, see
+[module 20](./20-production-serving-and-cost.md)). `cat` also merges adapters of
+**different ranks**.
 
 ### `svd` is exact up to the rank you keep
 
 `svd` forms the exact sum $\Delta = \sum_i c_iB_iA_i$ and refactorises it with a truncated SVD,
 $\Delta \approx U_k\Sigma_kV_k^\top$, setting $B' = U_k\Sigma_k$ and $A' = V_k^\top$. The rank
-of $\Delta$ is at most $\sum_i r_i$. Keep that many singular values and the result is exact.
-Keep fewer, and Eckart–Young says the truncation is the best possible rank-$k$
-approximation, with spectral-norm error exactly $\sigma_{k+1}$ and Frobenius error
-$\sqrt{\sum_{j>k}\sigma_j^2}$ (recap: [linear algebra notes](../../notes/math/linear-algebra.md)).
-PEFT's default `svd_rank` is the maximum input rank, so merging two rank-4 adapters
-with `svd` silently truncates a rank-8 sum to rank 4. Pass `svd_rank` explicitly. The
-SVD runs per target module on $d_{out}\times d_{in}$ matrices, which is slower than
-`cat` but still CPU-feasible.
+of $\Delta$ is at most $\sum_i r_i$; keep that many singular values and the result is exact.
+Keep fewer, and Eckart–Young makes the truncation the best rank-$k$ approximation, with
+spectral-norm error $\sigma_{k+1}$ and Frobenius error $\sqrt{\sum_{j>k}\sigma_j^2}$
+(recap: [linear algebra notes](../../notes/math/linear-algebra.md)). PEFT's default
+`svd_rank` is the maximum input rank, so merging two rank-4 adapters silently truncates
+a rank-8 sum to rank 4: pass `svd_rank` explicitly. The per-module SVD is slower than
+`cat` but CPU-feasible.
 
 ### Check 18.4: `cat` is exact, `linear` is not, `svd` obeys Eckart–Young
 
-This check builds two rank-4 LoRAs on a 16×12 weight with weights 0.5/0.5 and scaling 1
-($\alpha = r$). It verifies that PEFT's `cat` construction reproduces
-$0.5B_1A_1 + 0.5B_2A_2$ exactly with rank 8, that `linear`'s product differs by exactly
-the stated cross term, and that SVD re-compression is exact at rank 8 with error
-$\sigma_5$ at rank 4.
+Two rank-4 LoRAs on a 16×12 weight, weights 0.5/0.5, scaling 1. PEFT's `cat` reproduces
+$0.5B_1A_1 + 0.5B_2A_2$ exactly at rank 8, `linear` differs by exactly the cross term,
+and SVD is exact at rank 8 with error $\sigma_5$ at rank 4.
 
 ```python finetuning-check
 import math
@@ -627,94 +546,74 @@ for k in (8, 4):
 print("LoRA cat/linear/svd combination verified")
 ```
 
-It does not cover the `ties`/`dare_*` adapter variants. Those apply sparsification to
-factor matrices, so their effect on $\Delta W$ has no closed form and has to be measured.
+It does not cover the `ties`/`dare_*` adapter variants: they sparsify factor matrices,
+so their effect on $\Delta W$ has no closed form and has to be measured.
 
 ### Merging a LoRA fine-tune with a full fine-tune
 
-mergekit merges full checkpoints. To merge a LoRA-tuned model with a fully fine-tuned
-one, first fold the adapter into a **bf16** copy of the base with `merge_and_unload()`
-and save it. Do not fold it into a 4-bit QLoRA base. Then merge the two full
-checkpoints with the original base as `base_model`. Going the other way
-(`mergekit-extract-lora` on the full fine-tune) lets you stay in adapter space, at the
-cost of the SVD truncation error from Check 18.4. The quantised-merge pitfall is
-[module 06](./06-lora-and-qlora.md)'s.
-
----
+Fold the adapter into a **bf16** copy of the base with `merge_and_unload()` (never a
+4-bit QLoRA base; [module 06](./06-lora-and-qlora.md)), then merge the two full
+checkpoints in mergekit with the original base as `base_model`. Or run
+`mergekit-extract-lora` on the full fine-tune and stay in adapter space, at the cost of
+the SVD truncation error from Check 18.4.
 
 ## 18.5 Merging as a tool
 
 ### Forgetting recovery
 
-Domain SFT usually costs general ability. The cheapest fix is to interpolate back:
-
-$$
-\theta(w) = w\,\theta_{\text{domain}} + (1-w)\,\theta_{\text{instruct}}, \qquad w \in [0.3, 0.7]
-$$
-
+Domain SFT usually costs general ability. The cheapest fix is to interpolate back,
+$\theta(w) = w\,\theta_{\text{domain}} + (1-w)\,\theta_{\text{instruct}}$ with $w \in [0.3, 0.7]$.
 If the domain model was fine-tuned *from* the instruct model, this is task arithmetic
-with $\lambda = w$ on the domain task vector: you shrink the domain update until general
+with $\lambda = w$ on the domain task vector: shrink the domain update until general
 ability returns, and measure how much domain gain survives. In the lab's toy run a
 fine-tune at 0.914 task accuracy and 0.691 generic accuracy becomes 0.695 and 0.844 at
 $w = 0.5$. Alexandrov et al. (2024) [Branch-and-Merge](https://arxiv.org/abs/2407.08699)
-build this into training: fine-tune on data subsets, merge iteratively, and they report
-less forgetting with matched or better target-language results for Bulgarian and German.
-Measuring forgetting and the other mitigations (replay, lower LR, KL) belong to
+build this into training (fine-tune on subsets, merge iteratively) and report less
+forgetting for Bulgarian and German with matched or better target-language results.
+Measuring forgetting and the other mitigations belong to
 [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md).
 
-The same move merges a **reasoning** model with a **domain** model when both descend
-from one base. Check the result's chat template and thinking-token handling before its
-scores. Across tokenizers, merging does not apply; cross-tokenizer transfer is a
-distillation problem ([module 14](./14-distillation-and-reasoning.md)).
+The same move merges a **reasoning** model with a **domain** model from one base; check
+the chat template and thinking-token handling before the scores. Across tokenizers,
+use distillation instead ([module 14](./14-distillation-and-reasoning.md)).
 
 ### Safety re-alignment
 
-Fine-tuning, even on benign data, can erode refusal behaviour (harmful fine-tuning
-attacks and defences are [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)'s).
-SafeMERGE (Djuhera et al. 2025, [arXiv 2503.17239](https://arxiv.org/abs/2503.17239))
-is a post-hoc fix. It compares each layer of the fine-tuned model against a
-safety-aligned reference and merges the two **only in layers that deviate from safe
-behaviour**, using a cosine-similarity criterion. Across four LLMs the authors report
-fewer harmful outputs than other defences with negligible or positive utility impact.
-The general lesson is that **merges can be layer-wise**. mergekit's `filter:` and
-per-slice parameters express the same idea by hand.
+Fine-tuning, even on benign data, can erode refusal behaviour
+([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)). SafeMERGE (Djuhera
+et al. 2025, [arXiv 2503.17239](https://arxiv.org/abs/2503.17239)) merges the fine-tune
+with a safety-aligned reference **only in layers that deviate from safe behaviour**, by
+a cosine-similarity criterion, and reports fewer harmful outputs across four LLMs with
+negligible or positive utility impact. Merges can be layer-wise; mergekit's `filter:`
+and per-slice parameters do the same by hand.
 
 ### Evolutionary merge search
 
-Choosing weights and densities per layer by hand does not scale. Akiba et al. (2024)
-[Evolutionary Optimization of Model Merging Recipes](https://arxiv.org/abs/2403.13187)
-(Sakana AI) search two spaces with an evolutionary algorithm, scored by a task eval:
+Akiba et al. (2024) [Evolutionary Optimization of Model Merging Recipes](https://arxiv.org/abs/2403.13187)
+(Sakana AI) search per-layer TIES/DARE densities and weights (**parameter space**) and
+which layer of which model a token passes through next (**data-flow space**) with an
+evolutionary algorithm scored by a task eval. Their merged Japanese math LLM reached
+state-of-the-art results on Japanese benchmarks, surpassing much larger models.
+mergekit packages the parameter-space half as `mergekit-evolve`. The search fits its
+**fitness set** as hard as gradient descent fits a train set, so report on a separate
+held-out test set ([module 09](./09-evaluating-fine-tuned-models.md)).
 
-- **Parameter space (PS):** per-layer TIES/DARE densities and weights.
-- **Data-flow space (DFS):** which layer of which model a token passes through next, a
-  searched frankenmerge.
-
-Their Japanese math LLM, merged from a Japanese LLM and English math models, is
-reported to reach state-of-the-art results on several Japanese LLM benchmarks,
-surpassing much larger models. mergekit packages the PS half as `mergekit-evolve`. The
-trap is the **fitness set**: the search fits it as hard as gradient descent fits a
-train set, so report on a separate held-out test set
-([module 09](./09-evaluating-fine-tuned-models.md)).
-
-### Upcycling and layer duplication
-
-Merging can also *grow* a model. LLaMA Pro (Wu et al. 2024,
-[arXiv 2401.02415](https://arxiv.org/abs/2401.02415)) interleaves copies of existing blocks
-with zero-initialised output projections and trains only the new blocks. PEFT exposes
-the duplication as `layer_replication`. These are training methods, owned by
-[module 07](./07-the-wider-peft-landscape.md). Passthrough frankenmerges are their
-untrained cousins.
+**Upcycling.** LLaMA Pro (Wu et al. 2024, [arXiv 2401.02415](https://arxiv.org/abs/2401.02415))
+grows a model by interleaving copied blocks with zero-initialised output projections
+and training only those; PEFT exposes it as `layer_replication`
+([module 07](./07-the-wider-peft-landscape.md)). Passthrough frankenmerges are the
+untrained version.
 
 ### Dynamic composition at inference
 
-A static merge picks one point for every request. The alternative keeps adapters
+A static merge picks one point for every request. Dynamic composition keeps adapters
 separate and composes them per request:
 
 | Approach | What happens per request | Cost | Where |
 |---|---|---|---|
 | Static merge | one merged model, no choice | zero overhead | this module |
 | Per-request adapter switching | the router (or the user) names an adapter. The server batches requests for different adapters over one base | adapter memory, rank-bounded kernels | vLLM multi-LoRA ([inference course](/courses/inference/07-architectures/07-05-lora-and-pooling-models.html), [module 20](./20-production-serving-and-cost.md)) |
-| Learned routing over a LoRA library | per token and layer, a router weights the top-$k$ adapters (Arrow: Ostapenko et al. 2024, [arXiv 2405.11157](https://arxiv.org/abs/2405.11157)) | extra router compute, all adapters resident | PEFT `ArrowConfig` ([module 07](./07-the-wider-peft-landscape.md)) |
+| Learned routing over a LoRA library | per token and layer, a router weights the best-matching adapters (Arrow: Ostapenko et al. 2024, [arXiv 2405.11157](https://arxiv.org/abs/2405.11157)) | extra router compute, all adapters resident | PEFT `ArrowConfig` ([module 07](./07-the-wider-peft-landscape.md)) |
 | Mixture of LoRA experts | a trained gate mixes adapter outputs per token | gate training, all adapters resident | research code, MoE-style |
 
 Merge statically when tasks are few and known and serving simplicity matters. Compose
@@ -724,14 +623,13 @@ dynamically when tasks conflict too much to share weights, or when skills come a
 
 ## 18.6 Evaluating merges
 
-**A merge is a hyperparameter search with no training signal.** Every knob changes
-the model, and nothing during the merge tells you whether it helped. Evaluate it like
-any model change ([module 09](./09-evaluating-fine-tuned-models.md)):
+**A merge is a hyperparameter search with no training signal.** Evaluate it like any
+model change ([module 09](./09-evaluating-fine-tuned-models.md)):
 
-1. **Per-task metrics** on held-out sets for every input task (GSM8K for math, MBPP or
-   HumanEval for code, the support-email golden set for extraction).
-2. **General ability**: IFEval, a knowledge benchmark, and a safety refusal set. Run
-   these on the base, each single-task model, and the merge.
+1. **Per-task metrics** on held-out sets for every input task (GSM8K, MBPP or
+   HumanEval, the support-email golden set).
+2. **General ability** (IFEval, a knowledge benchmark, a safety refusal set) on the
+   base, each single-task model, and the merge.
 3. **Format checks**: does the merged model still emit EOS, use the chat template, and
    respect the thinking toggle? Mixed lineages break these first.
 4. **Sensitivity sweeps**: `density` ∈ {0.2, 0.5, 0.8} × `weight` or `lambda` ∈
@@ -741,27 +639,21 @@ any model change ([module 09](./09-evaluating-fine-tuned-models.md)):
 
 ### Interference diagnostics
 
-Before running evals you can predict trouble from the task vectors themselves.
-
 | Diagnostic | Definition | Reading |
 |---|---|---|
 | Cosine similarity | $\cos(\tau_i, \tau_j)$ per layer | near 0: mostly independent updates, merges well. Strongly negative: the tasks undo each other |
 | Sign-conflict rate | fraction of coordinates, among those both trimmed vectors keep, with opposite signs | high rates predict losses for task arithmetic. TIES exists for this case |
 | Norm ratio | $\lVert\tau_i\rVert / \lVert\tau_j\rVert$ per layer | one task dominating a layer will win every sign election there |
-| Distance from base | $\lVert\tau_i\rVert / \lVert\theta_0\rVert$ | large values (long training, high LR) leave the basin, and merging degrades |
+| Distance from base | $\lVert\tau_i\rVert / \lVert\theta_0\rVert$ | large values suggest the fine-tune may have left the basin; confirm with the interpolation test below rather than a fixed cutoff |
 
 Yadav et al. show sign conflicts rise as you merge more models and as you trim less
-(their Fig. 4 and Appendix B.3). Xiong et al. (2024)
-[Adaptive Weight Disentanglement](https://arxiv.org/abs/2411.18729) argue that
-interference is minimised when task vectors are **orthogonal**, which is why cosine
-similarity is the first number to compute. The 2026 survey by Song and Zheng
-([arXiv 2603.09938](https://arxiv.org/abs/2603.09938)) catalogues the newer methods and
-benchmarks if you need to go past TIES and DARE.
+(their Fig. 4 and Appendix B.3). Xiong et al. (2024) [Adaptive Weight Disentanglement](https://arxiv.org/abs/2411.18729)
+argue interference is minimised when task vectors are **orthogonal**, so compute cosine
+first. Song and Zheng's 2026 survey ([arXiv 2603.09938](https://arxiv.org/abs/2603.09938))
+catalogues methods past TIES and DARE.
 
 ### When merging fails
 
-- **No shared base.** Different pretrained checkpoints, or a vocabulary resized in one
-  fine-tune but not the other. The fix is not a better method. Do not merge.
 - **Fine-tunes too far from the base.** Long runs at high LR, or full fine-tunes on
   large corpora, drift out of the basin. Learning rate is the main knob on that
   distance ([optimisation notes](../../notes/deep-learning/optimization-and-training.md)).
@@ -769,131 +661,106 @@ benchmarks if you need to go past TIES and DARE.
 - **Genuinely conflicting objectives.** Two tasks that need opposite behaviour from the
   same inputs (terse versus verbose, refuse versus comply) cannot both survive in one
   set of weights. Route instead (18.5).
-- **Template and special-token mismatches.** Weights merge; the model emits the wrong
-  end-of-turn token.
-- **Unmeasured general regressions.** Task metrics rise while IFEval or the safety set
-  quietly drop, which is why item 2 is not optional.
+
+The other failures were covered above: no shared base (18.1, including a vocabulary
+resized in only one fine-tune), template and special-token mismatches (item 3), and
+unmeasured general regressions (item 2).
 
 ---
 
 ## 18.7 Provenance and licensing
 
-Merging launders lineage. "Merge of X and Y" hides that X was itself a merge of three
-models, one trained on data with restrictive terms. Treat parents like software
-dependencies:
+Merging launders lineage: "merge of X and Y" hides that X merged three models, one
+trained on restrictive data. Treat parents like software dependencies. Fingerprints and
+watermarks can survive a merge degraded, so a merge is not anonymous (and yours may not survive another's merge).
 
-- **License propagation.** A merge is a derivative of every parent. In practice **the
-  most restrictive parent's terms bind the merge**: a non-commercial parent makes the
-  merge non-commercial, and acceptable-use policies and attribution or naming
-  requirements carry over. Check each parent's license *and* each parent's training-data
-  terms, including terms on outputs of proprietary models
-  ([module 01](./01-when-to-fine-tune.md)). This is engineering guidance, not legal
-  advice. When the stakes are commercial, ask counsel.
-- **Recursive provenance.** Walk the tree. Hub model cards often list `base_model` in
-  metadata. Follow it to the leaves and record what you find.
-- **Fingerprints and watermarks.** A parent's weight-space fingerprint or output
-  watermark can survive merging in degraded form, so a merge is not anonymous; equally,
-  your own watermark may not survive someone else's merge.
+- **License propagation.** A merge is a derivative of every parent, so **the most
+  restrictive parent's terms bind it**: non-commercial, acceptable-use, attribution
+  and naming terms carry over. Check each parent's license *and* training-data terms,
+  including terms on outputs of proprietary models ([module 01](./01-when-to-fine-tune.md)).
+  This is engineering guidance, not legal advice.
+- **Recursive provenance.** Follow each model card's `base_model` metadata to the
+  leaves and record what you find.
 - **Document the recipe.** Put the exact mergekit YAML or `add_weighted_adapter` call,
-  the base revision, every parent's revision, the tool version, and the evaluation sweep
-  in the model card. mergekit writes a basic `README.md` card by default. Extend it
-  with evaluation and safety results ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)).
+  every base and parent revision, the tool version, and the evaluation sweep in the
+  model card; extend mergekit's default `README.md` with evaluation and safety results
+  ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)).
 
 ---
 
 ## 18.8 Lab: merge a math and a code LoRA, then recover general ability
 
-**Goal.** Merge two task adapters on one base with linear, TIES and DARE-TIES (PEFT and
-mergekit), measure both tasks and general ability, then trace the
-domain-versus-general curve of an instruct-recovery merge.
-
-**Tiers.** Merging runs on CPU. Evaluation runs on T0 (T4 16 GB, fp16) for 0.6B/1.7B
-models. The 4B recovery sweep in L18.2 needs T1 (24 GB, bf16).
-
+**Goal.** Merge two adapters on one base with linear, TIES and DARE-TIES, measure both
+tasks and general ability, then trace an instruct-recovery curve. **Tiers.** Merging
+runs on CPU. Evaluating 0.6B/1.7B models runs on T0 (T4 16 GB): pass `--dtype float16`,
+since bf16 needs Ampere or newer. The 4B recovery sweep needs T1 (24 GB, bf16).
 **Script.** [`merge_lab.py`](./code/merge_lab.py).
 
 ```bash
 python content/courses/finetuning/code/merge_lab.py --smoke
 python content/courses/finetuning/code/merge_lab.py --full \
-    --base Qwen/Qwen3-1.7B --math-adapter ./out/math-lora \
-    --code-adapter ./out/code-lora --out ./merges/
+  --base Qwen/Qwen3-1.7B --math-adapter ./out/math-lora \
+  --code-adapter ./out/code-lora --out ./merges/
 ```
 
-### Step 1: the CPU smoke run
-
-`--smoke` implements every method here in pure torch on state dicts. It pretrains a
-small MLP on a generic task, fine-tunes two copies from that base on tasks A and B,
-and scores every merge on A, B and the generic task in a few CPU seconds (digits vary
-by torch version):
+**Step 1: the CPU smoke run.** `--smoke` implements every method here in pure torch: it
+pretrains a small MLP on a generic task, fine-tunes two copies on tasks A and B, and
+scores every merge in a few CPU seconds (abridged; digits vary by torch version):
 
 ```text
-model                           A      B    gen  joint
-ft_A                        0.914  0.116  0.691  0.515
-ft_B                        0.170  0.908  0.704  0.539
-linear 0.5/0.5              0.672  0.623  0.780  0.647
-task_arith lam=1            0.723  0.711  0.601  0.717
-ties d=0.5 lam=1            0.762  0.725  0.698  0.743
-dare_ties p=0.5             0.684  0.579  0.647  0.632
-linear, different inits     0.539  0.477  0.695  0.508
+model                       A      B    gen  joint
+base                    0.179  0.126  0.916  0.153
+ft_A                    0.914  0.116  0.691  0.515
+ft_B                    0.170  0.908  0.704  0.539
+linear 0.5/0.5          0.672  0.623  0.780  0.647
+task_arith lam=1        0.723  0.711  0.601  0.717
+ties d=0.5 lam=1        0.762  0.725  0.698  0.743
+dare_ties p=0.5         0.684  0.579  0.647  0.632
+linear, different inits 0.539  0.477  0.695  0.508
 ```
 
-It asserts that TIES beats the single-task models' average joint score by a clear
-margin, that a merge across *different* inits is worse than one from the shared base,
-that the recovery sweep trades task-A for generic accuracy between its endpoints, and
-the Check 18.4 identities. Read the table critically. Linear averaging halves each
-update. Task arithmetic keeps full updates but costs generic accuracy. DARE trails TIES
-because this toy's deltas are large and few, the opposite of the LLM SFT regime Yu et
-al. studied.
+It asserts that TIES beats the single-task average joint score, that a merge across
+*different* inits is worse than one from the shared base, that the recovery sweep
+trades task A for generic accuracy, and the Check 18.4 identities. The base row shows
+the forgetting (generic 0.916 → about 0.69). DARE trails TIES here, plausibly because
+this toy's deltas are large and few, the opposite of the LLM SFT regime Yu et al.
+studied; the script does not test that explanation.
 
-### Step 2: train or fetch the adapters (L18.1)
+**Step 2: adapters (L18.1).** Train two LoRAs on the **same** base with the
+[module 06](./06-lora-and-qlora.md) recipe (`target_modules="all-linear"`, equal `r` if
+you want `linear` and `ties`) on 2–5k examples each of
+[`openai/gsm8k`](https://huggingface.co/datasets/openai/gsm8k) and
+[`google-research-datasets/mbpp`](https://huggingface.co/datasets/google-research-datasets/mbpp).
+To exercise the tooling without training, use the PEFT guide's public TinyLlama
+adapters (`smangrul/tinyllama_lora_norobots`, `_sql`, `_adcopy`). They were trained with
+an embedding table resized to 32,005 tokens, so the base must be resized before
+loading them, as the PEFT guide does: pass
+`--base TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T --resize-vocab 32005`.
 
-Train two LoRAs on the **same** base with the recipe from
-[module 05](./05-supervised-fine-tuning.md) and [module 06](./06-lora-and-qlora.md)
-(`target_modules="all-linear"`, same `r` for both if you want to try `linear` and
-`ties`). Use a 2–5k example subset of GSM8K
-([`openai/gsm8k`](https://huggingface.co/datasets/openai/gsm8k)) for math and of MBPP
-([`google-research-datasets/mbpp`](https://huggingface.co/datasets/google-research-datasets/mbpp))
-or another permissively licensed code-instruction set for code. Qwen3-1.7B fits on T0.
-To skip training and just exercise the tooling, the PEFT guide's three public TinyLlama
-adapters (`smangrul/tinyllama_lora_norobots`, `_sql`, `_adcopy`) share one base.
+**Step 3: merge and evaluate.** `--full` builds `linear`, `cat`, `svd`, `ties` and
+`dare_ties` adapters with `add_weighted_adapter`, folds each into a fresh base, saves
+each single-task model, and writes `ties.yml` so you can compare adapter-level TIES (on
+factors) with checkpoint-level TIES (on $\Delta W$). Run the printed `mergekit-yaml`
+command, then the printed `lm_eval` command
+([v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/tree/v0.4.13)) on base,
+singles and every merge; on T0 it must say `dtype=float16`, not `bfloat16`. MBPP
+executes generated code (`--confirm_run_unsafe_code`), so run it in a sandbox.
 
-### Step 3: merge with PEFT and mergekit
-
-`--full` builds `linear`, `cat`, `svd`, `ties` and `dare_ties` adapters with
-`add_weighted_adapter`, folds each into a fresh bf16 base, and saves it. It also saves
-each single-task model as a full checkpoint and writes `ties.yml` for mergekit, so
-you can compare adapter-level TIES (on factors) with checkpoint-level TIES (on
-$\Delta W$). Run the printed `mergekit-yaml` command.
-
-### Step 4: evaluate
-
-Score base, singles and every merge with lm-evaluation-harness
-([v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/tree/v0.4.13)):
+**Step 4: recover general ability (L18.2).** Given only `--domain` and `--instruct`,
+`--full` skips the adapter block and writes linear mergekit configs at
+$w \in \{0.3, 0.4, 0.5, 0.6, 0.7\}$ for a domain SFT of Qwen3-4B against the original:
 
 ```bash
-lm_eval --model hf --model_args pretrained=./merges/peft-ties,dtype=bfloat16 \
-    --tasks gsm8k,mbpp,ifeval --confirm_run_unsafe_code --batch_size auto \
-    --output_path ./merges/peft-ties/eval
+python content/courses/finetuning/code/merge_lab.py --full \
+  --domain ./out/qwen3-4b-domain --instruct Qwen/Qwen3-4B --out ./merges-4b/
 ```
 
-MBPP executes generated code, which is why the harness requires
-`--confirm_run_unsafe_code`. Run it in a sandboxed machine.
-
-### Step 5: recover general ability (L18.2)
-
-Pass a domain SFT of Qwen3-4B (instruct) as `--domain` and the original as
-`--instruct`. The script writes linear mergekit configs at
-$w \in \{0.3, 0.4, 0.5, 0.6, 0.7\}$. Plot domain metric against IFEval, endpoints
-included.
-
-**Record:** a table of every candidate × {GSM8K, MBPP pass@1, IFEval, domain metric},
-the TIES `density` sweep, and the recovery curve.
-
-**Expected outcome (qualitative).** Merges keep most, not all, of each single-task
-gain; TIES or DARE-TIES beat linear averaging when the adapters conflict; `linear`
-adapter combination trails `cat` and `svd`. The recovery curve is roughly monotone
-with a knee where most of the IFEval loss returns at modest domain cost. If a merge
-beats both parents on their own tasks, rule out contamination and seed luck first.
+**Record** every candidate × {GSM8K, MBPP pass@1, IFEval, domain metric}, the TIES
+`density` sweep, and the recovery curve (domain metric vs IFEval, with endpoints).
+**Expected:** merges keep most of each single-task gain; TIES or DARE-TIES beat linear
+averaging when adapters conflict; `linear` trails `cat` and `svd`; the recovery curve
+has a knee where most IFEval loss returns at modest domain cost. A merge that beats
+both parents on their own tasks needs contamination and seed luck ruled out first.
 
 ---
 
@@ -903,20 +770,16 @@ beats both parents on their own tasks, rule out contamination and seed luck firs
   linearly connected basin; independent inits do not, because of permutation symmetry.
 - **A task vector is $\theta_{\text{ft}} - \theta_0$.** Add to combine skills, negate to
   remove a behaviour, and treat $\lambda$ as a real hyperparameter.
-- **Linear averaging dilutes.** A uniform soup of $n$ different-task models is task
-  arithmetic with $\lambda = 1/n$; soups shine for same-task fine-tunes.
-- **SLERP preserves norm for exactly two models.** The lerp midpoint of unit vectors at
-  angle $\Omega$ shrinks to $\cos(\Omega/2)$.
+- **Linear averaging dilutes; SLERP preserves norm.** A uniform soup of $n$
+  different-task models is task arithmetic with $\lambda = 1/n$, and the lerp midpoint of
+  unit vectors at angle $\Omega$ shrinks to $\cos(\Omega/2)$; SLERP avoids that for two models.
 - **TIES = trim, elect sign by summed mass, disjoint mean.** Small updates and sign
   conflicts stop cancelling the updates that matter.
 - **DARE is unbiased but high-variance.** Survivors scale by $1/(1-p)$, variance is
   $\tau^2 p/(1-p)$, so it needs tiny, redundant deltas like LLM SFT's.
 - **PEFT `linear` is not the sum of updates.** Cross terms $\sqrt{c_1c_2}(B_1A_2+B_2A_1)$
   appear; `cat` is exact at summed rank; `svd` is exact up to `svd_rank`, so set it.
-- **PEFT `ties`/`dare_*` on adapters act on factors.** Use `*_svd` variants or mergekit
-  on merged checkpoints for TIES on $\Delta W$.
-- **mergekit is the standard full-model tool.** YAML, lazy CPU merges, tokenizer
-  control, LoRA extraction, evolutionary search; LGPL-3.0 again since v0.1.4.
+  `ties`/`dare_*` act on factors, so use `*_svd` or mergekit for TIES on $\Delta W$.
 - **Merging is a forgetting and safety tool.** Interpolating back to the instruct model
   ($w$ 0.3–0.7) trades domain gain for general ability; layer-wise merges restore safety.
 - **A merge is unvalidated until you sweep.** Per-task and general metrics over

@@ -11,7 +11,8 @@ Smoke mode (CPU, torch only, < 10 s):
 
 Full mode (tier T1: one 24 GB GPU; vLLM 0.31.x, PEFT 0.21.x, Transformers v5):
   launches `vllm serve` on 127.0.0.1 with three adapters, benchmarks mixed-adapter
-  throughput, loads a fourth adapter at runtime (local only: runtime loading lets
+  throughput on module 01's eval rows (system prompt + email, thinking off), loads
+  a fourth adapter at runtime (local only: runtime loading lets
   any API caller load arbitrary weights), and benchmarks a merged model.
 
 Run (from the repository root):
@@ -109,7 +110,7 @@ def simulate_cache(n_adapters, max_loras, max_cpu_loras, n_steps=2000, batch=16,
     return {k: v / total for k, v in hits.items()}, rounds / n_steps
 
 
-def smoke():
+def smoke(eval_jsonl=None):
     batched_lora_check()
     results = {}
     for max_loras, max_cpu in [(1, 8), (4, 8), (4, 64), (8, 64), (8, 200)]:
@@ -122,25 +123,40 @@ def smoke():
     assert results[(8, 200)][0]["disk"] <= results[(8, 64)][0]["disk"]
     assert results[(8, 64)][1] < results[(4, 64)][1] < results[(1, 8)][1]
     assert results[(8, 200)][0]["disk"] < 0.15        # 200 adapters all fit in host cache: only cold loads
+    if eval_jsonl:
+        rows = load_eval(eval_jsonl)
+        assert all(messages(r)[1]["content"] == r["email"] for r in rows)
+        print("eval file %s: %d rows conform to {id, email, gold}" % (eval_jsonl, len(rows)))
     print("smoke: batched multi-LoRA and cache simulator verified")
 
 
 # ------------------------------------------------------------------------------ full
-def load_prompts(path):
-    """Read module 01's eval JSONL; accept common field names for the input text."""
-    prompts = []
-    with open(path) as f:
+FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
+SYSTEM_PROMPT = (
+    "You extract structured data from customer support emails. Reply with one JSON "
+    "object and nothing else, with exactly these keys: "
+    '"customer_name" (string), '
+    '"order_id" (string: "ORD-" followed by the five-digit order number, e.g. "ORD-04217"), '
+    '"issue_type" (one of "refund", "shipping", "defect", "account", "other"), '
+    '"refund_requested" (true or false), '
+    '"sentiment" (one of "positive", "neutral", "negative").'
+)
+
+
+def load_eval(path):
+    """Read module 01's eval.jsonl: rows of exactly {id, email, gold}."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
         for line in f:
-            if not line.strip():
-                continue
             row = json.loads(line)
-            for key in ("prompt", "email", "input", "text"):
-                if key in row:
-                    prompts.append(row[key] if isinstance(row[key], str) else json.dumps(row[key]))
-                    break
-            else:
-                raise KeyError("no prompt-like field in %s" % sorted(row))
-    return prompts
+            assert set(row) == {"id", "email", "gold"}, sorted(row)
+            assert list(row["gold"]) == FIELDS, row["id"]
+            rows.append(row)
+    return rows
+
+
+def messages(row):
+    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": row["email"]}]
 
 
 def full(args):
@@ -150,7 +166,7 @@ def full(args):
     import urllib.request
     from concurrent.futures import ThreadPoolExecutor
 
-    prompts = load_prompts(args.eval_jsonl)
+    rows = load_eval(args.eval_jsonl)
     url = "http://127.0.0.1:%d" % args.port
 
     def post(path, body):
@@ -173,10 +189,10 @@ def full(args):
             t = time.time()
             r = post("/v1/chat/completions", {
                 "model": models[i % len(models)], "temperature": 0, "max_tokens": 256,
-                "messages": [{"role": "user", "content": prompts[i % len(prompts)]}],
+                "messages": messages(rows[i % len(rows)]),
                 "chat_template_kwargs": {"enable_thinking": False}})
             return time.time() - t, r["usage"]["completion_tokens"]
-        n = max(len(prompts), conc * 4)
+        n = max(len(rows), conc * 4)
         t0 = time.time()
         with ThreadPoolExecutor(conc) as ex:
             res = list(ex.map(one, range(n)))
@@ -209,7 +225,7 @@ def full(args):
             post("/v1/unload_lora_adapter", {"lora_name": name})
         base_out = post("/v1/chat/completions", {
             "model": args.base, "temperature": 0, "max_tokens": 128,
-            "messages": [{"role": "user", "content": prompts[0]}]})
+            "messages": messages(rows[0]), "chat_template_kwargs": {"enable_thinking": False}})
         print("negative control (base, no adapter):", base_out["choices"][0]["message"]["content"][:200])
     finally:
         proc.terminate()
@@ -234,7 +250,9 @@ def main():
     p.add_argument("--adapters", nargs="+", default=[], help="name=path entries")
     p.add_argument("--dynamic", default=None, help="name=path to load at runtime")
     p.add_argument("--merged", default=None, help="merged model dir for comparison")
-    p.add_argument("--eval-jsonl", default="./ft_data/eval.jsonl")
+    p.add_argument("--eval-jsonl", default=None,
+                   help="module 01 eval.jsonl (full mode default: ./ft_data/eval.jsonl; "
+                        "with --smoke, also validates this file)")
     p.add_argument("--max-lora-rank", type=int, default=16)
     p.add_argument("--concurrency", type=int, nargs="+", default=[1, 8, 32])
     p.add_argument("--port", type=int, default=8000)
@@ -242,9 +260,10 @@ def main():
     if args.full:
         if len(args.adapters) < 1:
             p.error("--full needs --adapters")
+        args.eval_jsonl = args.eval_jsonl or "./ft_data/eval.jsonl"
         full(args)
     else:
-        smoke()
+        smoke(args.eval_jsonl)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,17 @@ Purpose
     Full mode adds parity with Hugging Face PEFT on a real model's q/v
     projections and the same merge experiment with real bitsandbytes NF4.
 
+Full-mode procedure
+    L6.1: load Qwen/Qwen3-0.6B in fp32, attach PEFT LoRA to q_proj/v_proj with
+          init_lora_weights=False (random A and B, so parity is not trivially
+          zero), copy lora_A/lora_B into LoRALinear layers, assert equal logits
+          within 1e-4, then check merge_and_unload(). Record the
+          print_trainable_parameters() line and the max logit difference.
+    L6.4: (CUDA + bitsandbytes) compare a 4-bit QLoRA model against path A
+          (dequantise the NF4 base to bf16, load the adapter, merge_and_unload())
+          and path B (merge_and_unload() on the 4-bit model). Record both mean
+          logit errors and sample a few generations from each.
+
 Hardware
     --smoke: any CPU, under a minute, stdlib + torch only, no downloads.
     --full:  L6.1 parity runs on CPU or a free T4 (T0) with Qwen/Qwen3-0.6B;
@@ -279,9 +290,9 @@ def smoke():
         err_b = (path_b(probe) - reference).abs().max().item()
     assert err_b > 10 * err_a, (err_a, err_b)
     assert sum(cos) / len(cos) < 0.9, cos
-    print(f"[5] merge error vs QLoRA reference: bf16 copy {err_a:.2e}, re-quantized NF4 {err_b:.2e} "
+    print(f"[5] merge error vs QLoRA reference: bf16 copy {err_a:.2e}, re-quantised NF4 {err_b:.2e} "
           f"({err_b / err_a:.0f}x)\n    mean ||delta||/||W0|| = {sum(ratios) / len(ratios):.3f}; "
-          f"mean cos(delta kept after re-quantization, delta) = {sum(cos) / len(cos):.2f}")
+          f"mean cos(delta kept after re-quantisation, delta) = {sum(cos) / len(cos):.2f}")
 
     print(f"smoke OK in {time.time() - t0:.1f}s")
 

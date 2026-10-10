@@ -4,22 +4,26 @@ Module: 17 — Long-Context Extension and Long-Sequence Training.
 
 Purpose
     --smoke (CPU; also the default when --full is not given): build the RoPE frequency tables
-    for PI, NTK-aware scaling and YaRN for a given (base b, head dim d, factor s,
-    original context L), assert the module's worked numbers, and show on a tiny
+    for PI, NTK-aware scaling and YaRN for a given (base b, head dim d_head, factor s,
+    original context T0), assert the module's worked numbers, and show on a tiny
     attention layer that unscaled RoPE at 4x the trained length produces rotation
     angles and per-pair scores never seen in range, while PI-scaled RoPE stays in
     range. Uses only stdlib + torch.
     --full (tier T1, one 24 GB Ampere+ GPU): extend Qwen/Qwen3-1.7B with YaRN,
     run a short LoRA fine-tune with trainable embeddings and norms on long PG-19
-    books, then run a passkey (needle) sweep before and after.
+    books, then run a passkey (needle) sweep before and after. The trainable tied
+    embedding matrix (151,936 x 2,048 = 311M parameters, ~18% of the model) costs
+    about 5 GB at 16 bytes per trainable parameter; the script prints the count.
 
 Pinned versions for --full (as of October 2026): transformers>=5.0, trl>=1.15,
-peft>=0.18, datasets>=4.0, torch>=2.8 with CUDA. gradient-checkpointing offload
-(--offload) needs transformers>=5.17.
+peft>=0.18, datasets>=4.0, torch>=2.8 with CUDA. Gradient-checkpointing offload
+(--offload) needs transformers>=5.17; --tiled-mlp needs deepspeed>=0.18.1
+(deepspeed.runtime.sequence_parallel.ulysses_sp.TiledMLP).
 
 Run (from the repository root):
     python content/courses/finetuning/code/rope_scaling_lab.py --smoke
     python content/courses/finetuning/code/rope_scaling_lab.py --full --factor 4 --train-len 32768
+    python content/courses/finetuning/code/rope_scaling_lab.py --full --factor 4 --train-len 65536 --tiled-mlp
 """
 from __future__ import annotations
 
@@ -133,7 +137,7 @@ def smoke() -> None:
     # tiny attention layer: scores at 4x length, small d for speed
     rep = out_of_range_report(b, 16, s, 256)
     print("tiny attention (d=16, L=256, test to 4L):", rep)
-    assert rep["none"]["pairs_out_of_range"] > 0, "unscaled RoPE should leave the trained score range"
+    assert rep["none"]["pairs_out_of_range"] == 4, "unscaled RoPE should push 4 of 8 pairs out of range"
     assert rep["none"]["max_angle_ratio"] > 3.9
     assert rep["pi"]["pairs_out_of_range"] == 0, "PI-scaled scores should stay in range"
     assert rep["pi"]["max_angle_ratio"] <= 1.0
@@ -141,6 +145,25 @@ def smoke() -> None:
 
 
 # ---------------------------------------------------------------- full GPU lab
+def patch_tiled_mlp() -> None:
+    """Replace Qwen3MLP.forward with DeepSpeed's TiledMLP (ALST): the SwiGLU MLP runs over
+    ceil(T/d) sequence tiles in forward and backward, so only one tile's d_ff-wide
+    intermediates exist at a time. Exact. Single process here; under multi-rank sequence
+    parallelism, all-reduce the shard count to the max across ranks first."""
+    from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP
+    from transformers.models.qwen3 import modeling_qwen3
+
+    def mlp_fn(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    def tiled_forward(self, x):  # x: (B, T, d)
+        shards = math.ceil(x.shape[-2] / x.shape[-1])
+        params = [self.gate_proj.weight, self.up_proj.weight, self.down_proj.weight]
+        return TiledMLP.apply(mlp_fn, self, x, shards, params)
+
+    modeling_qwen3.Qwen3MLP.forward = tiled_forward
+
+
 def passkey_prompt(tok, filler: str, n_tokens: int, depth: float, key: str) -> str:
     ids = tok(filler, add_special_tokens=False)["input_ids"]
     while len(ids) < n_tokens:
@@ -194,8 +217,12 @@ def full(args) -> None:
     del base
     torch.cuda.empty_cache()
 
+    if args.tiled_mlp:
+        patch_tiled_mlp()
+    # max_position_embeddings at the extended length, so the saved config passes rule 1 of 17.8
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, device_map="cuda",
-                                                 rope_parameters=rope)
+                                                 rope_parameters=rope,
+                                                 max_position_embeddings=int(32768 * args.factor))
     print("== YaRN only, no fine-tune ==")
     passkey_sweep(model, tok, filler_text, eval_lengths)
 
@@ -206,6 +233,9 @@ def full(args) -> None:
         if "embed_tokens" in name or name.endswith("norm.weight"):
             p.requires_grad_(True)
     model.print_trainable_parameters()
+    n_emb = sum(p.numel() for n, p in model.named_parameters() if "embed_tokens" in n and p.requires_grad)
+    print(f"trainable embedding params: {n_emb / 1e6:.0f}M (tied with lm_head); "
+          f"~{n_emb * 16 / 1e9:.1f} GB at 16 bytes per trainable parameter")
 
     from datasets import Dataset
     ds = Dataset.from_dict({"text": rows})
@@ -241,6 +271,7 @@ def main() -> None:
     ap.add_argument("--num-books", type=int, default=2000)
     ap.add_argument("--eval-lengths", default="16384,32768,65536,98304")
     ap.add_argument("--offload", action="store_true")
+    ap.add_argument("--tiled-mlp", action="store_true", help="patch Qwen3MLP with DeepSpeed TiledMLP (needs deepspeed>=0.18.1)")
     ap.add_argument("--output-dir", default="/tmp/qwen3-1.7b-yarn")
     args = ap.parse_args()
     if args.full:

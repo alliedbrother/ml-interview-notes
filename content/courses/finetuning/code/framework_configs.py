@@ -16,7 +16,7 @@ Purpose
     --smoke : CPU only, stdlib only (no torch needed, no downloads). Writes all
               three artifacts to a temporary directory, asserts each contains the
               recipe's LR, rank and targets, asserts the schedule arithmetic of
-              Check 8.1, and runs the linter on a planted fixture.
+              module 08, section 8.2, and runs the linter on a planted fixture.
     --full  : prints the GPU commands for labs L8.1 (T0/T1) and L8.2 (T1 or
               Hugging Face Jobs). No GPU code runs inside this script.
     --out DIR : write the three artifacts to DIR instead of a temp directory.
@@ -206,7 +206,7 @@ def defaults_table() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Schedule arithmetic (Check 8.1)
+# Schedule arithmetic (module 08, section 8.2)
 # ---------------------------------------------------------------------------
 
 def schedule(n_examples: int, per_device: int, grad_accum: int, world: int, epochs: float,
@@ -232,7 +232,7 @@ def schedule(n_examples: int, per_device: int, grad_accum: int, world: int, epoc
 
 
 # ---------------------------------------------------------------------------
-# Stale-API linter (Check 8.3)
+# Stale-API linter (module 08, section 8.2)
 # ---------------------------------------------------------------------------
 
 STALE_KWARGS = {
@@ -368,7 +368,7 @@ def smoke(out_dir: str | None) -> None:
         assert "processing_class=tokenizer" in uns_src
         assert lint(uns_src) == []  # our own output passes our own linter
 
-        # Check 8.1 arithmetic: 10,000 examples, batch 4, accumulation 8, 2 GPUs, 3 epochs.
+        # Section 8.2 schedule arithmetic: 10,000 examples, batch 4, accumulation 8, 2 GPUs, 3 epochs.
         s = schedule(10_000, 4, 8, 2, 3, 0.03)
         assert (s["effective_batch"], s["micro_batches_per_rank"]) == (64, 1250)
         assert (s["steps_per_epoch"], s["total_steps"], s["warmup"]) == (157, 471, 15)
@@ -381,7 +381,7 @@ def smoke(out_dir: str | None) -> None:
                        r["epochs"], r["warmup_ratio"])
         assert (lab["effective_batch"], lab["total_steps"], lab["warmup"]) == (16, 125, 4)
 
-        # Check 8.3: the linter finds exactly the eight planted issues and nothing in clean code.
+        # 8.2 linter: the linter finds exactly the eight planted issues and nothing in clean code.
         issues = lint(FIXTURE_2024)
         assert len(issues) == 8, issues
         assert lint(FIXTURE_2026) == []

@@ -18,8 +18,11 @@ Hardware tier
              fallback) for a base model and a fine-tuned model / LoRA adapter on XSTest
              (CSV from the authors' GitHub repo pinned to a commit; prompts CC-BY-4.0), judges
              them with a guard model (allenai/wildguard via `pip install wildguard`; gated, Apache-2.0) and with
-             the keyword judge, and reports both. `--guard-preds` scores a JSONL of guard
-             predictions for L19.2.
+             the keyword judge, and reports both. `--train-sft` trains the L19.1 LoRA on
+             databricks/databricks-dolly-15k, optionally with a fraction of Bianchi et
+             al.'s safety examples mixed in. `--train-guard` trains the L19.2
+             sequence-classification LoRA guard and writes its test predictions;
+             `--guard-preds` scores such a predictions file.
 
 Pinned versions for the full lab (as of October 2026)
     Python 3.11+, torch 2.8+, transformers 5.x, peft 0.21.x, vllm (a release supported by
@@ -27,10 +30,15 @@ Pinned versions for the full lab (as of October 2026)
 
 Run commands (from the repository root)
     python content/courses/finetuning/code/safety_regression_eval.py --smoke
+    python content/courses/finetuning/code/safety_regression_eval.py --full --train-sft \
+        --safety-frac 0.0 --out-adapter runs/dolly-lora
+    python content/courses/finetuning/code/safety_regression_eval.py --full --train-sft \
+        --safety-frac 0.03 --out-adapter runs/dolly-safety-lora
     python content/courses/finetuning/code/safety_regression_eval.py --full \
         --base Qwen/Qwen3-4B-Instruct-2507 --adapter runs/dolly-lora \
-        --out results/safety
-    python content/courses/finetuning/code/safety_regression_eval.py --full \
+        --adapter runs/dolly-safety-lora --adapter qwen3-4b-json-sft --out results/safety
+    python content/courses/finetuning/code/safety_regression_eval.py --full --train-guard \
+        --guard-train data/guard_train.jsonl --guard-test data/guard_test.jsonl \
         --guard-preds results/guard_preds.jsonl
 """
 
@@ -248,10 +256,100 @@ def guard_refusals(prompts: list[str], responses: list[str]) -> list[bool]:
     return [res["response_refusal"] == "refusal" for res in guard.classify(items)]
 
 
+BIANCHI_SAFETY_JSON = ("https://raw.githubusercontent.com/vinid/safety-tuned-llamas/"
+                       "36a4b8d5c2177ed165bf61f59b590161394f7f12/data/training/"
+                       "safety_only_data_Instructions.json")
+
+
+def train_sft(args) -> None:
+    """L19.1: LoRA SFT on Dolly (Qi et al.'s benign set), optionally mixed with safety rows.
+
+    Safety rows: Bianchi et al. (2024) safety-tuned-llamas, 2,483 harmful instructions with
+    refusals (data CC-BY-NC-4.0: research use only), the source Qi et al. mixed in.
+    """
+    import json as _json
+    import urllib.request
+
+    import torch
+    from datasets import Dataset, concatenate_datasets, load_dataset
+    from peft import LoraConfig
+    from trl import SFTConfig, SFTTrainer
+
+    def pc(user, answer):
+        return {"prompt": [{"role": "user", "content": user}],
+                "completion": [{"role": "assistant", "content": answer}]}
+
+    dolly = load_dataset("databricks/databricks-dolly-15k", split="train").map(
+        lambda ex: pc(ex["instruction"] + ("\n\n" + ex["context"] if ex["context"] else ""),
+                      ex["response"]),
+        remove_columns=["instruction", "context", "response", "category"])
+    data = dolly
+    n_safe = round(args.safety_frac * len(dolly) / (1 - args.safety_frac)) if args.safety_frac else 0
+    if n_safe:
+        with urllib.request.urlopen(BIANCHI_SAFETY_JSON) as resp:
+            rows = _json.loads(resp.read().decode("utf-8"))
+        import random
+
+        rows = random.Random(0).sample(rows, n_safe)        # 3% of the mix is ~464 of 2,483
+        safety = Dataset.from_list([pc(r["instruction"] + ("\n\n" + r["input"] if r["input"] else ""),
+                                       r["output"]) for r in rows])
+        data = concatenate_datasets([dolly, safety]).shuffle(seed=0)
+    print(f"training on {len(dolly)} Dolly rows + {n_safe} safety rows -> {args.out_adapter}")
+    cfg = SFTConfig(output_dir=args.out_adapter, num_train_epochs=1, learning_rate=1e-4,
+                    per_device_train_batch_size=8, gradient_accumulation_steps=2, max_length=1024,
+                    model_init_kwargs={"dtype": torch.bfloat16}, logging_steps=20,
+                    save_strategy="no", report_to="none")
+    lora = LoraConfig(r=16, lora_alpha=32, target_modules="all-linear")
+    trainer = SFTTrainer(model=args.base, args=cfg, train_dataset=data, peft_config=lora)
+    trainer.train()
+    trainer.save_model(args.out_adapter)
+
+
+GUARD_LABELS = ["safe", "fraud", "harassment", "pii_exfiltration", "violence", "self_harm"]
+
+
+def train_guard(args) -> None:
+    """L19.2: Qwen3-0.6B + 6-way head + LoRA on your labelled {"text", "label"} JSONL files."""
+    import torch
+    from datasets import load_dataset
+    from peft import LoraConfig, get_peft_model
+    from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
+                              DataCollatorWithPadding, Trainer, TrainingArguments)
+
+    name = "Qwen/Qwen3-0.6B"
+    tok = AutoTokenizer.from_pretrained(name)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        name, num_labels=len(GUARD_LABELS), dtype=torch.bfloat16,
+        id2label=dict(enumerate(GUARD_LABELS)), label2id={l: i for i, l in enumerate(GUARD_LABELS)})
+    model.config.pad_token_id = tok.pad_token_id            # pool the last non-pad token
+    model = get_peft_model(model, LoraConfig(task_type="SEQ_CLS", r=16, lora_alpha=32,
+                                             target_modules="all-linear"))
+    ds = load_dataset("json", data_files={"train": args.guard_train, "test": args.guard_test})
+    ds = ds.map(lambda ex: {**tok(ex["text"], truncation=True, max_length=512),
+                            "labels": GUARD_LABELS.index(ex["label"])})
+    trainer = Trainer(model=model, args=TrainingArguments(
+                          output_dir="runs/guard", learning_rate=1e-4, num_train_epochs=3,
+                          per_device_train_batch_size=16, bf16=True, report_to="none",
+                          save_strategy="no"),
+                      train_dataset=ds["train"].remove_columns(["text", "label"]),
+                      data_collator=DataCollatorWithPadding(tok))
+    trainer.train()
+    logits = trainer.predict(ds["test"].remove_columns(["text", "label"])).predictions
+    os.makedirs(os.path.dirname(args.guard_preds) or ".", exist_ok=True)
+    with open(args.guard_preds, "w") as f:
+        for ex, row in zip(ds["test"], logits):
+            f.write(json.dumps({"label": ex["label"], "pred": GUARD_LABELS[int(row.argmax())]}) + "\n")
+    print("wrote", args.guard_preds)
+
+
 def full(args) -> None:
+    if args.train_sft:
+        return train_sft(args)
+    if args.train_guard:
+        train_guard(args)
     os.makedirs(args.out, exist_ok=True)
     if args.guard_preds:
-        labels = ["safe", "fraud", "harassment", "pii_exfiltration", "violence", "self_harm"]
+        labels = GUARD_LABELS
         conf = [[0] * len(labels) for _ in labels]
         with open(args.guard_preds) as f:
             for line in f:
@@ -263,7 +361,7 @@ def full(args) -> None:
 
     harmful, benign = load_xstest()
     prompts = harmful + benign
-    tags = [("base", None)] + ([("tuned", args.adapter)] if args.adapter else [])
+    tags = [("base", None)] + [(os.path.basename(a.rstrip("/")), a) for a in args.adapter]
     # Phase 1: generate everything (one model in memory), Phase 2: judge (guard in memory).
     responses = generate_all(args.base, tags, prompts)
     import gc
@@ -286,12 +384,14 @@ def full(args) -> None:
         with open(os.path.join(args.out, f"{tag}.jsonl"), "w") as f:
             for p, r, a, b in zip(prompts, responses[tag], judged_kw, judged_gd):
                 f.write(json.dumps({"prompt": p, "response": r, "kw": a, "guard": b}) + "\n")
-    if args.adapter:
+    for tag, _ in tags[1:]:                                  # each fine-tune vs the base
         for split in ("harmful", "benign_edgy"):
-            b = sum(x and not y for x, y in zip(paired[("base", split)], paired[("tuned", split)]))
-            c = sum(y and not x for x, y in zip(paired[("base", split)], paired[("tuned", split)]))
-            report[f"mcnemar/{split}"] = {"refused_then_complied": b, "complied_then_refused": c,
-                                          "p_exact": mcnemar_exact(b, c)}
+            base_r, tuned_r = paired[("base", split)], paired[(tag, split)]
+            b = sum(x and not y for x, y in zip(base_r, tuned_r))
+            c = sum(y and not x for x, y in zip(base_r, tuned_r))
+            report[f"mcnemar/{tag}/{split}"] = {"refused_then_complied": b,
+                                                "complied_then_refused": c,
+                                                "p_exact": mcnemar_exact(b, c)}
     print(json.dumps(report, indent=2))
     with open(os.path.join(args.out, "report.json"), "w") as f:
         json.dump(report, f, indent=2)
@@ -303,10 +403,21 @@ def main() -> None:
     mode.add_argument("--smoke", action="store_true", help="CPU fixture checks (default)")
     mode.add_argument("--full", action="store_true", help="T1 GPU generation + guard judging")
     ap.add_argument("--base", default="Qwen/Qwen3-4B-Instruct-2507")
-    ap.add_argument("--adapter", default=None, help="path to a LoRA adapter for the tuned model")
+    ap.add_argument("--adapter", action="append", default=[],
+                    help="LoRA adapter to compare with the base (repeatable)")
+    ap.add_argument("--train-sft", action="store_true", help="L19.1: Dolly LoRA SFT (+ safety mix)")
+    ap.add_argument("--safety-frac", type=float, default=0.0,
+                    help="fraction of the SFT mix drawn from Bianchi et al.'s safety rows")
+    ap.add_argument("--out-adapter", default="runs/dolly-lora")
+    ap.add_argument("--train-guard", action="store_true", help="L19.2: train the LoRA guard")
+    ap.add_argument("--guard-train", default="data/guard_train.jsonl",
+                    help="your labelled {'text','label'} JSONL")
+    ap.add_argument("--guard-test", default="data/guard_test.jsonl")
     ap.add_argument("--guard-preds", default=None, help="JSONL with 'label' and 'pred' fields (L19.2)")
     ap.add_argument("--out", default="results/safety")
     args = ap.parse_args()
+    if args.train_guard and not args.guard_preds:
+        args.guard_preds = "results/guard_preds.jsonl"
     if args.full:
         full(args)
     else:

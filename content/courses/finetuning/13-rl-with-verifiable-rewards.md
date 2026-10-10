@@ -106,7 +106,7 @@ its value is 1; it matters only when `beta != 0`
 ([`grpo_config.py` L967](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/grpo_config.py#L967-L978)).
 Background on KL: the [information-theory note](../../notes/math/information-theory.md).
 
-Check 13.4 confirms that $k_1$ and $k_3$ share a mean while $k_3$ is never negative and has far
+Check 13.1 confirms that $k_1$ and $k_3$ share a mean while $k_3$ is never negative and has far
 lower variance when the policies are close.
 
 ```python finetuning-check
@@ -124,7 +124,7 @@ r = ref[idx] / pi[idx]                                                # r = pi_r
 k1 = -r.log()
 k3 = (r - 1) - r.log()
 
-assert abs(k1.mean().item() - exact.item()) < 0.01
+assert abs(k1.mean().item() - exact.item()) < 2e-4
 assert abs(k3.mean().item() - exact.item()) < 0.01
 assert abs(k3.mean().item() - exact.item()) < 1e-3        # tighter: k3 is accurate here
 assert bool((k3 >= 0).all())                              # k3 never negative
@@ -202,7 +202,7 @@ contributes no gradient.** All-correct prompts are too easy, all-wrong ones too 
 generation compute is wasted. TRL logs the fraction as `frac_reward_zero_std`, and 13.10 is largely
 about keeping it low.
 
-Check 13.1 asserts the worked values, zero-sum, the zero-variance case, and the RLOO and Dr. GRPO
+Check 13.2 asserts the worked values, zero-sum, the zero-variance case, and the RLOO and Dr. GRPO
 variants.
 
 ```python finetuning-check
@@ -246,19 +246,6 @@ print("group advantages verified")
 The check is arithmetic only. It says nothing about whether $G=8$ can see a 3% pass rate; it cannot,
 since an 8-group is all-wrong with probability $0.97^8\approx0.78$.
 
-```mermaid
-flowchart LR
-    P["Prompt batch<br/>(prompt-only dataset)"] --> GEN["vLLM generate<br/>G completions each"]
-    GEN --> RW["Reward functions<br/>verifiers, format, length"]
-    RW --> ADV["Group advantages<br/>(r - mean) / std"]
-    GEN --> LP["Trainer recomputes<br/>token log-probs"]
-    ADV --> LOSS["Clipped surrogate<br/>token-aggregated loss"]
-    LP --> LOSS
-    LOSS --> OPT["Optimizer step"]
-    OPT --> SYNC["Weight sync<br/>to vLLM"]
-    SYNC --> GEN
-```
-
 Prompt-only dataset formats are in [module 04](./04-data-curation-and-synthesis.md). Sampling
 temperature defaults to 1.0; do not lower it to "improve quality", because diversity within the
 group *is* the signal (sampling parameters: [module 02](./02-tokens-templates-and-the-causal-lm-objective.md)).
@@ -290,7 +277,9 @@ from Qwen2.5-32B base with four changes:
    $\epsilon_{\text{high}}=0.28$. With symmetric clipping a token at probability 0.01 can only reach
    0.012 per step; the upper bound is what caps exploration, so raise it alone.
 3. **Dynamic sampling.** Drop all-equal groups and resample until the batch is full of informative
-   ones. TRL's paper index marks this **not supported** in `GRPOTrainer` (v1.15.0); difficulty
+   ones. The cost follows from 13.10's formula: at $p=0.01$ and $G=8$,
+   $0.99^8+0.01^8\approx0.923$ of groups are dropped, so filling a batch takes about 13× the
+   generation. TRL's paper index marks this **not supported** in `GRPOTrainer` (v1.15.0); difficulty
    filtering (13.10) gets you part of the way.
 4. **Overlong handling.** A truncated completion was cut off, not necessarily wrong. Mask it from
    the loss (`mask_truncated_completions=True`) or add a soft linear penalty near the cap
@@ -328,7 +317,7 @@ aggregation weight times $\hat A$:
 | `dr_grpo` ($L_{\max}=100$) | $1/200$ | $1/200$ | 10/200 vs 100/200 |
 
 Before the $1/G$ average, `grpo` gives $1/10$ vs $1/100$: **each wrong token is penalized ten times
-less than each right token is rewarded.** Check 13.2 measures these weights with autograd.
+less than each right token is rewarded.** Check 13.3 measures these weights with autograd.
 
 ```python finetuning-check
 import torch
@@ -376,10 +365,9 @@ steps. That needs a run (lab L13.2).
 length normalization change *which* prompts and tokens receive gradient. Those are biases in the
 update, and Dr. GRPO measured their effect on length.
 
-**"Longer responses mean better reasoning."** Length grows for at least three reasons: the model
-learns to check its work (good), `grpo` aggregation dilutes the penalty on long failures (artifact),
-or verbosity games a reward (hacking). Split length **by correctness** (log it with `log_metric`;
-TRL also logs `completions/mean_terminated_length`) and check that held-out accuracy moves with it.
+**"Longer responses mean better reasoning."** Length also grows when `grpo` aggregation dilutes the
+penalty on long failures, or when verbosity games a reward. Split length **by correctness** (log it
+with `log_metric`) and check that held-out accuracy moves with it.
 
 ---
 
@@ -402,10 +390,7 @@ the geometric mean of the token ratios. Qwen used it to stabilize RL on Qwen3 Mo
 `importance_sampling_level="sequence"` with `loss_type="grpo"` and the paper's tiny clip range
 (`epsilon=3e-4`, `epsilon_high=4e-4`), since a geometric mean moves far less than single ratios. It
 differs from GRPO only off-policy (`steps_per_generation > gradient_accumulation_steps` or
-`num_iterations > 1`). The experimental GSPO-token trainer was removed in v1.14. **GMPO**
-([Zhao et al., 2025](https://huggingface.co/papers/2507.20673)) also takes a geometric mean but
-clips each token in log space *before* averaging, tolerating a wider $(e^{-0.4},e^{0.4})$ band
-(`trl.experimental.gmpo`).
+`num_iterations > 1`). The experimental GSPO-token trainer was removed in v1.14.
 
 ### Clipping the weight, not the update: CISPO and SAPO
 
@@ -429,19 +414,14 @@ gradients fade instead of cutting off.
 | Objective | What it changes | Problem addressed | TRL (v1.15.0) |
 |---|---|---|---|
 | GSPO | sequence-level ratio (geometric mean), clipped per sequence | noisy token ratios, MoE instability | `importance_sampling_level="sequence"` |
-| GMPO | geometric mean of per-token *clipped* log ratios | outlier ratios; wider clip | `trl.experimental.gmpo.GMPOTrainer` |
 | CISPO | clip IS weight under stop-gradient; REINFORCE loss | clipped tokens lose all gradient | `loss_type="cispo"`, `epsilon_high≈5` |
 | SAPO | soft sigmoid gate instead of hard clip | brittle hard trust region | `loss_type="sapo"` |
-| LUSPO | GSPO with each sequence's loss scaled by its length | GSPO's bias against long responses | `loss_type="luspo"` + sequence level |
-| VESPO | smooth asymmetric Gamma weight $W^k e^{\lambda(1-W)}$ on the sequence ratio | staleness, mismatch | `loss_type="vespo"` |
 | GDPO | normalize **each reward function** per group, then sum | multi-reward advantage collapse | `multi_objective_aggregation="normalize_then_sum"` |
 | Lite PPO | group mean, batch std, token-level loss | robust critic-free scaling | `scale_rewards="batch"`, `loss_type="dapo"` |
-| OAR (A\*-PO) | regress $\beta\log(\pi/\pi_{\text{ref}})$ onto $r - V^*(x)$, one sample per prompt | group sampling cost | `trl.experimental.a2po` |
 | RLOO / REINFORCE++ | leave-one-out baseline / global batch normalization | variance without a critic | `RLOOTrainer` (stable) |
 
-Sources: the [TRL paper index](https://huggingface.co/docs/trl/v1.15.0/en/paper_index) (LUSPO
-[2602.05261](https://huggingface.co/papers/2602.05261), VESPO [2602.10693](https://huggingface.co/papers/2602.10693),
-GDPO [2601.05242](https://huggingface.co/papers/2601.05242), A\*-PO [2505.20686](https://huggingface.co/papers/2505.20686)).
+Sources: the [TRL paper index](https://huggingface.co/docs/trl/v1.15.0/en/paper_index), which lists
+more (GMPO, LUSPO, VESPO, A\*-PO); GDPO is [2601.05242](https://huggingface.co/papers/2601.05242).
 Treat the rows after GSPO as responses to a specific symptom, not defaults; most were shown on one or
 two model families. GDPO matters for the running task: summing a schema reward in $\{0,1\}$ with a
 field-accuracy reward in $\{0,0.2,\dots,1\}$ when nearly every sample is valid JSON makes the group
@@ -449,14 +429,12 @@ std almost all accuracy, so a rare schema failure barely registers. Normalizing 
 
 ### ScaleRL: what scales and what only speeds up
 
-[Khatri et al. (2025)](https://huggingface.co/papers/2510.13786), "The Art of Scaling RL Compute",
-spent over 400,000 GPU-hours on ablations and fit pass rate against compute with a sigmoid,
-$R_C - R_0 = (A - R_0)/(1 + (C_{\text{mid}}/C)^{B})$, where $A$ is the asymptote and $B$ the
-efficiency. They report that the loss type (CISPO and GSPO above DAPO), FP32 precision at the LM
-head, generation length and batch size raised $A$, while loss aggregation, advantage normalization,
-curriculum and the off-policy algorithm mostly changed $B$ (the split is not perfectly clean). The
-lesson: **a choice that wins at 1,000 GPU-hours may only reach the same ceiling sooner.** TRL
-approximates their recipe with `loss_type="cispo"`, `epsilon_high=5.0`, `scale_rewards="batch"`,
+[Khatri et al. (2025)](https://huggingface.co/papers/2510.13786) spent over 400,000 GPU-hours
+fitting pass rate against compute with a sigmoid whose asymptote $A$ is the ceiling and exponent $B$
+the efficiency. Loss type (CISPO and GSPO above DAPO), an FP32 LM head, generation length and batch
+size raised $A$; aggregation, normalization, curriculum and the off-policy algorithm mostly changed
+$B$. **A choice that wins at 1,000 GPU-hours may only reach the same ceiling sooner.** TRL's
+approximation: `loss_type="cispo"`, `epsilon_high=5.0`, `scale_rewards="batch"`,
 `num_generations=16`, `cast_lm_head_to_fp32=True`.
 
 ---
@@ -468,28 +446,26 @@ hundred steps, groups become identical, `frac_reward_zero_std` climbs, and learn
 an error. Clip-higher is the first defense. TRL adds:
 
 - **Entropy bonus:** `entropy_coef > 0` subtracts $\alpha\mathcal{H}$ (mean per-token entropy).
-- **Adaptive entropy** (Skywork-OR1): `use_adaptive_entropy=True` raises the coefficient by
-  `entropy_coef_delta` while entropy is at or below `entropy_target` and lowers it otherwise. The
-  default target of 0.2 nats almost never fires (LMs sit at 2–10 nats per token); set it near the
-  entropy you observe early on.
+- **Adaptive entropy** (Skywork-OR1): `use_adaptive_entropy=True` raises the coefficient while
+  entropy is at or below `entropy_target` and lowers it otherwise. The default target (0.2 nats) is
+  Skywork-OR1's value; per-token entropy in RL runs is typically ~0.2–1 nats and falls, so check
+  your early `entropy` log before choosing a target.
 - **High-entropy minority tokens:** [Wang et al. (2025)](https://huggingface.co/papers/2506.01939),
   "Beyond the 80/20 Rule", found about 20% of CoT tokens are high-entropy forks and that RLVR mostly
   adjusts those; restricting the gradient to the top 20% matched full updates on Qwen3-8B and beat
-  them on 14B and 32B. TRL: `top_entropy_quantile=0.2`
-  ([L861](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/grpo_config.py#L861-L870)).
+  them on 14B and 32B. TRL: set `top_entropy_quantile=0.2` (default 1.0, i.e. all tokens;
+  [L861](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/grpo_config.py#L861-L870)).
 
-Monitor `entropy` (gradual decline fine, a cliff in the first 5% of steps not), `clip_ratio/high_mean`,
-and `frac_reward_zero_std`.
+Monitor `entropy` (a gradual decline is fine; a cliff in the first 5% of steps is collapse).
 
 ---
 
 ## 13.6 Rollout infrastructure
 
 **Generation dominates an RL step.** TRL's docs call it "often the main bottleneck"; practitioner
-reports for long-CoT runs commonly put it at 70–90% of wall-clock (typical, not from one primary
-source; it depends on length and hardware). Decode is memory-bound and token-by-token, which is why
-vLLM with [continuous batching](/courses/inference/01-the-core-loop/01-03-continuous-batching.html)
-is used at all. Cost planning: [module 20](./20-production-serving-and-cost.md).
+reports for long-CoT runs put it at 70–90% of wall-clock (no single primary source). Decode is
+memory-bound, which is why vLLM with
+[continuous batching](/courses/inference/01-the-core-loop/01-03-continuous-batching.html) is used. Cost planning: [module 20](./20-production-serving-and-cost.md).
 
 **Colocate** (TRL default when `use_vllm=True`): vLLM runs in the trainer process on the same GPUs,
 `vllm_gpu_memory_utilization` (default 0.3) reserves its share, and weights are copied in memory after
@@ -515,25 +491,9 @@ multi-node layouts: [module 10](./10-distributed-fine-tuning-and-moe.md).
 **Async GRPO** ([`trl.experimental.async_grpo.AsyncGRPOTrainer`](https://huggingface.co/docs/trl/v1.15.0/en/async_grpo_trainer)):
 a background worker streams completions from a vLLM server, scores them, computes advantages and
 fills a queue that the trainer consumes, so generation and training overlap. Weights sync over NCCL
-every `weight_sync_steps`; a sample more than `max_staleness` updates old is discarded. The worker is
-a CPU-only process, so reward functions must be picklable, and distribution requires FSDP2. The
-price is **off-policy data by construction**: samples come from $\pi_{\theta-k}$, so the importance
-correction of 13.7 becomes essential rather than a small fix.
-
-```mermaid
-flowchart TD
-    subgraph C["Colocate (1 GPU or node)"]
-        C1["vLLM + trainer share GPUs"] --> C2["generate, then train,<br/>in-memory weight copy"]
-    end
-    subgraph S["Server (separate GPUs)"]
-        S1["vllm serve on GPUs 0..k"] -->|"completions + logprobs"| S2["trainer on GPUs k+1..n"]
-        S2 -->|"NCCL weight sync"| S1
-    end
-    subgraph A["Async (AsyncGRPOTrainer)"]
-        A1["rollout worker -&gt; queue"] --> A2["trainer pulls,<br/>drops if stale &gt; max_staleness"]
-        A2 -->|"NCCL every weight_sync_steps"| A1
-    end
-```
+every `weight_sync_steps`; a sample more than `max_staleness` updates old is discarded. Reward
+functions must be picklable (the worker is a CPU process) and distribution requires FSDP2. The price
+is **off-policy data by construction**, so 13.7's importance correction becomes essential.
 
 ---
 
@@ -567,7 +527,7 @@ the sequence-level IS weight, not GSPO's geometric mean. Defaults: `vllm_importa
 `sampling/sampling_logp_difference/mean` and `sampling/importance_sampling_ratio/{min,mean,max}`; a
 rising gap is a precision or infrastructure bug before it is an algorithm problem.
 
-Check 13.3 runs clipping, clip-higher, GSPO and both IS corrections on the same numbers.
+Check 13.4 runs clipping, clip-higher, GSPO and both IS corrections on the same numbers.
 
 ```python finetuning-check
 import math
@@ -639,51 +599,36 @@ reward function receives keyword arguments `prompts`, `completions`, `completion
 sample for which every function returns `None` gets advantage 0. `async def` functions are awaited
 concurrently. Conversational completions arrive as lists of message dicts.
 
-Teaching fragment (not executed; tested versions in [`reward_functions.py`](./code/reward_functions.py)):
-two running-task rewards routed by a `task` column, and a GSM8K pair.
+Teaching fragment (not executed; tested versions, plus field-accuracy, GSM8K and code rewards, in
+[`reward_functions.py`](./code/reward_functions.py)): the running task's schema reward. It reuses
+module 01's parser and enums unchanged, so 1.0 means exactly "schema-valid" under the eval scorer.
 
 ```python
-import json, re
-FIELDS = ("customer_name", "order_id", "issue_type", "refund_requested", "sentiment")
-ISSUE_TYPES = {"refund", "shipping_delay", "damaged_item", "wrong_item", "account", "other"}
-text = lambda c: c[-1]["content"] if isinstance(c, list) else c      # conversational or plain
+import re
+FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
+ISSUE_TYPES = ["refund", "shipping", "defect", "account", "other"]
+SENTIMENTS = ["positive", "neutral", "negative"]
+ORDER_ID_RE = r"^ORD-[0-9]{5}$"
+# parse_prediction: strip, unwrap one ```json fence, json.loads, dict or None (module 01, verbatim)
+from fit_or_not_baseline import parse_prediction
 
-def _load(s):
-    try:
-        return json.loads(s)
-    except json.JSONDecodeError:
-        return None
-
-def schema_reward(completions, task, **kwargs):            # `task` is a dataset column
+def schema_reward(completions, task, **kwargs):              # `task` is a dataset column
     out = []
     for c, t in zip(completions, task):
         if t != "email_json":
             out.append(None); continue                       # not my sample: skipped
-        o = _load(text(c))
-        ok = (isinstance(o, dict) and set(o) == set(FIELDS) and o["issue_type"] in ISSUE_TYPES
-              and isinstance(o["refund_requested"], bool))
+        o = parse_prediction(c[-1]["content"] if isinstance(c, list) else c)
+        ok = (o is not None and set(o) == set(FIELDS) and isinstance(o["refund_requested"], bool)
+              and all(isinstance(o[k], str) for k in FIELDS if k != "refund_requested")
+              and re.match(ORDER_ID_RE, o["order_id"]) is not None
+              and o["issue_type"] in ISSUE_TYPES and o["sentiment"] in SENTIMENTS)
         out.append(1.0 if ok else 0.0)
     return out
-
-def field_accuracy_reward(completions, gold_json, task, **kwargs):
-    out = []
-    for c, g, t in zip(completions, gold_json, task):
-        if t != "email_json":
-            out.append(None); continue
-        o, gold = _load(text(c)), json.loads(g)
-        out.append(0.0 if not isinstance(o, dict) else
-                   sum(str(o.get(f)).lower() == str(gold[f]).lower() for f in FIELDS) / len(FIELDS))
-    return out
-
-def gsm8k_correct(completions, answer, **kwargs):          # `answer`: gold number as text
-    preds = [re.findall(r"\\boxed\{([^{}]*)\}", text(c)) for c in completions]
-    return [1.0 if p and p[-1].replace(",", "").strip() == a.strip() else 0.0
-            for p, a in zip(preds, answer)]
-
-def gsm8k_format(completions, **kwargs):
-    pat = re.compile(r"^<think>.+?</think>\s*.*\\boxed\{[^{}]+\}\s*$", re.S)
-    return [0.2 if pat.match(text(c)) else 0.0 for c in completions]
 ```
+
+For GSM8K, `openai/gsm8k`'s `answer` column is the full rationale ending in `#### 72`. Extract the
+gold with `answer.split("####")[-1].strip()` in preprocessing (as `grpo_from_scratch.py` does) or in
+the reward (as `reward_functions.py` does); comparing against the raw column scores 0 on every row.
 
 ---
 
@@ -739,9 +684,10 @@ bases reasoning well with no template at all. RL raises the frequency of an exis
 mid-run appearance is not evidence of emergence.
 
 **LoRA is enough for RL.** Thinking Machines' [LoRA Without Regret](https://thinkingmachines.ai/blog/lora/)
-reports LoRA matching full fine-tuning for RL even at **rank 1**, because policy-gradient updates
-carry roughly one scalar of information per episode. Use all-linear targets and about 10× the
-full-FT learning rate ([module 06](./06-lora-and-qlora.md)).
+reports that LoRA "fully matches the learning performance of FullFT when running policy gradient
+algorithms for reinforcement learning, even with ranks as low as 1", because the advantage provides
+"only O(1) bits per episode". Use all-linear targets and about 10× the full-FT learning rate
+([module 06](./06-lora-and-qlora.md)).
 
 ---
 
@@ -755,16 +701,14 @@ it adds reasoning. Check your own model with module 09's unbiased pass@$k$ estim
 ([module 09](./09-evaluating-fine-tuned-models.md)).
 
 The rebuttals are real. [ProRL (Liu et al., 2025)](https://arxiv.org/abs/2505.24864) ran prolonged
-RL with KL control, reference resets and a broad task mix, and reports RL models beating base models
-across pass@$k$, including tasks the base fails at any $k$, with gains growing with training time.
-Fair summary: short RLVR on narrow math mostly redistributes probability; longer, broader runs can
-push past the base's coverage. Neither supports "RL teaches reasoning from nothing".
+RL with KL control, reference resets and a broad task mix, and reports RL beating the base across
+pass@$k$, including tasks the base fails at any $k$. Short RLVR on narrow math mostly redistributes
+probability; longer, broader runs can push past the base's coverage.
 
 **"SFT memorizes, RL generalizes"** ([Chu et al., 2025](https://arxiv.org/abs/2501.17161)): on a
-rule-based card game (GeneralPoints) and a navigation task (V-IRL), outcome-reward RL generalized to
-unseen rule and visual variants while SFT degraded, yet SFT was **still needed first** to stabilize
-the output format. The tasks are synthetic and narrow; read it as evidence about distribution shift
-there, not a law. **RL forgets less:** RL's Razor ([Shenfeld et al., 2025](https://arxiv.org/abs/2509.04259))
+card game (GeneralPoints) and a navigation task (V-IRL), RL generalized to unseen rule and visual
+variants while SFT degraded, yet SFT was **still needed first** to stabilize the output format.
+The tasks are synthetic and narrow. **RL forgets less:** RL's Razor ([Shenfeld et al., 2025](https://arxiv.org/abs/2509.04259))
 argues on-policy RL stays closer (in KL) to the base than SFT at equal task gains. On-policy
 distillation exploits the same property ([module 14](./14-distillation-and-reasoning.md)); forgetting
 belongs to [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md).
@@ -792,29 +736,24 @@ Names from TRL's [logged-metrics list](https://huggingface.co/docs/trl/v1.15.0/e
 
 ### Debugging prompt 1: reward flat at zero for 200 steps
 
-1. **Is the verifier right?** Feed it gold answers in the model's output format (`reward_functions.py --full`
-   does this for GSM8K). A parser that never matches is the commonest cause.
-2. **Does the model ever succeed?** `frac_reward_zero_std` near 1 with `reward` at 0 means every group
-   is all-wrong. Measure base pass@8 on the prompts and drop $\hat p=0$ prompts, or start from an
-   instruct/SFT checkpoint (cold start).
-3. **Is it truncated?** A high `completions/clipped_ratio` means answers never reach the box: raise
-   `max_completion_length` or ask for shorter reasoning.
-4. **Is the template right?** A base model without a chat template, or a thinking toggle that
-   disagrees with what the reward parses, yields unparseable output.
-5. **Is it just early?** Under ~300 steps on a small model a flat start is normal, provided
+1. **Test the verifier.** Feed it gold answers in the model's output format (`reward_functions.py
+   --full` does this for GSM8K). A parser that never matches is the commonest cause, and a template
+   or thinking toggle that disagrees with the parser is the second.
+2. **Check that the model ever succeeds.** `frac_reward_zero_std` near 1 with `reward` at 0 means
+   every group is all-wrong: drop $\hat p=0$ prompts or start from an SFT checkpoint. A high
+   `completions/clipped_ratio` means answers never reach the box: raise `max_completion_length`.
+3. **Allow for a slow start.** Under ~300 steps on a small model a flat start is normal, provided
    `reward_std` is non-zero.
 
 ### Debugging prompt 2: length grows while accuracy plateaus
 
-1. **Which loss?** `grpo` dilutes the penalty on long failures: use `dapo` (default) or `dr_grpo`,
-   and consider `scale_rewards=False`.
+1. **Check the loss and truncation.** `grpo` dilutes the penalty on long failures: use `dapo` or
+   `dr_grpo`. A rising `clipped_ratio` means hitting the cap: mask truncated completions or add the
+   soft overlong punishment.
 2. **Split length by correctness.** If only wrong answers lengthen, blame aggregation or a
    length-correlated reward, not "deeper reasoning".
-3. **Truncation.** Rising `clipped_ratio` means hitting the cap: enable `mask_truncated_completions`
-   or soft overlong punishment.
-4. **Hacking.** Read samples for repetition, multiple hedged answers, or padded think blocks.
-5. **Entropy and clipping.** Collapsed entropy with repetitive loops calls for clip-higher or a small
-   entropy bonus; then confirm held-out accuracy, not just training reward, responds.
+3. **Read samples.** Repetition, hedged answers or padded think blocks mean hacking; repetitive loops
+   with collapsed entropy call for clip-higher or a small entropy bonus. Confirm on held-out accuracy.
 
 ---
 
@@ -830,13 +769,11 @@ python content/courses/finetuning/code/grpo_from_scratch.py --smoke
 python content/courses/finetuning/code/reward_functions.py --smoke
 ```
 
-[`grpo_from_scratch.py`](./code/grpo_from_scratch.py) `--smoke` trains a tabular softmax policy on 25
-toy additions with $G=8$, an exact verifier, clip-higher (0.2/0.28), $\mu=2$ and masked truncation,
-200 updates under each of `grpo`, `dapo` and `dr_grpo` plus one run with a $k_3$ KL. It asserts the
-expected reward ends above 0.80 and that a zero-variance group yields exactly zero gradient.
-[`reward_functions.py`](./code/reward_functions.py) `--smoke` asserts nine extraction edge cases,
-`None` routing across tasks, JSON scoring, and that the hack detector flags `sys.exit(0)` and
-`os._exit(0)` while passing honest and merely wrong code.
+[`grpo_from_scratch.py`](./code/grpo_from_scratch.py) `--smoke` trains a tabular policy on 25 toy
+additions under `grpo`, `dapo`, `dr_grpo` and a $k_3$ KL run, asserting reward above 0.80 and zero
+gradient from a zero-variance group. [`reward_functions.py`](./code/reward_functions.py) `--smoke`
+asserts extraction edge cases, `None` routing, module 01's scoring fixture, and that the hack
+detector flags `sys.exit(0)` and `os._exit(0)` but not honest or merely wrong code.
 
 ### L13.1 (T0): Unsloth GRPO on Qwen3
 
@@ -864,19 +801,16 @@ curves, not exact numbers.
 
 ### L13.3 (T2): GSPO vs token-level
 
-Run `--is-level sequence`: the script switches to `loss_type="grpo"` (TRL warns that token-summing
-losses re-weight sequences by length at sequence level), uses GSPO's `epsilon=3e-4`/`epsilon_high=4e-4`,
-and goes off-policy with `steps_per_generation=8`. On a small MoE or dense 4–8B model, compare against
-a token-level run with the same off-policy setting: `clip_ratio/*`, reward variance across seeds, and
-collapses. Expect the largest difference on the MoE.
+Run `--is-level sequence`: the script switches to `loss_type="grpo"`, GSPO's
+`epsilon=3e-4`/`epsilon_high=4e-4` and off-policy `steps_per_generation=8`. Compare a token-level run
+with the same setting on a small MoE: `clip_ratio/*`, reward variance across seeds, collapses.
 
 ### L13.4 (T3): server mode, code RL, and a planted hack
 
-Start `vllm serve` on separate GPUs (13.6) and train on a code dataset with `hackable_code_reward` as
-the only reward; count how often `detect_hacks` flags completions over a few hundred steps. Then
-switch to `robust_code_reward` inside a real per-rollout container ([module 15](./15-agentic-and-tool-use-fine-tuning.md))
-and confirm the flag rate falls. Record training reward and held-out pass rate together: the hack is
-their divergence.
+Start `vllm serve` on separate GPUs (13.6), train on code with `hackable_code_reward` alone and
+count `detect_hacks` flags. Switch to `robust_code_reward` in a per-rollout container
+([module 15](./15-agentic-and-tool-use-fine-tuning.md)); the flag rate should fall. The hack is the
+divergence between training reward and held-out pass rate.
 
 ### L13.5 (T0, analysis): pass@1 vs pass@64
 
@@ -893,8 +827,7 @@ Vision-language GRPO uses the same trainer ([module 16](./16-multimodal-and-embe
 - **GRPO replaces PPO's critic with a group of samples**, saving a policy-sized value network and avoiding value learning from sparse terminal rewards.
 - **Group advantages sum to zero, and identical rewards give zero gradient.** `frac_reward_zero_std` measures wasted compute.
 - **The KL term is optional, not absent.** TRL defaults to `beta=0.0` (no reference model); when used, $k_3$ is unbiased and non-negative, and `use_bias_correction_kl` fixes its gradient.
-- **Per-sequence length normalization biases length.** Under `grpo` a wrong 100-token answer is penalized 10× less per token than a right 10-token one is rewarded; TRL defaults to token-level `dapo`, and `dr_grpo` removes the normalization bias.
-- **Std scaling is a difficulty bias**; `scale_rewards` chooses `group`, `batch` (Lite PPO) or `False` (Dr. GRPO).
+- **Per-sequence length normalization biases length, and std scaling biases difficulty.** Under `grpo` a wrong 100-token answer is penalized 10× less per token than a right 10-token one is rewarded; TRL defaults to token-level `dapo`, `dr_grpo` removes the normalization bias, and `scale_rewards=False` drops the std.
 - **Clip-higher protects exploration**; CISPO and SAPO go further by never fully zeroing a token's gradient.
 - **Sequence-level ratios suit sequence-level rewards**: GSPO's geometric-mean ratio is the stable choice for MoE and off-policy updates.
 - **Your sampler is not your trainer.** TRL applies masked sequence-level IS by default (`sequence_mask`, $C_{\max}=3$); watch the log-prob gap.

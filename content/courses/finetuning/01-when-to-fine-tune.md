@@ -1,4 +1,4 @@
-# 01 — Orientation: What Fine-Tuning Is, and When Not to Do It
+# 01 — When to Fine-Tune: What It Is, and When Not to Do It
 
 > **Prerequisites:** none (Python and basic deep learning).
 > **You will learn:** why most failed fine-tuning projects fail at the decision step, the
@@ -39,7 +39,8 @@ corpus (legal, biomedical, a new language), long documents for context extension
 or reasoning-heavy math and code near the end of pretraining. The defining
 property is that the loss covers *all* tokens of raw documents, not responses to
 prompts. CPT is the right tool for stable, large-volume domain knowledge, and it
-needs billions of tokens to move anything ([module 05](./05-supervised-fine-tuning.md)).
+typically needs hundreds of millions to billions of domain tokens to shift knowledge
+measurably ([module 05](./05-supervised-fine-tuning.md) gives the evidence).
 
 **Post-training** turns a text continuer into something you can talk to. It has
 three families of method, usually applied in this order. **Supervised fine-tuning
@@ -53,8 +54,8 @@ tests, a math answer checker, a JSON schema) and reinforces the ones that pass
 ([module 13](./13-rl-with-verifiable-rewards.md)).
 
 **Distillation** trains a small *student* on a large *teacher*'s outputs or
-log-probabilities. It is how most small open models in 2025–26 got their
-reasoning ability ([module 14](./14-distillation-and-reasoning.md)). **Merging**
+log-probabilities. Qwen3's 0.6B–14B models and DeepSeek's R1-Distill models got
+their reasoning ability this way (section 1.4, [module 14](./14-distillation-and-reasoning.md)). **Merging**
 combines the weights of several fine-tunes of the same base, without further
 training, into one model (module 18).
 
@@ -69,9 +70,8 @@ flowchart LR
     RL -.-> MG
 ```
 
-Read the arrows as "usually comes after", not "must come after". DeepSeek-R1-Zero
-skipped SFT entirely; Qwen3 interleaves SFT and RL in four stages; Llama 3 loops
-SFT and DPO six times. Section 1.4 shows the real shapes.
+Read the arrows as "usually comes after", not "must come after"; section 1.4 shows
+the real shapes.
 
 ### Base, instruct, reasoning and hybrid checkpoints
 
@@ -115,8 +115,8 @@ capabilities are learnt almost entirely during pretraining, while alignment
 teaches it which subdistribution of formats should be used when interacting with
 users." In their human study on 300 test prompts, LIMA's answers were equal to or
 preferred over GPT-4's in 43% of comparisons and over text-davinci-003's in 65%.
-An ablation found that a 16-fold increase in (Stack Exchange) training data did
-not improve quality, while diversity and quality did.
+In an ablation on 7B models graded by ChatGPT, a 16-fold increase in (Stack
+Exchange) training data did not improve quality, while diversity and quality did.
 
 What LIMA **does** establish: for a strong base, a small, clean, diverse SFT set
 is enough to produce a capable general assistant, and data quality dominates data
@@ -137,16 +137,15 @@ to justify spending on quality, not to justify skipping evaluation.**
 
 The [transfer-learning note](../../notes/deep-learning/transfer-learning-and-finetuning.md)
 gives the short version in its "Fine-tune, retrieve, or prompt?" section:
-fine-tuning adapts behaviour, retrieval supplies evidence. Here is the longer
-argument.
+fine-tuning adapts behaviour, retrieval supplies evidence.
 
 **Fine-tuning reliably changes how a model behaves.** It is good at:
 
 - **Format and structure**: always emit valid JSON with these five keys; always
   answer in this XML schema; stop after the answer.
 - **Style and tone**: your brand voice, your legal register, terse vs chatty.
-- **Task specialisation**: a narrow extraction or classification task where a 1B
-  model, trained, matches a 70B model prompted.
+- **Task specialisation**: a narrow extraction or classification task where a small
+  trained model can match a much larger prompted one.
 - **Tool-call reliability**: correct function names and argument JSON every time.
 - **Refusal policy**: stop refusing benign domain requests (security research,
   medication dosing for clinicians), or refuse a new class of requests.
@@ -155,22 +154,17 @@ argument.
 - **Reasoning on verifiable tasks**, via RL ([module 13](./13-rl-with-verifiable-rewards.md)).
 
 **Fine-tuning is unreliable for injecting facts.** The misconception that
-"fine-tuning is how you add new knowledge" is the single most expensive one in
-this course. Three reasons it fails:
-
-1. **SFT teaches the shape of answers before it teaches their content.** A few
-   hundred examples about your product catalogue mostly teach the model to *sound*
-   like it knows your catalogue. When asked about an item it saw once, it produces
-   a fluent near-miss: the right format, a plausible but wrong price.
-2. **Facts change; weights do not.** A price list that changes weekly would need a
-   training run, an evaluation and a deployment every week, and between runs the
-   model is confidently out of date.
-3. **No provenance.** A fine-tuned model cannot tell you which document a claim
-   came from, so it cannot cite, and access control cannot be applied per user.
+"fine-tuning is how you add new knowledge" is the most common expensive one.
+[Gekhman et al. (2024)](https://arxiv.org/abs/2405.05904) find that examples carrying
+new facts are learned much more slowly than examples consistent with what the model
+already knows, and that once learned they increase hallucination on other
+questions. **Facts also change while weights do not**: a weekly price list needs a
+weekly train-evaluate-deploy cycle. And **a fine-tuned model has no provenance**: it
+cannot cite the document a claim came from, and access control cannot be per user.
 
 For facts, use **retrieval** ([RAG note](../../notes/nlp/rag-and-retrieval.md)):
-update the index, not the weights, and get citations and per-user permissions for
-free. For *stable* domain knowledge at scale (a new language, a specialised
+update the index, not the weights, and citations and per-user permissions become
+possible. For *stable* domain knowledge at scale (a new language, a specialised
 corpus of billions of tokens), use **continued pretraining** and then SFT
 ([module 05](./05-supervised-fine-tuning.md)). Fine-tuning also **cannot fix a weak
 base**: if the base model cannot do the task at all with a good prompt and
@@ -225,9 +219,9 @@ format, domain tone and tool use; retrieve for facts.
 ```mermaid
 flowchart TD
     G["Measured gap on your eval set"] --> Q1{"Knowledge or behaviour?"}
-    Q1 -->|knowledge| Q2{"Are the facts volatile?"}
-    Q2 -->|yes| RAG["RAG or a live tool/API"]
-    Q2 -->|"no: large, stable corpus"| CPT["Continued pretraining<br/>then SFT (module 05)"]
+    Q1 -->|knowledge| Q2{"Large (billions of tokens)<br/>and stable corpus?"}
+    Q2 -->|no| RAG["RAG or a live tool/API<br/>(volatile or small)"]
+    Q2 -->|yes| CPT["Continued pretraining<br/>then SFT (module 05)"]
     Q1 -->|behaviour| Q3{"Does a better prompt +<br/>few-shot close it on the eval?"}
     Q3 -->|yes| STOP["Stop: ship the prompt"]
     Q3 -->|no| Q4{"Is latency or cost<br/>the real issue?"}
@@ -237,10 +231,8 @@ flowchart TD
     Q5 -->|no| SFTP["SFT, then preference<br/>optimisation (modules 05, 12)"]
 ```
 
-Real projects take several branches at once. A support assistant typically ends up
-as RAG for policy documents, a tool for order lookups, and a LoRA fine-tune for
-tone and tool-call format. The flowchart tells you which component each failure
-belongs to.
+Real projects take several branches at once: a support assistant often ends up as
+RAG for policies, a tool for order lookups and a LoRA for tone and tool-call format.
 
 ### The cost of not fine-tuning
 
@@ -273,8 +265,7 @@ $C_{\text{train}} = $ USD 90.
 - Serving premium $\Delta c = $ USD 0.0015 per request: $n^* = 90 / 0.003 = 30{,}000$ requests.
 
 At 2,000 requests a day, the first case pays back in ten days; at 50 a day, in more
-than a year, by which time you will have retrained twice. The check below encodes
-the formula and both numbers.
+than a year. The check below encodes the formula and both numbers.
 
 This check proves that the break-even function returns 20,000 and 30,000 requests
 for the worked example, and infinity when the serving premium eats the saving.
@@ -313,12 +304,10 @@ savings and ignores the quality difference, the engineering time, the evaluation
 and retraining cadence, prompt caching discounts, and output-length changes, any
 of which can dominate.
 
-Two corrections make the estimate honest. First, **prompt caching** cuts the
-effective $c_{\text{in}}$ for a fixed few-shot prefix, often by a large factor, so
-re-run the arithmetic with your provider's cached-input price. Second, **the real
-argument for fine-tuning is rarely the 1,500 tokens**: it is that a fine-tuned
-small model replaces a large prompted one, which changes $c_{\text{in}}$ and the
-output price by an order of magnitude. Do the arithmetic for that comparison too.
+Two corrections make the estimate honest. **Prompt caching** cuts the effective
+$c_{\text{in}}$ of a fixed few-shot prefix, so use your provider's cached-input price.
+And **the real argument is rarely the 1,500 tokens**: a fine-tuned small model replacing
+a large prompted one changes $c_{\text{in}}$ and the output price by an order of magnitude.
 
 ### Full fine-tuning, PEFT, hosted APIs, training-as-a-service
 
@@ -333,35 +322,21 @@ fit 8B models on one consumer GPU (modules 06 and 07).
 |---|---|---|---|---|
 | Control over recipe | total: any loss, any data mix | total within PEFT | low: the vendor's hyperparameters and method menu | medium: your training code (HF Jobs) or your loop over a LoRA-only primitive API (Tinker) |
 | Data residency | your infrastructure | your infrastructure | data goes to the vendor | data goes to the service |
-| Weights ownership | you own the full weights | you own the adapter (and use the base under its license) | usually stays with the vendor; you call it by ID | you download weights or adapters |
+| Weights ownership | you own the full weights | you own the adapter (and use the base under its licence) | usually stays with the vendor; you call it by ID | you download weights or adapters |
 | Cost model | GPU-hours; most expensive per run | GPU-hours; cheapest per run | per training token plus per-request serving (often a premium) | per GPU-hour or per token, no idle cluster |
 | Ops burden | highest: multi-GPU, sharding, checkpoints | moderate: one GPU, a framework | lowest | low to moderate |
 | Typical fit | CPT, large-data regimes, final production runs | most task SFT, RL experiments | teams with no ML infrastructure and a closed-model baseline | teams that want open weights without owning GPUs |
 
-[Module 08](./08-frameworks-and-tooling.md) covers HF Jobs and Tinker in detail,
-plus the frameworks you will use self-hosted. As of October 2026 the main open
-library, TRL, has a stable core (SFT, DPO, Reward, RLOO, GRPO, KTO and
-Distillation trainers) and a separate `trl.experimental` namespace for newer
-methods, a split that started with the
-[v1.0.0 release](https://github.com/huggingface/trl/releases/tag/v1.0.0) on
-31 March 2026 (module 08).
+[Module 08](./08-frameworks-and-tooling.md) covers HF Jobs, Tinker and the self-hosted frameworks, including TRL's stable/`trl.experimental` split since [v1.0.0](https://github.com/huggingface/trl/releases/tag/v1.0.0).
 
 ## 1.4 How open models are post-trained: five case studies
 
-Reading post-training sections of technical reports is the fastest way to see
-which methods survive contact with production. Five recipes span 2022 to 2025.
-
 ### InstructGPT (2022): SFT, reward model, PPO
 
-[Ouyang et al. (2022)](https://arxiv.org/abs/2203.02155) defined the template:
-SFT on labeller-written demonstrations, a reward model trained on labeller rankings
-of model outputs, then PPO against that reward model with a KL penalty to the SFT
-model. The headline result is the one to remember: human raters preferred the
-1.3B InstructGPT model's outputs to the 175B GPT-3's, a model about 100 times
-larger. Post-training mattered more than scale for usefulness. PPO itself is taught
-conceptually in [module 12](./12-preference-optimization.md) and
-[module 13](./13-rl-with-verifiable-rewards.md); TRL removed its `PPOTrainer` in
-v1.13, so you will implement RL with GRPO or RLOO instead.
+[Ouyang et al. (2022)](https://arxiv.org/abs/2203.02155) defined the template: SFT on
+labeller demonstrations, a reward model on labeller rankings, then PPO with a KL penalty
+to the SFT model. Human raters preferred the 1.3B InstructGPT to the 175B GPT-3. TRL
+removed `PPOTrainer` in v1.13, so the course teaches PPO conceptually ([module 12](./12-preference-optimization.md)) and implements RL with GRPO or RLOO.
 
 ### Llama 3 (2024): rejection sampling, SFT and DPO, in six rounds
 
@@ -398,36 +373,26 @@ IFEval-style constraint prompts. RLVR is the stage this course's
 
 ### Qwen3 (2025): four stages with thinking mode fusion
 
-The [Qwen3 report](https://arxiv.org/html/2505.09388v1) (arXiv 2505.09388) runs
-four stages on its flagship models: (1) **long chain-of-thought cold start**, SFT on
-curated, verified math, code, logic and STEM problems; (2) **reasoning RL** with
-GRPO on 3,995 query-verifier pairs; (3) **thinking mode fusion**, continued SFT
-mixing thinking and non-thinking data under one template; (4) **general RL**
-across more than 20 tasks with rule-based, reference-based and reward-model
-rewards. Small models (0.6B to 14B, and 30B-A3B) skip the four stages and use
-**strong-to-weak distillation** from the flagship models, off-policy then on-policy,
-which the report says needs about one tenth of the GPU hours.
-[Module 14](./14-distillation-and-reasoning.md) owns the details.
+The [Qwen3 report](https://arxiv.org/html/2505.09388v1) runs four stages on its
+flagships: a **long chain-of-thought cold start** (SFT on verified problems),
+**reasoning RL** with GRPO on 3,995 query-verifier pairs, **thinking mode fusion**, and
+**general RL** over 20+ tasks. The 0.6B–14B and 30B-A3B models instead get
+**strong-to-weak distillation**, at about one tenth of the GPU hours ([module 14](./14-distillation-and-reasoning.md)).
 
 ### DeepSeek-R1 (2025): pure RL, then a multi-stage repair
 
-[DeepSeek-AI (2025)](https://huggingface.co/papers/2501.12948) first trained
-**R1-Zero** with GRPO directly on the base model, using only rule-based accuracy and
-format rewards and no SFT; AIME 2024 pass@1 rose from 15.6% to 77.9%. R1-Zero's
-outputs were hard to read and mixed languages, so **R1** adds a cold-start SFT on
-thousands of long chain-of-thought examples, a reasoning RL stage, rejection
-sampling to build about 800k SFT samples (about 600k reasoning, 200k
-non-reasoning), SFT on them, and a final RL stage that adds preference rewards.
-The same 800k samples then distilled R1 into six dense Qwen- and Llama-based
-models from 1.5B to 70B. [Module 13](./13-rl-with-verifiable-rewards.md) owns
-R1-Zero and GRPO.
+[DeepSeek-AI (2025)](https://huggingface.co/papers/2501.12948) trained **R1-Zero** with
+GRPO directly on the base, with rule-based accuracy and format rewards and no SFT; AIME
+2024 pass@1 rose from 15.6% to 77.9%. Its outputs mixed languages, so **R1** adds a
+cold-start SFT, reasoning RL, about 800k rejection-sampled SFT samples and a final RL
+stage. Those 800k samples also distilled six dense students, 1.5B to 70B ([module 13](./13-rl-with-verifiable-rewards.md)).
 
 **Table 2: the five recipes**
 
 | Recipe | SFT data source | Preference stage | RL stage and reward type | Distillation | Open data / code? | Course module |
 |---|---|---|---|---|---|---|
 | InstructGPT ([2203.02155](https://arxiv.org/abs/2203.02155)) | labeller-written demonstrations | reward model on labeller rankings | PPO against the learned RM, KL to SFT | no | no (API models only) | 12 |
-| Llama 3 ([2407.21783](https://arxiv.org/abs/2407.21783)) | human prompts with rejection-sampled responses, targeted synthetic data, small human-curated set | RM for rejection sampling; DPO each round, six rounds | none beyond DPO; PPO explored and rejected | flagship model used to improve 8B/70B post-training | weights under the Llama license; data and code not released | 04, 12 |
+| Llama 3 ([2407.21783](https://arxiv.org/abs/2407.21783)) | human prompts with rejection-sampled responses, targeted synthetic data, small human-curated set | RM for rejection sampling; DPO each round, six rounds | none beyond DPO; PPO explored and rejected | flagship model used to improve 8B/70B post-training | weights under the Llama licence; data and code not released | 04, 12 |
 | Tulu 3 ([2411.15124](https://huggingface.co/papers/2411.15124)) | public instruction data plus persona-driven synthetic data | length-normalised DPO on on-policy pairs | RLVR: PPO, binary verifiable reward (math, constraints) | no | yes: data, code, eval, checkpoints | 05, 12, 13 |
 | Qwen3 ([2505.09388](https://arxiv.org/html/2505.09388v1)) | verified long-CoT problems (cold start); mixed thinking and non-thinking data (fusion) | inside general RL via reward-model rewards | GRPO with verifiers (stage 2); rule, reference and RM rewards (stage 4) | strong-to-weak, off- then on-policy, for 0.6B–14B and 30B-A3B | weights Apache-2.0; data not released | 13, 14 |
 | DeepSeek-R1 ([2501.12948](https://huggingface.co/papers/2501.12948)) | cold-start long-CoT; ~800k rejection-sampled samples | preference rewards in the final RL stage | GRPO; rule-based accuracy and format rewards (R1-Zero: RL only) | SFT of six Qwen/Llama students on the 800k samples | weights released; training data not released | 13, 14 |
@@ -457,10 +422,10 @@ checklist is more specific.
 
 | Criterion | What to check | Where to look |
 |---|---|---|
-| License | commercial use allowed; attribution and naming clauses; user-count thresholds; acceptable-use policy | the `LICENSE` file in the model repo, not the model card summary |
+| Licence | commercial use allowed; attribution and naming clauses; user-count thresholds; acceptable-use policy | the `LICENSE` file in the model repo, not the model card summary |
 | Size vs hardware tier | does LoRA/QLoRA fit your GPU at your sequence length; can you serve it at your latency target | module 03 memory math; the hardware tiers in module 00 |
 | Tokenizer and language coverage | fertility (tokens per word) on *your* data; a 2x fertility doubles cost and halves effective context | tokenize 1,000 of your real examples and count (module 02) |
-| Context length | native trained length, not the advertised extended length; your longest input plus output | `config.json` (`max_position_embeddings`, `rope_scaling`), the model card |
+| Context length | native trained length, not the advertised extended length; your longest input plus output | `config.json` (`max_position_embeddings`, `rope_parameters`, or `rope_scaling` on older cards), the model card |
 | Dense vs MoE | MoE fine-tuning memory scales with **total** parameters, not active ones; router stability under fine-tuning | `config.json` (`num_experts`); module 10 |
 | Chat template and thinking toggle | does the template mark assistant turns for loss masking; is there a thinking switch you must preserve | `tokenizer_config.json` / `chat_template.jinja`; module 02 |
 | Ecosystem support | day-zero support in TRL, Unsloth, Axolotl and vLLM; LoRA serving support for its module types | framework release notes and model lists (module 08) |
@@ -480,7 +445,7 @@ This is orientation, not legal advice; check the current terms before you ship.
 **The model licence.** Apache-2.0 (Qwen3, Gemma 4) imposes almost nothing beyond
 attribution. Google's
 [Gemma 4 announcement](https://opensource.googleblog.com/2026/03/gemma-4-expanding-the-gemmaverse-with-apache-20.html)
-calls it the first Gemma release under Apache-2.0; earlier Gemma versions remain
+calls Gemma 4 the first Gemma models released under Apache-2.0 (April 2026); earlier Gemma versions remain
 under the custom Gemma Terms of Use, with a prohibited-use policy that passes
 through to derivatives. Custom community licences add conditions: the
 [Llama 3.1 Community License](https://github.com/meta-llama/llama-models/blob/0e0b8c519242d5833d8c11bffc1232b77ad7f301/models/llama3_1/LICENSE#L24-L32)
@@ -507,12 +472,9 @@ governance.
 
 ### Safety is part of the choice
 
-An instruct model's refusal behaviour is itself a fine-tuned behaviour, and further
-fine-tuning can erode it. [Qi et al. (2023)](https://arxiv.org/abs/2310.03693) showed that a handful of adversarial
-examples, and to a lesser degree entirely benign data, can degrade the safety
-behaviour of aligned models. Whatever base you choose, you inherit the obligation
-to re-test safety after every fine-tune; [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)
-owns the evidence and the mitigations.
+Refusal behaviour is itself fine-tuned, and further fine-tuning can erode it: [Qi et al. (2023)](https://arxiv.org/abs/2310.03693)
+degraded aligned models' safety with a handful of adversarial examples, and less so with benign data.
+Re-test safety after every fine-tune ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)).
 
 ## 1.6 Scoping a project
 
@@ -541,57 +503,47 @@ support email. Output: one JSON object with exactly five fields.
 
 | Field | Type | Allowed values |
 |---|---|---|
-| `customer_name` | string | free text |
-| `order_id` | string | normalised to `ORD-` plus five digits |
+| `customer_name` | string | the name as signed, no titles or extra text |
+| `order_id` | string | normalised to `ORD-` plus five digits (`^ORD-[0-9]{5}$`) |
 | `issue_type` | string | `refund`, `shipping`, `defect`, `account`, `other` |
 | `refund_requested` | boolean | `true`, `false` |
 | `sentiment` | string | `positive`, `neutral`, `negative` |
 
-Two examples from the lab's generator:
+One row of the lab's eval set (`id` `eval-0011`):
 
 ```text
-Hi support,
+Dear customer service,
 
-The desk lamp I got in order ORD-88892 arrived with a cracked base. Any update
-helps. Thanks so much, you have always been great.
+Since I changed my password, my profile no longer lists order number 13303 for the
+phone case. I want a full refund. This is the last time I order here.
 
-Cheers,
-Elena Larsen
+Mateo Mensah (customer since 2019)
 ```
 
 ```json
-{"customer_name": "Elena Larsen", "order_id": "ORD-88892", "issue_type": "defect",
- "refund_requested": false, "sentiment": "positive"}
+{"customer_name": "Mateo Mensah", "order_id": "ORD-13303", "issue_type": "account",
+ "refund_requested": true, "sentiment": "negative"}
 ```
 
-```text
-Hi support,
+It is deliberately awkward: the issue is an account problem but the customer still
+asks for a refund, the order number must be normalised from `order number 13303`, and
+the sign-off carries extra text after the name. Those are the cases where prompting
+tends to wobble. Every method in the course uses one fixed system prompt (the
+script's `SYSTEM_PROMPT`), which names the five keys, the `ORD-` format and both enums.
 
-My account shows someone else's address on order #49755 for the monitor stand.
-Please refund me. Best.
+**The scoring rules.** Modules 05, 09 and 20 reuse them unchanged, and module 13's
+reward functions decompose them. Every metric is a fraction of all eval rows; an
+unparsable prediction scores 0 everywhere.
 
-Owen Rossi
-```
-
-```json
-{"customer_name": "Owen Rossi", "order_id": "ORD-49755", "issue_type": "account",
- "refund_requested": true, "sentiment": "neutral"}
-```
-
-The second example is deliberately awkward: the issue is an account problem, but
-the customer asks for a refund anyway, and the order number must be normalised from
-`#49755`. Those are exactly the cases where prompting tends to wobble.
-
-**The scoring rules**, used unchanged by modules 05, 06, 09, 11 and 20:
-
-- **Parse rate.** Strip one surrounding Markdown code fence (three backticks,
-  optionally tagged `json`) if present, then `json.loads`. A prediction *parses* if that yields a JSON object.
-- **Schema validity.** All five fields present; `refund_requested` is a JSON
-  boolean; every other field is a string; `issue_type` and `sentiment` are in their
-  enums.
+- **Parse rate.** Strip surrounding whitespace and one surrounding Markdown code fence
+  (three backticks, optionally tagged `json`), then `json.loads`. A prediction
+  *parses* if that yields a JSON object. No other normalisation: no case folding, no
+  ID repair.
+- **Schema validity.** Exactly the five keys, no more; `refund_requested` is a JSON
+  boolean; the rest are strings; `order_id` matches `^ORD-[0-9]{5}$`; `issue_type`
+  and `sentiment` are in their enums.
 - **Per-field exact match.** For each field, the parsed value equals the gold value
-  with the same JSON type (so the string `"true"` does not match `true`). An
-  unparsable prediction scores 0 on every field.
+  with the same JSON type (so the string `"true"` does not match `true`).
 - **All-fields exact match.** All five fields match. This is the headline number.
 
 This check proves that the scorer implements those rules on six hand-built
@@ -599,7 +551,8 @@ predictions: (a) perfect, (b) `issue_type` outside the enum, (c) invalid JSON wi
 a trailing comma, (d) correct but wrapped in a code fence, (e) `sentiment` missing,
 (f) `refund_requested` as the string `"true"`. Expected: parse rate 5/6,
 schema-valid 2/6 (a and d), all-fields exact match 2/6, `order_id` match 5/6,
-`issue_type` match 4/6 (a, d, e, f).
+`issue_type` match 4/6 (a, d, e, f). It also proves that an extra key or an
+un-normalised ID makes a record schema-invalid.
 
 ```python finetuning-check
 import json
@@ -610,9 +563,10 @@ FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentim
 ISSUE_TYPES = {"refund", "shipping", "defect", "account", "other"}
 SENTIMENTS = {"positive", "neutral", "negative"}
 FENCE = "`" * 3
-FENCE_RE = re.compile(r"^\s*" + FENCE + r"(?:json)?\s*\n(.*?)\n\s*" + FENCE + r"\s*$", re.S)
+FENCE_RE = re.compile("^" + FENCE + r"(?:json)?[ \t]*\n(.*)\n" + FENCE + "$", re.S)
 
 def parse(text):
+    text = text.strip()
     m = FENCE_RE.match(text)
     if m:
         text = m.group(1)
@@ -623,13 +577,14 @@ def parse(text):
     return obj if isinstance(obj, dict) else None
 
 def schema_valid(obj):
-    if obj is None or any(k not in obj for k in FIELDS):
+    if obj is None or set(obj) != set(FIELDS):
         return False
     if not isinstance(obj["refund_requested"], bool):
         return False
     if not all(isinstance(obj[k], str) for k in FIELDS if k != "refund_requested"):
         return False
-    return obj["issue_type"] in ISSUE_TYPES and obj["sentiment"] in SENTIMENTS
+    return (re.match(r"^ORD-[0-9]{5}$", obj["order_id"]) is not None
+            and obj["issue_type"] in ISSUE_TYPES and obj["sentiment"] in SENTIMENTS)
 
 def field_match(obj, gold, key):
     return obj is not None and key in obj and type(obj[key]) is type(gold[key]) and obj[key] == gold[key]
@@ -669,6 +624,10 @@ assert s["issue_type"] == Fraction(4, 6)
 # The two all-fields matches are exactly (a) and (d).
 assert [all(field_match(parse(p), gold, k) for k in FIELDS) for p in preds] == \
     [True, False, False, True, False, False]
+# An extra key or a non-canonical ID parses and can match fields but is schema-invalid.
+assert not schema_valid(dict(gold, note="x"))
+assert not schema_valid(dict(gold, order_id="#48213"))
+assert schema_valid(parse("  " + preds[3] + "\n"))
 ```
 
 It does not prove these are the *right* metrics for your product: exact match on
@@ -680,7 +639,8 @@ are written down and tested before any model is trained.
 
 | Term | Meaning in this course | Owning module |
 |---|---|---|
-| **Base model** | the pretrained checkpoint you start from (base or instruct) | 01, 02 |
+| **Starting checkpoint** | the checkpoint you fine-tune from: base, instruct, reasoning or hybrid | 01 |
+| **Base model** | a pretrained-only checkpoint with no post-training (e.g. `Qwen3-0.6B-Base`) | 01, 02 |
 | **Adapter** | a small set of trainable parameters added to a frozen base (e.g., LoRA matrices), saved and served separately | 06, 07 |
 | **Chat template** | the Jinja program that turns a list of messages into the exact token sequence the model was trained on | 02 |
 | **Loss mask** | which tokens contribute to the loss; in SFT usually only assistant tokens | 02, 05 |
@@ -699,73 +659,71 @@ are written down and tested before any model is trained.
 prompting baseline, zero-shot and 5-shot, so that every later module has a number
 to beat. Then apply the decision flowchart to three scenarios in a one-page memo.
 
-**Tier.** The script runs on CPU in reduced form (`--smoke`); full mode documents
-the **T0** tier (a free Colab or Kaggle T4 with 16 GB, fp16).
+**Tier and models.** Smoke mode runs on CPU. Full mode needs **T0** (a free T4, 16 GB,
+fp16) for [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B) (hybrid, thinking
+disabled) and [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) (about 8 GB of fp16 weights).
 
-**Models (full mode).** [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B)
-(the hybrid post-trained checkpoint, thinking disabled) and
-[`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
-(non-thinking only). In fp16, 4B weights take about 8 GB, so both fit a T4.
-
-**Data.** No Hub dataset: the script generates a synthetic support-email set from
-templates, deterministically (seed 0): 50 eval emails and 200 train emails, saved as
-`eval.jsonl` and `train.jsonl` under `--out` (default `./ft_data/` in full mode; a
-temporary directory in smoke mode unless you pass `--out`). The templates vary
-order-ID formats, sign-offs and tone phrases so that a regex is not enough.
+**Data.** No Hub dataset: the script generates the set deterministically (seed 0) and
+writes `train.jsonl` (200 rows) and `eval.jsonl` (50 rows, 10 per issue type) under
+`--out`, as `{"id", "email", "gold"}` rows. `--data-only` writes the full set on CPU;
+`--smoke` writes the same two files with 20 and 40 rows, prefixes of the full ones.
+**The eval split is built only from held-out templates**: its body sentences,
+greetings, refund and tone phrases and sign-offs never occur in train, and it adds
+three order-ID forms (`ORD13303`, `ord-13303`, `order no. 13303`) that train lacks. So
+the eval set measures whether a method generalises from train phrasing to unseen
+phrasing, not whether it memorised the templates. It is still synthetic: it tests
+your pipeline (template, decoding, parsing) and that generalisation, not real-world
+traffic, and a regex written after reading the eval set could saturate it. This
+breaks rule 1 of section 1.3 on purpose (a free, shareable, deterministic set); on a
+real project, sample the 50 from production traffic. Open `ft_data/eval.jsonl` and
+read five emails next to their gold JSON: would a careful human agree with each label?
 
 **Script:** [`fit_or_not_baseline.py`](./code/fit_or_not_baseline.py).
 
 ```bash
-# CPU, under a minute, no downloads
+# CPU, a few seconds, no downloads
 python content/courses/finetuning/code/fit_or_not_baseline.py --smoke
+# CPU: write the full 50 + 200 rows that later modules' labs read
+python content/courses/finetuning/code/fit_or_not_baseline.py --data-only --out ft_data/
 
 # T0 GPU: zero-shot and 5-shot baseline for both Qwen3 models
 pip install "transformers>=5" torch
-python content/courses/finetuning/code/fit_or_not_baseline.py --full --out ./ft_data/
+python content/courses/finetuning/code/fit_or_not_baseline.py --full --out ft_data/
 ```
 
-### Step 1: generate the dataset and inspect five rows
-
-Run the smoke mode with `--out ./ft_data/` and open `eval.jsonl`. Read five emails
-next to their gold JSON. Ask of each one: would a careful human agree with the
-label? An eval set you do not trust is worse than none.
-
-### Step 2: write the scorer
+### Step 1: the scorer and two reference points
 
 The script's `score()` implements the rules from section 1.6 and returns parse
 rate, schema validity, per-field exact match and all-fields exact match as exact
 fractions. Smoke mode asserts it on the six fixtures from Check 1.2, then scores two
-reference points on the 50 eval emails: a randomly initialised byte-level GRU (the
-"no learning at all" floor, which must parse 0 of 50) and a deliberately naive
-regex extractor. The regex parses 50/50 and is schema-valid 50/50 by construction,
-but gets only 17/50 order IDs (it misses `#49755` and `order number 51444`) and
-10/50 all-fields matches. Keep that number: it is the cheapest baseline there is,
-and a project whose LLM cannot beat a regex has a scoping problem, not a training
-problem.
+reference points. A randomly initialised byte-level GRU (the "no learning at all"
+floor) parses 0 of 50. A regex-and-keyword extractor written by reading the *train*
+templates scores 200/200 all-fields on train, and on the held-out eval gets 32/50
+order IDs, 18/50 names and **1/50 all-fields matches**. That gap is what memorising
+templates looks like, and it is the failure the held-out split exists to expose.
 
-### Step 3: run the baselines
+### Step 2: run the baselines
 
-In smoke mode, step 3 is the fixture and reference scoring above. In full mode
-the script formats each email with the model's own chat template
+In full mode the script formats each email with the model's own chat template
 (`apply_chat_template(..., add_generation_prompt=True, enable_thinking=False)`),
-uses the system prompt that specifies the schema, and decodes greedily
-(`do_sample=False`, 128 new tokens) in two settings: zero-shot, and 5-shot with the
-first five training emails as user/assistant turns. It writes
-`baseline_scores.json` with all metrics per model and setting. The loading code
-uses the Transformers v5 `dtype=` argument, not the removed `torch_dtype=`.
+uses `SYSTEM_PROMPT`, and decodes greedily (`do_sample=False`, 128 new tokens) in
+two settings: zero-shot, and 5-shot with the first five training rows as
+user/assistant turns. It writes `baseline_scores.json` with all metrics per model and
+setting. The loading code uses the Transformers v5 `dtype=` argument, not the
+deprecated `torch_dtype=` (still accepted with a warning in v5).
 
 **Record** parse rate, schema validity, per-field exact match and all-fields exact
 match for zero-shot and 5-shot on both models.
 
-**Expected outcome.** 5-shot should improve parse rate and the enum fields
-(`issue_type`, `sentiment`) over zero-shot, because the examples show the exact
-output shape. All-fields exact match should stay well below what SFT reaches in
-[module 05](./05-supervised-fine-tuning.md): the normalisation of order IDs and the
-refund-vs-issue distinction are behaviours that examples hint at and training
-fixes. Do not expect specific numbers; they depend on the template version and
-decoding details.
+**Expected outcome.** 5-shot should improve parse rate where zero-shot is below
+ceiling, and the enum fields (`issue_type`, `sentiment`), because the examples show
+the exact output shape. All-fields exact match should stay well below what SFT
+reaches in [module 05](./05-supervised-fine-tuning.md): the refund-vs-issue
+distinction and consistent ID normalisation are behaviours that a prompt describes
+and training fixes. Do not expect specific numbers; they depend on the template
+version and decoding details.
 
-### Step 4: the fine-tune-or-not memo
+### Step 3: the fine-tune-or-not memo
 
 Write one page applying the flowchart in section 1.3 to three scenarios: a product
 FAQ bot, a natural-language-to-SQL generator, and a legal style rewriter. For each,
@@ -783,8 +741,8 @@ would make you fine-tune. Then compare with this model answer.
 ## Key takeaways
 
 - **Most fine-tuning failures happen at the decision step.** Teams train to add
-  facts or to fix what a prompt would fix; a written metric and a prompting baseline
-  prevent both.
+  facts or to fix what a prompt would fix; a golden eval set and a prompting
+  baseline prevent both, and without them "the fine-tune helped" is unfalsifiable.
 - **Fine-tuning changes behaviour; retrieval supplies knowledge.** Format, tone,
   task specialisation, tool-call reliability, refusal policy and cost are
   fine-tuning wins; volatile facts belong in RAG or a tool.
@@ -795,8 +753,6 @@ would make you fine-tune. Then compare with this model answer.
 - **LIMA shows quality beats quantity for SFT on a strong base**, with one 65B
   model, 1,000 examples and a 300-prompt human study; it does not show 1,000
   examples suffice for every task or replace RL.
-- **Every decision starts with a golden eval set and a baseline.** Without a
-  number to beat, "the fine-tune helped" is unfalsifiable.
 - **Few-shot prompts have a per-request cost.** Break-even is
   $n^* = C_{\text{train}}/(P_{\text{shot}} c_{\text{in}} - \Delta c)$: 20,000
   requests in the worked example, 30,000 with a 0.15-cent serving premium, never if
@@ -805,17 +761,13 @@ would make you fine-tune. Then compare with this model answer.
   LoRA, hosted vendor APIs and training-as-a-service trade control, data residency,
   weights ownership, cost and ops burden.
 - **Modern post-training is SFT, then preference or RL, fed by rejection
-  sampling.** Llama 3 looped rejection sampling, SFT and DPO six times; Tulu 3 added
-  RLVR; Qwen3 and DeepSeek-R1 centre on GRPO with verifiers and distil to small
-  models.
-- **Llama 3 avoided complex RL for stability and scale.** DPO needed less compute
-  and performed better on instruction following in their experiments.
+  sampling.** Llama 3 looped rejection sampling, SFT and DPO six times and avoided
+  PPO for stability and compute; Tulu 3 added RLVR; Qwen3 and DeepSeek-R1 centre on
+  GRPO with verifiers and distil to small models.
 - **Licences stack.** The model licence, every dataset licence and the terms of any
   model whose outputs you train on must all permit your use.
 - **Fine-tuning can erode safety even on benign data**, so safety re-testing is
   part of every project, not an afterthought.
-- **A naive regex is a baseline too.** On the running task it gets 10/50
-  all-fields matches; an LLM pipeline that cannot beat it has a scoping problem.
 
 ## Self-check
 

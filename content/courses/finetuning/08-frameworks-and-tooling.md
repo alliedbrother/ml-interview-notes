@@ -8,21 +8,17 @@ You will almost never write a raw training loop for an LLM fine-tune. You will w
 or twenty lines of Python against a trainer, and a framework will do the rest. That makes the
 framework part of your experiment: its defaults pick your scheduler, your warmup, which tokens
 carry loss and how much memory you need. **Two tools given "the same recipe" do not run the same
-experiment unless you check the effective values.** This module teaches the dominant stacks as of
-October 2026, what each adds over plain TRL and Transformers, which ones are current (TRL v1,
-Unsloth, Axolotl, LLaMA-Factory) and which are not (torchtune), and how to choose.
-
-It is also the course's **API-currency reference**. Most fine-tuning tutorials on the web were
-written against TRL 0.x and Transformers 4.x. Section 8.2 holds the 2024 → 2026 migration table
-that every other module assumes.
+experiment unless you check the effective values.** This module covers the current stacks as of
+October 2026 and what each adds over plain TRL. It is also the course's **API-currency
+reference**: most tutorials on the web target TRL 0.x and Transformers 4.x, and 8.2 holds the
+2024 → 2026 migration table every other module assumes.
 
 ---
 
 ## 8.1 The Hugging Face stack and how it composes
 
-Six libraries and one service make up the default stack. The
-[Hugging Face ecosystem note](../../notes/libraries/huggingface.md) covers `Trainer`, PEFT and
-TRL basics with runnable examples; here is how the pieces fit together in 2026.
+The [Hugging Face ecosystem note](../../notes/libraries/huggingface.md) covers `Trainer`, PEFT and
+TRL basics; here is how the pieces fit together in 2026.
 
 | Piece | Owns | What you touch |
 |---|---|---|
@@ -34,39 +30,22 @@ TRL basics with runnable examples; here is how the pieces fit together in 2026.
 | **Kernels** | Hub-hosted compiled kernels swapped into models | `attn_implementation="kernels-community/..."`, `use_kernels` |
 | **Hub** | weights, datasets, adapters, model cards, Jobs | `push_to_hub`, `hf jobs` |
 
-Transformers v5 (stable release 26 January 2026) is PyTorch-only: TensorFlow and Flax are gone,
-slow tokenizers are gone, and `from_pretrained` infers dtype from the checkpoint config.
-[Module 02](./02-tokens-templates-and-the-causal-lm-objective.md) owns those changes; what matters
-here is that a TRL trainer does **not** follow the v5 dtype inference. If you let TRL load the
-model from a string and set no dtype, it loads in float32
-([`SFTTrainer` docstring, TRL v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L535-L537)).
-Pass `model_init_kwargs={"dtype": "bfloat16"}` in the config. Transformers v5 also ships `transformers serve`, an
-OpenAI-compatible server for quick checks of a fine-tune;
-[module 20](./20-production-serving-and-cost.md) covers serving properly.
+Transformers v5 (26 January 2026) is PyTorch-only, drops slow tokenizers, and infers dtype from
+the checkpoint config ([module 02](./02-tokens-templates-and-the-causal-lm-objective.md)). **A TRL
+trainer does not follow that inference**: load from a string with no dtype and you get float32
+([`SFTTrainer` docstring, TRL v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L535-L537)),
+so pass `model_init_kwargs={"dtype": "bfloat16"}`. v5 also ships `transformers serve`, an
+OpenAI-compatible server for quick checks ([module 20](./20-production-serving-and-cost.md)).
 
-```mermaid
-flowchart TD
-    S["your script or trl sft --config"] --> T["TRL trainer<br/>(SFT, DPO, GRPO, ...)"]
-    D["Datasets"] --> T
-    P["PEFT wraps the model<br/>(LoRA adapters)"] --> T
-    K["Kernels / Liger<br/>swap modules"] --> P
-    T --> HT["Transformers Trainer<br/>(loop, schedule, checkpoints)"]
-    HT --> A["Accelerate<br/>DDP / FSDP2 / DeepSpeed"]
-    A --> PT["PyTorch + CUDA"]
-    HT --> H["Hub<br/>(push adapters, model cards)"]
-```
-
-Read the diagram from top to bottom as a chain of responsibilities. TRL subclasses the
-Transformers `Trainer` and adds data preparation (chat templates, packing, loss masks) and the
-method-specific loss. The `Trainer` owns the loop, the optimizer, the schedule and checkpointing.
-Accelerate owns the processes and the sharding. When something goes wrong, the layer that owns the
-behaviour is where the fix lives: a wrong loss mask is a TRL question, a wrong warmup is a
-`Trainer` question, an FSDP hang is an Accelerate question.
+TRL subclasses the Transformers `Trainer` and adds data preparation (chat templates, packing,
+loss masks) and the method-specific loss. The `Trainer` owns the loop, the optimizer, the schedule
+and checkpointing; Accelerate owns the processes and the sharding. **Fix a bug in the layer that
+owns the behaviour**: a wrong loss mask is a TRL question, a wrong warmup is a `Trainer` question,
+an FSDP hang is an Accelerate question.
 
 ### Version compatibility (Table 1)
 
-Pin these together. Every cell below was read from the release's own packaging metadata or
-release notes as of 10 October 2026.
+Every cell was read from packaging metadata or release notes as of 10 October 2026.
 
 | Component | Current release | Hard constraint | Source |
 |---|---|---|---|
@@ -78,9 +57,8 @@ release notes as of 10 October 2026.
 | TRL | v1.15.0 (8 Oct 2026) | refuses `nn.DataParallel`; `datasets>=4.7.0` | [v1.15.0 release](https://github.com/huggingface/trl/releases/tag/v1.15.0) |
 | vLLM (for GRPO/RLOO/online distillation) | 0.31.0 | TRL v1.15's `vllm` extra pins `>=0.21.0,<=0.31.0`; the window moves every release | [TRL pyproject](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/pyproject.toml#L85-L86) |
 
-The practical rule: **pick the TRL release first, then take its vLLM window literally, then make
-sure PEFT is at least 0.18 if Transformers is v5.** TRL's lower bounds are compatibility promises,
-not recommendations.
+**Pick the TRL release first, take its vLLM window literally, then make sure PEFT is at least 0.18
+if Transformers is v5.** TRL's lower bounds are compatibility promises, not recommendations.
 
 ---
 
@@ -88,9 +66,8 @@ not recommendations.
 
 TRL v1.0 shipped on 31 March 2026 with a two-tier contract
 ([TRL v1 blog](https://huggingface.co/blog/trl-v1)): "The stable core follows semantic versioning.
-The experimental layer makes no such promises." A minor release may add features to a stable
-trainer but should not break its public API; anything breaking waits for v2.0 behind a
-deprecation warning. That is why the deprecated arguments below say "removal in v2.0.0".
+The experimental layer makes no such promises." Breaking changes to a stable trainer wait for
+v2.0 behind a deprecation warning, which is why deprecated arguments below say "removal in v2.0.0".
 
 ### Stable vs experimental
 
@@ -101,35 +78,28 @@ As of the [v1.15.0 docs index](https://huggingface.co/docs/trl/v1.15.0/en/index)
 | Stable (`from trl import ...`) | `SFTTrainer`, `DPOTrainer`, `KTOTrainer`, `RewardTrainer`, `RLOOTrainer`, `GRPOTrainer`, `DistillationTrainer` |
 | Experimental (`from trl.experimental... import ...`) | `ORPOTrainer`, `CPOTrainer`, `OnlineDPOTrainer`, `GKDTrainer`, `GOLDTrainer`, `AsyncGRPOTrainer`, `AsyncDistillationTrainer`, `GMPOTrainer`, `TPOTrainer`, `SDFTTrainer`, `SDPOTrainer`, `SSDTrainer`, and others |
 
-`DistillationTrainer` graduated in v1.10; [module 14](./14-distillation-and-reasoning.md) uses it
-instead of `GKDTrainer`. **Experimental means "may vanish in a minor release"**, and v1.14 proved it
-by deleting six trainers at once. Use experimental trainers for research, pin the exact TRL
-version, and never build a team pipeline on one without a plan to vendor the code.
+`DistillationTrainer` graduated in v1.10 ([module 14](./14-distillation-and-reasoning.md)).
+**Experimental means "may vanish in a minor release"**: v1.14 deleted six trainers at once. Pin the
+exact TRL version and have a plan to vendor the code before a team pipeline depends on one.
 
 ### Removed (Table 2)
 
 | Removed | In | Use instead |
 |---|---|---|
-| `PPOTrainer`, `PPOConfig`, `AutoModelForCausalLMWithValueHead` and the value-head module | [v1.13.0](https://github.com/huggingface/trl/releases/tag/v1.13.0) | `GRPOTrainer` or `RLOOTrainer`; verl/OpenRLHF for real PPO ([module 12](./12-preference-optimization.md)) |
+| `PPOTrainer`, `PPOConfig`, `AutoModelForCausalLMWithValueHead` and the value-head module | [v1.13.0](https://github.com/huggingface/trl/releases/tag/v1.13.0): "unmaintained ..., near-zero recorded usage" | `GRPOTrainer` or `RLOOTrainer`; verl/OpenRLHF for real PPO ([module 12](./12-preference-optimization.md)) |
 | `BCOTrainer`, `PRMTrainer`, `XPOTrainer`, `NashMDTrainer`, `GRPOWithReplayBufferTrainer`, GSPO-token trainer | [v1.14.0](https://github.com/huggingface/trl/releases/tag/v1.14.0) | KTO for unpaired feedback; GRPO with `importance_sampling_level="sequence"` for GSPO; vendor the old file if you must |
 | `trl.losses` (fused linear DPO/KTO/GRPO/JSD losses, vendored in v1.13) | v1.14.0 | trainers stream their own log-probs; nothing to import |
 | experimental MiniLLM trainer | [v1.15.0](https://github.com/huggingface/trl/releases/tag/v1.15.0) | `DistillationTrainer` |
 | `trl skills install` | [v1.11.0](https://github.com/huggingface/trl/releases/tag/v1.11.0) | the skill source moved out of the package |
 | old `examples/scripts/...` paths | v1.11.0 | per-example folders; trainer doc pages carry runnable snippets |
 
-The PPO removal note is worth reading as an engineering lesson: the trainer was "unmaintained (no
-feature work in over a year...), the only trainer never aligned on the input format..., near-zero
-recorded usage" ([v1.13.0 notes](https://github.com/huggingface/trl/releases/tag/v1.13.0)). TRL
-chose a small, coherent stable surface over breadth.
-
 ### The `trl` CLI
 
 Every stable trainer has a subcommand: `trl sft`, `trl dpo`, `trl kto`, `trl reward`, `trl rloo`,
 `trl grpo` and `trl distillation`, plus `trl env` for bug reports and `trl vllm-serve`
-([CLI docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/clis)). Since v1.11, `trl
-vllm-serve` is a thin wrapper that translates its flags into vLLM's own `vllm serve` and sets the
-three options TRL needs for NCCL weight transfer; the v1.15 docs mark it deprecated in favour of
-calling `vllm serve` directly. Here is the SFT recipe for this module's lab as a config file:
+([CLI docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/clis)). `trl vllm-serve` is now a
+thin wrapper over `vllm serve`; the v1.15 docs mark it deprecated in favour of calling
+`vllm serve --weight-transfer-config` directly. The lab's SFT recipe as a config file:
 
 ```yaml
 # sft.yaml  ->  trl sft --config sft.yaml
@@ -152,8 +122,9 @@ max_length: 2048
 output_dir: qwen3-1.7b-capybara-lora
 ```
 
-Three details in that file are traps. `learning_rate: 2.0e-4` has a dot because YAML 1.1 parsers
-read `2e-4` as a **string**, and the parser then fails on type conversion. `lora_target_modules`
+Three details in that file are traps. `learning_rate: 2.0e-4` has a dot because PyYAML (YAML 1.1)
+reads `2e-4` as the string `'2e-4'`. TRL's argparse layer happens to coerce it, but any code that
+reads the YAML directly gets a `str`. `lora_target_modules`
 defaults to `None`, which hands the choice to PEFT's per-architecture default (attention
 projections only for most decoders), so you must say `all-linear`
 ([module 06](./06-lora-and-qlora.md) explains why the MLP matters). And `warmup_steps: 0.03`
@@ -173,18 +144,14 @@ quantization flags `use_peft`, `lora_r`, `lora_alpha`, `lora_dropout`, `lora_tar
 `parse_args_and_config` loads the YAML, sets any `env:` block as environment variables, installs
 the YAML values as **new defaults**, then parses the command line, so a flag always beats the file
 ([`TrlParser`, v1.15.0](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/scripts/utils.py#L234-L340)).
-`trl sft --config sft.yaml --learning_rate 1e-4` runs the file with a different LR. Unknown keys in
-the file raise. Accelerate options such as `num_processes` or `accelerate_config: fsdp2` can live in
-the same YAML; the CLI forwards them to `accelerate launch`.
-
-This design means **the dataclass is the documentation**. When you wonder what a key does, read
-the field's `metadata["help"]` in the pinned source, not a blog post.
+`trl sft --config sft.yaml --learning_rate 1e-4` runs the file with a different LR; unknown keys
+raise. Accelerate options (`num_processes`, `accelerate_config: fsdp2`) can live in the same YAML.
+**The dataclass is the documentation**: read the field's `metadata["help"]` in the pinned source.
 
 ### Configs resolve to steps
 
-The single most common config bug is not a wrong key, it is a wrong mental model of how many
-optimizer steps a run will take. Take 10,000 examples, `per_device_train_batch_size=4`,
-`gradient_accumulation_steps=8`, two GPUs, three epochs and a 3% warmup.
+The most common config bug is a wrong mental model of how many optimizer steps a run takes. Take
+10,000 examples, `per_device_train_batch_size=4`, accumulation 8, two GPUs, 3 epochs, 3% warmup.
 
 The effective batch is $4 \times 8 \times 2 = 64$ sequences per optimizer step. Each rank's
 `DistributedSampler` sees $\lceil 10{,}000 / 2 \rceil = 5{,}000$ examples, which is
@@ -206,8 +173,7 @@ Axolotl computes `int(warmup_ratio * total_steps)`, a floor, so the same 3% give
 ([Axolotl builder](https://github.com/axolotl-ai-cloud/axolotl/blob/d17227d1a3ba1983442400fc3b9dcf0260bed857/src/axolotl/core/builders/base.py#L264-L285)).
 If you set `max_steps=200`, epochs no longer matter: 200 steps and $\lceil 6.0 \rceil = 6$ warmup.
 
-The check below implements the Transformers v5 arithmetic (ceilings everywhere) and asserts those
-numbers, plus the two alternative conventions.
+The check below asserts those numbers under the v5 convention and the two alternatives.
 
 ```python finetuning-check
 import math
@@ -226,11 +192,7 @@ def schedule(n, per_device, accum, world, epochs, warmup_ratio, max_steps=-1,
     return effective, micro, per_epoch, total, warm
 
 eff, micro, per_epoch, total, warm = schedule(10_000, 4, 8, 2, 3, 0.03)
-assert eff == 64
-assert micro == 1250
-assert per_epoch == 157
-assert total == 471
-assert warm == 15
+assert (eff, micro, per_epoch, total, warm) == (64, 1250, 157, 471, 15)
 
 # max_steps overrides epochs; warmup follows the new total
 _, _, _, total200, warm200 = schedule(10_000, 4, 8, 2, 3, 0.03, max_steps=200)
@@ -272,24 +234,21 @@ change behaviour.
 | links to `trl/examples/scripts/...` | the trainer's doc page | reorganised in v1.11 |
 | `pip install peft<0.18` with Transformers v5 | PEFT ≥ 0.18 | incompatible |
 
-Version sources: the [v0.12](https://github.com/huggingface/trl/releases/tag/v0.12.0),
-[v0.16](https://github.com/huggingface/trl/releases/tag/v0.16.0) and
-[v1.10](https://github.com/huggingface/trl/releases/tag/v1.10.0) release notes, plus a check of
-`trl/trainer/utils.py` at the v0.19.0 tag (class present) and v0.20.0 tag (class absent).
+Sources: TRL [v0.12](https://github.com/huggingface/trl/releases/tag/v0.12.0), [v0.16](https://github.com/huggingface/trl/releases/tag/v0.16.0)
+and [v1.10](https://github.com/huggingface/trl/releases/tag/v1.10.0) notes; the collator is in `trl/trainer/utils.py` at v0.19.0, absent at v0.20.0.
 
 You can automate most of this. The check below is a small linter that walks a script's AST and
-reports the eight most common stale patterns. It uses the AST rather than plain regex so comments
-do not trigger it, and so it can tell `tokenizer=` passed to a `*Trainer(` (stale) from
-`tokenizer=` passed to a collator, and `max_seq_length=` passed to a TRL `*Config(` (stale) from
-Unsloth's `from_pretrained(max_seq_length=...)` (current Unsloth API).
+reports five common stale patterns. It uses the AST rather than regex so comments do not trigger
+it, and so it can tell `tokenizer=` passed to a `*Trainer(` (stale) from `tokenizer=` passed to a
+collator, and `max_seq_length=` passed to a TRL `*Config(` (stale) from Unsloth's
+`from_pretrained(max_seq_length=...)` (current Unsloth API).
 
 ```python finetuning-check
 import ast
 
 STALE_KWARGS = {"max_seq_length": "max_length", "evaluation_strategy": "eval_strategy",
                 "torch_dtype": "dtype"}
-STALE_NAMES = {"DataCollatorForCompletionOnlyLM": "completion_only_loss / assistant_only_loss",
-               "PPOTrainer": "GRPOTrainer / RLOOTrainer"}
+STALE_NAMES = {"DataCollatorForCompletionOnlyLM": "completion_only_loss / assistant_only_loss"}
 
 def call_name(node):
     f = node.func
@@ -307,89 +266,60 @@ def lint(src):
                     continue
                 elif kw.arg in STALE_KWARGS:
                     found.add((kw.arg + "=", STALE_KWARGS[kw.arg] + "="))
-                elif kw.arg == "use_liger_kernel" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                    found.add(("use_liger_kernel=True", 'model_init_kwargs={"use_kernels": True}'))
-                elif kw.arg == "truncation_mode" and isinstance(kw.value, ast.Constant) and kw.value.value == "keep_end":
-                    found.add(('truncation_mode="keep_end"', 'truncation_mode="keep_start"'))
-        elif isinstance(node, ast.Name) and node.id in STALE_NAMES:
-            found.add((node.id, STALE_NAMES[node.id]))
         elif isinstance(node, ast.alias) and node.name in STALE_NAMES:
             found.add((node.name, STALE_NAMES[node.name]))
     return sorted(found)
 
 old = "\n".join([
-    "from trl import SFTTrainer, SFTConfig, DPOConfig, PPOTrainer, DataCollatorForCompletionOnlyLM",
-    "from transformers import AutoModelForCausalLM, AutoTokenizer",
+    "from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM",
     'model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B", torch_dtype="bfloat16")',
-    'tok = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B")',
-    'collator = DataCollatorForCompletionOnlyLM("### Answer:", tokenizer=tok)',
-    'args = SFTConfig(output_dir="out", max_seq_length=2048, evaluation_strategy="steps",',
-    '                 truncation_mode="keep_end")',
-    'dpo_args = DPOConfig(output_dir="dpo", use_liger_kernel=True)',
-    "trainer = SFTTrainer(model=model, args=args, train_dataset=ds, tokenizer=tok,",
-    "                     data_collator=collator)",
-    "trainer.train()",
-    "rlhf = PPOTrainer",
+    'args = SFTConfig(output_dir="out", max_seq_length=2048, evaluation_strategy="steps")',
+    "trainer = SFTTrainer(model=model, args=args, train_dataset=ds, tokenizer=tok)",
 ])
 new = "\n".join([
-    "from trl import SFTTrainer, SFTConfig, DPOConfig",
-    "from unsloth import FastLanguageModel",
-    "# old code used tokenizer= and PPOTrainer; comments must not trigger the linter",
-    'model, tok = FastLanguageModel.from_pretrained("unsloth/Qwen3-1.7B", max_seq_length=2048)',
-    'args = SFTConfig(output_dir="out", max_length=2048, eval_strategy="steps",',
-    '                 truncation_mode="keep_start", model_init_kwargs={"dtype": "bfloat16"})',
-    'dpo_args = DPOConfig(output_dir="dpo", model_init_kwargs={"use_kernels": True})',
-    "trainer = SFTTrainer(model=model, args=args, train_dataset=ds, processing_class=tok)",
+    'model, tok = FastLanguageModel.from_pretrained("unsloth/Qwen3-1.7B", max_seq_length=2048)  # was tokenizer=',
+    "collator = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False)",
+    'trainer = SFTTrainer(model=model, args=SFTConfig(output_dir="out", max_length=2048), processing_class=tok)',
 ])
 
 issues = lint(old)
-assert len(issues) == 8, issues
-assert {p for p, _ in issues} == {
-    "tokenizer=", "max_seq_length=", "evaluation_strategy=", "torch_dtype=",
-    "use_liger_kernel=True", "DataCollatorForCompletionOnlyLM", "PPOTrainer",
-    'truncation_mode="keep_end"'}
+assert {p for p, _ in issues} == {"tokenizer=", "max_seq_length=", "evaluation_strategy=",
+                                  "torch_dtype=", "DataCollatorForCompletionOnlyLM"}, issues
 assert lint(new) == []
 print("stale-API linter verified")
 ```
 
-This proves the linter finds the eight planted patterns and stays silent on a current script,
-including the collator's `tokenizer=` and Unsloth's `max_seq_length=`. It does not prove
+This proves the linter finds the five planted patterns and stays silent on a current script,
+including the collator's `tokenizer=`, Unsloth's `max_seq_length=` and a comment. It does not prove
 completeness: it knows nothing about default changes (a 2024 GRPO script that relied on server-mode
-vLLM runs without error and does something different). The lab script ships the same linter as
-`--lint`.
+vLLM runs without error and does something different). The lab script's `--lint` mode adds
+`use_liger_kernel=True`, `keep_end` and `PPOTrainer`.
 
 ---
 
 ## 8.3 Kernels
 
-A kernel library replaces PyTorch module implementations with fused GPU kernels. The gains come
-from two places: fewer round trips to HBM, and not materialising large intermediates.
+A kernel library replaces PyTorch modules with fused GPU kernels: fewer round trips to HBM, and
+no large intermediates.
 
 **Liger Kernel** (Hsu et al., 2024, [arXiv 2410.10989](https://arxiv.org/abs/2410.10989)) is a set
 of Triton kernels for RMSNorm, RoPE, SwiGLU/GeGLU and a fused linear cross-entropy. The paper
 reports "on average a 20% increase in training throughput and a 60% reduction in GPU memory usage"
-against the Hugging Face implementations, on its own benchmark set. The memory part comes almost
-entirely from the fused linear cross-entropy: it never builds the $(B, T, V)$ logits tensor, which
-for Qwen3's 151,936-token vocabulary dominates activation memory at long $T$.
-[Module 03](./03-training-mechanics-and-memory-math.md) derives why, extending the
-[Transformers course's memory budget](../transformers/13-training-considerations.md).
-
+on its own benchmark set. The memory comes almost entirely from the fused linear cross-entropy,
+which never builds the $(B, T, V)$ logits tensor ([module 03](./03-training-mechanics-and-memory-math.md)
+derives why, extending the [Transformers course's memory budget](../transformers/13-training-considerations.md)).
 In 2026 TRL took that idea in-house:
 
-- **v1.14** shipped an in-tree Triton kernel that computes per-token log-probs and entropy directly
-  from the hidden states, on by default on CUDA, ROCm and XPU
-  ([v1.14.0 notes](https://github.com/huggingface/trl/releases/tag/v1.14.0)).
+- **v1.14** shipped an in-tree Triton kernel for per-token log-probs and entropy from the hidden
+  states, on by default on CUDA, ROCm and XPU ([v1.14.0 notes](https://github.com/huggingface/trl/releases/tag/v1.14.0)).
 - **v1.15** made a **fused LM head** the default for SFT, DPO, KTO, GRPO, RLOO and Distillation:
   hidden states are projected through `lm_head` in tiles and reduced to per-token log-probs, "so
   the `[batch, seq, vocab]` logits tensor is never built"
   ([v1.15.0 notes](https://github.com/huggingface/trl/releases/tag/v1.15.0)).
 
-The v1.15 benchmark (gemma-3-1b, 262k vocabulary, 79 GiB cap, bf16, batch 1, gradient checkpointing,
-SDPA) reports the maximum trainable sequence length rising from 9,216 to 63,488 tokens for KTO
-(6.89×), 10,240 to 59,392 for DPO (5.80×) and 20,480 to 107,520 for SFT with `loss_type="nll"`
-(5.25×). SFT's previous default path already avoided full logits and did not change. Those numbers
-are for a small model with a huge vocabulary, the case where logits are the largest tensor; expect
-smaller gains on an 8B model with a 32k vocabulary.
+The v1.15 benchmark (gemma-3-1b, 262k vocabulary, 79 GiB cap, bf16) reports the maximum
+trainable KTO sequence length rising 6.89×, from 9,216 to 63,488 tokens. That is the best case, a
+small model with a huge vocabulary; expect smaller gains on an 8B model with a 32k vocabulary.
 
 Because TRL now owns the head, `use_liger_kernel=True` is **deprecated in DPO, KTO, GRPO and RLOO**
 (removal in v2.0.0). Liger's layer kernels still apply, but its fused cross-entropy is forced off.
@@ -409,28 +339,24 @@ args = SFTConfig(output_dir="sft",
                                     "attn_implementation": "kernels-community/flash-attn2@v2"})
 ```
 
-Pin the kernel revision. The [Kernels Hub guide](https://huggingface.co/docs/trl/v1.15.0/en/kernels_hub)
-notes that Transformers picks a default version branch per kernel repository and that the default
-can change between Transformers releases, and it documents a CUDA 12.8 backward-pass failure in
-`v3` builds for grouped-query attention. A run that is reproducible on Tuesday can silently
-change kernels on Wednesday unless you write `@v2` or a commit SHA.
+**Pin the kernel revision.** The [Kernels Hub guide](https://huggingface.co/docs/trl/v1.15.0/en/kernels_hub)
+notes that the default version branch per kernel repository can change between Transformers
+releases, and documents a CUDA 12.8 backward-pass failure in `v3` builds for grouped-query
+attention. Without `@v2` or a commit SHA, a rerun can silently change kernels.
 
-Two more knobs belong here but are owned elsewhere. `attn_implementation` chooses SDPA,
-FlashAttention or a Hub kernel; FlashAttention needs Ampere or newer, so a T4 runs SDPA. And
-`torch.compile` can fuse the rest of the graph; [module 03](./03-training-mechanics-and-memory-math.md)
-covers when it pays. For how Triton kernels are written at all, see the inference course's
-[Triton and CUTLASS chapter](/courses/inference/08-compilation-and-runtime/08-03-triton-and-cutlass.html).
+FlashAttention needs Ampere or newer, so a T4 runs SDPA. `torch.compile` can fuse the rest of the
+graph ([module 03](./03-training-mechanics-and-memory-math.md)); for how Triton kernels are written,
+see the inference course's [Triton and CUTLASS chapter](/courses/inference/08-compilation-and-runtime/08-03-triton-and-cutlass.html).
 
 ---
 
 ## 8.4 Unsloth
 
-Unsloth is a single-GPU-first training library built on top of TRL and PEFT. It rewrites the hot
-paths (attention, RoPE, MLP, cross-entropy, LoRA matmuls) as Triton kernels with hand-derived
-backward passes, patches the model classes at import time, and then hands you an ordinary
-`SFTTrainer`. **What it adds is speed and memory on one GPU; what it costs is a patched,
-version-sensitive model stack.** That is why `import unsloth` must come before `trl` and
-`transformers`.
+Unsloth is a single-GPU-first library on top of TRL and PEFT. It rewrites the hot paths
+(attention, RoPE, MLP, cross-entropy, LoRA matmuls) as Triton kernels with hand-derived backward
+passes, patches the model classes at import time, and hands you an ordinary `SFTTrainer`. **It adds
+speed and memory on one GPU at the cost of a patched, version-sensitive stack**, which is why
+`import unsloth` must come first.
 
 ```python
 # Teaching fragment: not executed (needs a CUDA GPU and `pip install unsloth`).
@@ -448,7 +374,6 @@ model = FastLanguageModel.get_peft_model(
     r=16, lora_alpha=32, lora_dropout=0.0,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     use_gradient_checkpointing="unsloth",   # offloaded checkpointing
-    random_state=3407,
 )
 trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=ds,
                      args=SFTConfig(learning_rate=2e-4, max_length=2048, output_dir="out"))
@@ -467,47 +392,33 @@ The signatures above match Unsloth's source at
 2.0 in TRL's CLI, which acts like a 2× learning-rate difference on the adapter
 ([module 06](./06-lora-and-qlora.md)).
 
-The pieces that matter:
-
 - **`use_gradient_checkpointing="unsloth"`** checkpoints activations and asynchronously offloads
   them to CPU RAM. Unsloth's April 2024 post reported about 30% less VRAM for about 1.9% extra
-  time ([Unsloth long-context blog](https://unsloth.ai/blog/long-context)); your PCIe bandwidth
-  sets the real cost.
+  time ([Unsloth long-context blog](https://unsloth.ai/blog/long-context)); PCIe sets the real cost.
 - **Dynamic 4-bit quants** (the `unsloth-bnb-4bit` uploads) build on bitsandbytes NF4 but leave
   selected sensitive parameters unquantized, for under 10% more VRAM than plain NF4 per Unsloth's
   [December 2024 post](https://unsloth.ai/blog/dynamic-4bit). They change the frozen base in
   QLoRA, not the adapter.
-- **Export**: merged 16-bit weights for vLLM, GGUF for llama.cpp/Ollama, and (from July 2026)
-  NVFP4, FP8 and imatrix GGUF exports
-  ([Unsloth changelog](https://unsloth.ai/docs/new/changelog)).
-- **GRPO**: since July 2026 sequence packing is on by default for GRPO and Unsloth reports GRPO
-  1.3× faster (changelog, 7 July 2026).
-- **`FastVisionModel`** is the VLM counterpart; [module 16](./16-multimodal-and-embedding-fine-tuning.md)
-  uses it.
+- **Export**: merged 16-bit for vLLM, GGUF for llama.cpp/Ollama, and since July 2026 NVFP4, FP8
+  and imatrix GGUF ([Unsloth changelog](https://unsloth.ai/docs/new/changelog)).
+- **GRPO** packs sequences by default since 7 July 2026 (Unsloth reports 1.3× faster), and
+  **`FastVisionModel`** is the VLM counterpart ([module 16](./16-multimodal-and-embedding-fine-tuning.md)).
 
-The 2026 product line, from the changelog: **Unsloth Studio**, a browser UI for running, training
-and exporting models, launched in March 2026 (the first post-launch release is dated 25 March);
-**preliminary automatic multi-GPU** for training and inference (31 March 2026); full **AMD** support
-(20 July 2026) and **Intel XPU** support (29 July 2026); **Unsloth Desktop**, a native app wrapping
-Studio (11 August 2026); and **`unsloth eval`** for evaluating checkpoints and LoRA adapters
-(1 October 2026). Unsloth core is Apache-2.0; Studio's UI components are AGPL-3.0
+2026 additions, per the changelog: **Unsloth Studio** (browser UI, March) and **Unsloth Desktop**
+(August), **preliminary** automatic multi-GPU (31 March), AMD and Intel XPU support (July), and
+`unsloth eval` (1 October). Studio's UI components are AGPL-3.0, unlike the Apache-2.0 core
 ([README](https://github.com/unslothai/unsloth/blob/e0a92903052b4d556fc82299c5fe182125e71bfa/README.md)),
-which matters if you embed it in a product.
-
-Treat multi-GPU Unsloth as preliminary until its docs say otherwise. **Unsloth's sweet spot is one
-GPU, especially a small one**: a free T4 running QLoRA on an 8B model is the case it was built for.
+which matters if you embed it in a product. **Unsloth's sweet spot is one GPU, especially a small
+one**: a free T4 running QLoRA on an 8B model is the case it was built for.
 
 ---
 
 ## 8.5 Axolotl
 
-Axolotl is a YAML-first trainer: you describe the run in one config file and `axolotl train
-config.yaml` does preprocessing, training, and optionally merging and export. Under the hood it
-builds Transformers/TRL trainers, but it adds a large, tested surface of options that would
-otherwise be your glue code. **What it adds is reproducible multi-GPU configs and breadth of
-features behind flags.**
-
-Here is the lab recipe as Axolotl YAML, with keys checked against the
+Axolotl is a YAML-first trainer: `axolotl train config.yaml` does preprocessing, training, and
+optionally merging and export, on top of Transformers/TRL trainers. **It adds reproducible
+multi-GPU configs and a broad, tested feature surface behind flags.** The lab recipe, with keys
+checked against the
 [0.20 schema](https://github.com/axolotl-ai-cloud/axolotl/blob/d17227d1a3ba1983442400fc3b9dcf0260bed857/src/axolotl/utils/schemas/config.py):
 
 ```yaml
@@ -547,8 +458,7 @@ while TRL computes loss on every token of a `messages` dataset unless you set
 LR, different objective. The default scheduler is cosine, not linear. Gradient checkpointing is off.
 And if you set no warmup at all, Axolotl adds `min(int(0.03 × steps), 100)` steps for you.
 
-The features you reach Axolotl for, from its
-[README at a pinned commit](https://github.com/axolotl-ai-cloud/axolotl/blob/d17227d1a3ba1983442400fc3b9dcf0260bed857/README.md):
+Features, from the [README at a pinned commit](https://github.com/axolotl-ai-cloud/axolotl/blob/d17227d1a3ba1983442400fc3b9dcf0260bed857/README.md):
 
 | Feature | What it does |
 |---|---|
@@ -561,10 +471,9 @@ The features you reach Axolotl for, from its
 | [Export](https://docs.axolotl.ai/docs/export.html) | `axolotl export` to GGUF with optional quantization (September 2026) |
 | Kernels | Liger plugin, Cut Cross-Entropy plugin, LoRA MLP/QKV kernels |
 
-A team that needs "the same run, next month, on a different cluster" gets the most from Axolotl:
-the YAML is the experiment. The cost is an abstraction layer: when Axolotl's preprocessing does
-something you did not expect, you debug Axolotl, not TRL. Use `axolotl preprocess` and inspect
-the tokenized output with its label mask before you train.
+For "the same run, next month, on a different cluster", the Axolotl YAML is the experiment. The
+cost is an abstraction layer you must debug yourself: run `axolotl preprocess` and inspect the
+tokenized output and label mask before you train.
 
 ---
 
@@ -573,45 +482,29 @@ the tokenized output with its label mask before you train.
 ### LLaMA-Factory
 
 [LLaMA-Factory](https://github.com/hiyouga/LlamaFactory/blob/1fded918ac4723ac9966363f51ed4500866c5d1d/README.md)
-is the broadest of the config-driven tools. It supports more model families than anyone else,
-reads YAML (`llamafactory-cli train config.yaml`), and ships **LLaMA Board**, a Gradio web UI
-(`llamafactory-cli webui`) that drives the same training options without editing YAML. Its distinctive breadth is in
-memory-efficient full tuning: GaLore, BAdam, APOLLO, Adam-mini and Muon optimizers, plus OFT and
-OFTv2 adapters (August 2025) and freeze-tuning. [Module 07](./07-the-wider-peft-landscape.md)
-explains those methods; LLaMA-Factory is the easiest place to try them side by side. Since
-26 October 2025 it also has a **Megatron-core training backend** via `mcore_adapter`, and its
-sibling project [EasyR1](https://github.com/hiyouga/EasyR1) does GRPO-style RL.
+is the broadest config-driven tool: the most model families, YAML (`llamafactory-cli train`), and
+**LLaMA Board**, a Gradio web UI (`llamafactory-cli webui`) over the same options. Its distinctive
+breadth is memory-efficient full tuning: GaLore, BAdam, APOLLO, Adam-mini and Muon optimizers, OFT
+and OFTv2 adapters, and freeze-tuning ([module 07](./07-the-wider-peft-landscape.md) explains them).
+Since 26 October 2025 it has a **Megatron-core backend** via `mcore_adapter`, and its sibling
+[EasyR1](https://github.com/hiyouga/EasyR1) does GRPO-style RL.
 
-### LitGPT, NeMo and Megatron
+### NeMo, Megatron and RL-at-scale frameworks
 
-[LitGPT](https://pypi.org/project/litgpt/) (Lightning AI) reimplements popular architectures in
-readable single-file PyTorch with recipes for pretraining, fine-tuning and LoRA. Pick it when you
-want to read and modify every line of the model.
-
-NVIDIA's NeMo framework and [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge)
-(conversion between Hugging Face checkpoints and Megatron-Core training) are where you go when the
-Hugging Face stack stops scaling. **Leave the HF stack when** you train dense models past roughly
-100B parameters, large MoE models where expert parallelism and pipeline schedules dominate, or any
-run where a few points of model FLOPs utilisation are worth an engineer's month. Megatron-Core's
-tensor, pipeline, context and expert parallelism are more mature than what Accelerate composes, at
-the price of its own checkpoint format and config system. [Module 10](./10-distributed-fine-tuning-and-moe.md)
-covers the parallelism itself.
-
-### RL-at-scale frameworks
-
-For RL with large rollouts, the 2025–26 field split off from trainer libraries.
-[verl](https://github.com/volcengine/verl) (ByteDance), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)
-(Ray plus vLLM) and [slime](https://github.com/THUDM/slime) (Megatron plus SGLang) all separate
-the rollout engine from the trainer and schedule them across a cluster. They implement PPO with a
-critic, GRPO, DAPO and their successors at scales TRL does not target. Stay in TRL for GRPO on one
-node; move to one of these when generation throughput across nodes is the bottleneck.
-[Module 13](./13-rl-with-verifiable-rewards.md) owns the algorithms.
+**Leave the HF stack when** you train dense models past roughly 100B parameters, large MoE models
+where expert parallelism and pipeline schedules dominate, or any run where a few points of model
+FLOPs utilisation are worth an engineer's month. Then use NVIDIA NeMo:
+[Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) converts HF checkpoints for
+Megatron-Core, whose parallelism is more mature than Accelerate's
+([module 10](./10-distributed-fine-tuning-and-moe.md)). For RL bound by multi-node generation, [verl](https://github.com/volcengine/verl),
+[OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) and [slime](https://github.com/THUDM/slime)
+separate the rollout engine from the trainer ([module 13](./13-rl-with-verifiable-rewards.md)).
+[LitGPT](https://pypi.org/project/litgpt/) suits readers who want to edit every line of the model.
 
 ### torchtune: no longer maintained
 
-torchtune was PyTorch's native fine-tuning library and many 2024 tutorials (including PyTorch's
-own QAT walk-throughs) use it. Its README now opens with: "Torchtune is no longer actively
-maintained: torchtune development wound down in 2025"
+Many 2024 tutorials (including PyTorch's QAT walk-throughs) use torchtune. Its README now opens:
+"Torchtune is no longer actively maintained: torchtune development wound down in 2025"
 ([README at a pinned commit](https://github.com/meta-pytorch/torchtune/blob/bd2a0fc7c31430972728494fa01aaeeb0ebf1ba1/README.md)).
 **Do not start a new project on torchtune.** Re-base its recipes on TRL, Axolotl or Unsloth, and
 use torchao directly for QAT.
@@ -620,8 +513,7 @@ use torchao directly for QAT.
 
 ## 8.7 Managed and API-based training
 
-Sometimes you do not want to own a GPU at all. Three shapes exist, and they differ in how much of
-the loop you keep.
+Three shapes exist if you do not want to own a GPU; they differ in how much of the loop you keep.
 
 ### Hugging Face Jobs: your script, their hardware
 
@@ -645,33 +537,28 @@ hf jobs run --flavor a100x4 --timeout 2h --secrets HF_TOKEN huggingface/trl -- \
     --dataset_name trl-lib/Capybara --output_dir qwen3-sft --push_to_hub
 ```
 
-`--secrets HF_TOKEN` forwards your local token so the job can push. `hf jobs logs -f <id>`,
-`hf jobs ps` and `hf jobs cancel <id>` manage runs. Pin the script URL to a tag or commit
-rather than `main` for anything you want to reproduce.
+`--secrets HF_TOKEN` lets the job push; `hf jobs logs -f <id>`, `ps` and `cancel` manage runs. Pin
+the script URL to a tag or commit, not `main`, for anything you want to reproduce.
 
 ### Tinker: you own the loop, they own the GPUs
 
 [Tinker](https://tinker-docs.thinkingmachines.ai/tinker/) (Thinking Machines) inverts the
-arrangement. You run the training loop on your laptop; the service holds the model and executes
-four primitives remotely: "`forward_backward`: feed in your data and loss function, and we'll
-compute and accumulate the gradients for you", "`optim_step`: update your model using the
-accumulated gradients", `sample` to generate from the current weights, and `save_state` to
-checkpoint. Calls return futures, so you can pipeline them. Tinker "implements low-rank
+arrangement: your laptop runs the loop, the service holds the model and executes four primitives.
+"`forward_backward`: feed in your data and loss function, and we'll compute and accumulate the
+gradients for you"; "`optim_step`: update your model using the accumulated gradients"; `sample`;
+and `save_state`. Calls return futures, so you can pipeline them. Tinker "implements low-rank
 adaptation (LoRA) fine-tuning, not full fine-tuning", citing the
-[LoRA Without Regret](https://thinkingmachines.ai/blog/lora/) evidence that LoRA matches full
-fine-tuning for most post-training and RL. Built-in losses include cross-entropy, importance
-sampling, PPO, CISPO and DRO, plus custom losses over log-probs.
+[LoRA Without Regret](https://thinkingmachines.ai/blog/lora/) evidence. Built-in losses include
+cross-entropy, importance sampling, PPO, CISPO and DRO, plus custom losses over log-probs.
 
 **Why the primitive split matters: gradient accumulation semantics.** Tinker's cross-entropy loss
 is a **sum** over weighted tokens, not a mean
 ([cross-entropy docs](https://tinker-docs.thinkingmachines.ai/tinker/losses/cross-entropy/)).
 Summed gradients compose exactly across `forward_backward` calls; means do not, because a mean
 over a 3-example chunk and a mean over a 5-example chunk weight examples differently from a mean
-over all 8. So you either pre-scale token weights by $1/N_{\text{total}}$ before the calls, or
-divide once at step time. The check below builds a toy client with Tinker-shaped primitives over
-`nn.Linear(4, 1)` and proves that two `forward_backward` calls on chunks of 3 and 5 examples
-followed by one `optim_step` land on exactly the same weights as one call on all 8, while
-stepping after each chunk does not.
+over all 8. Pre-scale token weights by $1/N_{\text{total}}$, or divide once at step time. The
+check below proves, with a toy Tinker-shaped client over `nn.Linear(4, 1)`, that chunks of 3 and
+5 then one `optim_step` equal one call on all 8, while stepping per chunk does not.
 
 ```python finetuning-check
 import torch
@@ -733,34 +620,38 @@ prove anything about Adam state or token-weighted LLM losses, where the same rul
 the total token count across all micro-batches) is what Transformers' `Trainer` and TRL implement
 for you; [module 03](./03-training-mechanics-and-memory-math.md) has the LLM version.
 
-Evaluation on such an API is just `sample` plus your own scoring code, run between steps on a
-saved sampler checkpoint. What you give up compared with owning GPUs: full fine-tuning, custom
-architectures and kernels, control over precision and parallelism, and data residency (your data
-leaves your network). What you gain: no CUDA, no OOM debugging, and the freedom to write any loss
-over log-probs.
+Evaluation is `sample` plus your own scoring code on a saved sampler checkpoint. You give up full
+fine-tuning, custom architectures and kernels, control over precision and parallelism, and data
+residency. You gain no CUDA, no OOM debugging, and any loss you can write over log-probs.
 
-### Cloud vendor fine-tuning APIs and parallel sweeps
+### Vendor fine-tuning APIs, including reinforcement fine-tuning
 
-The big model vendors' fine-tuning endpoints sit at the far end: upload JSONL, pick a base model
-and a few hyperparameters, get a hosted model back. You cannot see the loss mask, the scheduler or
-the weights, and you usually cannot export the result. Use them when the base model is only
-available that way, and check data-retention and region terms first.
+Vendor endpoints sit at the far end: upload JSONL, pick a base model and a few hyperparameters,
+get a hosted model back. You cannot see the loss mask, scheduler or weights, or usually export them.
 
-At the other end, [RapidFire AI](https://huggingface.co/docs/trl/v1.15.0/en/rapidfire_integration)
-integrates with TRL's SFT, DPO and GRPO trainers to run many configs concurrently on the same
-GPUs. It time-slices configs chunk by chunk over the data, so you can compare learning curves
-live, stop losers and clone-and-modify winners mid-run. The integration page claims 16–24× higher
-experimentation throughput than sequential runs; that is the vendor's figure, and the real gain
-depends on how early your configs separate.
+**Reinforcement fine-tuning (RFT)** is the hosted counterpart of
+[module 13](./13-rl-with-verifiable-rewards.md). OpenAI's
+[RFT API](https://developers.openai.com/api/docs/guides/reinforcement-fine-tuning) takes prompts
+plus a **grader**: a string check, text similarity, Python code run in a sandbox, a score model
+(an LLM that returns a number in $[0, 1]$), or a weighted multi-grader. The service "samples several
+responses per prompt, scores them with the grader" and "applies policy-gradient updates based on
+those rewards". As of October 2026 it runs on o4-mini only, and the same page says OpenAI "is
+winding down the fine-tuning platform", which is closed to new users. **You control the grader,
+not the algorithm**: no say over the KL term, group size or clipping. A grader bug is reward
+hacking you cannot inspect from inside the loop (the guide warns a model can learn "to reward hack
+your grader"), so read sampled outputs at each checkpoint, not only the reward curve.
+
+[RapidFire AI](https://huggingface.co/docs/trl/v1.15.0/en/rapidfire_integration) goes the other
+way: it time-slices many TRL SFT, DPO or GRPO configs over the same GPUs so you can stop losers and
+clone winners mid-run. Its 16–24× experimentation-throughput figure is the vendor's own.
 
 ---
 
 ## 8.8 Environment, configs and tracking
 
-Most "the framework is broken" reports are environment bugs. The stack has five layers that must
-agree: the NVIDIA **driver**, the **CUDA runtime** a wheel was built against, **PyTorch**, and the
-compiled extensions on top (**flash-attn**, **bitsandbytes**, **vLLM**). Three failure classes
-account for most lost afternoons:
+Most "the framework is broken" reports are environment bugs. The NVIDIA **driver**, the **CUDA
+runtime** a wheel was built against, **PyTorch**, and compiled extensions (**flash-attn**,
+**bitsandbytes**, **vLLM**) must agree. Three failure classes dominate:
 
 | Failure | Symptom | Cause and fix |
 |---|---|---|
@@ -768,37 +659,27 @@ account for most lost afternoons:
 | bitsandbytes CUDA mismatch | 4-bit load fails or falls back to CPU | the library cannot find a CUDA runtime it supports; check `python -m bitsandbytes`, match it to your torch's CUDA |
 | vLLM pins torch | installing vLLM downgrades or upgrades torch, breaking everything else | vLLM wheels pin an exact torch; install vLLM first, then the rest, inside TRL's supported vLLM window |
 
-The fixes are boring and they work:
+The fixes:
 
-- **Use the official images** when you can: `huggingface/trl` (now with vLLM installed, per the
-  v1.15 notes), `axolotlai/axolotl`, and `unsloth/unsloth` (plus `unsloth/unsloth-rocm` for AMD).
+- **Use the official images**: `huggingface/trl` (with vLLM since v1.15), `axolotlai/axolotl`,
+  `unsloth/unsloth` (and `unsloth/unsloth-rocm`).
 - **Lock with `uv`.** A `uv.lock` records exact versions and hashes; `uv sync --locked` recreates
   the environment or fails loudly ([uv docs](https://docs.astral.sh/uv/concepts/projects/sync/)).
-  Axolotl's install instructions already use `uv` with `UV_TORCH_BACKEND` to choose the CUDA build.
-- **Record the environment with the run.** `trl env` prints platform, Python, torch, accelerator,
-  and the versions of Transformers, Accelerate (with its config), Datasets, TRL, PEFT, DeepSpeed,
-  bitsandbytes, Liger and vLLM. Save that output next to every checkpoint.
+- **Record the environment with the run.** `trl env` prints platform, Python, torch and every HF,
+  DeepSpeed, bitsandbytes, Liger and vLLM version; save it next to every checkpoint.
 
-**Config management** follows the same rule. You have three ways to specify a run: a YAML file, CLI
-flags, and Python dataclasses. They are layers of one system (8.2), and the precedence is flag >
-YAML > dataclass default. Whatever you use, **save the resolved config** (the `TrainingArguments`
-the `Trainer` actually saw, which it writes as `training_args.bin`, plus the Axolotl or TRL YAML
-and the `trl env` dump). A YAML file that omits `lr_scheduler` is not a record of which scheduler
-ran.
-
-**Tracking**: `report_to` sends metrics to Weights & Biases, Trackio (Hugging Face's lightweight
-open-source tracker), MLflow or TensorBoard; [module 03](./03-training-mechanics-and-memory-math.md)
-covers which curves to watch. The [MLOps note](../../notes/libraries/mlops-and-serving.md) covers
-experiment tracking and model versioning in general, and the
-[PyTorch note](../../notes/libraries/pytorch.md) has the raw-loop equivalents (checkpointing,
-mixed precision, `torchrun`) if you need to drop below the frameworks.
+**Configs and tracking.** YAML, CLI flags and dataclasses are layers of one system (8.2): flag >
+YAML > dataclass default. **Save the resolved config** (the `TrainingArguments` the `Trainer` saw,
+written as `training_args.bin`, plus the YAML and the `trl env` dump); a YAML that omits
+`lr_scheduler` is not a record of which scheduler ran. `report_to` sends metrics to W&B, Trackio,
+MLflow or TensorBoard ([module 03](./03-training-mechanics-and-memory-math.md): which curves to
+watch; [MLOps note](../../notes/libraries/mlops-and-serving.md); [PyTorch note](../../notes/libraries/pytorch.md) for raw loops).
 
 ---
 
 ## 8.9 Choosing a framework
 
-All of these tools sit on the same PyTorch and mostly on the same TRL. The choice is about
-ergonomics, hardware and how much you want hidden.
+All of these sit on PyTorch and mostly on TRL; the choice is ergonomics, hardware and how much you want hidden.
 
 | Criterion | Unsloth | Axolotl | LLaMA-Factory | Raw TRL | Tinker / HF Jobs |
 |---|---|---|---|---|---|
@@ -828,8 +709,8 @@ read effective hyperparameters rather than the ones you meant to set.
 
 **Script.** [`framework_configs.py`](./code/framework_configs.py) takes one recipe dict and emits a
 TRL CLI YAML, an Axolotl YAML and an Unsloth Python script, plus an `effective_defaults.md` table
-of what each tool does for knobs you leave out. It also contains the Check 8.1 schedule arithmetic
-and the Check 8.3 linter.
+of what each tool does for knobs you leave out. It also contains the schedule arithmetic and the
+stale-API linter from 8.2.
 
 ```bash
 # CPU smoke test: writes all three artifacts to a temp dir and asserts their contents
@@ -854,33 +735,30 @@ python content/courses/finetuning/code/framework_configs.py --lint path/to/old_t
 Steps:
 
 1. Run `--full --out runs/l8` and read `effective_defaults.md` before training anything.
-2. Train each tool: `trl sft --config runs/l8/trl_sft.yaml`, `axolotl train runs/l8/axolotl_sft.yaml`,
-   `python runs/l8/unsloth_sft.py`.
-3. For each, record tokens/s (from the logs), peak VRAM (`torch.cuda.max_memory_allocated()` or
-   `nvidia-smi`), final train loss, and eval loss on the same 200 held-out conversations with the
-   same template.
-4. Diff the resolved configs: open the saved `training_args.bin` (TRL, Unsloth) and Axolotl's
-   resolved config, and list every value that differs from the recipe.
+2. Train each: `trl sft --config runs/l8/trl_sft.yaml`, `axolotl train runs/l8/axolotl_sft.yaml`,
+   `python runs/l8/unsloth_sft.py`. Record tokens/s, peak VRAM (`torch.cuda.max_memory_allocated()`),
+   final train loss, and eval loss on the same 200 held-out conversations.
+3. Diff the resolved configs: load the saved `training_args.bin` (TRL, Unsloth) with
+   `torch.load(path, weights_only=False)`, read Axolotl's resolved config, and list every value
+   that differs from the recipe.
 
 **Expected outcome.** Unsloth should use the least VRAM and run fastest on one GPU. Axolotl's train
 loss is **not comparable** to the others unless you switch TRL and Unsloth to assistant-only loss
-too: by default it averages over assistant tokens only, which are harder to predict than the
-user's text. Expect your diff list to include at least the loss mask, the warmup rounding and the
-checkpointing mode. Do not expect identical eval loss; expect differences you can explain.
+too: by default it averages over assistant tokens only, a different token set from TRL's all-token
+loss. Expect the diff list to include at least the loss mask, the warmup rounding and the
+checkpointing mode, and eval-loss differences you can explain.
 
 ### L8.2: CLI job and Hub push (T1 or HF Jobs)
 
 1. Add `push_to_hub: true` and `hub_model_id: <you>/qwen3-1.7b-capybara-lora` to the TRL YAML and
-   run `trl sft --config runs/l8/trl_sft.yaml` on a 24 GB GPU, or run the `hf jobs` command the
-   script prints (one `a10g-large`, `--timeout 2h`, `--secrets HF_TOKEN`).
-2. Open the pushed repo. Check that it holds only adapter weights (`adapter_model.safetensors`
-   and `adapter_config.json`, tens of MB), and that `adapter_config.json` lists all seven
-   projection modules.
-3. Edit the model card: base model, dataset slice, the resolved hyperparameters, the `trl env`
-   output and the eval numbers from L8.1.
+   run it on a 24 GB GPU, or run the `hf jobs` command the script prints (`a10g-large`: one 24 GB
+   A10G, see the Jobs hardware table for its price).
+2. Check the pushed repo holds only `adapter_model.safetensors` and `adapter_config.json` (tens of
+   MB), with all seven projection modules listed.
+3. Write the model card: base model, data slice, resolved hyperparameters, `trl env` output and
+   the L8.1 eval numbers. Record wall-clock and cost (seconds × per-second price).
 
-**Record** the job's wall-clock and cost (seconds × the flavor's per-second price). **Expected
-outcome:** a loadable adapter repo whose card is enough for a stranger to rerun the job.
+**Expected outcome:** a loadable adapter repo whose card is enough for a stranger to rerun the job.
 
 ## Key takeaways
 
@@ -892,23 +770,18 @@ outcome:** a loadable adapter repo whose card is enough for a stranger to rerun 
   Seven stable trainers; v1.14 deleted six experimental ones in one release.
 - **PPOTrainer is gone (v1.13).** Use GRPO or RLOO in TRL, or verl/OpenRLHF/slime for PPO with a critic at scale.
 - **The migration table is mechanical.** `processing_class`, `max_length`, `eval_strategy`, `dtype`,
-  `warmup_steps` as a ratio, completion/assistant-only loss, `keep_start`, `use_kernels`; a linter
-  catches most of it.
-- **The `trl` CLI is `HfArgumentParser` over dataclasses.** YAML sets defaults, flags override them,
-  and the dataclass field's help text is the documentation.
+  `warmup_steps` as a ratio, completion/assistant-only loss, `keep_start`, `use_kernels`.
+- **The `trl` CLI is `HfArgumentParser` over dataclasses.** YAML sets defaults and flags override them.
 - **Step counts depend on rounding conventions.** 10,000 examples at effective batch 64 is 157
   steps per epoch in Transformers v5, 156 in older versions; warmup is ceiling in TRL, floor in Axolotl.
 - **TRL v1.15's fused LM head never builds the logits tensor.** It is on by default and replaces
   Liger's fused loss; up to 6.9× longer sequences on a large-vocabulary 1B model.
-- **Unsloth wins on one GPU.** Custom kernels, offloaded checkpointing, dynamic 4-bit quants and
-  direct GGUF/16-bit export; multi-GPU is still preliminary.
-- **Axolotl wins on reproducible multi-GPU runs.** One YAML covers packing, FSDP2/DeepSpeed,
-  context and expert parallelism, QAT and RL.
-- **LLaMA-Factory wins on breadth and GUI.** Most model families, GaLore/APOLLO/BAdam/Muon/OFT,
-  and a Megatron-core backend.
-- **torchtune is no longer maintained.** Do not start new work on it.
+- **Unsloth wins on one GPU, Axolotl on reproducible multi-GPU runs, LLaMA-Factory on breadth and
+  GUI.** torchtune is no longer maintained; do not start new work on it.
 - **Tinker-style APIs keep your loop and rent their GPUs.** Summed losses make
   `forward_backward` accumulation exact; you give up full fine-tuning and data residency.
+- **Hosted RFT gives you the grader, not the algorithm.** A grader bug is reward hacking you cannot
+  inspect, so read samples, not just the reward curve.
 - **Most framework bugs are environment bugs.** Use official images or `uv` lockfiles, and save
   `trl env` output and the resolved config with every run.
 

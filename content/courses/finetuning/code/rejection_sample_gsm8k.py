@@ -1,6 +1,6 @@
 """Rejection sampling: build a verified math SFT set from teacher samples on GSM8K.
 
-Module: 04 - Data: Formats, Curation, Synthesis, and Decontamination (lab L4.3).
+Module: 04 - Data Curation and Synthesis (lab L4.3).
 
 For every training problem, sample k solutions from a teacher, extract each final
 answer, keep only the samples whose answer matches the reference, and report the
@@ -142,7 +142,9 @@ def full(args) -> None:
     llm = LLM(model=args.teacher, seed=args.seed, max_model_len=4096)
     instr = "\n\nSolve step by step. End with a final line of the form '#### <number>'."
     convs = [[{"role": "user", "content": p["question"] + instr}] for p in problems]
-    params = SamplingParams(n=args.k, temperature=0.8, top_p=0.95, max_tokens=1024, seed=args.seed)
+    # Seed the engine (LLM(seed=...)), not each request: a fixed per-request seed is a
+    # trap when prompts repeat (see build_sft_dataset.py's Magpie path).
+    params = SamplingParams(n=args.k, temperature=0.8, top_p=0.95, max_tokens=1024)
     outs = llm.chat(convs, params)
     samples = [[c.text for c in o.outputs] for o in outs]
     kept, stats = rejection_sample(problems, samples, max_keep=args.max_keep)

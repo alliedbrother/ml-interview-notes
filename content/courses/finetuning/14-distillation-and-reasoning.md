@@ -61,8 +61,8 @@ Check 14.1 makes this concrete. The teacher is a bimodal distribution on a grid 
 points from $-4$ to $4$, two narrow bumps ($\sigma = 0.4$) at $-2$ and $+2$. The student is
 a single discretised Gaussian with fixed $\sigma = 0.6$ and a free mean $\mu$, scanned
 over $[-3, 3]$. Forward KL is minimised at $\mu = 0$, exactly between the modes, with value
-4.99 nats. Reverse KL is minimised at $\mu = \pm 2$, on a mode, with value 0.91 nats (about
-$\log 2$ for ignoring half the teacher's mass, plus a small width mismatch).
+4.99 nats. Reverse KL is minimised at $\mu = \pm 2$, on a mode, with value 0.91 nats
+($\log 2 \approx 0.69$ for ignoring half the teacher's mass, plus 0.22 nats of width mismatch).
 
 ```python finetuning-check
 import torch
@@ -133,22 +133,9 @@ Carlo estimate of sequence-level forward KL**, one sample at a time. That is wha
 "distill R1 into a 7B" recipe does. It inherits forward KL's mass-covering behaviour and
 adds a problem of its own, exposure bias (14.2).
 
-The three families differ in who samples and what the teacher provides:
+Table 1 in 14.3 compares the three families: off-policy sequence KD, logit KD on fixed
+data, and on-policy KD.
 
-```mermaid
-flowchart TD
-    P["prompts x"] --> A["Off-policy sequence KD"]
-    P --> B["Logit KD on fixed data"]
-    P --> C["On-policy KD"]
-    A --> A1["teacher samples y ~ p_T"]
-    A1 --> A2["student SFT on y<br/>(sequence-level forward KL)"]
-    B --> B1["dataset tokens y (human or teacher)"]
-    B1 --> B2["teacher log-probs at every position"]
-    B2 --> B3["student matches full next-token<br/>distribution (token-level KL or JSD)"]
-    C --> C1["student samples y ~ q_S"]
-    C1 --> C2["teacher scores each sampled token"]
-    C2 --> C3["per-token reverse KL<br/>as dense advantage"]
-```
 
 ---
 
@@ -305,22 +292,14 @@ policy-gradient update on these advantages converges, which the lab's toy loop
 
 ### GKD and MiniLLM: the predecessors
 
-**GKD** (Agarwal et al.) introduced two knobs. `lmbda` is the fraction of batches built
-from student samples: `lmbda=0.0` is supervised logit distillation on dataset sequences,
-`lmbda=1.0` is fully on-policy, values in between pick per batch at random. `beta` is the
-JSD interpolation above. A `seq_kd=True` flag adds teacher-generated sequences. The paper's
-finding, as summarised in the [TRL GKD docs](https://huggingface.co/docs/trl/v1.15.0/en/gkd_trainer),
-is that high `lmbda` (on-policy data) works better while the best `beta` depends on the
-task. GKD computes the divergence over the **full next-token distribution** at each
-position, which needs the teacher's logits over the whole vocabulary; the Thinking Machines
-recipe needs only the teacher's log-prob of the sampled token. That is cheaper to transmit
-and is why it fits an RL codebase unchanged.
-
-**MiniLLM** (Gu et al., 2023) [Knowledge Distillation of Large Language Models](https://huggingface.co/papers/2306.08543)
-was the first on-policy method: minimise sequence-level reverse KL with a policy gradient.
-TRL shipped a `MiniLLMTrainer` in `trl.experimental` up to v1.14 and **removed it in v1.15**
-([release notes](https://github.com/huggingface/trl/releases/tag/v1.15.0)). Use
-`DistillationTrainer` with `beta=1.0` for the same objective.
+**GKD** (Agarwal et al.) adds `lmbda`, the fraction of batches built from student samples
+(`0.0` is logit KD on dataset sequences, `1.0` fully on-policy), to the JSD `beta`; per the
+[TRL GKD docs](https://huggingface.co/docs/trl/v1.15.0/en/gkd_trainer), high `lmbda` works
+better and the best `beta` is task-dependent. GKD needs the teacher's full next-token
+distribution; the Thinking Machines recipe needs only the log-prob of the sampled token, so
+it fits an RL codebase unchanged. **MiniLLM** (Gu et al., 2023, [paper](https://huggingface.co/papers/2306.08543))
+first minimised sequence-level reverse KL with a policy gradient; TRL removed its trainer in
+[v1.15](https://github.com/huggingface/trl/releases/tag/v1.15.0). Use `DistillationTrainer` with `beta=1.0`.
 
 ### Compute economics
 
@@ -421,13 +400,12 @@ directly; use `modules_to_save=["lm_head"]` if you must train the head.
 ### `AsyncDistillationTrainer` and multi-teacher OPD
 
 `trl.experimental.async_distillation.AsyncDistillationTrainer` (v1.11) is built like
-AsyncGRPO: a background worker generates student rollouts on a vLLM server while training
-runs concurrently, and the teacher is **never loaded locally**, only reached over HTTP
-([docs](https://huggingface.co/docs/trl/v1.15.0/en/async_distillation_trainer)). Two
-details differ from the synchronous trainer. Its `beta` defaults to `0.0` (forward KL), and
-the teacher returns only a top-k slice of its distribution (`teacher_top_k`, default 8),
-so for `beta != 0` the divergence is computed over just the teacher's top-1 token and the
-sampled token.
+AsyncGRPO: a background worker generates student rollouts on a vLLM server, and the teacher
+is **never loaded locally**, only reached over HTTP
+([docs](https://huggingface.co/docs/trl/v1.15.0/en/async_distillation_trainer)). Its `beta`
+defaults to `0.0` (forward KL), and the teacher returns only a top-k slice
+(`teacher_top_k`, default 8), so for `beta != 0` the divergence covers just the teacher's
+top-1 token and the sampled token.
 
 Multi-teacher on-policy distillation (MOPD, [paper](https://huggingface.co/papers/2606.30406))
 is the reason to use it. Pass several entries in `teacher_server_urls`, e.g.
@@ -440,17 +418,9 @@ unconverted; a mismatch can train against the wrong tokens silently.
 
 ### The experimental zoo
 
-As of TRL v1.15 these live in `trl.experimental` and may change without notice
-([paper index](https://huggingface.co/docs/trl/v1.15.0/en/paper_index)):
-
-| Trainer | Import | One-line description |
-|---|---|---|
-| `GKDTrainer` | `trl.experimental.gkd` | original GKD with `lmbda` on/off-policy mixing and `seq_kd`; since v1.11 it emits a hint to switch when `DistillationTrainer` covers your config |
-| `GOLDTrainer` | `trl.experimental.gold` | General Online Logit Distillation: GKD plus cross-tokenizer alignment (14.5) |
-| `SDFTTrainer` | `trl.experimental.sdft` | Self-Distilled Fine-Tuning: the model conditioned on a demonstration (`privileged_context`) teaches the model without it, on-policy (14.6) |
-| `SDPOTrainer` | `trl.experimental.sdpo` | Self-Distillation Policy Optimization: RLVR where the model conditioned on feedback (errors, successful rollouts) is the teacher |
-| `SSDTrainer` | `trl.experimental.ssd` | Simple Self-Distillation: SFT on the model's own unverified samples at a chosen temperature and truncation (code generation) |
-| `IWOPDTrainer` | `trl.experimental.iw_opd` | Importance-Weighted OPD: down-weights later tokens after the student's prefix drifts from the teacher, countering OPD's position bias |
+As of TRL v1.15, `GOLDTrainer` (cross-tokenizer, 14.5), `SDFTTrainer`, `SDPOTrainer`,
+`SSDTrainer`, `IWOPDTrainer` (14.6) and `GKDTrainer` live in `trl.experimental` and may
+change without notice ([paper index](https://huggingface.co/docs/trl/v1.15.0/en/paper_index)).
 
 **Default choice in October 2026:** `DistillationTrainer` for same-tokenizer distillation,
 `AsyncDistillationTrainer` when the teacher is large or there are several,
@@ -462,11 +432,9 @@ As of TRL v1.15 these live in `trl.experimental` and may change without notice
 ## 14.5 Cross-tokenizer distillation
 
 **Logit distillation needs a shared vocabulary.** A KL compares two distributions over the
-same events. If the teacher's token 1,234 is `" Face"` and the student's is `"ing"`, the
-comparison is meaningless; if the teacher splits `"Hugging Face"` into two tokens where the
-student uses one, the positions do not even line up. Sequence-level KD passes **text**
-between the models, so off-policy SFT works across any pair of families. On-policy logit
-methods did not, until recently.
+same events: if teacher token 1,234 is `" Face"` and the student's is `"ing"`, or the
+tokenizers split `"Hugging Face"` differently, positions and events no longer line up.
+Sequence-level KD passes **text**, so off-policy SFT works across any pair of families.
 
 GOLD (Hugging Face H4,
 [Unlocking On-Policy Distillation for Any Model Family](https://huggingface.co/spaces/HuggingFaceH4/general-on-policy-logit-distillation))
@@ -517,16 +485,23 @@ and that sequential SDFT accumulates several skills without regression. TRL's
 `SDFTTrainer` takes the extra information as a `privileged_context` column; the teacher
 can be the initial model (`"base"`), the current model (`"live"`) or an EMA (`"ema"`).
 
-Two neighbouring ideas complete the picture. **IW-OPD** (Importance-Weighted OPD,
-[On the Position Bias of On-Policy Distillation](https://huggingface.co/papers/2606.22600))
-observes that once a student's prefix drifts far from what the teacher would write, the
-teacher's per-token judgements on later tokens are less informative, and reweights updates
-by accumulated prefix discrepancy so early tokens keep larger weight. **SDPO** uses the
-same self-teacher trick inside RLVR, conditioning on feedback text. Why on-policy methods
-forget less, the alternatives (replay, lower learning rate, LoRA), and how to measure
-forgetting are in [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md).
-Merging the domain model back towards the original weights is the training-free
-alternative in [module 18](./18-model-merging-and-composition.md).
+**IW-OPD** ([position bias of OPD](https://huggingface.co/papers/2606.22600)) down-weights
+later tokens once the student's prefix drifts from the teacher. **SDPO** uses the self-teacher
+inside RLVR, conditioned on feedback text. **SSD** (`SSDTrainer`) is plain SFT on the model's
+own unverified samples at a chosen temperature and truncation, used for code generation.
+
+**Context distillation** (prompt baking; Snell et al. 2022,
+[Learning by Distilling Context](https://arxiv.org/abs/2209.15189)) is the oldest form of the
+same trick. The teacher is the model *with* a long system prompt or few-shot context, the
+student is the same model *without* it, and training (SFT on the teacher's outputs, or token
+KL as in 14.1) bakes the prompt's behaviour into the weights. It is the standard way to drop
+a long system prompt at serve time; score it against the
+[module 01](./01-when-to-fine-tune.md) prompting baseline it replaces.
+
+Why on-policy methods forget less, the alternatives (replay, lower learning rate, LoRA)
+and how to measure forgetting are in [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md);
+merging back towards the original weights is the training-free alternative
+([module 18](./18-model-merging-and-composition.md)).
 
 ---
 
@@ -537,7 +512,9 @@ alternative in [module 18](./18-model-merging-and-composition.md).
 Two conventions coexist. **Inline**: the assistant content holds `<think>...</think>` and
 then the answer, with `<think>`/`</think>` as single special tokens (Qwen3 ids 151667 and
 151668). **Structured**: the message carries a separate `reasoning_content` field and the
-chat template decides how to render it.
+chat template decides how to render it. That is the chat-template input field;
+[vLLM v0.31](https://docs.vllm.ai/en/v0.31.0/features/reasoning_outputs/) returns it as
+`reasoning`, so rename when you turn served outputs into training rows.
 
 The [Qwen3-8B chat template](https://huggingface.co/Qwen/Qwen3-8B/blob/b968826d9c46dd6066d109eabc6255188de91218/tokenizer_config.json)
 shows every engineering decision in about 30 lines of Jinja:
@@ -551,10 +528,8 @@ shows every engineering decision in about 30 lines of Jinja:
   `<think>\n\n</think>\n\n`, so the model starts directly with the answer.
 
 Dropping old reasoning saves context but breaks **prefix preservation**: turn 1 renders
-differently once turn 2 exists, so the training rendering of a conversation is not a
-prefix of what the model saw while generating
-([module 02](./02-tokens-templates-and-the-causal-lm-objective.md) covers why that matters
-for loss masks and caching). Agent loops make it worse, since the model must still see its
+differently once turn 2 exists
+([module 02](./02-tokens-templates-and-the-causal-lm-objective.md) covers loss masks and caching). Agent loops make it worse, since the model must still see its
 reasoning after a tool result returns; TRL swaps in patched prefix-preserving templates for
 Qwen3 and DeepSeek-V3 when tools are enabled. Reasoning before tool calls is in
 [module 15](./15-agentic-and-tool-use-fine-tuning.md).
@@ -585,7 +560,7 @@ thinking length at decode time with no retraining:
 - **Extend.** When the model emits the end delimiter before a minimum budget, suppress it,
   append "Wait", and continue. The model often re-checks and fixes its reasoning.
 
-On AIME24, s1-32B went from 50% to 57% with budget forcing. Qwen3 ships the cap half as
+On AIME24 this is the 50% → 57% gain in the s1 row of 14.2's table. Qwen3 ships the cap half as
 a product feature. When thinking hits the user's budget, generation halts and the
 instruction "Considering the limited time by the user, I have to give the solution based
 on the thinking directly now." is inserted; the report says this ability was not trained
@@ -674,9 +649,7 @@ length is a first-class target. The levers, from training time to decode time:
 
 On early exit, [Dynamic Early Exit in Reasoning Models](https://arxiv.org/abs/2504.15895)
 reports, training-free across 11 reasoning models and 10 benchmarks, average CoT length
-reductions of 19.1% to 80.1% with accuracy changes of +0.3% to +5.0%. Surveys such as
-[Stop Overthinking](https://arxiv.org/abs/2503.16419) group the field into model-based,
-output-based and prompt-based methods.
+reductions of 19.1% to 80.1% with accuracy changes of +0.3% to +5.0%.
 
 The curve to draw for any reasoning model is **accuracy against thinking budget** (L14.3):
 a steep rise while the cap cuts most traces mid-thought, then a plateau once most finish
@@ -689,9 +662,8 @@ curve in the model card.
 
 ### Student capacity
 
-Distillation cannot add capacity. When the student cannot represent the teacher, the
-divergence decides *how* it fails: forward KL (and SFT on traces) smears mass into hedged,
-incoherent traces; reverse KL collapses to a narrower behaviour the student can execute.
+Distillation cannot add capacity. Forward KL (and SFT on traces) makes a too-small student
+smear mass into hedged traces; reverse KL collapses it onto behaviour it can execute.
 
 - **Pick the student by deployment budget first** (memory, latency, tokens per second),
   then distil the best teacher into it. Qwen3 distilled dense students from 0.6B to 14B
@@ -708,8 +680,8 @@ incoherent traces; reverse KL collapses to a narrower behaviour the student can 
 The protocol from [module 09](./09-evaluating-fine-tuned-models.md), specialised:
 
 - **Sample, then average.** AIME has 30 problems a year, so one greedy run has a standard
-  error of several points. Report pass@1 averaged over $k$ samples per problem (LIMO used
-  4 samples at temperature 0.6 on its small benchmarks). Never decode Qwen3 thinking mode
+  error of several points. Report pass@1 averaged over $k$ samples per problem ([LIMO v3](https://arxiv.org/abs/2502.03387v3)
+  used 4 samples at temperature 0.6 for AIME24, AMC23 and CHMath). Never decode Qwen3 thinking mode
   greedily; the card warns of repetition.
 - **Report the settings**: thinking on/off, thinking budget, max new tokens (Qwen3
   recommends 32,768, or 38,912 for competition math), temperature, top-p. A score without
@@ -722,15 +694,13 @@ The protocol from [module 09](./09-evaluating-fine-tuned-models.md), specialised
   public reasoning sets overlap benchmarks ([module 04](./04-data-curation-and-synthesis.md)).
   Prefer benchmarks released after the teacher's cutoff, such as a new AIME year.
 
-"SFT memorizes, RL generalizes" and its rebuttals are in
-[module 13](./13-rl-with-verifiable-rewards.md). A distilled student can also serve as a
-speculative-decoding draft for its teacher ([module 20](./20-production-serving-and-cost.md);
-[transformers 14.3](../transformers/14-inference-optimizations.md#143-speculative-decoding);
-[inference course](/courses/inference/06-decoding-algorithms/06-02-speculative-decoding.html)).
-For distillation inside the Qwen3 and DeepSeek families see the
-[case studies](../transformers/15-modern-architecture-case-studies.md); KL and entropy are in
-the [information theory note](../../notes/math/information-theory.md), and sampling
-temperature in [text generation and decoding](../../notes/nlp/text-generation-and-decoding.md).
+Related material: "SFT memorizes, RL generalizes" in [module 13](./13-rl-with-verifiable-rewards.md);
+distilled students as speculative-decoding drafts in [module 20](./20-production-serving-and-cost.md),
+[transformers 14.3](../transformers/14-inference-optimizations.md#143-speculative-decoding) and the
+[inference course](/courses/inference/06-decoding-algorithms/06-02-speculative-decoding.html);
+Qwen3 and DeepSeek distillation in the [case studies](../transformers/15-modern-architecture-case-studies.md);
+KL in the [information theory note](../../notes/math/information-theory.md) and temperature in
+[text generation and decoding](../../notes/nlp/text-generation-and-decoding.md).
 
 ---
 
@@ -747,20 +717,19 @@ python content/courses/finetuning/code/kd_losses.py --smoke
 python content/courses/finetuning/code/budget_forcing.py --smoke
 ```
 
-The `kd_losses.py` smoke mode checks the losses, then runs off-policy SFT and on-policy
-distillation (14.3's advantages in a REINFORCE step) against a fixed 8-token teacher and
-asserts the student's reverse KL falls at least 50× (about 2,900× on the reference run).
+The `kd_losses.py` smoke run trains a toy 8-token student both ways and asserts its reverse
+KL falls at least 50×.
 
 ### L14.1 Off-policy: generate, filter, SFT (T1)
 
-- **Teacher:** `Qwen/Qwen3-32B` in thinking mode via vLLM (bf16 needs a T2 card; on T1
-  use `Qwen/Qwen3-8B`, or an API teacher whose licence allows training on outputs).
+- **Teacher:** `Qwen/Qwen3-8B` in thinking mode via vLLM; `Qwen/Qwen3-32B` is the T2
+  option (bf16), as is an API teacher whose licence allows training on outputs.
 - **Prompts:** 1,000 problems from `open-r1/OpenR1-Math-220k` (`problem`, `answer`).
 - **Student:** `Qwen/Qwen3-1.7B-Base`; `--lora` (all linear layers) fits T1, full FT wants T2.
 
 ```bash
 python content/courses/finetuning/code/kd_losses.py --full generate \
-    --teacher Qwen/Qwen3-32B --n-prompts 1000 --samples-per-prompt 4
+    --teacher Qwen/Qwen3-8B --n-prompts 1000 --samples-per-prompt 4
 python content/courses/finetuning/code/kd_losses.py --full sft \
     --student Qwen/Qwen3-1.7B-Base --max-length 8192 --lora
 ```
@@ -825,8 +794,9 @@ flattens; report the knee.
   vocabulary required, and `max_completion_length=512` must be raised for reasoning.
 - **Async for big or many teachers, GOLD for different tokenizers**:
   `AsyncDistillationTrainer` routes rows by `teacher_id` (MOPD); MiniLLM left TRL in v1.15.
-- **Self-distillation repairs forgetting**: distilling from the original model took
-  IF-eval from 45% back to 83% after document mid-training.
+- **Self-distillation repairs forgetting**: in Thinking Machines' example, mid-training on
+  documents cut IF-eval from 85% to 79% even with a 70/30 chat mix; OPD with the original
+  model as teacher brought it back to 83% with knowledge intact.
 - **Thinking templates are training data**: Qwen3 strips old reasoning and uses an empty
   think block for non-thinking mode, so train both modes and watch prefix preservation.
 - **Length is a target**: budget forcing caps with the end tag and extends with "Wait";

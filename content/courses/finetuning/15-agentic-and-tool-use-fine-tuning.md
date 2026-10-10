@@ -24,9 +24,19 @@ Every modern stack shares one message-level contract, the one the Transformers c
 
 That layer is portable. **The rendered string is not.** Each model family serializes the same messages into different tokens, and the model only knows the serialization it was trained on.
 
+### Where serve-time schemas come from: MCP
+
+The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is an open JSON-RPC protocol through which servers expose tools to client applications. A client sends `tools/list`; each tool comes back with a `name`, a `description`, an `inputSchema` (JSON Schema, 2020-12 by default) and optional `title`, `outputSchema` and `annotations` ([MCP tools spec, 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)). The client copies `inputSchema` into `parameters`, passes the list as `tools=[...]`, sends the model's call back as `tools/call` with `name` and `arguments`, and appends the result's `content` (or its `structuredContent` JSON) as a `tool` message. The model never sees MCP itself, only the chat template's rendering of that list. What follows for training data and evaluation:
+
+- **Schemas look like MCP schemas.** Descriptions are long, schemas nest, names use styles like `getUser` or `admin.tools.list`, and a client that aggregates several servers puts dozens of tools in one context, often with server-prefixed names to avoid collisions. Train on tool lists of that size and shape.
+- **Errors come in two kinds.** Execution errors (bad input, a failed API call) return as ordinary results with `isError: true` and text meant for the model to self-correct; error-recovery rows should look like that. Protocol errors such as an unknown tool are JSON-RPC errors that a client may not pass to the model at all.
+- **The tool list can change mid-session** (`notifications/tools/list_changed`), one more reason to vary tool lists per row (15.2).
+- **Descriptions and annotations are untrusted** unless the server is trusted, per the spec; they are an injection channel (15.8).
+- **Evaluate on unseen servers.** Hold out whole MCP servers, not just rows, so the eval measures reading new schemas rather than recalling trained ones (module [09](./09-evaluating-fine-tuned-models.md) covers held-out design).
+
 ### What the model actually sees: one Qwen3 trajectory
 
-Here is the conversation above rendered by the Qwen3 chat template ([`Qwen/Qwen3-4B` tokenizer_config.json at a pinned revision](https://huggingface.co/Qwen/Qwen3-4B/blob/1cfa9a7208912126459214e8b04321603b3df60c/tokenizer_config.json)) with one tool, rendered exactly by that template (Jinja, `add_generation_prompt=False`). Special tokens are `<|im_start|>` and `<|im_end|>`; `<tool_call>`, `</tool_call>`, `<tool_response>`, `</tool_response>`, `<think>` and `</think>` are added tokens in the Qwen3 vocabulary.
+Here is a four-message conversation (the user asks where order A1 is, the assistant calls `get_order_status`, the tool replies, the assistant answers) rendered by the Qwen3 chat template ([`Qwen/Qwen3-4B` tokenizer_config.json at a pinned revision](https://huggingface.co/Qwen/Qwen3-4B/blob/1cfa9a7208912126459214e8b04321603b3df60c/tokenizer_config.json)) with one tool, rendered exactly by that template (Jinja, `add_generation_prompt=False`). Special tokens are `<|im_start|>` and `<|im_end|>`; `<tool_call>`, `</tool_call>`, `<tool_response>`, `</tool_response>`, `<think>` and `</think>` are added tokens in the Qwen3 vocabulary.
 
 ```text
 <|im_start|>system
@@ -153,7 +163,7 @@ Two example types are easy to skip and expensive to miss:
 | Refusal of out-of-policy actions | a tool exists but the request is not allowed | performs side effects it should not (see 15.8) |
 | Varying tool lists per row | the tool list is input, not vocabulary | calls tools that were not offered in this conversation |
 
-A reasonable starting mix, absent a better signal from your eval: mostly verified single and parallel calls, with 10 to 20 percent no-call and clarification rows, plus several percent error-recovery rows. Then let the eval in 15.7 tell you which bucket to grow.
+As a heuristic (no published ablation pins these ratios), a reasonable starting mix, absent a better signal from your eval, is mostly verified single and parallel calls, with 10 to 20 percent no-call and clarification rows, plus several percent error-recovery rows. Then let the eval in 15.7 tell you which bucket to grow.
 
 ---
 
@@ -169,7 +179,7 @@ In TRL you get this with `assistant_only_loss=True` on conversational data, whic
 
 ### Trained-token accounting
 
-Take the 3-turn trajectory from 15.1 (user asks, assistant calls, tool replies, assistant answers), with a toy tokenizer where each special marker is one token and everything else splits on whitespace:
+Take the 15.1 trajectory (system, user, call, tool result, answer), shortened for the toy: the tool result is the bare word `shipped` and the system block keeps only the `<tools>` list. With a toy tokenizer where each special marker is one token and everything else splits on whitespace:
 
 | Segment | Tokens | Loss? |
 |---|---|---|
@@ -261,7 +271,7 @@ It does not prove that a real BPE tokenizer splits on the same boundaries; with 
 
 ### Long trajectories, truncation, and reasoning before calls
 
-Agent trajectories are long, and **truncation removes the most valuable tokens first**. TRL's `truncation_mode="keep_start"` (the only supported mode as of v1.15) keeps the beginning and drops the end, which is where the final answer and the decision to stop live. Three fixes, in order of preference: raise `max_length` (default 1024 in `SFTConfig`) to cover your 95th-percentile trajectory; **split** a long episode into several examples, each containing the history up to one assistant turn with only that turn trained; or **summarize** old tool outputs (truncate a 5,000-token search result to its first lines plus "[truncated]") in the data, matching what your serving harness does.
+Agent trajectories are long, and **truncation removes the most valuable tokens first**. TRL's default `truncation_mode="keep_start"` (`keep_end` is deprecated and slated for removal in TRL v2.0) keeps the beginning and drops the end, which is where the final answer and the decision to stop live. Three fixes, in order of preference: raise `max_length` (default 1024 in `SFTConfig`) to cover your 95th-percentile trajectory; **split** a long episode into several examples, each containing the history up to one assistant turn with only that turn trained; or **summarize** old tool outputs (truncate a 5,000-token search result to its first lines plus "[truncated]") in the data, matching what your serving harness does.
 
 For thinking models, the assistant turn that calls a tool can carry reasoning first: `<think>...</think>` then `<tool_call>...`. Train the reasoning and the call as one action. Watch the template: Qwen3's shipped template drops reasoning from turns before the last user query, so **the reasoning you think you are training on may be rendered out of the string**. TRL's `qwen3_training.jinja` always emits the thinking block, which is one reason to let TRL swap it in.
 
@@ -345,7 +355,7 @@ Use `tools=` when the world has no memory. Use `environment_factory` when **what
 
 ### Prefix-preserving templates
 
-The trainer generates turn 1, appends the tool result, re-renders, and generates turn 2 from the new string. It computes log-probabilities over the concatenated sequence. That only works if **appending a message never changes how earlier messages render**. Qwen3's shipped template fails this test (the empty `<think>` block appears on whichever assistant turn is last, Check 15.1). TRL's docs state the requirement and, for known families including Qwen3 and DeepSeek-V3, swap in a patched training template automatically when tools are enabled. For any other model, test `render(msgs[:k])` is a prefix of `render(msgs)` for every `k` before you train; module [02](./02-tokens-templates-and-the-causal-lm-objective.md) explains why templates break it.
+The trainer generates turn 1, appends the tool result, re-renders, and generates turn 2 from the new string. It computes log-probabilities over the concatenated sequence. That only works if **appending a message never changes how earlier messages render**. Qwen3's shipped template fails this test (the empty `<think>` block appears on whichever assistant turn is last; see 15.1 and the prefix assertion in the 15.3 check). TRL's docs state the requirement and, for known families including Qwen3 and DeepSeek-V3, swap in a patched training template automatically when tools are enabled. For any other model, test `render(msgs[:k])` is a prefix of `render(msgs)` for every `k` before you train; module [02](./02-tokens-templates-and-the-causal-lm-objective.md) explains why templates break it.
 
 ### Masking the environment, and assigning credit
 
@@ -357,15 +367,15 @@ $$
 R = \sum_{k=0}^{K-1} \gamma^{k} r_k
 $$
 
-and the reward-to-go from turn $k$ is $G_k = \sum_{j \ge k} \gamma^{\,j-k} r_j$. Three regimes:
+where $\gamma \in (0, 1]$ is the discount factor (unrelated to the LoRA scale $\gamma_r$), and the reward-to-go from turn $k$ is $G_k = \sum_{j \ge k} \gamma^{\,j-k} r_j$. Three regimes:
 
 - **Outcome-only rewards** (the default in TRL's integrations: `get_reward()` at the end, every trained token shares one advantage). Simple, hard to hack, and high variance: a 10-turn episode with one bad turn and one brilliant turn gets one number for both. GRPO's group baseline (module 13) removes the per-prompt offset but not the within-episode blur.
 - **Discounted outcome.** With a single success reward at the solving turn, $R = \gamma^{K-1}$, which prefers shorter solutions. With $\gamma = 0.9$, solving in 2 turns scores 0.9 and in 3 turns 0.81.
-- **Per-turn rewards** from per-turn verifiers (did this call parse, did it run, did it change the state toward the goal). Then each turn $k$ can get its own advantage, $\hat A_{i,k} = (G_{i,k} - \text{mean}_i G_{i,k}) / \text{std}_i\, G_{i,k}$ across the group, applied to that turn's tokens. Lower variance, but every per-turn verifier is another thing the policy can game.
+- **Per-turn rewards** from per-turn verifiers (did this call parse, did it run, did it change the state toward the goal). Then for rollout $i$ of the group, turn $k$ gets its own advantage $\hat A_{i,k} = (G_{i,k} - \text{mean}_{i'} G_{i',k}) / \text{std}_{i'}\, G_{i',k}$, taken over the rollouts that reach turn $k$ (or with a learned per-turn value baseline when too few do), applied to that turn's tokens. Lower variance, but every per-turn verifier is another thing the policy can game.
 
 The TRL docs' practical advice for OpenEnv environments points the same way: binary success rewards gave cleaner signals than shaped partial credit in their Wordle and Sudoku experiments, and **judging the final state rather than the path** leaves the model free to find its own strategy. Start outcome-only; add shaping only when the success rate is near zero and the group has no variance to learn from.
 
-The check below runs a stateful guessing environment with `reset`, `step` and `get_reward`. Three scripted trajectories against the hidden number 7 (seed 0) are A: guesses 4, 7 (solves at turn 2); B: 4, 6, 7 (solves at turn 3); C: 1, 2, 3 (fails). Outcome-only rewards are $[1, 1, 0]$ and cannot rank A above B; the discounted returns with $\gamma = 0.9$ are $[0.9, 0.81, 0]$. The group mean is 0.57 and the population std 0.405, giving advantages $[0.815, 0.593, -1.408]$, which sum to zero. B's reward-to-go per turn is $[0.81, 0.9, 1.0]$. The check asserts all of that, that observation tokens get zero loss weight (perturbing their log-probabilities leaves the loss unchanged), and that `reset()` restores identical state.
+The check below runs a stateful guessing environment with `reset`, `step` and `get_reward`. Three scripted trajectories against the hidden number 7 (seed 0) are A: guesses 4, 7 (solves at turn 2); B: 4, 6, 7 (solves at turn 3); C: 1, 2, 3 (fails). Outcome-only rewards are $[1, 1, 0]$ and cannot rank A above B; the discounted returns with $\gamma = 0.9$ are $[0.9, 0.81, 0]$. The group mean is 0.57 and the population std 0.405, giving advantages $[0.815, 0.593, -1.408]$, which sum to zero. B's reward-to-go per turn is $[0.81, 0.9, 1.0]$. The check asserts all of that, that observation tokens get zero loss weight (perturbing their log-probabilities leaves the loss unchanged, while an all-ones mask would change it), and that `reset()` restores identical state.
 
 ```python finetuning-check
 import random
@@ -428,6 +438,7 @@ G = [sum(GAMMA ** (j - k) * rb[j] for j in range(k, len(rb))) for k in range(len
 torch.testing.assert_close(torch.tensor(G), torch.tensor([0.81, 0.9, 1.0]))
 
 # Observation tokens get zero loss weight: perturbing their log-probs leaves the loss unchanged.
+# The mask comes from token roles, so check it against the observation strings, not just w.
 tokens, weights, _, _ = out["B"]
 w = torch.tensor(weights, dtype=torch.float32)
 torch.manual_seed(0)
@@ -436,6 +447,9 @@ loss = -(adv[1] * logp * w).sum() / w.sum()
 noisy = logp + (1 - w) * torch.randn(len(tokens))
 torch.testing.assert_close(-(adv[1] * noisy * w).sum() / w.sum(), loss)
 assert int(w.sum()) == 3 * 4 and all(wt == 0 for t, wt in zip(tokens, weights) if t in ("higher", "lower", "correct"))
+# Sensitivity: a mask that trains every token (the bug) does see the perturbation.
+ones = torch.ones_like(w)
+assert not torch.allclose(-(adv[1] * noisy * ones).sum() / ones.sum(), -(adv[1] * logp * ones).sum() / ones.sum())
 
 # reset() restores identical state.
 e1, e2 = GuessEnv(), GuessEnv()
@@ -444,7 +458,7 @@ e2.reset(0)
 assert vars(e1) == vars(e2)
 ```
 
-It does not prove that discounting helps a real LLM agent: it fixes the arithmetic, and whether shorter episodes are worth the extra bias is an empirical question per task.
+It does not prove that discounting helps a real LLM agent: it fixes the arithmetic, and whether shorter episodes are worth the extra bias is an empirical question per task. The masking assertion checks only that a zero weight removes a token from the loss, not that a real trainer builds that weight correctly.
 
 ### Async and agent-owned loops; tool latency
 
@@ -489,7 +503,7 @@ flowchart LR
 | tests the agent cannot read or edit | otherwise the cheapest policy edits the tests |
 | timeouts returned as results | the model learns that slow code fails, and the episode still yields a sample |
 
-Practitioner reports converge on this. Paniego's [survey of 2026 lab practice](https://huggingface.co/blog/sergiopaniego/rl-environments-2026) (Hugging Face blog, September 2026) quotes several training reports, for example "each rollout runs in a dedicated sandbox with its own runtime", and fresh containers destroyed after each task.
+Paniego's [survey of 2026 lab practice](https://huggingface.co/blog/sergiopaniego/rl-environments-2026) (Hugging Face blog, September 2026) collects several lab training reports that follow these rules, for example "each rollout runs in a dedicated sandbox with its own runtime", and fresh containers destroyed after each task.
 
 **SWE-style coding harnesses.** A task is a repository snapshot, an issue, and hidden tests. The agent explores and edits through tools (shell, file edit); at the end the harness applies the resulting patch to a clean copy and runs the tests; the reward is pass/fail or fraction passed. Paniego's [harness-training walkthrough](https://huggingface.co/blog/sergiopaniego/trl-openenv-harness-training) (August 2026, updated October 2026) trains Qwen3-8B as the OpenCode agent on DeepCoder problems with one remote sandbox per rollout and the fraction of hidden tests passed as reward. The author reports reward rising from about 0.27 to about 0.71 over a short 10-step run on two H200s, and a 4B attempt that collapsed into spamming tool calls. Treat both as one practitioner's run, not a benchmark.
 
@@ -569,7 +583,7 @@ assert Fraction(sum(v), n) == Fraction(1, 2)       # validity 3/6
 assert Fraction(sum(c), n) == Fraction(1, 3)       # AST accuracy 2/6
 assert Fraction(sum(h), n) == Fraction(1, 6)       # hallucinated-tool rate 1/6
 assert not type_ok(True, "number")                 # bool is an int in Python; reject it anyway
-assert ast_correct({"name": "refund", "args": {"order_id": " a1", "amount": 12}}, gold)  # string normalisation
+assert ast_correct({"name": "refund", "args": {"order_id": " a1", "amount": 12}}, gold)  # string normalization
 ```
 
 It does not prove agreement with BFCL's own checker, which also handles lists of acceptable values, optional-argument defaults, and language-specific types; use the official harness for reported numbers and this kind of local evaluator for fast iteration.
@@ -636,26 +650,27 @@ python content/courses/finetuning/code/tool_sft_data.py --smoke
 python content/courses/finetuning/code/env_rollout.py --smoke
 ```
 
-On a laptop CPU the first prints 13 trained tokens and validity 1/2, AST 1/3, hallucinated 1/6. The second trains a tabular policy for 100 iterations with groups of 8 rollouts and asserts the success rate rises from about 0.33 (uniform random guessing over 8 numbers with 3 guesses) to above 0.6; with the default seed it reaches about 0.77, against 7/8 for the binary-search optimum. It also asserts every `<tool_response>` token has loss weight 0.
+On a laptop CPU the first prints 13 trained tokens and validity 1/2 (3/6), AST 1/3 (2/6), hallucinated 1/6, the 15.7 numbers. The second trains a tabular policy for 100 iterations with groups of 8 rollouts and asserts the success rate rises from about 0.33 (three uniform random guesses over 8 numbers, repeats allowed: $1-(7/8)^3$) to above 0.6; with the default seed it reaches about 0.77, against 7/8 for the binary-search optimum. It also asserts every `<tool_response>` token has loss weight 0.
 
 ### L15.1 Function-calling SFT (T0/T1)
 
 - **Model:** `Qwen/Qwen3-4B`. **Data:** [`Salesforce/xlam-function-calling-60k`](https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k), gated: accept the terms on the dataset page, then `hf auth login`.
-- **Steps:** convert rows with `xlam_row_to_trl` (parses the JSON strings, maps `"int"`, `"str, optional"` and similar to JSON-schema types, marks required arguments); add about 10 percent no-call rows, because xLAM has none; train LoRA (`target_modules="all-linear"`, r=16) with `assistant_only_loss=True` and `max_length=2048`; evaluate a held-out slice with the local AST evaluator, and optionally run the BFCL harness on its non-live AST and irrelevance categories.
-- **Tier:** T0 (T4, fp16, leave `--bf16` off; use QLoRA if memory is tight) or T1 (24 GB, add `--bf16`).
+- **Steps:** convert rows with `xlam_row_to_trl` (parses the JSON strings, maps `"int"`, `"str, optional"` and similar to JSON-schema types, marks required arguments); add no-call rows, because xLAM has none (`--no-call-frac`, default 0.1; 0 disables them); train LoRA (`target_modules="all-linear"`, r=16) with `assistant_only_loss=True` and `max_length=2048`; evaluate a held-out set of xLAM rows plus ten unseen no-call prompts with the local evaluator (`--eval-base` scores the base model on the same set first), and optionally run the BFCL harness on its non-live AST and irrelevance categories.
+- **Tier:** T0 (T4, fp16 LoRA, leave `--bf16` off; add `--qlora` for 4-bit NF4 if memory is tight) or T1 (24 GB, add `--bf16`).
 
 ```bash
-python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300          # T4
-python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --bf16   # Ampere+
+python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --eval-base          # T4
+python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --eval-base --bf16   # Ampere+
+python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --no-call-frac 0     # ablation
 ```
 
-- **Record:** validity, AST accuracy and hallucinated-tool rate before and after; irrelevance accuracy with and without the added no-call rows; one decoded example with its mask.
-- **Expect:** a large jump in validity and AST accuracy on xLAM-style held-out rows. Without no-call rows, expect the irrelevance score to *drop* below the base instruct model's.
+- **Record:** validity, AST accuracy, hallucinated-tool rate and irrelevance accuracy for the base model and after training (the script prints both); irrelevance accuracy with `--no-call-frac 0.1` and with `0`; one decoded example with its mask.
+- **Expect:** a large jump in validity and AST accuracy on xLAM-style held-out rows. With `--no-call-frac 0`, expect irrelevance accuracy to *drop* below the base instruct model's.
 
 ### L15.2 GRPO with `environment_factory` on OpenEnv (T1/T2)
 
 - **Model:** `Qwen/Qwen3-1.7B` (T1) or `Qwen/Qwen3-4B` (T2). **Environment:** OpenEnv TextArena Wordle; follow the [OpenEnv Wordle GRPO tutorial](https://huggingface.co/docs/openenv/en/tutorials/wordle-grpo).
-- **Steps:** install `trl[vllm]` and the Wordle client from its Space; duplicate the Space or run its Docker image, then set `SUPPORTS_CONCURRENT_SESSIONS` and `max_concurrent_envs` to at least the generation batch; run with vLLM colocate mode, thinking off, `max_completion_length=1024` (it counts all turns, tool results included), `max_tool_calling_iterations=8`.
+- **Steps:** install `trl[vllm]` and the Wordle client from its Space; duplicate the Space or run its Docker image, then set `SUPPORTS_CONCURRENT_SESSIONS` and `max_concurrent_envs` to at least the generation batch (32 with the script's `per_device_train_batch_size=1`, `gradient_accumulation_steps=32`); run with vLLM colocate mode, thinking off, `max_completion_length=1024` (it counts all turns, tool results included), `max_tool_calling_iterations=8`.
 
 ```bash
 python content/courses/finetuning/code/env_rollout.py --full --env-url https://<your-copy>.hf.space
@@ -666,7 +681,7 @@ python content/courses/finetuning/code/env_rollout.py --full --env-url https://<
 
 ### L15.3 Coding-agent RL in sandboxes (T2/T3)
 
-- **Setup:** a scaled-down version of the [harness-training walkthrough](https://huggingface.co/blog/sergiopaniego/trl-openenv-harness-training): an OpenEnv Harbor server providing one sandbox per rollout, a vLLM server with `--enable-auto-tool-choice`, the matching `--tool-call-parser`, token ids returned and NCCL weight sync, and `AsyncGRPOTrainer` with a `HarnessRolloutWorker` (see the [TRL OpenEnv guide](https://huggingface.co/docs/trl/v1.15.0/en/openenv) for the current wiring; the path is experimental and pins an OpenEnv revision).
+- **Setup:** a scaled-down version of the [harness-training walkthrough](https://huggingface.co/blog/sergiopaniego/trl-openenv-harness-training); follow TRL's [`async_grpo_harbor` example](https://github.com/huggingface/trl/tree/v1.15.0/examples/async_grpo_harbor) for the wiring described in 15.5 (the path is experimental and pins an OpenEnv revision).
 - **Scale down:** 32 problems, `num_generations=4` to 8, `max_inflight_tasks` matched to the sandboxes you can afford, a short run.
 - **Reward:** fraction of hidden unit tests passed; tests are copied in after the agent finishes and never visible to it.
 - **Record:** reward and reward std per step, `sample/staleness_mean`, `tools/latency_s`, sandbox failures, and at least ten full traces you read yourself.

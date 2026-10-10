@@ -15,12 +15,25 @@ Two modes
     weight that reproduces the adapted forward pass. It also runs a toy GaLore
     step (projected Adam state) and the Spectrum SNR scorer.
 
---full (GPU tier T1 for L7.1: one 24 GB GPU; tier T2 for --galore / --spectrum):
-    L7.1: PEFT + TRL SFT of Qwen/Qwen3-1.7B on a slice of trl-lib/Capybara with
-    LoRA, DoRA, IA3, prompt tuning and OFT; records eval loss, trainable params,
-    step time, mergeability and vLLM servability.
-    L7.2: GaLore (Transformers `optim="galore_adamw"`) or Spectrum-style
-    selective full fine-tuning vs LoRA on Qwen/Qwen2.5-3B (one 80 GB GPU).
+--full (GPU tier T1 for L7.1: one 24 GB GPU; tier T2 for --galore / --spectrum / --full-ft):
+    L7.1: PEFT + TRL SFT of Qwen/Qwen3-1.7B on a 4,000-example slice of
+    trl-lib/Capybara. Configs: LoRA and DoRA r=16 all-linear; IA3 on
+    k_proj/v_proj/down_proj; 32 virtual tokens with vocabulary init; OFT with
+    oft_block_size=32. Each trains with TRL SFTTrainer (processing_class=,
+    max_length=1024, model_init_kwargs={"dtype": torch.bfloat16}) for 300 steps
+    at a per-method LR (2e-4 LoRA/DoRA, 1e-3 IA3 and prompt, 1e-4 OFT). Prints a
+    Markdown table of trainable params, eval loss, s/step, peak memory,
+    mergeability and vLLM servability.
+    L7.2: on Qwen/Qwen2.5-3B (one 80 GB GPU, gradient checkpointing, bf16
+    weights), one of:
+      --galore      optim="galore_adamw", optim_target_modules for attention and
+                    MLP, rank=128, update_proj_gap=200, scale=0.25;
+      --spectrum F  score every attention/MLP matrix with spectrum_snr (the
+                    smoke-mode scorer), unfreeze the top fraction F per module
+                    type, train with plain AdamW;
+      --full-ft     plain AdamW on every parameter (the memory baseline).
+    Each prints peak memory, train samples/s and eval loss. The LoRA baseline is
+    `--full --methods lora --model Qwen/Qwen2.5-3B`.
 
 Pinned versions for full mode (as of October 2026): transformers 5.19.0,
 peft 0.21.2, trl 1.15.x, datasets 4.x, galore-torch (for --galore).
@@ -30,6 +43,7 @@ Run commands (from the repository root):
     python content/courses/finetuning/code/peft_bakeoff.py --full --methods lora dora ia3 prompt oft
     python content/courses/finetuning/code/peft_bakeoff.py --full --galore
     python content/courses/finetuning/code/peft_bakeoff.py --full --spectrum 0.25
+    python content/courses/finetuning/code/peft_bakeoff.py --full --full-ft
     python content/courses/finetuning/code/peft_bakeoff.py --full --methods lora --model Qwen/Qwen2.5-3B
 """
 
@@ -370,23 +384,25 @@ def run_full_l71(methods, model_id="Qwen/Qwen3-1.7B", max_steps=300) -> None:
         trainer = SFTTrainer(model=model_id, args=args, train_dataset=ds, eval_dataset=ev,
                              processing_class=tok, peft_config=peft_config_for(method))
         n_train = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+        th.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         trainer.train()
         step_time = (time.perf_counter() - t0) / max_steps
+        peak_gb = th.cuda.max_memory_allocated() / 1e9
         eval_loss = trainer.evaluate()["eval_loss"]
         mergeable = method != "prompt"
-        results.append((method, n_train, eval_loss, step_time, mergeable, VLLM_SERVABLE[method]))
+        results.append((method, n_train, eval_loss, step_time, peak_gb, mergeable, VLLM_SERVABLE[method]))
         del trainer
         th.cuda.empty_cache()
-    print("| method | trainable params | eval loss | s/step | mergeable | vLLM unmerged |")
-    print("|---|---|---|---|---|---|")
+    print("| method | trainable params | eval loss | s/step | peak GB | mergeable | vLLM unmerged |")
+    print("|---|---|---|---|---|---|---|")
     for r in results:
-        print(f"| {r[0]} | {r[1]:,} | {r[2]:.4f} | {r[3]:.2f} | {r[4]} | {r[5]} |")
+        print(f"| {r[0]} | {r[1]:,} | {r[2]:.4f} | {r[3]:.2f} | {r[4]:.1f} | {r[5]} | {r[6]} |")
 
 
-def run_full_l72(galore: bool, spectrum_fraction: float | None, model_id="Qwen/Qwen2.5-3B",
-                 max_steps=300) -> None:
-    """L7.2: GaLore or Spectrum-style selective full fine-tuning; compare with
+def run_full_l72(galore: bool, spectrum_fraction: float | None, full_ft: bool = False,
+                 model_id="Qwen/Qwen2.5-3B", max_steps=300) -> None:
+    """L7.2: GaLore, Spectrum-style selective, or plain full-AdamW fine-tuning; compare with
     `--full --methods lora --model Qwen/Qwen2.5-3B` for the LoRA baseline."""
     import torch as th
     from datasets import load_dataset
@@ -404,6 +420,8 @@ def run_full_l72(galore: bool, spectrum_fraction: float | None, model_id="Qwen/Q
         args = SFTConfig(learning_rate=1e-5, optim="galore_adamw",
                          optim_target_modules=[r".*self_attn.*", r".*mlp.*"],
                          optim_args="rank=128, update_proj_gap=200, scale=0.25", **common)
+    elif full_ft:
+        args = SFTConfig(learning_rate=1e-5, **common)   # every parameter, plain AdamW
     else:
         frac = spectrum_fraction or 0.25
         scores = {}
@@ -439,12 +457,14 @@ def main() -> None:
     ap.add_argument("--methods", nargs="+", default=["lora", "dora", "ia3", "prompt", "oft"])
     ap.add_argument("--galore", action="store_true", help="L7.2: GaLore full-parameter run")
     ap.add_argument("--spectrum", type=float, default=None, help="L7.2: Spectrum top fraction")
+    ap.add_argument("--full-ft", action="store_true", help="L7.2: full-AdamW memory baseline")
     ap.add_argument("--max-steps", type=int, default=300)
     ap.add_argument("--model", default=None, help="override the model id (default per lab step)")
     a = ap.parse_args()
     if a.full and torch.cuda.is_available():
-        if a.galore or a.spectrum is not None:
-            run_full_l72(a.galore, a.spectrum, model_id=a.model or "Qwen/Qwen2.5-3B", max_steps=a.max_steps)
+        if a.galore or a.spectrum is not None or a.full_ft:
+            run_full_l72(a.galore, a.spectrum, full_ft=a.full_ft, model_id=a.model or "Qwen/Qwen2.5-3B",
+                         max_steps=a.max_steps)
         else:
             run_full_l71(a.methods, model_id=a.model or "Qwen/Qwen3-1.7B", max_steps=a.max_steps)
     else:

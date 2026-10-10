@@ -24,7 +24,9 @@ What it does
     --full (GPU, T1): for a LoRA you trained on Qwen/Qwen3-4B (bf16), merges it
       into a bf16 copy of the base with PEFT, quantizes the merged model to
       4-bit GPTQ with GPTQModel, measures token KL and top-1 agreement between
-      the bf16 and GPTQ models on held-out prompts, and prints the llama.cpp
+      the bf16 and GPTQ models on the running example's golden eval prompts
+      (module 01's ft_data/eval.jsonl, rendered with the course system prompt and
+      the chat template, thinking off), and prints the llama.cpp
       commands that convert the merged model to GGUF and quantize it to Q4_K_M
       (with an optional imatrix). Run your task eval (module 09) on each artefact.
 
@@ -37,7 +39,9 @@ Run from the repository root:
     python content/courses/finetuning/code/quantize_and_eval.py --smoke
     python content/courses/finetuning/code/quantize_and_eval.py --full \
         --base Qwen/Qwen3-4B --adapter ./out/qwen3-4b-lora \
-        --prompts ./data/eval_prompts.jsonl --out ./quant/
+        --eval ft_data/eval.jsonl --out ./quant/
+    (create ft_data/ first with module 01's
+    `python content/courses/finetuning/code/fit_or_not_baseline.py --data-only`)
 """
 
 import argparse
@@ -217,6 +221,41 @@ def smoke():
 
 
 # ---------------------------------------------------------------------------
+# Running example (contract owned by module 01's fit_or_not_baseline.py)
+# ---------------------------------------------------------------------------
+
+FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
+SYSTEM_PROMPT = (
+    "You extract structured data from customer support emails. Reply with one JSON "
+    "object and nothing else, with exactly these keys: "
+    '"customer_name" (string), '
+    '"order_id" (string: "ORD-" followed by the five-digit order number, e.g. "ORD-04217"), '
+    '"issue_type" (one of "refund", "shipping", "defect", "account", "other"), '
+    '"refund_requested" (true or false), '
+    '"sentiment" (one of "positive", "neutral", "negative").'
+)
+
+
+def load_eval_rows(path):
+    """Rows of ft_data/eval.jsonl: {"id", "email", "gold"} with gold keys == FIELDS."""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            assert set(row) == {"id", "email", "gold"}, f"bad row keys: {sorted(row)}"
+            assert list(row["gold"]) == FIELDS, f"bad gold keys in {row['id']}"
+            rows.append(row)
+    return rows
+
+
+def messages_for(row):
+    return [{"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": row["email"]}]
+
+
+# ---------------------------------------------------------------------------
 # Full mode (GPU, T1). Heavy imports stay inside these functions.
 # ---------------------------------------------------------------------------
 
@@ -247,15 +286,22 @@ def gptq_quantize(merged_dir, out_dir, n_calib=256):
 
 
 @torch.no_grad()
-def kl_report(ref_dir, test_dir, prompts, max_len=512):
-    """Mean and p99 token KL(ref || test) and top-1 agreement over prompt tokens."""
+def kl_report(ref_dir, test_dir, rows, max_len=512):
+    """Mean and p99 token KL(ref || test) and top-1 agreement over prompt tokens.
+
+    Each eval row is rendered with the course system prompt and the chat template
+    (enable_thinking=False for Qwen3 hybrid checkpoints), plus the gold JSON as the
+    assistant turn, so the KL covers the tokens the model is asked to produce.
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(ref_dir)
     ref = AutoModelForCausalLM.from_pretrained(ref_dir, dtype=torch.bfloat16, device_map="cuda")
     test = AutoModelForCausalLM.from_pretrained(test_dir, device_map="cuda")
     kls, agree = [], []
-    for text in prompts:
+    for row in rows:
+        msgs = messages_for(row) + [{"role": "assistant", "content": json.dumps(row["gold"])}]
+        text = tok.apply_chat_template(msgs, tokenize=False, enable_thinking=False)
         ids = tok(text, return_tensors="pt", truncation=True, max_length=max_len).input_ids.cuda()
         lp = ref(ids).logits[0]       # (T, V)
         lq = test(ids).logits[0]      # (T, V)
@@ -276,9 +322,8 @@ def full(args):
         merge_to_bf16(args.base, args.adapter, merged)
     if not os.path.isdir(gptq):
         gptq_quantize(merged, gptq)
-    with open(args.prompts) as f:
-        prompts = [json.loads(line)["prompt"] for line in f if line.strip()]
-    report = kl_report(merged, gptq, prompts)
+    rows = load_eval_rows(args.eval)
+    report = kl_report(merged, gptq, rows)
     print(json.dumps(report, indent=2))
     with open(os.path.join(args.out, "kl_gptq.json"), "w") as f:
         json.dump(report, f, indent=2)
@@ -292,7 +337,8 @@ def full(args):
     print(f"{llama}/build/bin/llama-quantize --imatrix {args.out}/imatrix.gguf "
           f"{gguf_bf16} {gguf_q4} Q4_K_M")
     print("\nThen run the same task eval (module 09) on merged-bf16, gptq-int4 and the "
-          "Q4_K_M GGUF, and record task metric, KL mean/p99 and top-1 agreement.")
+          "Q4_K_M GGUF, and record all-fields exact match, schema validity, parse rate, KL mean/p99 "
+          "and top-1 agreement.")
 
 
 def main():
@@ -302,8 +348,9 @@ def main():
     mode.add_argument("--full", action="store_true", help="GPU lab (tier T1)")
     ap.add_argument("--base", default="Qwen/Qwen3-4B")
     ap.add_argument("--adapter", default="./out/qwen3-4b-lora")
-    ap.add_argument("--prompts", default="./data/eval_prompts.jsonl",
-                    help="JSONL with a 'prompt' field per line (held-out prompts)")
+    ap.add_argument("--eval", default="ft_data/eval.jsonl",
+                    help="running-example golden eval split written by module 01's "
+                         "fit_or_not_baseline.py (id, email, gold)")
     ap.add_argument("--llama-cpp", default="./llama.cpp")
     ap.add_argument("--out", default="./quant")
     args = ap.parse_args()

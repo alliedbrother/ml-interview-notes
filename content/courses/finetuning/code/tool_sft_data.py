@@ -11,19 +11,28 @@ Module
 
 Modes
     --smoke  CPU, stdlib only, under a second. Asserts on built-in fixtures.
-    --full   Tier T0/T1 (free T4 16 GB with QLoRA, or one 24 GB GPU with LoRA).
+    --full   Tier T0 (free T4 16 GB: fp16 LoRA, or add --qlora for 4-bit NF4
+             QLoRA if you run out of memory) or T1 (one 24 GB GPU, add --bf16).
              Converts Salesforce/xlam-function-calling-60k (gated: accept the
              terms on the dataset page and run `hf auth login` first) into TRL's
-             tool-calling format (`messages` + `tools`), adds no-call examples,
-             trains Qwen/Qwen3-4B with LoRA and assistant_only_loss=True, then
-             scores a held-out slice with the local AST evaluator.
+             tool-calling format (`messages` + `tools`), adds no-call examples
+             (--no-call-frac, default 0.1; 0 disables them), trains Qwen/Qwen3-4B
+             with LoRA and assistant_only_loss=True, then scores a held-out slice
+             with the local AST evaluator. The held-out set is xLAM rows (a call
+             is required) plus no-call prompts (a call is wrong), so it reports
+             validity, AST accuracy, hallucinated-tool rate, irrelevance accuracy
+             and call/no-call accuracy. --eval-base scores the base model (adapter
+             disabled) on the same set before training. It also prints one
+             decoded training example with the trained spans in [[...]].
 
 Pinned versions for --full (as of October 2026)
-    trl>=1.15, transformers>=5.2, peft>=0.21, datasets>=4.7, torch>=2.8
+    trl>=1.15, transformers>=5.2, peft>=0.21, datasets>=4.7, torch>=2.8,
+    bitsandbytes>=0.45 (only for --qlora)
 
 Run (from the repository root)
     python content/courses/finetuning/code/tool_sft_data.py --smoke
-    python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300
+    python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --eval-base
+    python content/courses/finetuning/code/tool_sft_data.py --full --max-steps 300 --eval-base --no-call-frac 0
 """
 
 from __future__ import annotations
@@ -168,7 +177,8 @@ def score(preds, golds, schemas):
     n = len(preds)
     valid = sum(validate_call(p, schemas)[0] for p in preds)
     correct = sum(ast_match(p, g, schemas) for p, g in zip(preds, golds))
-    halluc = sum(p["name"] not in schemas for p in preds)
+    # A missing or unparseable call is invalid but is not a call to an invented tool.
+    halluc = sum(p["name"] not in schemas and p["name"] not in ("<no_call>", "<unparseable>") for p in preds)
     return {"validity": Fraction(valid, n), "ast_accuracy": Fraction(correct, n), "hallucinated_rate": Fraction(halluc, n)}
 
 
@@ -203,6 +213,32 @@ def xlam_row_to_trl(row):
         {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": a["name"], "arguments": a["arguments"]}} for a in answers]},
     ]
     return {"messages": messages, "tools": tools}
+
+
+def parse_first_call(text):
+    """First Hermes <tool_call> in generated text, None if the model made no call."""
+    if "<tool_call>" not in text:
+        return None
+    try:
+        return json.loads(text.split("<tool_call>")[1].split("</tool_call>")[0])
+    except (IndexError, json.JSONDecodeError):
+        return {"name": "<unparseable>", "arguments": {}}
+
+
+def decision_accuracy(called, should_call):
+    """Fraction of turns where the call/no-call decision was right."""
+    return Fraction(sum(c == s for c, s in zip(called, should_call)), len(called))
+
+
+def add_no_call_rows(data, frac, prompts, rng):
+    """Append round(frac * len(data)) no-call rows that reuse a random row's tool list."""
+    extra = []
+    for _ in range(round(frac * len(data))):
+        ex = rng.choice(data)
+        extra.append({"messages": [{"role": "user", "content": rng.choice(prompts)},
+                                   {"role": "assistant", "content": "No tool is needed for that. How else can I help?"}],
+                      "tools": ex["tools"]})
+    return data + extra
 
 
 # --------------------------------------------------------------------------
@@ -259,6 +295,16 @@ def smoke():
     p = ex["tools"][0]["function"]["parameters"]
     assert p["required"] == ["limit"] and p["properties"]["step"]["type"] == "integer"
     assert ex["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"limit": 10}
+
+    # Held-out decision scoring and the no-call ablation switch.
+    assert parse_first_call('<tool_call>\n{"name": "refund", "arguments": {}}\n</tool_call>')["name"] == "refund"
+    assert parse_first_call("You're welcome!") is None
+    assert parse_first_call("<tool_call>{bad json")["name"] == "<unparseable>"
+    assert decision_accuracy([True, True, False, True], [True, True, False, False]) == Fraction(3, 4)
+    import random
+    base = [ex] * 20
+    assert len(add_no_call_rows(base, 0.1, NO_CALL_PROMPTS, random.Random(0))) == 22
+    assert add_no_call_rows(base, 0.0, NO_CALL_PROMPTS, random.Random(0)) == base
     print(f"smoke ok: {len(trained)} trained tokens; validity={s['validity']} ast={s['ast_accuracy']} halluc={s['hallucinated_rate']}")
 
 
@@ -266,59 +312,92 @@ def smoke():
 # Full mode (GPU). Imports stay inside so --smoke needs only the stdlib.
 # --------------------------------------------------------------------------
 
-NO_CALL_PROMPTS = ["Thanks, that's all!", "What does your refund policy cover in general?", "hi there"]
+NO_CALL_PROMPTS = ["Thanks, that's all!", "What does your refund policy cover in general?", "hi there",
+                   "Can you explain what you are able to do?", "Never mind, I figured it out."]
+# Held out from training: scored as irrelevance (the right output is no call).
+NO_CALL_EVAL_PROMPTS = ["Good morning!", "Who wrote Pride and Prejudice?", "Thanks a lot, bye.",
+                        "What is 2 plus 2?", "Tell me a short joke.", "How are you today?",
+                        "What's the capital of France?", "Ok, that answers my question.",
+                        "Can you say that again more politely?", "I have no more questions."]
 
 
-def full(args):
-    import random
-
-    from datasets import Dataset, load_dataset
-    from peft import LoraConfig
-    from trl import SFTConfig, SFTTrainer
-
-    raw = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
-    raw = raw.shuffle(seed=0)
-    held_out, train_rows = raw.select(range(args.eval_n)), raw.select(range(args.eval_n, args.eval_n + args.train_n))
-    data = [xlam_row_to_trl(r) for r in train_rows]
-    # Irrelevance / no-call data: xLAM has none, so add some (about 10 percent).
-    rng = random.Random(0)
-    for _ in range(len(data) // 10):
-        ex = rng.choice(data)
-        data.append({"messages": [{"role": "user", "content": rng.choice(NO_CALL_PROMPTS)},
-                                  {"role": "assistant", "content": "I can help with that without calling a tool."}],
-                     "tools": ex["tools"]})
-    train = Dataset.from_list(data, on_mixed_types="use_json")
-
-    cfg = SFTConfig(output_dir=args.output_dir, assistant_only_loss=True, max_length=2048,
-                    per_device_train_batch_size=2, gradient_accumulation_steps=8, learning_rate=2e-4,
-                    max_steps=args.max_steps, logging_steps=10, bf16=args.bf16, fp16=not args.bf16,
-                    model_init_kwargs={"dtype": "bfloat16" if args.bf16 else "float16"})
-    trainer = SFTTrainer(model=args.model, args=cfg, train_dataset=train,
-                         peft_config=LoraConfig(r=16, lora_alpha=32, target_modules="all-linear", task_type="CAUSAL_LM"))
-    trainer.train()
-    trainer.save_model(args.output_dir)
-
-    # Local AST evaluation on held-out rows (a reduced stand-in for the BFCL harness).
+def evaluate(model, tok, held_out, no_call_eval):
+    """Score call rows (a call is required) and no-call rows (a call is wrong)."""
     import torch
-    tok, model = trainer.processing_class, trainer.model.eval()
-    per = []
-    for r in held_out:
-        ex = xlam_row_to_trl(r)
+
+    called, should_call, per = [], [], []
+    for ex, gold in held_out + [(e, None) for e in no_call_eval]:
         schemas = {t["function"]["name"]: t["function"] for t in ex["tools"]}
         prompt = tok.apply_chat_template(ex["messages"][:1], tools=ex["tools"], add_generation_prompt=True,
                                          tokenize=False, enable_thinking=False)
         ids = tok(prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
             out = model.generate(**ids, max_new_tokens=256, do_sample=False)
-        text = tok.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=False)
-        try:
-            call = json.loads(text.split("<tool_call>")[1].split("</tool_call>")[0])
-        except (IndexError, json.JSONDecodeError):
-            call = {"name": "<no_call_or_unparseable>", "arguments": {}}
-        gold = json.loads(r["answers"])[0]  # first gold call only: a reduced evaluator
-        per.append(score([call], [gold], schemas))
-    agg = {k: sum(x[k] for x in per) / len(per) for k in per[0]}
-    print({k: float(v) for k, v in agg.items()})
+        call = parse_first_call(tok.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=False))
+        called.append(call is not None)
+        should_call.append(gold is not None)
+        if gold is not None:  # first gold call only: a reduced evaluator
+            per.append(score([call or {"name": "<no_call>", "arguments": {}}], [gold], schemas))
+    res = {k: float(sum(x[k] for x in per) / len(per)) for k in per[0]}
+    n_call = sum(should_call)
+    res["irrelevance_accuracy"] = float(Fraction(sum(not c for c in called[n_call:]), len(called) - n_call))
+    res["call_no_call_accuracy"] = float(decision_accuracy(called, should_call))
+    return res
+
+
+def full(args):
+    import random
+
+    import torch
+    from datasets import Dataset, load_dataset
+    from peft import LoraConfig
+    from trl import SFTConfig, SFTTrainer
+
+    raw = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
+    raw = raw.shuffle(seed=0)
+    eval_rows, train_rows = raw.select(range(args.eval_n)), raw.select(range(args.eval_n, args.eval_n + args.train_n))
+    data = [xlam_row_to_trl(r) for r in train_rows]
+    # Irrelevance / no-call data: xLAM has none. --no-call-frac 0 is the ablation.
+    rng = random.Random(0)
+    data = add_no_call_rows(data, args.no_call_frac, NO_CALL_PROMPTS, rng)
+    train = Dataset.from_list(data, on_mixed_types="use_json")
+
+    held_out = [(xlam_row_to_trl(r), json.loads(r["answers"])[0]) for r in eval_rows]
+    no_call_eval = [{"messages": [{"role": "user", "content": p}], "tools": held_out[i % len(held_out)][0]["tools"]}
+                    for i, p in enumerate(NO_CALL_EVAL_PROMPTS)]
+
+    dtype = torch.bfloat16 if args.bf16 else torch.float16
+    init = {"dtype": dtype}
+    if args.qlora:
+        from transformers import BitsAndBytesConfig
+        init["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                                         bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype)
+    cfg = SFTConfig(output_dir=args.output_dir, assistant_only_loss=True, max_length=2048,
+                    per_device_train_batch_size=2, gradient_accumulation_steps=8, learning_rate=2e-4,
+                    max_steps=args.max_steps, logging_steps=10, bf16=args.bf16, fp16=not args.bf16,
+                    model_init_kwargs=init)
+    trainer = SFTTrainer(model=args.model, args=cfg, train_dataset=train,
+                         peft_config=LoraConfig(r=16, lora_alpha=32, target_modules="all-linear", task_type="CAUSAL_LM"))
+    tok = trainer.processing_class
+
+    # One decoded training example with its mask: trained spans in [[...]], masked text plain.
+    row = trainer.train_dataset[0]
+    shown, cur, cur_m = [], [], None
+    mask = row["assistant_masks"] if "assistant_masks" in row else [l != IGNORE for l in row["labels"]]
+    for t, m in zip(row["input_ids"], mask):
+        if m != cur_m and cur:
+            shown.append(f"[[{tok.decode(cur)}]]" if cur_m else tok.decode(cur)); cur = []
+        cur.append(t); cur_m = m
+    shown.append(f"[[{tok.decode(cur)}]]" if cur_m else tok.decode(cur))
+    print("decoded example with mask:\n" + "".join(shown))
+
+    if args.eval_base:  # the base model is the same weights with the LoRA adapter switched off
+        trainer.model.eval()
+        with trainer.model.disable_adapter():
+            print("base:", evaluate(trainer.model, tok, held_out, no_call_eval))
+    trainer.train()
+    trainer.save_model(args.output_dir)
+    print(f"trained (no_call_frac={args.no_call_frac}):", evaluate(trainer.model.eval(), tok, held_out, no_call_eval))
 
 
 def main():
@@ -330,6 +409,9 @@ def main():
     ap.add_argument("--eval-n", type=int, default=200)
     ap.add_argument("--max-steps", type=int, default=300)
     ap.add_argument("--bf16", action="store_true", help="use on Ampere+; leave off on a T4")
+    ap.add_argument("--qlora", action="store_true", help="load the base in 4-bit NF4 (needs bitsandbytes)")
+    ap.add_argument("--no-call-frac", type=float, default=0.1, help="no-call rows per training row; 0 disables")
+    ap.add_argument("--eval-base", action="store_true", help="score the base model before training")
     ap.add_argument("--output-dir", default="qwen3-4b-xlam-lora")
     args = ap.parse_args()
     if args.full:

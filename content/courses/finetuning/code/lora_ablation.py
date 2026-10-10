@@ -7,6 +7,17 @@ Purpose
     asserts the trainable-parameter formula and the capacity ordering.
     --full runs the real grids with TRL's SFTTrainer and PEFT.
 
+Full-mode procedure
+    grid:    Qwen/Qwen3-4B-Base (base checkpoint, no chat behaviour pre-installed),
+             4,000 examples of trl-lib/Capybara (or the course's support-email
+             set), rank {8, 32, 128} x targets {attention-only, all-linear} x
+             {LoRA, rsLoRA, DoRA}, 200 steps each, alpha 32, LR 2e-4. Writes
+             lora_grid.json and lora_grid.png (eval loss vs trainable params).
+    compare: Qwen/Qwen3-1.7B-Base as QLoRA (NF4 + DQ, r=16, all-linear), bf16
+             LoRA (same adapter), and full fine-tuning at LR 2e-5 (T2 only).
+             Records eval loss, peak VRAM (torch.cuda.max_memory_allocated)
+             and wall time.
+
 Hardware
     --smoke:          any CPU, a few seconds, torch only, no downloads.
     --full grid:      T1 (one 24 GB GPU, bf16) for Qwen/Qwen3-4B-Base, 18 short runs.

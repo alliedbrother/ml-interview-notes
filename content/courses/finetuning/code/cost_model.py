@@ -73,6 +73,20 @@ def break_even(a):
     return {"a": api_req, "v": v, "F": fixed, "R_star": r_star, "months": months}
 
 
+def reconcile(a):
+    """Monthly GPU spend at `requests_per_day`: fluid break-even model vs scenario (c).
+
+    The fluid model bills fractional GPUs; scenario (c) rounds up and adds N+1 spares.
+    """
+    v = break_even(a)["v"]
+    rc = scenario_c(a)
+    fluid = 30 * a.requests_per_day * v
+    integer = 30 * math.ceil(rc["gpus_fluid"]) * 24 * a.gpu_price
+    spare = 30 * a.redundancy * 24 * a.gpu_price
+    return {"fluid_month": fluid, "rounding_month": integer - fluid,
+            "redundancy_month": spare, "scenario_c_month": 30 * rc["self_day"]}
+
+
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--smoke", action="store_true", help="assert the module's worked numbers")
@@ -120,6 +134,11 @@ def report(a):
     for r in (1e5, 1e6, 1e7):
         api_m, self_m = be["months"](r)
         print("  %10.0f req/day: API USD %10.2f/month, self-host USD %10.2f/month" % (r, api_m, self_m))
+    rec = reconcile(a)
+    print("GPU spend/month at %.0f req/day: fluid USD %.2f + integer rounding USD %.2f + N+1 spare "
+          "USD %.2f = scenario (c) USD %.2f" % (a.requests_per_day, rec["fluid_month"],
+                                               rec["rounding_month"], rec["redundancy_month"],
+                                               rec["scenario_c_month"]))
     return ra, rb, rc, be
 
 
@@ -136,6 +155,11 @@ def smoke_asserts(a):
     assert round(be["R_star"]) == 428943
     assert [tuple(round(x, 2) for x in be["months"](r)) for r in (1e5, 1e6, 1e7)] == [
         (1560.0, 5777.78), (15600.0, 8277.78), (156000.0, 33277.78)]
+    rec = reconcile(defaults)
+    assert round(rec["fluid_month"], 2) == 2777.78 and round(rec["scenario_c_month"]) == 5400
+    assert round(rec["rounding_month"], 2) == 822.22 and round(rec["redundancy_month"]) == 1800
+    assert abs(rec["fluid_month"] + rec["rounding_month"] + rec["redundancy_month"]
+               - rec["scenario_c_month"]) < 1e-6
     print("smoke: all worked numbers from module 20 verified")
 
 

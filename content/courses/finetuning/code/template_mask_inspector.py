@@ -42,8 +42,8 @@ import torch.nn.functional as F
 
 CONVO = [
     {"role": "system", "content": "Extract the ticket as JSON."},
-    {"role": "user", "content": "Hi, order 1142 arrived broken. Ana"},
-    {"role": "assistant", "content": '{"order_id": "1142", "issue_type": "damaged"}'},
+    {"role": "user", "content": "Hi, order ORD-01142 arrived broken. Ana"},
+    {"role": "assistant", "content": '{"order_id": "ORD-01142", "issue_type": "defect"}'},
     {"role": "user", "content": "Add whether I want a refund: yes."},
     {"role": "assistant", "content": '{"refund_requested": true}'},
 ]
@@ -306,8 +306,8 @@ def run_full(never_stop=False):
     tok, header, turn_end = qwen
 
     # Step 4: pad = eos with a 3-example batch
-    variants = [CONVO, CONVO[:3], [CONVO[0], {"role": "user", "content": "Order 77 is late."},
-                                   {"role": "assistant", "content": '{"order_id": "77", "issue_type": "late"}'}]]
+    variants = [CONVO, CONVO[:3], [CONVO[0], {"role": "user", "content": "Order ORD-00077 is late."},
+                                   {"role": "assistant", "content": '{"order_id": "ORD-00077", "issue_type": "shipping"}'}]]
     rows = [labels_from_offsets(tok, tok.apply_chat_template(v, tokenize=False), header, turn_end)
             for v in variants]
     eos_id = tok.convert_tokens_to_ids(turn_end)
@@ -349,11 +349,11 @@ def run_never_stop(device, steps=100, n_eval=20):
     base = "Qwen/Qwen3-0.6B-Base"
     rng = random.Random(0)
     names = ["Ana", "Bo", "Chen", "Dita", "Eli", "Fay", "Gus", "Hana"]
-    issues = ["damaged", "late", "wrong_item", "missing"]
+    issues = ["refund", "shipping", "defect", "account", "other"]   # module 01 enum
 
     def example():
-        oid, who, issue = str(rng.randint(1000, 9999)), rng.choice(names), rng.choice(issues)
-        return [{"role": "user", "content": f"Order {oid} problem: {issue.replace('_', ' ')}. {who}"},
+        oid, who, issue = f"ORD-{rng.randint(0, 99999):05d}", rng.choice(names), rng.choice(issues)
+        return [{"role": "user", "content": f"Order {oid} problem: {issue}. {who}"},
                 {"role": "assistant",
                  "content": f'{{"customer_name": "{who}", "order_id": "{oid}", "issue_type": "{issue}"}}'}]
 

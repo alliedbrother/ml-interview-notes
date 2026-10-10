@@ -11,13 +11,16 @@ Purpose
     Contents:
       * GSM8K answer extraction (\\boxed{}, '####', last-number fallback) and correctness.
       * Format reward (<think>...</think> then a boxed answer).
-      * Running task (support-email JSON extraction): schema validity and field accuracy.
+      * Running task (support-email JSON extraction): schema validity and field accuracy,
+        using module 01's parser, enums and exact-match rule unchanged (the dataset row's
+        `gold` column is passed to the reward as a dict).
       * Code rewards: a HACKABLE verifier (reward = "the test process exited 0") and a
         robust one (fresh harness owns the asserts, checks a sentinel the program cannot
         forge), plus a detector that flags completions where the two disagree or where
         the code contains known tampering patterns.
 
-    --smoke : asserts extraction edge cases, None-skipping, JSON scoring, and that the
+    --smoke : asserts extraction edge cases, None-skipping, JSON scoring (including module
+              01's six-prediction scoring fixture), and that the
               detector flags every planted hack while passing honest solutions (CPU, ~2 s;
               runs snippets in a subprocess with a timeout; no network).
     --full  : downloads openai/gsm8k (test split) and checks that the gold answer, rewritten
@@ -45,8 +48,12 @@ import subprocess
 import sys
 import tempfile
 
-ISSUE_TYPES = {"refund", "shipping_delay", "damaged_item", "wrong_item", "account", "other"}
-FIELDS = ("customer_name", "order_id", "issue_type", "refund_requested", "sentiment")
+# Running-example schema, copied verbatim from fit_or_not_baseline.py (module 01).
+FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
+ISSUE_TYPES = ["refund", "shipping", "defect", "account", "other"]
+SENTIMENTS = ["positive", "neutral", "negative"]
+ORDER_ID_RE = r"^ORD-[0-9]{5}$"
+FENCE = re.compile(r"^`{3}(?:json)?[ \t]*\n(.*)\n`{3}$", re.S)
 
 
 def _text(completion) -> str:
@@ -87,9 +94,9 @@ def extract_answer(text: str) -> float | None:
     return None
 
 
-def gsm8k_gold(answer_field: str) -> float:
-    """openai/gsm8k stores the gold as '... #### 72'."""
-    return _to_float(answer_field.split("####")[-1])
+def gsm8k_gold(answer_field: str) -> float | None:
+    """openai/gsm8k stores the gold as '<rationale> #### 72'; a bare number is returned as is."""
+    return _to_float(str(answer_field).split("####")[-1])
 
 
 def correctness_reward(prompts, completions, answer=None, task=None, **kwargs) -> list[float | None]:
@@ -99,7 +106,7 @@ def correctness_reward(prompts, completions, answer=None, task=None, **kwargs) -
             out.append(None)  # not my sample: TRL skips this function for it
             continue
         pred = extract_answer(_text(c))
-        gold = _to_float(str(answer[i])) if answer is not None else None
+        gold = gsm8k_gold(answer[i]) if answer is not None else None  # raw column or bare number
         out.append(1.0 if pred is not None and gold is not None and math.isclose(pred, gold, abs_tol=1e-6) else 0.0)
     return out
 
@@ -124,47 +131,59 @@ def format_reward(completions, task=None, **kwargs) -> list[float | None]:
 
 # ---------------------------------------------------------------- running task: JSON extraction
 
-def _parse_json(text: str):
+def parse_prediction(text):
+    """Module 01's only normalisation: strip, unwrap one surrounding ```json fence, json.loads."""
+    if not isinstance(text, str):
+        return None
     text = text.strip()
-    if text.startswith("`"):
-        text = text.strip("`").removeprefix("json").strip()
+    m = FENCE.match(text)
+    if m:
+        text = m.group(1)
     try:
         obj = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError:
         return None
     return obj if isinstance(obj, dict) else None
 
 
+def schema_valid(obj) -> bool:
+    if obj is None or set(obj) != set(FIELDS):
+        return False
+    if not isinstance(obj["refund_requested"], bool):
+        return False
+    if not all(isinstance(obj[k], str) for k in FIELDS if k != "refund_requested"):
+        return False
+    return (re.match(ORDER_ID_RE, obj["order_id"]) is not None
+            and obj["issue_type"] in ISSUE_TYPES and obj["sentiment"] in SENTIMENTS)
+
+
+def field_match(obj, gold, key) -> bool:
+    """Exact match with the same JSON type ("true" != true, 1 != true); no case folding."""
+    if obj is None or key not in obj:
+        return False
+    return type(obj[key]) is type(gold[key]) and obj[key] == gold[key]
+
+
 def schema_reward(completions, task=None, **kwargs) -> list[float | None]:
-    """1.0 if the output is a JSON object with exactly the five fields and valid types/enum."""
+    """1.0 iff the output is schema-valid under module 01's scorer."""
     out: list[float | None] = []
     for i, c in enumerate(completions):
         if task is not None and task[i] != "email_json":
             out.append(None)
             continue
-        obj = _parse_json(_text(c))
-        ok = (obj is not None and set(obj) == set(FIELDS)
-              and isinstance(obj["customer_name"], str) and isinstance(obj["order_id"], str)
-              and obj["issue_type"] in ISSUE_TYPES and isinstance(obj["refund_requested"], bool)
-              and obj["sentiment"] in {"negative", "neutral", "positive"})
-        out.append(1.0 if ok else 0.0)
+        out.append(1.0 if schema_valid(parse_prediction(_text(c))) else 0.0)
     return out
 
 
-def field_accuracy_reward(completions, gold_json=None, task=None, **kwargs) -> list[float | None]:
-    """Fraction of the five fields that match the gold record (0 if unparseable)."""
+def field_accuracy_reward(completions, gold=None, task=None, **kwargs) -> list[float | None]:
+    """Fraction of the five fields that exactly match the row's `gold` dict (0 if unparseable)."""
     out: list[float | None] = []
     for i, c in enumerate(completions):
         if task is not None and task[i] != "email_json":
             out.append(None)
             continue
-        obj = _parse_json(_text(c))
-        gold = json.loads(gold_json[i])
-        if obj is None:
-            out.append(0.0)
-            continue
-        hits = sum(1 for f in FIELDS if f in obj and str(obj[f]).strip().lower() == str(gold[f]).strip().lower())
-        out.append(hits / len(FIELDS))
+        obj = parse_prediction(_text(c))
+        out.append(sum(field_match(obj, gold[i], f) for f in FIELDS) / len(FIELDS))
     return out
 
 
@@ -266,19 +285,34 @@ def smoke():
     completions = [
         [{"role": "assistant", "content": "<think>48 / 2 = 24, and 48 + 24 = 72 clips</think> \\boxed{72}"}],
         [{"role": "assistant", "content": "\\boxed{70}"}],
-        [{"role": "assistant", "content": json.dumps({"customer_name": "Ana Ruiz", "order_id": "A-17",
+        [{"role": "assistant", "content": json.dumps({"customer_name": "Ana Ruiz", "order_id": "ORD-00017",
                                                       "issue_type": "refund", "refund_requested": True,
                                                       "sentiment": "negative"})}],
     ]
     task = ["gsm8k", "gsm8k", "email_json"]
-    answer = ["72", "72", ""]
-    gold = ["{}", "{}", json.dumps({"customer_name": "Ana Ruiz", "order_id": "A-17", "issue_type": "refund",
-                                    "refund_requested": True, "sentiment": "neutral"})]
+    answer = ["Natalia sold 48/2 = 24 clips.\n#### 72", "72", ""]   # raw openai/gsm8k column, or bare
+    gold = [None, None, {"customer_name": "Ana Ruiz", "order_id": "ORD-00017", "issue_type": "refund",
+                         "refund_requested": True, "sentiment": "neutral"}]
     kw = dict(prompts=[None] * 3, completions=completions, completion_ids=[[0]] * 3, task=task)
     assert correctness_reward(answer=answer, **kw) == [1.0, 0.0, None]
     assert format_reward(**kw) == [0.2, 0.0, None]
     assert schema_reward(**kw) == [None, None, 1.0]
-    assert field_accuracy_reward(gold_json=gold, **kw) == [None, None, 0.8]
+    assert field_accuracy_reward(gold=gold, **kw) == [None, None, 0.8]
+
+    # 2b. module 01's scoring fixture: parse 5/6, schema 2/6, all-fields 2/6, order_id 5/6, issue_type 4/6
+    g = {"customer_name": "Maya Patel", "order_id": "ORD-48213", "issue_type": "refund",
+         "refund_requested": True, "sentiment": "negative"}
+    perfect, fence = json.dumps(g), "`" * 3
+    preds = [perfect, perfect.replace('"refund",', '"billing",'), perfect[:-1] + ",}",
+             f"{fence}json\n{perfect}\n{fence}",
+             json.dumps({k: v for k, v in g.items() if k != "sentiment"}), perfect.replace("true", '"true"')]
+    parsed = [parse_prediction(p) for p in preds]
+    assert sum(o is not None for o in parsed) == 5
+    assert schema_reward(preds) == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+    acc = field_accuracy_reward(preds, gold=[g] * 6)
+    assert sum(a == 1.0 for a in acc) == 2
+    assert sum(field_match(o, g, "order_id") for o in parsed) == 5
+    assert sum(field_match(o, g, "issue_type") for o in parsed) == 4
 
     # 3. planted code hacks vs honest solutions
     tests = "assert add(2, 3) == 5\nassert add(-1, 1) == 0\n"
@@ -306,7 +340,7 @@ def full():
     ds = load_dataset("openai/gsm8k", "main", split="test")
     golds = [gsm8k_gold(a) for a in ds["answer"]]
     comps = [f"<think>reasoning omitted for this check</think> \\boxed{{{g:g}}}" for g in golds]
-    r = correctness_reward(prompts=[None] * len(ds), completions=comps, answer=[str(g) for g in golds])
+    r = correctness_reward(prompts=[None] * len(ds), completions=comps, answer=ds["answer"])  # raw column
     assert all(x == 1.0 for x in r), sum(1 for x in r if x != 1.0)
     print(f"gold-as-completion recall: {sum(r)}/{len(r)}")
 

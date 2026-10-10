@@ -5,11 +5,9 @@
 > metrics, harnesses, LLM-as-judge bias controls, pass@k, and statistically
 > sound comparisons.
 
-Without evaluation, fine-tuning is guesswork with a GPU bill. Every later module in this course
-ends with "evaluate it", and this is the module that tells you what that means. The order matters:
-build a task-specific eval first, then add standard benchmarks, then LLM-as-judge with bias
-controls, then regression suites for forgetting and safety, and put a confidence interval on every
-number you report.
+Without evaluation, fine-tuning is guesswork with a GPU bill. The order matters: a task-specific
+eval first, then standard benchmarks, then LLM-as-judge with bias controls, then regression suites
+for forgetting and safety, with a confidence interval on every number you report.
 
 Two notes cover the general machinery, and this module assumes them. [Model
 evaluation](../../notes/ml/model-evaluation.md) covers classification metrics, validation
@@ -31,37 +29,22 @@ and Shreya Shankar (practitioner material: the [Parlance evals
 course](https://hamel.quarto.pub/parlance/education/evals) and Husain's [evals
 FAQ](https://hamel.dev/blog/posts/evals-faq/)). It has five steps:
 
-1. **Read outputs.** Run the current system (your [module-01](./01-when-to-fine-tune.md) prompting
-   baseline on the support-email task) on 50 to 100 realistic inputs and read every output. Husain recommends at least 100
-   traces, and to keep reading until new traces stop showing new failure kinds.
-2. **Open-code.** Write a free-text note on each failure, in your own words. Note the *first*
-   thing that went wrong; later errors are often caused by it.
-3. **Cluster (axial coding).** Group the notes into a taxonomy: "invented an `order_id` that is
-   not in the email", "`issue_type` outside the enum", "prose wrapped around the JSON",
-   "sentiment wrong on sarcastic emails".
-4. **Count and prioritise.** A taxonomy with counts tells you which failures matter. Twenty
-   hallucinated order IDs beat two odd sentiment labels.
-5. **Turn the top classes into targeted tests.** Each class becomes an automated check (a regex, a
-   schema validator, an exact-match field) or, only where no code check is possible, a narrow
-   binary LLM judge.
+1. **Read outputs.** Run the current system (your [module-01](./01-when-to-fine-tune.md)
+   prompting baseline) on realistic inputs and read every output. Husain recommends at least 100
+   traces, and reading until new traces stop showing new failure kinds.
+2. **Open-code.** Write a free-text note on each failure. Note the *first* thing that went wrong;
+   later errors are often caused by it.
+3. **Cluster (axial coding)** the notes into a taxonomy: "invented an `order_id`", "`issue_type`
+   outside the enum", "prose wrapped around the JSON".
+4. **Count and prioritise.** Twenty hallucinated order IDs beat two odd sentiment labels.
+5. **Turn the top classes into targeted tests**: a regex, a schema validator, an exact-match
+   field or, only where no code check is possible, a narrow binary LLM judge.
 
-Husain argues for **binary pass/fail checks per failure mode** over 1-to-5 Likert scores. Binary
-labels force a decision, and annotators drift to the middle of a scale. If you want a gradient,
-use several binary checks.
-
-```mermaid
-flowchart LR
-    A["Read 50-100 outputs<br/>(baseline system)"] --> B["Open-code failures"]
-    B --> C["Cluster into<br/>error taxonomy + counts"]
-    C --> D["Targeted evals<br/>(code checks first, judges second)"]
-    D --> E["Fix data / train<br/>(modules 04, 05)"]
-    E --> F["Re-evaluate vs baseline<br/>with CIs"]
-    F --> G["Promote checks into<br/>regression suite"]
-    G --> A
-```
+Husain argues for **binary pass/fail checks per failure mode** over 1-to-5 Likert scores: binary
+labels force a decision, while annotators drift to the middle of a scale.
 
 The loop never ends. Every production incident is a new trace to open-code, and every new failure
-class becomes a new test. **The baseline is not optional.** If the prompted Qwen3-4B-Instruct
+class becomes a new test. **The baseline is not optional.** If the prompted Qwen3-4B-Instruct-2507
 already scores 0.92 schema validity, a fine-tune that reaches 0.94 has to justify its cost (module
 01 makes that decision); you can only know this if you measured the baseline with the same harness.
 
@@ -70,33 +53,29 @@ already scores 0.92 schema validity, a fine-tune that reaches 0.94 has to justif
 A golden set is a small, frozen, carefully labelled set of inputs with known-correct outputs. The
 course's running task uses 50 support emails. Four rules:
 
-- **Size sets your noise floor.** At n = 50 a 95% interval on an accuracy of 0.8 is about ±11
-  points (worked in 9.7). A 50-item set can detect a jump from 0.6 to 0.9; it cannot detect 0.80
-  to 0.83. Grow the set when the decisions you need to make get finer.
-- **Stratify by taxonomy class.** If 10% of real traffic is refund requests with no order ID,
-  make sure the golden set has enough of them to measure. Report per-stratum results next to the
-  total.
-- **Freeze and version it.** `golden_v3.jsonl` with a content hash. Never edit labels silently;
-  a relabel is a new version, and you re-score old models on it.
-- **Keep it out of training.** Fine-tuning data comes from the same source as the golden set,
-  so leakage is easy. Run the n-gram and embedding decontamination from
-  [module 04](./04-data-curation-and-synthesis.md) against every training set, every time.
+- **Size sets your noise floor.** At n = 50 a 95% interval on 0.8 accuracy is about ±11 points
+  (9.7): enough to see 0.6 to 0.9, not 0.80 to 0.83.
+- **Stratify by taxonomy class** so each important failure class has enough items to measure, and
+  report per-stratum results next to the total.
+- **Freeze and version it.** The course's set is module 01's `ft_data/eval.jsonl`, deterministic
+  from its seed and identified by a content hash. Never edit labels silently; a relabel is a new
+  version, and you re-score old models on it.
+- **Keep it out of training.** Run [module 04](./04-data-curation-and-synthesis.md)'s
+  decontamination against every training set, every time.
 
 ---
 
 ## 9.2 Loss, perplexity and why they are not enough
 
-Eval loss is the mean token-level cross-entropy on held-out examples; perplexity is its
-exponential, $\exp(\mathcal{L})$. They measure how well the model fits the *distribution of
-reference tokens* in the eval set under teacher forcing. That is useful and cheap. It is not the
-question you care about.
+Eval loss is the mean token-level cross-entropy on held-out examples; perplexity is
+$\exp(\mathcal{L})$. Both measure fit to *reference tokens* under teacher forcing: cheap and
+useful, but not the question you care about.
 
 **Lower eval loss does not guarantee better generations**, for three reasons:
 
-- **Template memorisation.** Much of the loss on instruction data sits in predictable tokens:
-  JSON braces, field names, the chat template. A model can drive those to near-zero loss while
-  still getting `issue_type` wrong. The loss averages over all tokens; your metric cares about
-  five.
+- **Template memorisation.** Much of the loss sits in predictable tokens (JSON braces, field
+  names, the chat template). A model can drive those to near zero while still getting
+  `issue_type` wrong.
 - **Exposure bias.** Teacher forcing always conditions on the *reference* prefix. At inference
   time the model conditions on its own earlier tokens, and one early mistake (an invented order
   ID) changes everything after it. Loss never sees that path.
@@ -104,7 +83,7 @@ question you care about.
   ([module 02](./02-tokens-templates-and-the-causal-lm-objective.md) covers temperature, top-p,
   top-k and min-p). A model with lower loss can still loop, truncate or emit the wrong stop token.
 
-So correct the misconception directly: **"lower training loss means a better model" is false.**
+**"Lower training loss means a better model" is false.**
 Training loss can fall because the model memorises the training set (train loss below about 0.2
 on instruction data is a common overfitting signal, module 03). Use loss as a **smoke alarm**:
 eval loss that rises while training loss falls means overfitting; a loss spike means a data or
@@ -130,20 +109,12 @@ The [NLP evaluation note](../../notes/nlp/nlp-evaluation.md) derives BLEU and RO
 here is only that **surface overlap is a weak signal for open-ended generation**, and fine-tunes
 that change style but not content move it in either direction.
 
-### Execution-based code evaluation
-
-For code, the reference is a set of unit tests, not a string. Generate a program, run it in a
-sandbox against hidden tests, and count it as correct only if every test passes. Chen et al.
-(2021) [Codex / HumanEval](https://arxiv.org/abs/2107.03374) set the pattern: 164 hand-written
-problems, each with unit tests, scored by functional correctness. Three practical rules:
-
-- **Sandbox everything.** Generated code can delete files, open sockets, or loop forever. Run it in
-  a container with no network, a CPU and memory limit, and a wall-clock timeout. Inspect AI
-  (9.4) ships Docker sandboxes for exactly this.
-- **Test the tests.** A weak test suite rewards wrong programs; a model being trained against it
-  will find the gap (reward hacking, [module 13](./13-rl-with-verifiable-rewards.md)).
-- **Sample more than once.** Report pass@1 estimated from $n$ samples per problem, not from one
-  sample, so the estimate has low variance.
+**Code is scored by execution, not by string.** Chen et al. (2021) [Codex /
+HumanEval](https://arxiv.org/abs/2107.03374) set the pattern: run each program against hidden unit
+tests in a sandbox (no network, resource limits, a timeout; Inspect AI ships Docker sandboxes) and
+count it correct only if every test passes. Weak tests invite reward hacking
+([module 13](./13-rl-with-verifiable-rewards.md)); tool-use execution evals are in
+[module 15](./15-agentic-and-tool-use-fine-tuning.md).
 
 ### pass@k without bias
 
@@ -181,8 +152,7 @@ contains a correct sample and the estimate is exactly 1.
 **Why not plug in $\hat p = c/n$?** The tempting estimator is $1 - (1 - c/n)^k$. For our numbers
 it gives $1 - 0.7^5 = 0.83193$, not 0.91667. It is biased because $(1-\hat p)^k$ is a convex
 function of $\hat p$; by Jensen's inequality $\mathbb{E}[(1-\hat p)^k] \ge (1-p)^k$, so the plug-in
-**systematically underestimates** pass@k. It also treats the $n$ samples as if drawn with
-replacement, which double-counts the wrong ones.
+**systematically underestimates** pass@k.
 
 The check below implements the product form and compares it with a brute-force count over every
 5-subset of 10 samples.
@@ -239,22 +209,21 @@ fixed seed, or deduplicated samples, break the i.i.d. assumption the estimator r
 
 ## 9.4 Harnesses
 
-Do not write your own benchmark runner. Prompt formatting, few-shot selection, answer extraction
-and normalisation each move scores by points, and harnesses exist so those choices are fixed and
-shared. As of October 2026 three open harnesses matter.
+Do not write your own benchmark runner. Prompt format, few-shot selection, answer extraction and
+normalisation each move scores by points; harnesses fix and share those choices.
 
 ### lm-evaluation-harness
 
-EleutherAI's [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/eb4678c395c2c1f157d462b8f3a09831160c861a)
+EleutherAI's [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/ddd67220430a2470529f25fd5c05a576ca1057a0)
 (`lm_eval`, v0.4.13 as of August 2026) is the standard for academic benchmarks. Two recent changes
 break old tutorials:
 
 - **The base package no longer bundles torch or transformers.** Install the backend you need:
   `pip install "lm_eval[hf]"` or `pip install "lm_eval[vllm]"`
-  ([README at v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/blob/eb4678c395c2c1f157d462b8f3a09831160c861a/README.md)).
+  ([README at v0.4.13](https://github.com/EleutherAI/lm-evaluation-harness/blob/ddd67220430a2470529f25fd5c05a576ca1057a0/README.md)).
 - **The CLI has subcommands** (December 2025): `lm-eval run`, `lm-eval ls tasks`, and
   `lm-eval validate --tasks ...`, plus `--config` for a YAML run config
-  ([CLI reference](https://github.com/EleutherAI/lm-evaluation-harness/blob/eb4678c395c2c1f157d462b8f3a09831160c861a/docs/interface.md)).
+  ([CLI reference](https://github.com/EleutherAI/lm-evaluation-harness/blob/ddd67220430a2470529f25fd5c05a576ca1057a0/docs/interface.md)).
   Both `lm-eval` and `lm_eval` entry points exist.
 
 A typical run of your SFT checkpoint with the vLLM backend:
@@ -274,7 +243,7 @@ statistics in 9.7 need. For Qwen3 in thinking mode, the CLI reference documents
 `enable_thinking=True,think_end_token="</think>"` in `--model_args` to strip the reasoning trace
 before scoring.
 
-Tasks are YAML files. The [GSM8K task](https://github.com/EleutherAI/lm-evaluation-harness/blob/eb4678c395c2c1f157d462b8f3a09831160c861a/lm_eval/tasks/gsm8k/gsm8k.yaml)
+Tasks are YAML files. The [GSM8K task](https://github.com/EleutherAI/lm-evaluation-harness/blob/ddd67220430a2470529f25fd5c05a576ca1057a0/lm_eval/tasks/gsm8k/gsm8k.yaml)
 shows every choice a benchmark number depends on:
 
 ```yaml
@@ -298,22 +267,19 @@ filter you report.** Write your own task the same way and pass `--include_path .
 ### Lighteval
 
 Hugging Face's [Lighteval](https://huggingface.co/docs/lighteval/en/index) (v0.13.0, November
-2025) has backends for Accelerate, vLLM, SGLang, Nanotron, endpoints and LiteLLM. Its docs, as of
-October 2026, call the **inspect-ai backend (`lighteval eval`) the preferred way**:
+2025) calls its **inspect-ai backend (`lighteval eval`) the preferred way** as of October 2026:
 
 ```bash
 lighteval eval vllm/your-org/qwen3-1.7b-sft "gsm8k|0" --max-samples 200
-lighteval eval hf-inference-providers/openai/gpt-oss-20b aime25 --epochs 16 --epochs-reducer pass_at_4
 ```
 
 The [inspect-ai backend page](https://huggingface.co/docs/lighteval/en/inspect-ai) notes that not
-every Lighteval task has been ported yet; the older `lighteval vllm "model_name=..." tasks` route
-still covers those. Results land in an Inspect log directory, browsable with `inspect view`.
+every task has been ported; the older `lighteval vllm` route still covers those.
 
 ### Inspect AI
 
 [Inspect AI](https://inspect.aisi.org.uk/) from the UK AI Security Institute (PyPI
-[`inspect-ai`](https://pypi.org/project/inspect-ai/0.3.251/); 0.3.278 released 2026-10-09) is a
+[`inspect-ai`](https://pypi.org/project/inspect-ai/0.3.278/); 0.3.278 released 2026-10-09) is a
 framework rather than a benchmark list. Four concepts:
 
 - **Task**: a dataset plus a solver plus a scorer.
@@ -327,34 +293,10 @@ Models are named `provider/model`, for example `vllm/Qwen/Qwen3-1.7B`; Inspect s
 server for you, or uses an existing one via `--model-base-url` / `VLLM_BASE_URL`
 ([providers](https://inspect.aisi.org.uk/providers.html)).
 
-A custom scorer for the running task's schema validity, following the
-[custom scorer docs](https://inspect.aisi.org.uk/custom-scorers.html). Teaching fragment: not
-executed (needs `inspect-ai`); the full version is in the lab script.
-
-```python
-from inspect_ai.scorer import CORRECT, INCORRECT, Score, Target, accuracy, scorer, stderr
-from inspect_ai.solver import TaskState
-
-@scorer(metrics=[accuracy(), stderr()])
-def json_schema_valid():
-    async def score(state: TaskState, target: Target) -> Score:
-        obj = extract_json(state.output.completion)     # None if not one JSON object
-        errors = schema_errors(obj)                       # enum, type, missing-field checks
-        return Score(
-            value=CORRECT if not errors else INCORRECT,
-            answer=state.output.completion,
-            explanation="; ".join(errors) or "valid",
-        )
-    return score
-# Task(dataset=samples, solver=generate(), scorer=json_schema_valid())
-```
-
-### `unsloth eval`
-
-Unsloth added an [`unsloth eval` command](https://github.com/unslothai/unsloth/pull/6824) that runs
-lm-evaluation-harness tasks on a checkpoint or LoRA adapter. It is convenient right after an
-Unsloth run; [module 08](./08-frameworks-and-tooling.md) covers it with the rest of the Unsloth
-tooling.
+The lab script [`inspect_json_task.py`](./code/inspect_json_task.py) is a worked
+[custom scorer](https://inspect.aisi.org.uk/custom-scorers.html): a `@scorer` that applies module
+01's parsing and schema rules and returns CORRECT/INCORRECT with the failure reasons as the
+explanation. Unsloth's own eval command wraps lm-eval tasks; [module 08](./08-frameworks-and-tooling.md) covers it.
 
 **Table 1. Harnesses (as of October 2026).**
 
@@ -363,7 +305,6 @@ tooling.
 | lm-evaluation-harness | widest academic task set; YAML tasks; reference implementation behind many reported numbers | `hf`, `vllm`, `sglang`, OpenAI-compatible APIs | standard benchmarks for base vs fine-tune; reproducing paper numbers |
 | Lighteval | inspect-ai backend, Hub-integrated results, provider comparisons, `--epochs` with pass@k reducers | inspect-ai (preferred), Accelerate, vLLM, SGLang, Nanotron, endpoints, LiteLLM | HF-ecosystem evals, reasoning benchmarks with many samples, pushing results to the Hub |
 | Inspect AI | custom tasks, solvers and scorers in Python; agents and tools; Docker sandboxes; log viewer | API providers, vLLM, SGLang, HF | your golden set, agentic and code evals, anything needing a sandbox |
-| `unsloth eval` | one command after an Unsloth run; LoRA adapters directly | lm-eval tasks underneath | quick sanity numbers inside an Unsloth workflow |
 
 ---
 
@@ -387,40 +328,30 @@ fine-tune with identical settings, and compare.
 | Safety | refusal and harmful-request sets, over-refusal sets | refuses harmful requests, answers benign ones | refusal rate / compliance rate | owned by [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md) |
 
 **IFEval in detail**, because it is the benchmark most often hurt by fine-tuning. Each prompt
-carries one or more instructions that code can verify. *Instruction-level* accuracy is the
-fraction of individual instructions followed; *prompt-level* accuracy is the fraction of prompts
-where **all** instructions were followed, so it is always lower or equal. *Strict* checks the
-raw response; *loose* also accepts the response after simple transformations (removing the first
-or last line, stripping markdown asterisks) to reduce false negatives. lm-eval reports all four as
-`prompt_level_strict_acc`, `inst_level_strict_acc`, `prompt_level_loose_acc` and
-`inst_level_loose_acc` ([task YAML](https://github.com/EleutherAI/lm-evaluation-harness/blob/eb4678c395c2c1f157d462b8f3a09831160c861a/lm_eval/tasks/ifeval/ifeval.yaml)).
-Report prompt-level strict as the headline.
+carries instructions that code can verify. *Prompt-level* accuracy requires **all** of a prompt's
+instructions to pass, so it is never above *instruction-level*; *loose* also accepts the response
+after simple transformations (dropping the first or last line, stripping asterisks). lm-eval
+reports all four combinations
+([task YAML](https://github.com/EleutherAI/lm-evaluation-harness/blob/ddd67220430a2470529f25fd5c05a576ca1057a0/lm_eval/tasks/ifeval/ifeval.yaml));
+report `prompt_level_strict_acc` as the headline.
 
 ### Generation settings are part of the result
 
 The same checkpoint can score 10 points apart under two generation configs. A benchmark number
-without its settings is not a result. The settings that matter:
-
-- **Chat template.** Instruct and fine-tuned models must be evaluated with the template they were
-  trained with (`--apply_chat_template` in lm-eval). Evaluating a chat fine-tune on raw
-  completion prompts measures the wrong model. Base models are usually evaluated without one.
-- **Temperature and top-p.** Greedy (`temperature=0`) for deterministic single-answer tasks. But
-  the [Qwen3 model card](https://huggingface.co/Qwen/Qwen3-1.7B/blob/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/README.md)
-  says thinking mode should use temperature 0.6, top-p 0.95, top-k 20 and warns **not** to use
-  greedy decoding, which can cause endless repetition. Follow the model card, and use the same
-  settings for base and fine-tune.
-- **Max new tokens.** Reasoning traces run to thousands of tokens. A cap that truncates them
-  turns correct answers into failures. Report the truncation rate.
-- **Thinking on or off.** For hybrid models such as Qwen3 this is a different operating mode,
-  not a detail. Report both if you claim anything about reasoning.
-- **Number of samples.** pass@1 from 1 sample, or averaged over 16, has very different variance.
-- **Stop tokens and few-shot count.** A missing `<|im_end|>` stop lets the model ramble into the
-  next turn.
+without its settings is not a result. Evaluate chat fine-tunes with the template they were trained
+with (`--apply_chat_template`); raw completion prompts measure the wrong model. Greedy decoding
+suits single-answer tasks, but the [Qwen3 model
+card](https://huggingface.co/Qwen/Qwen3-1.7B/blob/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/README.md)
+says thinking mode should use temperature 0.6, top-p 0.95, top-k 20 and warns **not** to decode
+greedily, which can cause endless repetition. A max-new-tokens cap that truncates reasoning traces
+turns correct answers into failures, so report the truncation rate. Thinking on and off are two
+operating modes, not a detail. A missing `<|im_end|>` stop lets the model ramble into the next turn.
 
 **Reporting checklist** (put this in every eval table caption or model card): harness and version;
 task names and filters; model revision (commit SHA); chat template on/off; thinking on/off;
-temperature, top-p, top-k; max new tokens; number of samples per item and how they were reduced;
-few-shot count; dataset revision; seeds; and the confidence interval.
+temperature, top-p, top-k; max new tokens and truncation rate; number of samples per item and how
+they were reduced; stop tokens; few-shot count; dataset revision; seeds; and the confidence
+interval. Use the same settings for base and fine-tune.
 
 ---
 
@@ -433,11 +364,10 @@ is 80 two-turn questions in 8 categories; Chatbot Arena collects crowd votes on 
 side-by-side battles. They found GPT-4 as a judge reached **over 80% agreement with human
 preferences, the same level as human-human agreement**, and also documented its biases.
 
-**Pointwise vs pairwise.** *Pointwise* (single-answer grading) asks for an absolute score, say
-1 to 10. It scales linearly with the number of models but scores drift and compress (most land
-at 7 or 8). *Pairwise* asks which of two answers is better. It is more consistent and maps
-directly onto "is the fine-tune better than the baseline?", but its cost grows with the number of
-pairs. For a before/after comparison, pairwise against the baseline is the default.
+**Pointwise vs pairwise.** *Pointwise* grading (a 1-to-10 score) scales linearly with the number
+of models, but scores drift and compress around 7 or 8. *Pairwise* ("which is better?") is more
+consistent and maps onto "is the fine-tune better than the baseline?", so it is the default for
+a before/after comparison.
 
 ### The three biases
 
@@ -453,37 +383,26 @@ pairs. For a before/after comparison, pairwise against the baseline is the defau
   say their data cannot establish the effect conclusively. Treat it as a risk to control, not a
   measured constant.
 
-The obvious failed attempt is "the judge is a strong model, so its verdicts are objective".
-**LLM-as-judge is not objective.** It is a measuring instrument with known systematic errors,
-and you calibrate it like one.
+**LLM-as-judge is not objective**, however strong the judge. It is an instrument with known
+systematic errors, and you calibrate it like one.
 
 ### Length-controlled AlpacaEval
 
-AlpacaEval compares a model's answers to a baseline's with an LLM judge and reports a win rate.
-Raw win rate rewards length. Dubois et al. (2024) [Length-Controlled
-AlpacaEval](https://arxiv.org/abs/2404.04475) fix this with regression rather than prompting.
-They fit a generalised linear model (a logistic regression) predicting the judge's preference
-from the model identity, the **length difference** between the two answers, and other features
-such as instruction difficulty. Then they predict the preference **with the length difference
-set to zero**. The result answers "what would the win rate be if both answers had the same
-length?". Length control raised the Spearman correlation with Chatbot Arena rankings from 0.94 to
-0.98, and made the metric much harder to game by padding. **Report AlpacaEval 2 LC, not raw
-win rate.**
+AlpacaEval reports a judge's win rate against a baseline, and raw win rate rewards length.
+Dubois et al. (2024) [Length-Controlled AlpacaEval](https://arxiv.org/abs/2404.04475) fit a
+logistic regression predicting the judge's preference from model identity, the **length
+difference** and instruction difficulty, then predict with the length difference **set to zero**.
+That raised the Spearman correlation with Chatbot Arena from 0.94 to 0.98 and made padding much
+less effective. **Report AlpacaEval 2 LC, not raw win rate.**
 
 ### Arena-Hard and BenchBuilder
 
-Li et al. (2024) [Arena-Hard / BenchBuilder](https://arxiv.org/abs/2406.11939) address a
-different problem: MT-Bench is small and saturated, so it no longer separates strong models.
-BenchBuilder is a pipeline that takes crowdsourced prompts (from Chatbot Arena and similar
-sources), has an LLM annotate each for qualities such as specificity, domain knowledge,
-complexity and problem-solving, and keeps high-quality prompts from high-quality topic clusters.
-The resulting Arena-Hard-Auto has 500 challenging prompts. Each model is compared pairwise against
-a fixed baseline by an LLM judge, in both orders, and the pairwise outcomes are turned into
-scores with a Bradley-Terry model (the same pairwise-preference model behind reward-model
-training in [module 12](./12-preference-optimization.md)), with bootstrap confidence intervals. The paper reports about 3x the separation of
-model performances of MT-Bench and 98.6% correlation with human preference rankings, at about
-USD 20 per evaluation. The lesson for your own judge sets: **prompt selection and pairwise
-comparison against a fixed baseline are what make a judge benchmark informative.**
+Li et al. (2024) [Arena-Hard / BenchBuilder](https://arxiv.org/abs/2406.11939) replace small,
+saturated MT-Bench with 500 hard prompts filtered from crowdsourced traffic by an LLM annotator.
+Each model is judged pairwise against a fixed baseline in both orders, and outcomes become
+Bradley-Terry scores ([module 12](./12-preference-optimization.md)) with bootstrap CIs. The paper
+reports about 3x MT-Bench's separation and 98.6% correlation with human rankings. **Prompt
+selection and pairwise comparison against a fixed baseline make a judge benchmark informative.**
 
 ### Controls that work
 
@@ -492,13 +411,11 @@ comparison against a fixed baseline are what make a judge benchmark informative.
    alternative is to average the two orders' probabilities.
 2. **Control length.** Use LC-style regression for win rates, or instruct the judge to ignore
    length and spot-check that it does. Report average output length next to every judge score.
-3. **Write a rubric with anchored scale points.** "4 = all fields correct, tone appropriate,
-   no unsupported claims; 2 = one factual error" beats "rate helpfulness 1 to 5". Prefer binary
-   checks per failure mode (9.1).
-4. **Give reference answers** where they exist. Zheng et al. found GPT-4 failed 14 of 20 math
-   gradings with the default prompt and 3 of 20 when shown a reference answer.
-5. **Use multiple judges or a different family** from the model being evaluated, to dilute
-   self-preference.
+3. **Anchor the rubric** ("4 = all fields correct, no unsupported claims; 2 = one factual
+   error"), or better, binary checks per failure mode (9.1).
+4. **Give reference answers.** Zheng et al.'s GPT-4 judge failed 14 of 20 maths gradings without
+   one and 3 of 20 with one.
+5. **Use multiple judges or a different family** to dilute self-preference.
 6. **Calibrate against humans.** Label 100 or more items yourself (or with domain experts), run
    the judge on the same items, and report agreement with a confidence interval and **Cohen's
    kappa**, which corrects for chance agreement:
@@ -508,9 +425,8 @@ comparison against a fixed baseline are what make a judge benchmark informative.
    human labels on a held-out test split, because overall agreement hides whether it misses
    failures or raises false alarms.
 7. **Consider an open judge.** Prometheus 2 ([Kim et al. 2024](https://arxiv.org/abs/2405.01535))
-   is an open evaluator model trained for both rubric-based direct assessment and pairwise
-   ranking. It is cheaper and reproducible (pinned weights never change under you, an API judge
-   can), at some cost in accuracy versus frontier judges. Calibrate it the same way.
+   does rubric grading and pairwise ranking with pinned weights that never change under you, at
+   some accuracy cost versus frontier judges. Calibrate it the same way.
 
 ### Measuring position bias
 
@@ -521,8 +437,8 @@ Two numbers summarise a judge run in both orders over $P$ pairs:
 - **First-position preference rate**: the fraction of all $2P$ verdicts that pick whichever answer
   was shown first.
 
-They are linked. A consistent pair contributes exactly one first-position pick (A in one order,
-second slot in the other). An inconsistent pair contributes two (the judge picked the first slot
+They are linked. A consistent pair contributes exactly one first-position pick: its winner is
+shown first in one order and second in the other. An inconsistent pair contributes two (the judge picked the first slot
 both times) or zero (the second slot both times). So
 
 $$
@@ -574,8 +490,8 @@ calibration is a separate step.
 
 ## 9.7 Statistical rigour
 
-Every eval number is an estimate from a finite sample of items, and fine-tuning gains are often
-a few points. The [statistics note](../../notes/math/statistics.md) covers intervals, tests and
+Every eval number is an estimate from a finite sample, and fine-tuning gains are often a few
+points. The [statistics note](../../notes/math/statistics.md) covers intervals, tests and
 the bootstrap in general; this section applies them to model comparisons.
 
 ### Confidence intervals for one model: Wilson
@@ -595,10 +511,8 @@ $$
 the centre is $(0.8 + 0.0384)/1.0768 = 0.7786$ and the half-width is $0.1090$, giving
 **[0.670, 0.888]**. That is about ±11 points on a single model.
 
-What difference can you detect? If you compared two *independent* 50-item runs, the 95%
-half-width on the difference is about $1.96\sqrt{2 \times 0.16/50} \approx 0.157$: you would need
-a gap of roughly 16 points. Pairing (same items for both models, below) helps a lot, but only
-the items where the models *disagree* carry evidence. With 10 discordant items, you need a 9-to-1
+Two *independent* 50-item runs need a gap of about $1.96\sqrt{2 \times 0.16/50} \approx 0.157$
+to separate. Pairing (below) helps, but only items where the models *disagree* carry evidence. With 10 discordant items, you need a 9-to-1
 split (a 16-point net gain on 50 items) before McNemar's exact test gives $p < 0.05$; an 8-to-2
 split gives $p = 0.11$. **A 50-item golden set is for catching big regressions and big wins, not
 for ranking close checkpoints.**
@@ -611,17 +525,11 @@ for ranking close checkpoints.**
 
 ### Paired bootstrap for A vs B
 
-When both models are scored on the same items, compare them **per item**. The paired bootstrap:
-
-1. Compute per-item scores $a_j, b_j$ for $j = 1..n$ (0/1 for accuracy, or any per-item metric).
-2. The observed delta is $\bar b - \bar a$.
-3. For $B = 2{,}000$ resamples, draw $n$ item indices **with replacement**, and recompute
-   $\bar b - \bar a$ on those indices (the same indices for both models; that is the pairing).
-4. The 2.5th and 97.5th percentiles of the 2,000 deltas form the 95% percentile CI.
-
-Resampling items jointly keeps the correlation between the models: an item both get right moves
-both means together, so it adds no noise to the delta. This is why paired CIs are much narrower
-than two independent intervals.
+When both models are scored on the same items, compare them **per item**. The paired bootstrap
+draws $B = 2{,}000$ resamples of $n$ item indices **with replacement**, recomputes $\bar b - \bar a$
+on the same indices for both models (that is the pairing), and takes the 2.5th and 97.5th
+percentiles of the deltas as the 95% CI. An item both models get right moves both means together
+and adds no noise to the delta, so paired CIs are much narrower than two independent intervals.
 
 **Fixture.** 200 items: both right on 140, only A right on 8, only B right on 20, both wrong on
 32. A scores 148/200 = 0.74, B scores 160/200 = 0.80, delta = +0.06 (12 net items). The paired
@@ -632,12 +540,10 @@ with 13 A-only and 15 B-only items (delta +0.01, two net items) gives a CI of ab
 **McNemar's test** is the classical paired test for binary outcomes. Let $n_{01}$ be items only A
 gets right and $n_{10}$ items only B gets right. Under the null of equal accuracy each discordant
 item is a fair coin flip, so the exact test is a two-sided binomial test of $n_{10}$ out of
-$n_{01} + n_{10}$ at $p = 0.5$. For the first fixture, 20 versus 8 gives $p \approx 0.036$. Items
-both models get right or wrong do not enter at all, which is the paired bootstrap's lesson in a
-single formula.
+$n_{01} + n_{10}$ at $p = 0.5$. For the first fixture, 20 versus 8 gives $p \approx 0.036$.
+Concordant items do not enter at all.
 
-The check asserts the delta, the bootstrap CI's behaviour on both fixtures, and the Wilson numbers
-stated above.
+The check asserts the delta, both bootstrap CIs as stated, McNemar's p and the Wilson numbers.
 
 ```python finetuning-check
 import math
@@ -668,6 +574,8 @@ a2, b2 = fixture(a_only=13, b_only=15)
 d2, lo2, hi2 = paired_bootstrap(a2, b2)
 assert abs(d2 - 2 / 200) < 1e-12
 assert lo2 < 0 < hi2                           # includes zero
+assert (round(lo, 3), round(hi, 3)) == (0.010, 0.115)   # values stated in the prose
+assert (round(lo2, 2), round(hi2, 2)) == (-0.04, 0.06)
 
 # Exact McNemar on the first fixture: 8 vs 20 discordant items.
 m = 28
@@ -691,28 +599,22 @@ customers, not emails, or the interval will be too narrow.
 
 ### Seed variance
 
-The bootstrap covers *item* noise: which emails happened to be in the set. It does not cover
-*training* noise. Two fine-tunes with identical configs and different seeds (data order, LoRA
-init, dropout) can differ by more than the gain you are claiming. **When you claim a small gain,
-train at least 3 seeds of each configuration** and report the mean and spread across seeds along
-with the per-run CIs. If the seed spread is as large as the delta, you have no result. Fix the
-generation seed separately when sampling, and report both.
+The bootstrap covers *item* noise, not *training* noise. Two fine-tunes that differ only in seed
+(data order, LoRA init, dropout) can differ by more than the gain you claim. **For a small gain,
+train at least 3 seeds per configuration** and report the mean and spread with the per-run CIs.
+If the seed spread is as large as the delta, you have no result.
 
 ---
 
 ## 9.8 Contamination, gaming and regression suites
 
-### Contamination
+### Contamination and gaming
 
-A benchmark score means nothing if the test items were in the training data. For fine-tuning
-this happens two ways: your SFT data (often synthetic, often scraped) contains benchmark items,
-or the base model saw them in pretraining. Checks, in increasing order of strength (the methods
-are in [module 04](./04-data-curation-and-synthesis.md)):
+A benchmark score means nothing if the test items were in the training data. The detection
+methods (n-gram and embedding overlap, canary strings) live in
+[module 04](./04-data-curation-and-synthesis.md); run them on every training set. Two eval-side
+checks matter here:
 
-- **n-gram overlap** between training data and eval items (13-gram overlap is a common choice),
-  plus embedding similarity for paraphrases.
-- **Canary strings.** Some benchmarks embed a unique GUID so that a model reproducing it reveals
-  training on the benchmark files. Search your training corpus for them.
 - **Post-cutoff items.** Score separately on items published after the model's training cutoff.
   LiveCodeBench dates every problem for this reason. A model that does much better on old items
   than new ones of equal difficulty was probably trained on them.
@@ -720,18 +622,13 @@ are in [module 04](./04-data-curation-and-synthesis.md)):
   ([module 14](./14-distillation-and-reasoning.md)) can inherit benchmark answers the teacher
   memorised, even if your own data pipeline never touched the benchmark.
 
-### Gaming
-
-Benchmarks are gamed without anyone intending to cheat. **Format overfitting**: SFT data written
-in GSM8K's "#### answer" style lifts `strict-match` scores without improving maths. **Prompt
-tuning on the test set**: trying ten system prompts and reporting the best is selection on the
-test set; the best-of-ten is biased upward. Keep a dev split for choices and touch the test split
-once.
+Gaming needs no intent: SFT data in GSM8K's `#### answer` style lifts `strict-match` without
+improving maths, and reporting the best of ten system prompts is selection on the test set. Make
+choices on a dev split and touch the test split once.
 
 ### Regression suites
 
-A regression suite is a fixed set of evals that every candidate must pass before release. For a
-fine-tune, it has four parts:
+A regression suite is a fixed set of evals every candidate must pass before release:
 
 | Suite | What it catches | Example contents | Gate |
 |---|---|---|---|
@@ -740,89 +637,52 @@ fine-tune, it has four parts:
 | Format adherence | broken output contract | your schema-validity checks, stop-token checks | validity ≥ target (e.g. 0.98 on the golden set) |
 | Latency and cost | longer outputs, slower serving | output length distribution, p50/p95 latency on fixed hardware | p95 within budget |
 
-Fine-tuning can erode general and safety behaviour even on benign data;
-[module 19](./19-safety-forgetting-and-responsible-fine-tuning.md) gives the evidence and
-mitigations. Latency regressions usually come from longer outputs, not a slower model; measure
-them the way the inference course's [honest
-benchmarking](/courses/inference/10-benchmarking/10-03-honest-benchmarking.html) chapter
-describes. **Gate releases on the suite automatically**, so nobody has to remember to run it.
+[Module 19](./19-safety-forgetting-and-responsible-fine-tuning.md) gives the evidence that even
+benign fine-tuning erodes general and safety behaviour. Latency regressions usually come from
+longer outputs; measure them as the inference course's [honest
+benchmarking](/courses/inference/10-benchmarking/10-03-honest-benchmarking.html) chapter describes.
+**Gate releases on the suite automatically.**
 
 ---
 
 ## 9.9 Evaluating RL-trained models (preview)
 
-Models trained with RL on verifiable rewards ([module 13](./13-rl-with-verifiable-rewards.md))
-need one extra caution: **the choice of $k$ can reverse the conclusion.** Yue et al. (2025) [Does
-Reinforcement Learning Really Incentivize Reasoning Capacity in LLMs Beyond the Base
-Model?](https://arxiv.org/abs/2504.13837) compared base and RLVR-trained models with pass@k at
-large $k$. RL-trained models win at pass@1, but base models catch up and can overtake them as $k$
-grows to the hundreds. Their reading is that RLVR mostly sharpens the distribution toward answers
-the base model could already find, narrowing coverage. Rebuttals exist and module 13 covers the
-debate. For evaluation the lesson is simple: **report pass@1 and pass@k at several $k$ (computed
-with the unbiased estimator from the same $n$ samples)**, and do not claim "new reasoning
-ability" from pass@1 alone.
-
-The second caution is **reward hacking**. RL optimises the verifier, not the task. Audit
-RL-trained models with a held-out verifier the training never saw, read a sample of
-high-reward outputs, and watch for length inflation and format tricks. Module 13 covers the
-taxonomy (DAPO-style length shaping and Lilian Weng's reward-hacking survey included).
+For RL-trained models ([module 13](./13-rl-with-verifiable-rewards.md)), **the choice of $k$ can
+reverse the conclusion**: Yue et al. (2025) [found](https://arxiv.org/abs/2504.13837) base models
+catch up with RLVR models at large pass@k. Report pass@1 and pass@k at several $k$ from the same
+$n$ samples, and audit reward hacking with a held-out verifier. Module 13 covers the debate and
+the hacking taxonomy.
 
 ---
 
 ## 9.10 Online evaluation and reporting
 
-Offline evals predict; production decides. Once a fine-tune passes the regression suite:
+Offline evals predict; production decides. Once a fine-tune passes the regression suite, A/B
+test it on a slice of real traffic with a primary metric and guardrails fixed in advance, and run
+it to the precomputed sample size (peeking inflates false positives; see the [statistics
+note](../../notes/math/statistics.md)). Production thumbs, side-by-sides and agent edits are noisy
+but on-distribution. Every bad trace re-enters the 9.1 loop and, after decontamination against the
+golden set, the next training set; preference pairs feed [module 12](./12-preference-optimization.md),
+and [module 20](./20-production-serving-and-cost.md) builds this flywheel into the serving stack.
 
-- **A/B test** it against the current model on a slice of real traffic, with a primary metric
-  fixed in advance (task success, escalation rate, user rating) and guardrail metrics (latency,
-  refusal rate, complaints). Run the A/B test long enough for the sample size you computed in
-  advance; peeking and stopping early inflates false positives (see the [statistics
-  note](../../notes/math/statistics.md) on A/B testing).
-- **Collect human preferences** in production: thumbs up/down, side-by-side comparisons for
-  internal reviewers, edits that agents make to model drafts. These are noisy but on-distribution.
-- **Feed failures back into data.** Every bad trace goes through the 9.1 loop: open-code it, add
-  it to the taxonomy, add a test, and (after decontamination against the golden set) add
-  corrected examples to the next training set. Preference pairs from production feed
-  [module 12](./12-preference-optimization.md). [Module 20](./20-production-serving-and-cost.md)
-  builds this flywheel into the serving stack.
-
-**Log evals with training runs.** Every checkpoint you might ship should have its eval suite
-results logged in the same experiment tracker as its training curves, with the full config
-(including the generation settings from 9.5) and the harness version.
+**Log evals with training runs**: same tracker, full config, generation settings and harness
+version.
 
 **Publish eval results with the model.** The model card should state intended use, the eval
-sets, the settings checklist and the CIs. On the Hugging Face Hub, eval scores can also live as
-YAML files in a model repo's `.eval_results/` folder ([Hub docs, a work-in-progress feature as
-of October 2026](https://huggingface.co/docs/hub/eval-results)). Each entry names a Hub benchmark
-dataset and task, and the score appears on the model page and on that benchmark's leaderboard:
-
-```yaml
-# .eval_results/gsm8k.yaml  (required fields: dataset.id, dataset.task_id, value)
-- dataset:
-    id: openai/gsm8k           # must be a Hub dataset registered as a Benchmark
-    task_id: gsm8k             # as defined in the benchmark's eval.yaml
-  value: 0.71
-  date: "2026-10-10"
-  source:
-    url: https://huggingface.co/datasets/my-org/qwen3-sft-eval-logs
-    name: Eval traces
-  notes: "inspect-ai via lighteval eval, benchmark eval.yaml protocol, thinking off"
-```
-
-Only datasets registered as Hub benchmarks are accepted, and each benchmark's `eval.yaml` fixes
-its own protocol. GSM8K's, for instance, runs through inspect-ai with its own prompt template,
-4 epochs reduced to pass@1 and a model-graded scorer, so an lm-eval `strict-match` number is a
-different measurement and should not be posted under it without saying so in `notes`. A `verifyToken` marks results that
-were run on HF Jobs with inspect-ai. Results submitted by others via pull request show as
-"community". Treat the value above as a placeholder, not a reported score.
+sets, the settings checklist and the CIs. On the Hub, scores can also live as YAML in a model
+repo's `.eval_results/` folder ([Hub docs, work in progress as of October
+2026](https://huggingface.co/docs/hub/eval-results)), for example
+`- {dataset: {id: openai/gsm8k, task_id: gsm8k}, value: 0.71}`. Only Hub-registered benchmarks
+are accepted, and each fixes its own protocol in `eval.yaml`, so an lm-eval `strict-match` number
+is a different measurement and must say so in `notes`.
 
 ---
 
 ## 9.11 Lab: an evaluation report with error bars
 
-**Goal.** Produce the evaluation report you would attach to a release decision for the
-[module-05](./05-supervised-fine-tuning.md) SFT model: standard benchmarks base vs SFT with paired CIs, a calibrated pairwise judge, and an
-Inspect task for the running task's output contract.
+**Goal.** The evaluation report you would attach to a release decision for the
+[module-05](./05-supervised-fine-tuning.md) SFT model: benchmarks with paired CIs, a calibrated
+pairwise judge, and an Inspect task for the running task's output contract.
 
 **Scripts.** [`eval_toolkit.py`](./code/eval_toolkit.py) (pass@k, Wilson, paired bootstrap,
 McNemar, judge consistency and Cohen's kappa; reads lm-eval sample logs) and
@@ -836,9 +696,8 @@ python content/courses/finetuning/code/inspect_json_task.py --smoke
 
 ### L9.1 Benchmarks with confidence intervals (T1)
 
-- **Tier:** T1 (single 24 GB GPU).
-- **Models:** your module-05 base model (for example `Qwen/Qwen3-1.7B-Base` or `Qwen/Qwen3-1.7B`)
-  and the SFT checkpoint, with the LoRA adapter merged.
+- **Tier and models:** T1 (single 24 GB GPU); your module-05 base model (for example
+  `Qwen/Qwen3-1.7B-Base`) and the merged SFT checkpoint.
 - **Datasets:** `TIGER-Lab/MMLU-Pro` (two or three subject subtasks such as `mmlu_pro_math`),
   `openai/gsm8k`, `google/IFEval`, through their lm-eval tasks.
 
@@ -848,9 +707,8 @@ Steps:
    command from 9.4 twice, with `--output_path results/base` and `results/sft`, identical
    settings otherwise. Apply the chat template to both if both are instruct models; if comparing
    a base model, decide and record how it was prompted.
-2. Repeat one task with Lighteval: push the merged SFT model to the Hub (a private repo is
-   fine) and run `lighteval eval vllm/<your-org>/<repo> "gsm8k|0"`. Compare the score
-   with lm-eval's. Explain any difference by reading both prompt templates and extraction rules.
+2. Run GSM8K once more with `lighteval eval` (9.4) on the merged SFT model and explain any gap
+   from lm-eval by reading both prompt templates and extraction rules.
 3. Build the report:
 
 ```bash
@@ -858,12 +716,11 @@ python content/courses/finetuning/code/eval_toolkit.py --full \
   --base-dir results/base --tuned-dir results/sft --tasks gsm8k ifeval mmlu_pro_math
 ```
 
-(The script reads each task's metric and filter from a table matching the v0.4.13 task YAMLs:
-`strict-match` for GSM8K, `prompt_level_strict_acc` for IFEval, `custom-extract` for MMLU-Pro;
-`--metric`/`--filter` override it for other tasks.) **Record:** per task, n, base, SFT, delta, paired 95% CI, McNemar
-p, and Wilson intervals; plus the settings checklist. **Expect:** gains on tasks close to your SFT
-data, flat or slightly negative IFEval and MMLU-Pro if forgetting occurred. Do not expect any
-specific number; the point is whether the CI excludes zero.
+The script's default metrics match the v0.4.13 YAMLs (`strict-match` for GSM8K,
+`prompt_level_strict_acc` for IFEval, `custom-extract` for MMLU-Pro); `--metric`/`--filter`
+override them. **Record:** per task, n, base, SFT, delta, paired 95% CI, McNemar p, Wilson
+intervals and the settings checklist. **Expect:** gains near your SFT data, flat or slightly
+negative IFEval and MMLU-Pro if forgetting occurred; the point is whether the CI excludes zero.
 
 ### L9.2 A calibrated pairwise judge (API or T1)
 
@@ -873,11 +730,10 @@ specific number; the point is whether the CI excludes zero.
 
 Steps:
 
-1. Write a pairwise rubric prompt with anchored criteria (9.6) and ask for "A", "B" or "tie".
-2. Judge each pair twice: base answer first, then SFT answer first. Record winners by answer
-   identity.
-3. Label the same 100 pairs yourself, blind to which model produced which answer.
-4. Save `judge_labels.csv` with columns `item_id,verdict_ab,verdict_ba,human` and run
+1. Write an anchored pairwise rubric (9.6) that answers "A", "B" or "tie". Judge each pair in
+   both orders, recording winners by answer identity.
+2. Label the same 100 pairs yourself, blind to which model produced which answer.
+3. Save `judge_labels.csv` with columns `item_id,verdict_ab,verdict_ba,human` and run
    `eval_toolkit.py --full ... --judge-csv judge_labels.csv`.
 
 **Record:** consistency rate, first-position rate, agreement with human labels and its Wilson
@@ -888,54 +744,47 @@ low, fix the rubric before trusting any judge-based number.
 ### L9.3 An Inspect task for the output contract (T0)
 
 - **Tier:** T0 (free T4) with vLLM serving Qwen3-0.6B or 1.7B, or any API model.
-- **Data:** the module-01 50-example golden set as JSONL rows `{"email": ..., "label": {...}}`.
+- **Data:** module 01's frozen eval split, JSONL rows `{"id": ..., "email": ..., "gold": {...}}`
+  (`ft_data/eval.jsonl`; create it with `fit_or_not_baseline.py --data-only`). The script uses
+  module 01's system prompt, enums and scoring rules, with thinking off.
 
 Steps:
 
-1. `pip install inspect-ai`, then
-   `python content/courses/finetuning/code/inspect_json_task.py --full --data golden_50.jsonl --model vllm/Qwen/Qwen3-1.7B`.
-2. Run it again on your fine-tuned model (`--model vllm/<your-org>/<repo>` for the Hub copy
-   from L9.1).
-3. Open `inspect view` and read every INCORRECT sample's explanation. Add each new failure kind to
-   your taxonomy.
+1. `pip install inspect-ai==0.3.278`, then
+   `python content/courses/finetuning/code/inspect_json_task.py --full --data ft_data/eval.jsonl --model vllm/Qwen/Qwen3-1.7B`.
+2. Repeat with your fine-tune (`--model vllm/<path-or-hub-repo>`), then read every INCORRECT
+   sample's explanation in `inspect view` and add each new failure kind to your taxonomy.
 
-**Record:** schema validity with Inspect's stderr, mean field accuracy from the score metadata,
-and the failure taxonomy counts. **Expect:** the base instruct model fails mostly on format (prose
-around JSON, enum drift); the fine-tune should fix format, and its remaining failures should be
-field-level errors.
+**Record:** schema validity with Inspect's stderr, parse rate, per-field and all-fields exact
+match from the score metadata, and the failure taxonomy counts. **Expect:** the base instruct
+model fails mostly on format (prose around JSON, enum drift); the fine-tune's remaining failures
+should be field-level.
 
 ---
 
 ## Key takeaways
 
-- **Evaluation comes before training.** Define the metric, golden set and error taxonomy first,
-  and measure the prompting baseline with the same harness, or you cannot tell whether the
-  fine-tune was worth it.
-- **Error analysis drives the evals.** Read 50 to 100 outputs, open-code, cluster, count, and
-  turn the top failure classes into binary code checks before reaching for a judge.
+- **Evaluation comes before training.** Define the metric, golden set and error taxonomy from
+  error analysis of the prompted baseline, and measure both with the same harness.
 - **Loss is a smoke alarm, not a decision.** Lower eval loss can coexist with worse generations
   through template memorisation, exposure bias and decoding failures.
 - **Use the unbiased pass@k estimator.** $1 - \binom{n-c}{k}/\binom{n}{k}$ in product form; the
   plug-in $1-(1-c/n)^k$ underestimates (0.832 vs 0.917 for $n = 10$, $c = 3$, $k = 5$).
-- **Harnesses fix the hidden choices.** lm-eval (`lm-eval run`, `[vllm]` extra), Lighteval
-  (`lighteval eval`, inspect-ai backend) and Inspect AI (tasks, solvers, scorers, sandboxes)
-  make prompts, extraction and normalisation reproducible.
-- **Generation settings are part of the result.** Template, thinking mode, temperature,
-  max tokens, samples and filters can move a score by many points; report them every time.
+- **Harnesses fix the hidden choices.** lm-eval, Lighteval and Inspect AI make prompts,
+  extraction and normalisation reproducible.
+- **Generation settings are part of the result.** Template, thinking mode, temperature, max
+  tokens and filters move scores by points; report them.
 - **LLM judges are biased instruments.** Position, verbosity and self-preference biases are
   documented; GPT-4 was consistent on only 65% of swapped near-identical pairs in Zheng et al.
 - **Control judges explicitly.** Swap order and require agreement, control length (LC
   AlpacaEval's GLM), use anchored rubrics and references, and calibrate on 100+ human labels with
   Cohen's kappa.
-- **Small golden sets are noisy.** At $n = 50$ and 0.8 accuracy the Wilson interval is
-  [0.670, 0.888]; only big changes are detectable.
-- **Compare models per item.** Paired bootstrap and McNemar use only the discordant items'
-  evidence and give much tighter intervals than two independent CIs.
-- **Seeds are a second noise source.** Train at least three seeds before claiming a small gain.
+- **Small golden sets are noisy; compare per item.** At $n = 50$ and 0.8 the Wilson interval is
+  [0.670, 0.888]. Paired bootstrap and McNemar use the discordant items and beat two independent
+  CIs; train three seeds before claiming a small gain.
 - **Regression suites gate releases.** General capability, safety and refusal, format adherence
   and latency, checked automatically on every candidate.
-- **For RL-trained models, report pass@k at several k.** pass@1 gains can coexist with narrower
-  coverage at large $k$.
+- **For RL-trained models, report pass@k at several k**, not pass@1 alone.
 
 ## Self-check
 

@@ -14,7 +14,7 @@ Purpose
               general web text (HuggingFaceFW/fineweb-edu), LoRA r=128 on all
               linear layers plus fully trained embed_tokens/lm_head at a smaller
               LR, then domain and general perplexity. Follow with a short SFT
-              (sft_lab.py) and an MMLU-Pro subset through module 09's tooling.
+              (sft_lab.py) and an MMLU-Pro subset with lm_eval (module 09).
 
 Module      content/courses/finetuning/05-supervised-fine-tuning.md
 Hardware    smoke: any CPU, < 60 s.  full: T1 (24 GB, tight) or T2 (80 GB).

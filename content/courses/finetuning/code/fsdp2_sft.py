@@ -16,7 +16,9 @@ Purpose
     --full   The real lab. Run it under `accelerate launch` with one of the
              written configs. Variants (--variant):
                full      full fine-tune (L10.1; FSDP2 or ZeRO-3 depending on config)
-               qlora     NF4 base + LoRA, quant storage bf16 (L10.2; FSDP2 config)
+               lora      bf16 base + all-linear LoRA (dense baseline for L10.4)
+               qlora     NF4 base + LoRA, quant storage from --quant-storage
+                         (default bfloat16; uint8 reproduces the FSDP failure) (L10.2)
                moe-lora  LoRA on attention + experts via target_parameters (L10.4)
              It logs tokens/s, peak memory per rank and the checkpoint layout.
 
@@ -179,13 +181,17 @@ def full(args: argparse.Namespace) -> None:  # pragma: no cover - needs GPUs
 
     model_kwargs: dict = {"dtype": torch.bfloat16}
     peft_config = None
-    if args.variant == "qlora":
+    if args.variant == "lora":
+        peft_config = LoraConfig(r=16, lora_alpha=32, target_modules="all-linear",
+                                 task_type="CAUSAL_LM")
+    elif args.variant == "qlora":
         model_kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_storage=torch.bfloat16,  # must equal the dtype FSDP shards
+            # Must equal the model dtype FSDP shards; uint8 shows the failure mode.
+            bnb_4bit_quant_storage=getattr(torch, args.quant_storage),
         )
         peft_config = LoraConfig(r=16, lora_alpha=32, target_modules="all-linear",
                                  task_type="CAUSAL_LM")
@@ -250,7 +256,9 @@ def main() -> None:
     mode.add_argument("--full", action="store_true", help="GPU run; launch with accelerate launch")
     mode.add_argument("--write-configs", metavar="DIR", help="write FSDP2 / ZeRO-3 configs and exit")
     p.add_argument("--gpus", type=int, default=4)
-    p.add_argument("--variant", choices=["full", "qlora", "moe-lora"], default="full")
+    p.add_argument("--variant", choices=["full", "lora", "qlora", "moe-lora"], default="full")
+    p.add_argument("--quant-storage", choices=["bfloat16", "float16", "uint8"], default="bfloat16",
+                   help="bnb_4bit_quant_storage for --variant qlora")
     p.add_argument("--model", default="Qwen/Qwen3-8B")
     p.add_argument("--dataset", default="trl-lib/Capybara")
     p.add_argument("--max-examples", type=int, default=2000)

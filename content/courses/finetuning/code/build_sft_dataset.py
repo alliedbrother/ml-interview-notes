@@ -1,10 +1,13 @@
 """Build a clean, deduplicated, decontaminated SFT dataset in every TRL schema.
 
-Module: 04 - Data: Formats, Curation, Synthesis, and Decontamination (labs L4.1, L4.2).
+Module: 04 - Data Curation and Synthesis (labs L4.1, L4.2).
+
+Input rows follow module 01's running-example schema exactly
+({"id", "email", "gold"}; see fit_or_not_baseline.py), e.g. ft_data/train.jsonl.
 
 What it does, in order:
-  1. load raw support-email records (email text + gold JSON extraction),
-  2. normalize and validate the extraction against the course schema,
+  1. load support-email records (email text + gold JSON extraction),
+  2. validate `gold` against module 01's schema (five keys, enums, ORD-NNNNN),
   3. exact dedup (sha256 of normalized text),
   4. near-duplicate dedup (character 5-gram MinHash, 128 hashes, LSH b=32 x r=4),
   5. decontaminate against the golden eval set (13-gram word overlap),
@@ -17,6 +20,8 @@ Modes:
       exact/near duplicates, a planted contaminated example and a malformed record;
       a whitespace "tokenizer" with a fixed ChatML-like overhead; asserts the
       planted rows are removed. Runs in well under a second on a laptop CPU.
+      With --input/--eval it instead runs the same pipeline on your files
+      (e.g. module 01's ft_data/) with the whitespace counter, still CPU-only.
   --full: real inputs and tokenizer. Hardware tier: CPU for --input processing;
       T1 (single 24 GB GPU) for --magpie generation with vLLM.
       Pinned versions used when writing (October 2026): transformers>=5.0,
@@ -26,7 +31,7 @@ Modes:
 Run (from the repository root):
   python content/courses/finetuning/code/build_sft_dataset.py --smoke
   python content/courses/finetuning/code/build_sft_dataset.py --full \
-      --input raw.jsonl --eval golden_eval.jsonl --tokenizer Qwen/Qwen3-0.6B \
+      --input ft_data/train.jsonl --eval ft_data/eval.jsonl --tokenizer Qwen/Qwen3-0.6B \
       --output-dir out/ [--magpie 2000] [--push-to-hub user/support-email-sft]
 """
 
@@ -36,21 +41,27 @@ import argparse
 import hashlib
 import json
 import random
+import re
 import string
 import tempfile
 from pathlib import Path
 
-ISSUE_TYPES = {"damaged", "late", "missing", "billing", "account", "other"}
-SENTIMENTS = {"negative", "neutral", "positive"}
-FIELDS = {
-    "customer_name": str,
-    "order_id": str,
-    "issue_type": str,
-    "refund_requested": bool,
-    "sentiment": str,
-}
-SYSTEM = ("Extract customer_name, order_id, issue_type, refund_requested and "
-          "sentiment from the email. Reply with one JSON object only.")
+# Module 01's running-example contract, copied verbatim (scripts stay self-contained).
+FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
+ISSUE_TYPES = ["refund", "shipping", "defect", "account", "other"]
+SENTIMENTS = ["positive", "neutral", "negative"]
+ORDER_ID_RE = r"^ORD-[0-9]{5}$"
+FIELD_TYPES = {"customer_name": str, "order_id": str, "issue_type": str,
+               "refund_requested": bool, "sentiment": str}
+SYSTEM_PROMPT = (
+    "You extract structured data from customer support emails. Reply with one JSON "
+    "object and nothing else, with exactly these keys: "
+    '"customer_name" (string), '
+    '"order_id" (string: "ORD-" followed by the five-digit order number, e.g. "ORD-04217"), '
+    '"issue_type" (one of "refund", "shipping", "defect", "account", "other"), '
+    '"refund_requested" (true or false), '
+    '"sentiment" (one of "positive", "neutral", "negative").'
+)
 
 
 # ---------------------------------------------------------------- schema --
@@ -60,9 +71,13 @@ def validate_extraction(obj) -> list[str]:
         return ["not an object"]
     errs = [f"missing {k}" for k in FIELDS if k not in obj]
     errs += [f"extra {k}" for k in obj if k not in FIELDS]
-    for k, typ in FIELDS.items():
+    for k, typ in FIELD_TYPES.items():
         if k in obj and not isinstance(obj[k], typ):
             errs.append(f"{k} is not {typ.__name__}")
+    if not (isinstance(obj.get("customer_name"), str) and obj["customer_name"].strip()):
+        errs.append("customer_name empty")
+    if not (isinstance(obj.get("order_id"), str) and re.match(ORDER_ID_RE, obj["order_id"])):
+        errs.append("order_id not ORD-NNNNN")
     if obj.get("issue_type") not in ISSUE_TYPES:
         errs.append("issue_type outside enum")
     if obj.get("sentiment") not in SENTIMENTS:
@@ -156,13 +171,14 @@ def contaminated(texts: list[str], eval_texts: list[str], n: int = 13) -> list[i
 
 # --------------------------------------------------------- format export --
 def to_formats(rec: dict) -> dict[str, dict]:
-    gold = json.dumps(rec["label"], sort_keys=True)
-    prompt = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": rec["email"]}]
+    target = {k: rec["gold"][k] for k in FIELDS}       # module 01 key order, default separators
+    gold = json.dumps(target)
+    prompt = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": rec["email"]}]
     completion = [{"role": "assistant", "content": gold}]
     # A cheap, schema-violating rejected answer: drop one required field.
-    bad = dict(rec["label"])
+    bad = dict(target)
     bad.pop("refund_requested")
-    rejected = [{"role": "assistant", "content": json.dumps(bad, sort_keys=True)}]
+    rejected = [{"role": "assistant", "content": json.dumps(bad)}]
     return {
         "language_modeling": {"text": f"Email:\n{rec['email']}\nJSON:\n{gold}"},
         "prompt_completion": {"prompt": prompt, "completion": completion},
@@ -195,8 +211,11 @@ def length_report(lengths: list[tuple[int, int]], max_length: int) -> dict:
 # -------------------------------------------------------------- pipeline --
 def run_pipeline(raw: list[dict], eval_set: list[dict], count_tokens) -> dict:
     log = {"raw": len(raw)}
-    valid = [r for r in raw if isinstance(r.get("email"), str) and not validate_extraction(r.get("label"))]
+    valid = [r for r in raw if isinstance(r.get("email"), str) and not validate_extraction(r.get("gold"))]
     log["after_schema"] = len(valid)
+    if not valid:
+        raise SystemExit("no rows passed the schema check: rows must be module 01's "
+                         "{'id', 'email', 'gold'} with the canonical enums and ORD-NNNNN ids")
 
     seen, exact = set(), []
     for r in valid:
@@ -237,57 +256,58 @@ def write_jsonl(rows_by_kind: dict, out: Path) -> None:
 
 # ----------------------------------------------------------------- smoke --
 SMOKE_EMAILS = [
-    ("Dana Kim", "10412", "damaged", True, "negative",
+    ("Dana Kim", "ORD-10412", "defect", True, "negative",
      "Hello, order 10412 arrived today and the blender jar is cracked down the side. I want my money back, not a replacement. Dana Kim"),
-    ("Luis Ortega", "10449", "late", False, "neutral",
+    ("Luis Ortega", "ORD-10449", "shipping", False, "neutral",
      "Hi, just checking on order 10449. The tracking page says it left the depot nine days ago and nothing since. No rush, but could you look into it? Luis"),
-    ("Priya Raman", "10486", "missing", True, "negative",
+    ("Priya Raman", "ORD-10486", "shipping", True, "negative",
      "The courier marked parcel 10486 as delivered on Friday, but nothing was on my porch and my neighbours saw no van. Refund please. - Priya Raman"),
-    ("Tomasz Nowak", "10523", "billing", True, "negative",
+    ("Tomasz Nowak", "ORD-10523", "refund", True, "negative",
      "My card statement shows two charges of 49.99 for order 10523. I only placed it once. Please reverse the duplicate charge. Tomasz Nowak"),
-    ("Aiko Sato", "10560", "account", False, "neutral",
+    ("Aiko Sato", "ORD-10560", "account", False, "neutral",
      "I cannot log in since I changed my email address last week; the reset link never arrives. Order 10560 is still pending under my old account. Aiko"),
-    ("Femi Ade", "10597", "other", False, "positive",
+    ("Femi Ade", "ORD-10597", "other", False, "positive",
      "Loved the rain jacket from order 10597, it kept me dry on a long hike! Do you sell the matching trousers in size M? Cheers, Femi Ade"),
-    ("Grace Liu", "10634", "damaged", False, "negative",
+    ("Grace Liu", "ORD-10634", "defect", False, "negative",
      "Order 10634: the desk lamp shade came dented and one bulb socket rattles. Can you ship a new shade? I'd rather not return the whole lamp. Grace Liu"),
-    ("Omar Haddad", "10671", "late", True, "negative",
+    ("Omar Haddad", "ORD-10671", "shipping", True, "negative",
      "This is the third time I am writing about order 10671. It was promised for my daughter's birthday, which has now passed. Cancel it and refund me. Omar Haddad"),
-    ("Sofia Rossi", "10708", "missing", False, "neutral",
+    ("Sofia Rossi", "ORD-10708", "shipping", False, "neutral",
      "Box for order 10708 arrived but the charging cable listed on the packing slip was not inside. Could you send just the cable? Thanks, Sofia Rossi"),
-    ("Ben Carter", "10745", "billing", False, "neutral",
+    ("Ben Carter", "ORD-10745", "other", False, "neutral",
      "Quick question about invoice 10745: the VAT line looks higher than the rate on your website. Is that a mistake or am I misreading it? Ben Carter"),
-    ("Mei Chen", "10782", "account", False, "negative",
+    ("Mei Chen", "ORD-10782", "account", False, "negative",
      "Someone changed the shipping address on my profile without my permission and order 10782 is now going to a city I have never lived in. Mei Chen"),
-    ("Jonas Berg", "10819", "other", False, "positive",
+    ("Jonas Berg", "ORD-10819", "other", False, "positive",
      "Just wanted to say thanks: your support agent sorted out my exchange for order 10819 in five minutes. Great service. Jonas Berg"),
-    ("Ana Souza", "10856", "damaged", True, "negative",
+    ("Ana Souza", "ORD-10856", "defect", True, "negative",
      "The coffee grinder from order 10856 smells of burning plastic after one use and the motor stalls. I will not use it again; please refund. Ana Souza"),
-    ("Raj Patel", "10893", "late", False, "neutral",
+    ("Raj Patel", "ORD-10893", "shipping", False, "neutral",
      "Order 10893 shows 'label created' for a week now. Has it actually shipped? I need it before the 20th if possible. Regards, Raj Patel"),
-    ("Chloe Martin", "10930", "billing", True, "negative",
+    ("Chloe Martin", "ORD-10930", "refund", True, "negative",
      "I returned the backpack from order 10930 a month ago, you confirmed receipt, and I still have not seen the refund on my card. Chloe Martin"),
-    ("Kwame Mensah", "10967", "missing", False, "neutral",
+    ("Kwame Mensah", "ORD-10967", "shipping", False, "neutral",
      "Two of the three phone cases in order 10967 arrived. The navy one is missing from the bag. Can you check the warehouse? Kwame Mensah"),
 ]
 
 
 def smoke_corpus() -> tuple[list[dict], list[dict]]:
-    keys = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
-    raw = [{"email": e[-1], "label": dict(zip(keys, e[:-1]))} for e in SMOKE_EMAILS]
+    raw = [{"id": f"train-{i:04d}", "email": e[-1], "gold": dict(zip(FIELDS, e[:-1]))}
+           for i, e in enumerate(SMOKE_EMAILS)]
     eval_set = [{
+        "id": "eval-0000",
         "email": ("Hi, my order 55555 for a standing desk arrived with one leg bent "
                   "and two screws missing from the hardware bag, so I cannot assemble "
                   "it at all. Please refund me. Thanks, Grace Liu"),
-        "label": {"customer_name": "Grace Liu", "order_id": "55555", "issue_type": "damaged",
+        "gold": {"customer_name": "Grace Liu", "order_id": "ORD-55555", "issue_type": "defect",
                   "refund_requested": True, "sentiment": "negative"}}]
     planted = [
         dict(raw[3]),                                                         # exact duplicate
-        {"email": raw[5]["email"].upper().replace(".", "!"), "label": raw[5]["label"]},  # equal after normalize
+        {"email": raw[5]["email"].upper().replace(".", "!"), "gold": raw[5]["gold"]},  # equal after normalize
         {"email": raw[7]["email"].replace("third", "fourth").replace("Cancel", "Please cancel"),
-         "label": raw[7]["label"]},                                           # near duplicate
-        {"email": "FWD: " + eval_set[0]["email"].lower(), "label": eval_set[0]["label"]},  # contaminated
-        {"email": "Where is my parcel?", "label": {"customer_name": "X", "order_id": 7}},   # malformed
+         "gold": raw[7]["gold"]},                                             # near duplicate
+        {"email": "FWD: " + eval_set[0]["email"].lower(), "gold": eval_set[0]["gold"]},  # contaminated
+        {"email": "Where is my parcel?", "gold": {"customer_name": "X", "order_id": 7}},   # malformed
     ]
     return raw + planted, eval_set
 
@@ -297,6 +317,21 @@ def whitespace_count(prompt, completion):
     p = sum(len(m["content"].split()) + overhead for m in prompt) + 3   # + generation prompt
     c = sum(len(m["content"].split()) + overhead for m in completion)
     return p, c
+
+
+def read_jsonl(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def smoke_files(args) -> None:
+    """CPU run of the same pipeline on your files (e.g. module 01's ft_data/)."""
+    raw = read_jsonl(args.input)
+    evals = read_jsonl(args.eval) if args.eval else []
+    out = run_pipeline(raw, evals, whitespace_count)
+    print(json.dumps(out["log"], indent=2))
+    if args.output_dir:
+        write_jsonl(out["rows"], Path(args.output_dir))
 
 
 def smoke(output_dir: str | None) -> None:
@@ -328,12 +363,14 @@ def magpie_generate(model_id: str, n: int, seed: int = 0) -> list[dict]:
 
     llm = LLM(model=model_id, seed=seed, max_model_len=4096)
     pre_query = "<|im_start|>user\n"          # ChatML pre-query template (Qwen3)
+    # No per-request seed here: N identical prompts with the same request seed would
+    # sample the same query N times. LLM(seed=seed) alone keeps the run reproducible.
     q_params = SamplingParams(n=1, temperature=1.0, top_p=0.99, max_tokens=256,
-                              stop=["<|im_end|>"], seed=seed)
+                              stop=["<|im_end|>"])
     instr = [o.outputs[0].text.strip() for o in llm.generate([pre_query] * n, q_params)]
     instr = [q for q in instr if 20 <= len(q) <= 2000]
     convs = [[{"role": "user", "content": q}] for q in instr]
-    a_params = SamplingParams(temperature=0.7, top_p=0.8, max_tokens=1024, seed=seed)
+    a_params = SamplingParams(temperature=0.7, top_p=0.8, max_tokens=1024)
     answers = llm.chat(convs, a_params)
     return [{"messages": c + [{"role": "assistant", "content": a.outputs[0].text}]}
             for c, a in zip(convs, answers)]
@@ -348,7 +385,7 @@ def full(args) -> None:
         rows = magpie_generate(args.magpie_model, args.magpie)
         texts = [r["messages"][0]["content"] for r in rows]
         keep = minhash_dedup(texts)
-        evals = [json.loads(l)["email"] for l in open(args.eval)] if args.eval else []
+        evals = [r["email"] for r in read_jsonl(args.eval)] if args.eval else []
         bad = set(contaminated(texts, evals, n=13))
         rows = [rows[i] for i in keep if i not in bad]
         with open(out_dir / "magpie.jsonl", "w") as f:
@@ -356,17 +393,23 @@ def full(args) -> None:
                 f.write(json.dumps(r) + "\n")
         print(f"magpie: kept {len(rows)} of {args.magpie} after MinHash dedup and decontamination;"
               " judge-filter next (see module 04, section 4.10)")
+        if args.push_to_hub:
+            from datasets import Dataset
+            Dataset.from_list(rows).push_to_hub(args.push_to_hub, config_name="magpie", private=True)
+            print(f"pushed magpie.jsonl to {args.push_to_hub} (config 'magpie', before judging)")
     if not args.input:
         return
     tok = AutoTokenizer.from_pretrained(args.tokenizer)
 
     def count(prompt, completion):
-        p = tok.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True)
-        pc = tok.apply_chat_template(prompt + completion, tokenize=True)
+        # Qwen3 hybrid checkpoints: thinking off, as in module 01's prompt contract.
+        p = tok.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True,
+                                    enable_thinking=False)
+        pc = tok.apply_chat_template(prompt + completion, tokenize=True, enable_thinking=False)
         return len(p), len(pc) - len(p)
 
-    raw = [json.loads(l) for l in open(args.input)]
-    evals = [json.loads(l) for l in open(args.eval)] if args.eval else []
+    raw = read_jsonl(args.input)
+    evals = read_jsonl(args.eval) if args.eval else []
     out = run_pipeline(raw, evals, count)
     print(json.dumps(out["log"], indent=2))
     write_jsonl(out["rows"], out_dir)
@@ -374,7 +417,7 @@ def full(args) -> None:
         from datasets import Dataset
         ds = Dataset.from_list(out["rows"]["prompt_completion"])
         split = ds.train_test_split(test_size=0.05, seed=0)
-        split.push_to_hub(args.push_to_hub, private=True)
+        split.push_to_hub(args.push_to_hub, config_name="extraction", private=True)
         print(f"pushed to {args.push_to_hub}; now edit its README.md dataset card")
 
 
@@ -383,18 +426,22 @@ def main() -> None:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--smoke", action="store_true", help="CPU, inline corpus, asserts (default)")
     mode.add_argument("--full", action="store_true", help="real data/tokenizer; optional vLLM Magpie")
-    ap.add_argument("--input", help="raw JSONL with {'email': str, 'label': {...}} rows")
-    ap.add_argument("--eval", help="golden eval JSONL (same schema) to decontaminate against")
+    ap.add_argument("--input", help="module 01-schema JSONL ({'id', 'email', 'gold'}), "
+                    "e.g. ft_data/train.jsonl; with --smoke, runs on CPU with a whitespace counter")
+    ap.add_argument("--eval", help="golden eval JSONL (same schema, e.g. ft_data/eval.jsonl)")
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-0.6B")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--magpie", type=int, default=0, help="number of Magpie instructions to generate")
     ap.add_argument("--magpie-model", default="Qwen/Qwen3-4B-Instruct-2507")
-    ap.add_argument("--push-to-hub", default=None)
+    ap.add_argument("--push-to-hub", default=None,
+                    help="repo id; pushes config 'extraction' (--input) and/or 'magpie' (--magpie)")
     args = ap.parse_args()
     if args.full:
         if not args.output_dir:
             ap.error("--full needs --output-dir")
         full(args)
+    elif args.input:
+        smoke_files(args)
     else:
         smoke(args.output_dir)
 

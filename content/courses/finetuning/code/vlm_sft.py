@@ -18,8 +18,11 @@ Purpose
                   the loss falls and the frozen encoder did not move.
     --full  : the real lab L16.1 with TRL's SFTTrainer: LoRA SFT of
               Qwen/Qwen2.5-VL-3B-Instruct (T0/T1) or Qwen/Qwen3-VL-8B-Instruct
-              (T1, QLoRA) on naver-clova-ix/cord-v2 receipts (CC-BY-4.0),
-              followed by field-level F1 on the CORD test split.
+              (T1, QLoRA) on naver-clova-ix/cord-v2 receipts (CC-BY-4.0).
+              It scores the base model first, trains, then scores again:
+              micro and per-field P/R/F1, JSON validity, FP on fields absent
+              from gold, mean image tokens per receipt, and peak memory.
+              --eval-only stops after the base-model score.
 
 Module      content/courses/finetuning/16-multimodal-and-embedding-fine-tuning.md
 Hardware    smoke: any CPU, < 60 s.  full: T0 (T4 16 GB, fp16, 3B + QLoRA) or
@@ -30,8 +33,9 @@ Versions    smoke: Python 3.11+, torch 2.x (no other dependency).
 
 Run (from the repository root)
     python content/courses/finetuning/code/vlm_sft.py --smoke
-    python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct
-    python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen3-VL-8B-Instruct --qlora
+    python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct --qlora  # T0
+    python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen2.5-VL-3B-Instruct          # T1
+    python content/courses/finetuning/code/vlm_sft.py --full --model Qwen/Qwen3-VL-8B-Instruct --qlora    # T1
 """
 
 from __future__ import annotations
@@ -330,6 +334,72 @@ def cord_to_messages(row):
     }
 
 
+def cord_units(rec):
+    """Scoring units for a CORD target: one per menu item name, one for the total."""
+    from collections import Counter
+
+    u = Counter()
+    for it in rec.get("menu", []) or []:
+        u[("menu", " ".join(str(it.get("nm", "")).lower().split()))] += 1
+    tp = (rec.get("total") or {}).get("total_price")
+    if tp:
+        try:
+            # the module 16.5 normalisation, adapted to CORD: "," and "." are both
+            # thousands separators here ("45,500", "60.000")
+            u[("total", round(float(str(tp).replace(",", "").replace(".", "")), 2))] += 1
+        except ValueError:
+            u[("total", str(tp))] += 1
+    return u
+
+
+def evaluate_cord(model, processor, test, label: str) -> None:  # pragma: no cover - GPU
+    """Greedy-decode the test split; print micro and per-field P/R/F1, the FP count on
+    fields absent from gold, JSON validity, and mean image tokens per receipt."""
+    model.eval()
+    per, absent_fp, valid, img_tokens = {}, 0, 0, []
+    merge = getattr(processor.image_processor, "merge_size", 2)
+    for row in test:
+        gold = json.loads(cord_to_messages(row)["messages"][2]["content"][0]["text"])
+        prompt = [
+            {"role": "system", "content": [{"type": "text", "text": SYSTEM}]},
+            {"role": "user", "content": [{"type": "image", "image": row["image"]},
+                                         {"type": "text", "text": "Extract this receipt."}]},
+        ]
+        inputs = processor.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True,
+                                               return_dict=True, return_tensors="pt").to(model.device)
+        img_tokens.append(int(inputs["image_grid_thw"].prod(-1).sum()) // (merge * merge))
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        text = processor.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        try:
+            pred = json.loads(text)
+            valid += isinstance(pred, dict)
+            pred = pred if isinstance(pred, dict) else {}
+        except json.JSONDecodeError:
+            pred = {}
+        G, P = cord_units(gold), cord_units(pred)
+        gold_fields = {k[0] for k in G}
+        for k in set(G) | set(P):
+            t = min(G[k], P[k])
+            row_c = per.setdefault(k[0], [0, 0, 0])
+            row_c[0] += t; row_c[1] += P[k] - t; row_c[2] += G[k] - t
+            if k[0] not in gold_fields:
+                absent_fp += P[k]  # a field the receipt does not have: hallucinated
+
+    def prf(tp, fp, fn):
+        p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
+        return p, r, 2 * p * r / max(p + r, 1e-9)
+
+    tot = [sum(v[i] for v in per.values()) for i in range(3)]
+    p, r, f1 = prf(*tot)
+    print(f"[{label}] field-level micro P={p:.3f} R={r:.3f} F1={f1:.3f}  "
+          f"valid JSON {valid}/{len(test)}  FP on fields absent from gold: {absent_fp}")
+    for field, (tp, fp, fn) in sorted(per.items()):
+        fp_, fr_, ff_ = prf(tp, fp, fn)
+        print(f"[{label}]   {field:6s} TP={tp} FP={fp} FN={fn}  P={fp_:.3f} R={fr_:.3f} F1={ff_:.3f}")
+    print(f"[{label}] mean image tokens per receipt: {sum(img_tokens) / len(img_tokens):.0f}")
+
+
 def run_full(args) -> None:  # pragma: no cover - needs a GPU and downloads
     from datasets import load_dataset
     from peft import LoraConfig
@@ -337,7 +407,6 @@ def run_full(args) -> None:  # pragma: no cover - needs a GPU and downloads
     from trl import SFTConfig, SFTTrainer
 
     ds = load_dataset("naver-clova-ix/cord-v2")
-    train = [cord_to_messages(r) for r in ds["train"]]  # list, not .map(): keeps PIL images as-is
     side = 32 if "Qwen3-VL" in args.model else 28  # px per image token side: 16*2 vs 14*2
     processor = AutoProcessor.from_pretrained(
         args.model, min_pixels=256 * side * side, max_pixels=args.max_image_tokens * side * side
@@ -349,6 +418,15 @@ def run_full(args) -> None:  # pragma: no cover - needs a GPU and downloads
             load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=model_kwargs["dtype"]
         )
     model = AutoModelForImageTextToText.from_pretrained(args.model, **model_kwargs)
+
+    # baseline: the same eval loop on the untouched base model
+    torch.cuda.reset_peak_memory_stats()
+    evaluate_cord(model, processor, ds["test"], "base")
+    if args.eval_only:
+        print(f"peak memory (eval): {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+        return
+
+    train = [cord_to_messages(r) for r in ds["train"]]  # list, not .map(): keeps PIL images as-is
     peft_config = LoraConfig(
         r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
         # language-model linears only; the vision tower and merger stay frozen
@@ -373,45 +451,11 @@ def run_full(args) -> None:  # pragma: no cover - needs a GPU and downloads
     )
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=train, processing_class=processor,
                          peft_config=peft_config)
+    torch.cuda.reset_peak_memory_stats()
     trainer.train()
+    print(f"peak memory (training): {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
     trainer.save_model(args.output_dir)
-
-    # field-level F1 on the test split (normalisation as in Check 16.3)
-    from collections import Counter
-
-    def units(rec):
-        u = Counter()
-        for it in rec.get("menu", []) or []:
-            u[("menu", " ".join(str(it.get("nm", "")).lower().split()))] += 1
-        tp = (rec.get("total") or {}).get("total_price")
-        if tp:
-            try:
-                # CORD prices use "," or "." as thousands separators ("45,500", "60.000")
-                u[("total", round(float(str(tp).replace(",", "").replace(".", "")), 2))] += 1
-            except ValueError:
-                u[("total", str(tp))] += 1
-        return u
-
-    model.eval()
-    tp = fp = fn = 0
-    for row in ds["test"]:
-        ex = cord_to_messages(row)
-        prompt = ex["messages"][:2]
-        inputs = processor.apply_chat_template(prompt, add_generation_prompt=True, tokenize=True,
-                                               return_dict=True, return_tensors="pt", images=ex["images"])
-        inputs = inputs.to(model.device)
-        out = model.generate(**inputs, max_new_tokens=512, do_sample=False)
-        text = processor.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-        try:
-            pred = json.loads(text)
-        except json.JSONDecodeError:
-            pred = {}
-        G, P = units(json.loads(ex["messages"][2]["content"][0]["text"])), units(pred)
-        for k in set(G) | set(P):
-            t = min(G[k], P[k])
-            tp, fp, fn = tp + t, fp + P[k] - t, fn + G[k] - t
-    p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
-    print(f"field-level micro P={p:.3f} R={r:.3f} F1={2 * p * r / max(p + r, 1e-9):.3f}")
+    evaluate_cord(trainer.model, processor, ds["test"], "fine-tuned")
 
 
 def main() -> None:
@@ -420,6 +464,8 @@ def main() -> None:
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     ap.add_argument("--qlora", action="store_true")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="full mode: score the base model on the CORD test split and stop")
     ap.add_argument("--max-image-tokens", type=int, default=1024)
     ap.add_argument("--output-dir", default="vlm-cord-lora")
     args = ap.parse_args()

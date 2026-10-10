@@ -7,7 +7,10 @@ Purpose
               best-fit-decreasing (BFD) packing with position-id resets. The run
               asserts that (1) the loss falls, (2) masked (prompt) positions get
               exactly zero gradient at the logits, and (3) a packed row produces
-              the same logits as running each example alone.
+              the same logits as running each example alone. It also runs
+              the module 01 scorer fixture and checks that SYSTEM_PROMPT equals
+              module 01's, and, with --train-file/--eval-file pointing at
+              files written by fit_or_not_baseline.py, loads and scores them.
     --full  : the real labs with TRL's SFTTrainer, selected with --task:
                 base2instruct  L5.1  Qwen/Qwen3-0.6B-Base -> chat model on
                                trl-lib/Capybara, template cloned from SmolLM3,
@@ -18,7 +21,10 @@ Purpose
                                (T1: one 24 GB GPU)
                 reasoning      L5.4  <think>-formatted SFT on
                                FreedomIntelligence/medical-o1-reasoning-SFT
-                               (T0)
+                               (T0); then samples 10 held-out questions
+                               with thinking on and off
+              --eval-only --adapter DIR scores a saved adapter on the eval
+              file without training (base model chosen by --task).
 
 Module      content/courses/finetuning/05-supervised-fine-tuning.md
 Hardware    smoke: any CPU, < 60 s.  full: T0 or T1 as listed above.
@@ -28,7 +34,9 @@ Versions    smoke: Python 3.11+, torch 2.x (no other dependency).
 
 Run (from the repository root)
     python content/courses/finetuning/code/sft_lab.py --smoke
+    python content/courses/finetuning/code/sft_lab.py --smoke --train-file /tmp/re/train.jsonl --eval-file /tmp/re/eval.jsonl
     python content/courses/finetuning/code/sft_lab.py --full --task base2instruct
+    python content/courses/finetuning/code/sft_lab.py --full --task base2instruct --eval-only --adapter qwen3-0.6b-base-capybara
     python content/courses/finetuning/code/sft_lab.py --full --task task --train-file ft_data/train.jsonl --eval-file ft_data/eval.jsonl
     python content/courses/finetuning/code/sft_lab.py --full --task task --full-sequence-loss --packing
     python content/courses/finetuning/code/sft_lab.py --full --task reasoning
@@ -37,10 +45,14 @@ Run (from the repository root)
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
+import os
 import random
+import re
 import time
+from fractions import Fraction
 
 import torch
 import torch.nn as nn
@@ -69,7 +81,7 @@ FILLER = [
 
 def make_example(rng: random.Random) -> tuple[str, str]:
     name = rng.choice(NAMES)
-    order = str(rng.randint(1000, 9999))
+    order = f"ORD-{rng.randint(10000, 99999)}"
     issue = rng.choice(list(ISSUES))
     sentiment = rng.choice(list(SENTIMENT))
     refund = issue == "refund" or rng.random() < 0.2
@@ -82,8 +94,7 @@ def make_example(rng: random.Random) -> tuple[str, str]:
             "issue_type": issue,
             "refund_requested": refund,
             "sentiment": sentiment,
-        },
-        separators=(",", ":"),
+        }
     )
     return email, target
 
@@ -298,60 +309,135 @@ def run_smoke(seed: int = 0, steps: int = 30) -> None:
 # Full mode (GPU). Library imports live inside these functions.
 # --------------------------------------------------------------------------
 
+# Running-example contract (module 01, fit_or_not_baseline.py), copied verbatim.
 FIELDS = ["customer_name", "order_id", "issue_type", "refund_requested", "sentiment"]
-ENUMS = {
-    "issue_type": {"refund", "shipping", "defect", "account", "other"},
-    "sentiment": {"positive", "neutral", "negative"},
-}
-SYSTEM = (
-    "Extract customer_name, order_id, issue_type (refund|shipping|defect|account|other), "
-    "refund_requested (bool) and sentiment (positive|neutral|negative) from the email. "
-    "Reply with JSON only."
+ISSUE_TYPES = ["refund", "shipping", "defect", "account", "other"]
+SENTIMENTS = ["positive", "neutral", "negative"]
+ORDER_ID_RE = r"^ORD-[0-9]{5}$"
+
+SYSTEM_PROMPT = (
+    "You extract structured data from customer support emails. Reply with one JSON "
+    "object and nothing else, with exactly these keys: "
+    '"customer_name" (string), '
+    '"order_id" (string: "ORD-" followed by the five-digit order number, e.g. "ORD-04217"), '
+    '"issue_type" (one of "refund", "shipping", "defect", "account", "other"), '
+    '"refund_requested" (true or false), '
+    '"sentiment" (one of "positive", "neutral", "negative").'
 )
 
+FENCE = re.compile(r"^`{3}(?:json)?[ \t]*\n(.*)\n`{3}$", re.S)
 
-def score(predictions: list[str], references: list[dict]) -> dict:
-    """The four module-01 metrics: parse rate, schema validity, per-field EM, all-fields EM."""
-    parsed = valid = all_em = 0
-    field_hits = {f: 0 for f in FIELDS}
-    for pred, ref in zip(predictions, references):
-        try:
-            obj = json.loads(pred.strip())
-        except (json.JSONDecodeError, TypeError):
-            continue
-        parsed += 1
-        ok = (
-            isinstance(obj, dict)
-            and set(obj) == set(FIELDS)
-            and isinstance(obj["refund_requested"], bool)
-            and all(obj[k] in v for k, v in ENUMS.items())
-        )
-        valid += int(ok)
-        hits = [isinstance(obj, dict) and obj.get(f) == ref[f] for f in FIELDS]
-        for f, h in zip(FIELDS, hits):
-            field_hits[f] += int(h)
-        all_em += int(all(hits))
-    n = max(len(references), 1)
-    return {
-        "parse_rate": parsed / n,
-        "schema_valid": valid / n,
-        "per_field_em": {f: h / n for f, h in field_hits.items()},
-        "all_fields_em": all_em / n,
+
+def parse_prediction(text):
+    """Strip whitespace and one surrounding ```json fence, then json.loads. Dict or None."""
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    m = FENCE.match(text)
+    if m:
+        text = m.group(1)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def schema_valid(obj):
+    if obj is None or set(obj) != set(FIELDS):
+        return False
+    if not isinstance(obj["refund_requested"], bool):
+        return False
+    if not all(isinstance(obj[k], str) for k in FIELDS if k != "refund_requested"):
+        return False
+    return (re.match(ORDER_ID_RE, obj["order_id"]) is not None
+            and obj["issue_type"] in ISSUE_TYPES and obj["sentiment"] in SENTIMENTS)
+
+
+def field_match(obj, gold, key):
+    if obj is None or key not in obj:
+        return False
+    return type(obj[key]) is type(gold[key]) and obj[key] == gold[key]
+
+
+def score(predictions, golds):
+    """Module 01's four metrics, exact fractions over all len(golds) rows."""
+    n = len(golds)
+    parsed = [parse_prediction(p) for p in predictions]
+    out = {
+        "parse_rate": Fraction(sum(o is not None for o in parsed), n),
+        "schema_valid": Fraction(sum(schema_valid(o) for o in parsed), n),
+        "all_fields_em": Fraction(
+            sum(all(field_match(o, g, k) for k in FIELDS) for o, g in zip(parsed, golds)), n),
     }
+    for k in FIELDS:
+        out[f"em_{k}"] = Fraction(sum(field_match(o, g, k) for o, g in zip(parsed, golds)), n)
+    return out
+
+
+def as_floats(scores):
+    return {k: round(float(v), 4) for k, v in scores.items()}
+
+
+def fixture_check():
+    """The contract's six-prediction fixture: parse 5/6, schema 2/6, all-fields 2/6."""
+    gold = {"customer_name": "Maya Patel", "order_id": "ORD-48213", "issue_type": "refund",
+            "refund_requested": True, "sentiment": "negative"}
+    perfect = json.dumps(gold)
+    fence = "`" * 3
+    preds = [
+        perfect,
+        perfect.replace('"refund",', '"billing",'),
+        perfect[:-1] + ",}",
+        f"{fence}json\n{perfect}\n{fence}",
+        json.dumps({k: v for k, v in gold.items() if k != "sentiment"}),
+        perfect.replace("true", '"true"'),
+    ]
+    s = score(preds, [gold] * 6)
+    assert s["parse_rate"] == Fraction(5, 6)
+    assert s["schema_valid"] == Fraction(2, 6)
+    assert s["all_fields_em"] == Fraction(2, 6)
+    assert s["em_order_id"] == Fraction(5, 6)
+    assert s["em_issue_type"] == Fraction(4, 6)
+
+
+def check_system_prompt():
+    """SYSTEM_PROMPT must equal module 01's, so L5.x and the baseline share one prompt."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fit_or_not_baseline.py")
+    spec = importlib.util.spec_from_file_location("fit_or_not_baseline", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.SYSTEM_PROMPT == SYSTEM_PROMPT, "SYSTEM_PROMPT drifted from module 01"
+    assert mod.FIELDS == FIELDS and mod.ISSUE_TYPES == ISSUE_TYPES and mod.SENTIMENTS == SENTIMENTS
 
 
 def load_task_rows(path: str) -> list[dict]:
-    """Accept module-01 rows: either {prompt, completion} or {email, <fields>}."""
+    """Load module 01 rows {"id", "email", "gold"}; anything else is an error."""
     rows = []
     with open(path, encoding="utf-8") as fh:
-        for line in fh:
+        for n, line in enumerate(fh, 1):
             r = json.loads(line)
-            if "email" in r:
-                target = {f: r[f] for f in FIELDS} if all(f in r for f in FIELDS) else r["target"]
-                rows.append({"email": r["email"], "target": target})
-            else:
-                rows.append({"email": r["prompt"], "target": json.loads(r["completion"])})
+            assert set(r) == {"id", "email", "gold"}, f"{path}:{n}: keys {sorted(r)}"
+            assert list(r["gold"]) == FIELDS, f"{path}:{n}: gold keys {list(r['gold'])}"
+            assert schema_valid(r["gold"]), f"{path}:{n}: gold violates the schema"
+            rows.append(r)
     return rows
+
+
+def build_messages(email: str) -> list[dict]:
+    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": email}]
+
+
+def check_task_files(train_file: str, eval_file: str) -> None:
+    """Load module 01's files, build the SFT rows, and score gold-as-prediction (must be 1.0)."""
+    for path in (train_file, eval_file):
+        rows = load_task_rows(path)
+        sft = [{"prompt": build_messages(r["email"]),
+                "completion": [{"role": "assistant", "content": json.dumps(r["gold"])}]} for r in rows]
+        assert len(sft) == len(rows) > 0
+        s = score([c["completion"][0]["content"] for c in sft], [r["gold"] for r in rows])
+        assert all(v == 1 for v in s.values()), s
+        print(f"{path}: {len(rows)} rows loaded, gold-as-prediction scores 1.0 on all metrics")
 
 
 def full_base2instruct(args) -> None:
@@ -390,23 +476,45 @@ def full_base2instruct(args) -> None:
     )
     trainer.train()
     trainer.save_model()
-    print("saved to", cfg.output_dir, "- now score it with module 01's eval set (--task task --eval-only)")
+    print("saved to", cfg.output_dir, "- score it on module 01's eval set with "
+          f"--full --task base2instruct --eval-only --adapter {cfg.output_dir}")
 
 
-def generate_and_score(model, tokenizer, rows, enable_thinking=False) -> dict:
+def generate_and_score(model, tokenizer, rows) -> dict:
+    """Greedy-decode module 01's prompt for each row and score with module 01's rules."""
     import torch as _torch
 
     preds = []
     for r in rows:
-        msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": r["email"]}]
         enc = tokenizer.apply_chat_template(
-            msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True,
-            enable_thinking=enable_thinking,
+            build_messages(r["email"]), add_generation_prompt=True, return_tensors="pt",
+            return_dict=True, enable_thinking=False,  # contract: hybrid Qwen3 prompted thinking-off
         ).to(model.device)
         with _torch.no_grad():
             out = model.generate(**enc, max_new_tokens=128, do_sample=False)
         preds.append(tokenizer.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True))
-    return score(preds, [r["target"] for r in rows])
+    return as_floats(score(preds, [r["gold"] for r in rows]))
+
+
+BASE_MODEL = {"base2instruct": "Qwen/Qwen3-0.6B-Base", "task": "Qwen/Qwen3-4B-Instruct-2507"}
+
+
+def full_eval_only(args) -> None:
+    """Score a saved adapter on module 01's eval file without training."""
+    import torch as _torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    if args.task not in BASE_MODEL:
+        raise SystemExit("--eval-only scores the JSON task; use --task base2instruct or task")
+    tok = AutoTokenizer.from_pretrained(args.adapter)  # saved with the (cloned) template
+    model = AutoModelForCausalLM.from_pretrained(BASE_MODEL[args.task], dtype=_torch.bfloat16,
+                                                 device_map="auto")
+    if len(tok) > model.get_input_embeddings().num_embeddings:
+        model.resize_token_embeddings(len(tok), pad_to_multiple_of=64)
+    model = PeftModel.from_pretrained(model, args.adapter).eval()
+    metrics = generate_and_score(model, tok, load_task_rows(args.eval_file))
+    print(args.adapter, json.dumps(metrics, indent=2))
 
 
 def full_task(args) -> None:
@@ -416,15 +524,14 @@ def full_task(args) -> None:
     from transformers import AutoTokenizer
     from trl import SFTConfig, SFTTrainer
 
-    model_id = "Qwen/Qwen3-4B-Instruct-2507"
+    model_id = BASE_MODEL["task"]
     train = load_task_rows(args.train_file)
     evalrows = load_task_rows(args.eval_file)
 
     def to_pc(r):  # conversational prompt-completion: completion-only loss by default
         return {
-            "prompt": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": r["email"]}],
-            "completion": [{"role": "assistant",
-                            "content": json.dumps(r["target"], separators=(",", ":"))}],
+            "prompt": build_messages(r["email"]),
+            "completion": [{"role": "assistant", "content": json.dumps(r["gold"])}],
         }
 
     ds = Dataset.from_list([to_pc(r) for r in train])
@@ -457,7 +564,7 @@ def full_reasoning(args) -> None:
     import torch as _torch
     from datasets import load_dataset
     from peft import LoraConfig
-    from transformers import BitsAndBytesConfig
+    from transformers import AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
 
     ds = load_dataset("FreedomIntelligence/medical-o1-reasoning-SFT", "en", split="train",
@@ -470,7 +577,13 @@ def full_reasoning(args) -> None:
                             "content": f"<think>\n{ex['Complex_CoT']}\n</think>\n\n{ex['Response']}"}],
         }
 
-    ds = ds.map(fmt, remove_columns=ds.column_names).select(range(min(5000, len(ds))))
+    n_train = min(5000, len(ds) - 10)
+    held_out = [ds[i]["Question"] for i in range(n_train, n_train + 10)]
+    ds = ds.map(fmt, remove_columns=ds.column_names).select(range(n_train))
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    lengths = [len(tok(tok.apply_chat_template(ex["prompt"] + ex["completion"], tokenize=False))["input_ids"])
+               for ex in ds]
+    print(f"truncation rate at max_length=2048: {sum(n > 2048 for n in lengths) / len(lengths):.1%}")
     cfg = SFTConfig(
         output_dir=args.output_dir or "qwen3-0.6b-medical-think",
         max_length=2048,  # traces are long: check truncation rate first (module 04)
@@ -484,13 +597,32 @@ def full_reasoning(args) -> None:
         report_to="none",
     )
     trainer = SFTTrainer(
-        model="Qwen/Qwen3-0.6B", args=cfg, train_dataset=ds,
+        model="Qwen/Qwen3-0.6B", args=cfg, train_dataset=ds, processing_class=tok,
         quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                                bnb_4bit_compute_dtype=_torch.float16),
         peft_config=LoraConfig(r=16, lora_alpha=32, target_modules="all-linear"),
     )
     trainer.train()
     trainer.save_model()
+
+    # Ten held-out questions, each decoded with thinking on and off (section 5.5's toggle test).
+    model = trainer.model.eval()
+    samples = []
+    for q in held_out:
+        for thinking in (True, False):
+            enc = tok.apply_chat_template([{"role": "user", "content": q}], add_generation_prompt=True,
+                                          return_tensors="pt", return_dict=True,
+                                          enable_thinking=thinking).to(model.device)
+            with _torch.no_grad():
+                out = model.generate(**enc, max_new_tokens=768, do_sample=False)
+            text = tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+            samples.append({"question": q, "enable_thinking": thinking, "output": text,
+                            "has_trace": "</think>" in text and len(text.split("</think>")[0].strip()) > 0})
+    for thinking in (True, False):
+        n = sum(x["has_trace"] for x in samples if x["enable_thinking"] == thinking)
+        print(f"enable_thinking={thinking}: {n}/10 outputs contain a non-empty trace")
+    with open(f"{cfg.output_dir}/thinking_samples.json", "w", encoding="utf-8") as fh:
+        json.dump(samples, fh, indent=2)
 
 
 def main() -> None:
@@ -504,13 +636,26 @@ def main() -> None:
     p.add_argument("--full-sequence-loss", action="store_true", help="ablation: train on prompt too")
     p.add_argument("--packing", action="store_true", help="ablation: BFD packing on")
     p.add_argument("--output-dir", default=None)
+    p.add_argument("--eval-only", action="store_true",
+                   help="score --adapter on --eval-file without training (--task base2instruct or task)")
+    p.add_argument("--adapter", default=None, help="saved adapter directory for --eval-only")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
     if args.full and not torch.cuda.is_available():
         raise SystemExit("--full needs a GPU; use --smoke on CPU")
+    if args.eval_only and not args.adapter:
+        raise SystemExit("--eval-only needs --adapter DIR")
     if not args.full:
         run_smoke(args.seed)
+        fixture_check()
+        check_system_prompt()
+        print("scorer fixture and SYSTEM_PROMPT match module 01")
+        if os.path.exists(args.train_file) and os.path.exists(args.eval_file):
+            check_task_files(args.train_file, args.eval_file)
+        return
+    if args.eval_only:
+        full_eval_only(args)
         return
     {"base2instruct": full_base2instruct, "task": full_task, "reasoning": full_reasoning}[args.task](args)
 
