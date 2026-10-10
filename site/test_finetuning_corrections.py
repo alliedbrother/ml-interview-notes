@@ -22,8 +22,8 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 import torch
 
 
-# Raise this as the course gains checks; it guards against fences being lost.
-MIN_CHECKS = 10
+# Exact fence count; raise it when checks are added so a deletion fails CI.
+MIN_CHECKS = 71
 
 ROOT = Path(__file__).resolve().parents[1]
 COURSE = ROOT / "content/courses/finetuning"

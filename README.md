@@ -10,7 +10,7 @@ Adding or improving a page is a pull request.
 
 | Section | Contents |
 |---|---|
-| [Courses](https://mlinterviewnotes.com/courses/) | Long-form, sequential material. **Transformers Deep Dive** — 17 modules from "why did we abandon RNNs?" to the configuration choices in production 2026 models. **The Inference Engineering Course** — 14 chapters on how LLM serving works, read out of the vLLM and SGLang source. **LLM Fine-Tuning Deep Dive** — 18 modules from "why not just prompt it?" through SFT, LoRA, preference optimisation and RL with verifiable rewards. |
+| [Courses](https://mlinterviewnotes.com/courses/) | Long-form, sequential material. **Transformers Deep Dive** — 17 modules from "why did we abandon RNNs?" to the configuration choices in production 2026 models. **The Inference Engineering Course** — 14 chapters on how LLM serving works, read out of the vLLM and SGLang source. **LLM Fine-Tuning Deep Dive** — 21 modules from "why not just prompt it?" through SFT, LoRA, preference optimisation and RL with verifiable rewards to distillation, agents, merging, safety and serving fine-tunes. |
 | [Notes](https://mlinterviewnotes.com/notes/) | Topic-by-topic reference notes: Math, Libraries, ML, Deep Learning, NLP. In progress — contributions welcome. |
 
 ## Repository layout

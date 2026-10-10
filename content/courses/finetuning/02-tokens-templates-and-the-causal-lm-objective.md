@@ -82,15 +82,15 @@ Transformers v5 made two changes that affect old tutorials. **It is PyTorch-only
 | EOS / turn-end | **must appear as a target** so the model learns to stop | generation halts when any id in `generation_config.eos_token_id` is sampled |
 | PAD | fills batches; must be excluded from attention and from the loss | fills left-padded prompts in batched generation |
 | UNK | byte-level BPE never needs it; SentencePiece vocabularies keep one | n/a |
-| added/special | control tokens (`<|im_start|>`, `<think>`, tool tags), never split | parsed by the server for roles, reasoning and tool calls |
+| added/special | control tokens (`<\|im_start\|>`, `<think>`, tool tags), never split | parsed by the server for roles, reasoning and tool calls |
 
 These conventions differ between families more than most people expect. Table 2 was read directly from each repository's `tokenizer_config.json` and `generation_config.json` at a pinned revision. The Llama and Gemma repositories are gated, so you need to log in to view their files.
 
 | Family (checkpoint, revision) | BOS | Tokenizer EOS | Turn-end token | PAD default | `generation_config.eos_token_id` |
 |---|---|---|---|---|---|
-| Qwen3 hybrid ([`Qwen/Qwen3-0.6B@c1899de`](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json)) | none (`bos_token: null`) | `<|im_end|>` (151645) | `<|im_end|>` | `<|endoftext|>` (151643) | list: `[151645, 151643]` |
-| Qwen3 base (`Qwen/Qwen3-0.6B-Base@da87bfb`) | none | `<|endoftext|>` | `<|im_end|>` in its template | `<|endoftext|>` (**= EOS**) | single: `151643` |
-| Llama 3.2 ([`meta-llama/Llama-3.2-1B-Instruct@9213176`](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/blob/9213176726f574b556790deb65791e0c5aa438b6/generation_config.json)) | `<|begin_of_text|>` (128000), added by the template **and** the tokenizer post-processor | `<|eot_id|>` (128009) | `<|eot_id|>` | none set (`<|finetune_right_pad_id|>` 128004 exists) | list: `[128001, 128008, 128009]` |
+| Qwen3 hybrid ([`Qwen/Qwen3-0.6B@c1899de`](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/generation_config.json)) | none (`bos_token: null`) | `<\|im_end\|>` (151645) | `<\|im_end\|>` | `<\|endoftext\|>` (151643) | list: `[151645, 151643]` |
+| Qwen3 base (`Qwen/Qwen3-0.6B-Base@da87bfb`) | none | `<\|endoftext\|>` | `<\|im_end\|>` in its template | `<\|endoftext\|>` (**= EOS**) | single: `151643` |
+| Llama 3.2 ([`meta-llama/Llama-3.2-1B-Instruct@9213176`](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct/blob/9213176726f574b556790deb65791e0c5aa438b6/generation_config.json)) | `<\|begin_of_text\|>` (128000), added by the template **and** the tokenizer post-processor | `<\|eot_id\|>` (128009) | `<\|eot_id\|>` | none set (`<\|finetune_right_pad_id\|>` 128004 exists) | list: `[128001, 128008, 128009]` |
 | Gemma 3 ([`google/gemma-3-1b-it@dcc83ea`](https://huggingface.co/google/gemma-3-1b-it/blob/dcc83ea841ab6100d6b47a070329e1ba4cf78752/generation_config.json)) | `<bos>` (2), template **and** `add_bos_token: true` | `<eos>` (1) | `<end_of_turn>` (106) | `<pad>` (0) | list: `[1, 106]` |
 
 Three facts from this table drive the rest of the module:
@@ -169,11 +169,11 @@ Take a 6-token tail of an assistant turn: `<|im_start|> assistant {"ok": true} <
 
 | Position $t$ | Input token | `labels[t]` (stored) | Target used at $t$ (`labels[t+1]`) | In loss? |
 |---|---|---|---|---|
-| 0 | `<|im_start|>` | -100 | `assistant` → -100 | no |
+| 0 | `<\|im_start\|>` | -100 | `assistant` → -100 | no |
 | 1 | `assistant` | -100 | `{"ok":` | **yes** |
 | 2 | `{"ok":` | id | `true}` | **yes** |
-| 3 | `true}` | id | `<|im_end|>` | **yes** |
-| 4 | `<|im_end|>` | id | `<pad>` → -100 | no |
+| 3 | `true}` | id | `<\|im_end\|>` | **yes** |
+| 4 | `<\|im_end\|>` | id | `<pad>` → -100 | no |
 | 5 | `<pad>` | -100 | (padded -100) | no |
 
 Read the table by rows. The label stored at position $t$ is scored at position $t-1$. Position 1 has a masked label of its own, yet it is the position that learns to start the answer, and position 3 is the one that learns to emit `<|im_end|>`. "Mask the header" therefore means "do not train the model to predict the header tokens". It does not mean "the header positions get no gradient".
@@ -269,7 +269,7 @@ A chat model is still a next-token predictor over a single string. The **chat te
 |---|---|---|
 | `tokenize=False` | returns the rendered string | inspection, logging, writing JSONL |
 | `tokenize=True` (+ `return_dict=True`) | returns ids (and masks) directly; BOS is handled by the template | training and inference, the safe default |
-| `add_generation_prompt=True` | appends the assistant header (`<|im_start|>assistant\n`) so the model answers instead of continuing the user's turn | inference, eval, RL rollouts; **not** training |
+| `add_generation_prompt=True` | appends the assistant header (`<\|im_start\|>assistant\n`) so the model answers instead of continuing the user's turn | inference, eval, RL rollouts; **not** training |
 | `continue_final_message=True` | renders the last message **without** its end-of-turn token so generation continues it | prefilling, e.g. starting the reply with `{"order_id": "` |
 
 You cannot combine the last two: one opens a new turn and the other leaves the previous one open, and passing both raises an error. In v5, `continue_final_message` also accepts a **field name**: `continue_final_message="reasoning_content"` prefills Qwen's reasoning block and leaves it open, whereas prefilling `content` closes the reasoning block first. Gemma's equivalent field is `thinking` (same docs). Thinking formats and Qwen3's thinking-mode fusion ([Qwen3 technical report](https://arxiv.org/abs/2505.09388)) belong to [module 14](./14-distillation-and-reasoning.md).
@@ -425,7 +425,7 @@ The Qwen3 rendering above breaks the property. Its template prints the `<think>.
 |---|---|---|---|
 | Double BOS | none visible; per-token table shows two BOS ids at position 0–1 | slightly worse quality; train/serve mismatch | `add_special_tokens=False` after `tokenize=False`, or `apply_chat_template(tokenize=True)` |
 | pad = eos, mask by id | EOS rows are -100 in the label table; loss looks normal | never stops; runs to `max_new_tokens` | mask by attention/position; distinct pad token |
-| Wrong EOS for the template (base models) | labels end in `<|endoftext|>` while turns end in `<|im_end|>` | stray `<|im_end|>` text or no stop in the server | `eos_token="<|im_end|>"`; align `generation_config.eos_token_id` |
+| Wrong EOS for the template (base models) | labels end in `<\|endoftext\|>` while turns end in `<\|im_end\|>` | stray `<\|im_end\|>` text or no stop in the server | `eos_token="<\|im_end\|>"`; align `generation_config.eos_token_id` |
 | Loss on prompt tokens | lower loss than expected; slower task learning | echoes or paraphrases the prompt | `assistant_only_loss` / `completion_only_loss` (module 05) |
 | No `{% generation %}` markers | `assistant_masks` all zeros, so nothing (or everything) is trained | model unchanged, or trained on the user's text | TRL training templates, or offsets-based masking (lab) |
 | Template not prefix-preserving | multi-turn RL log-probs disagree with rollout | unstable or degenerate tool-use RL | patched training template; test with `is_chat_template_prefix_preserving` |
