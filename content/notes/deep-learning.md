@@ -147,13 +147,16 @@ the final test set and present the best score as an untouched estimate.
 
 ## Related courses
 
-Two long-form courses on this site go considerably deeper than these notes:
+Three long-form courses on this site go considerably deeper than these notes:
 
 - **[Transformers Deep Dive](/courses/transformers/)** — 17 modules from "why did
   we abandon RNNs?" to the configuration choices in 2026 production models, with
   67 diagrams, worked numerics, and a runnable reference decoder.
 - **[The Inference Engineering Course](/courses/inference/)** — 14 chapters on how
   LLM serving works, read out of the vLLM and SGLang source.
+- **[LLM Fine-Tuning Deep Dive](/courses/finetuning/)** — 21 modules on adapting
+  pretrained LLMs: SFT, LoRA/QLoRA, preference optimization, RL with verifiable
+  rewards, distillation, and serving the result.
 
 ## The short version
 

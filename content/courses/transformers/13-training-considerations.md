@@ -335,6 +335,8 @@ in the training pipeline as well as the inference scaling strategies."
 
 Two models with identical architectures can differ enormously. Architecture is
 necessary to understand; it is not where the remaining differentiation lives.
+The [LLM Fine-Tuning Deep Dive](/courses/finetuning/) picks up from here and covers
+this stack, from SFT through preference optimization and reasoning RL, in depth.
 
 ---
 

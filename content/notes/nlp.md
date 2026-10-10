@@ -74,6 +74,8 @@ flowchart TD
   architecture from first principles.
 - **[The Inference Engineering Course](/courses/inference/)** — 14 chapters on
   serving these models efficiently.
+- **[LLM Fine-Tuning Deep Dive](/courses/finetuning/)** — 21 modules on adapting
+  these models after pretraining.
 
 ## The short version
 
