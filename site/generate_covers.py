@@ -73,6 +73,44 @@ def inference():
     im.save(OUT/"inference.webp",quality=94)
 
 
+def pytorch():
+    im=Image.new("RGB",(1000,480),"#f6eeeb")
+    d=ImageDraw.Draw(im)
+    ink,rule="#8a4a3b","#d6b8ae"
+    ramp=lambda v: tuple(round(a+(b-a)*v) for a,b in zip((238,214,205),(170,66,38)))
+    label(d,(46,38),"04 / PYTORCH","#8a4a3b",17)
+    label(d,(807,40),"loss.backward()",ink,15)
+    label(d,(46,100),"STORAGE",ink,15)
+    for i in range(12):
+        d.rounded_rectangle((46+i*40,130,80+i*40,164),radius=3,fill=ramp(.1+i*.08))
+    label(d,(46,196),"VIEW STRIDE (4, 1)",ink,15)
+    label(d,(276,196),"T STRIDE (1, 4)",ink,15)
+    for r in range(4):
+        for c in range(4):
+            if r<3:
+                d.rounded_rectangle((46+c*40,228+r*40,80+c*40,262+r*40),radius=3,fill=ramp(.1+(r*4+c)*.08))
+            if c<3:
+                d.rounded_rectangle((276+c*40,228+r*40,310+c*40,262+r*40),radius=3,fill=ramp(.1+(c*4+r)*.08))
+    d.line((560,100,560,388),fill=rule,width=2)
+    nodes={"x":(600,132),"W":(600,232),"mm":(708,182),"relu":(816,182),"loss":(816,282)}
+    for a,b in (("x","mm"),("W","mm"),("mm","relu")):
+        (x1,y1),(x2,y2)=nodes[a],nodes[b]
+        d.line((x1+70,y1+17,x2,y2+17),fill=rule,width=2)
+    d.line((851,216,851,282),fill=rule,width=2)
+    for k,(x,y) in nodes.items():
+        leaf=k in ("x","W")
+        d.rounded_rectangle((x,y,x+70,y+34),radius=4,fill="#e9d3cb" if leaf else ramp(.75),outline=None)
+        label(d,(x+10,y+8),k,ink if leaf else "#fbf3f0",15)
+    d.line((600,352,800,352),fill="#b98a7c",width=2)
+    d.polygon(((600,347),(590,352),(600,357)),fill="#b98a7c")
+    label(d,(612,362),"GRAD_FN CHAIN",ink,13)
+    label(d,(46,421),"FROM STRIDES TO A TRAINED GPT.",ink,15)
+    for i,c in enumerate((ramp(.15),ramp(.4),ramp(.65),ramp(.9))):
+        d.rounded_rectangle((825+i*29,408,848+i*29,431),radius=3,fill=c)
+    im.save(OUT/"pytorch.webp",quality=94)
+
+
 if __name__ == "__main__":
     attention()
     inference()
+    pytorch()
