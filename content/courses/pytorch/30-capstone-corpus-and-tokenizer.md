@@ -386,4 +386,4 @@ Scope: the pre-tokenizer is ASCII and English-oriented, there is no Unicode norm
 
 ---
 
-**Next →** [31 — Token Datasets and the Training Data Pipeline](./31-capstone-data-pipeline.md)
+**Next → [31 — Token Datasets and the Training Data Pipeline](./31-capstone-data-pipeline.md)**

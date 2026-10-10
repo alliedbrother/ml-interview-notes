@@ -271,4 +271,4 @@ Scope: single process, whole corpus in RAM, no streaming from disk at scale, no 
 
 ---
 
-**Next →** [32 — The GPT Model, Line by Line](./32-capstone-gpt-model.md)
+**Next → [32 — The GPT Model, Line by Line](./32-capstone-gpt-model.md)**
