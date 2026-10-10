@@ -124,7 +124,7 @@ r = ref[idx] / pi[idx]                                                # r = pi_r
 k1 = -r.log()
 k3 = (r - 1) - r.log()
 
-assert abs(k1.mean().item() - exact.item()) < 2e-4
+assert abs(k1.mean().item() - exact.item()) < 4 * k1.std().item() / len(k1) ** 0.5   # 4 standard errors
 assert abs(k3.mean().item() - exact.item()) < 0.01
 assert abs(k3.mean().item() - exact.item()) < 1e-3        # tighter: k3 is accurate here
 assert bool((k3 >= 0).all())                              # k3 never negative

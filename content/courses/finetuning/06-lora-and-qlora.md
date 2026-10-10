@@ -428,9 +428,10 @@ $$
 
 a saving of 0.373 bits per parameter, matching the paper: 4.5 GB without DQ and 4.127 GB
 with it for 8B parameters, against 16 GB in bf16 (embeddings, norms and usually
-`lm_head` stay 16-bit, so real footprints are higher). The check below quantises 4,096
+`lm_head` stay 16-bit, so real footprints are higher). The check below quantises 65,536
 normal weights block-wise onto NF4 and onto a uniform 16-level grid, asserts NF4's MSE
-is more than 20% lower, then asserts the bit and memory arithmetic.
+is more than 10% lower (it measures about 16% lower, and 15-17% on other seeds), then
+asserts the bit and memory arithmetic.
 
 ```python finetuning-check
 import torch
@@ -448,13 +449,13 @@ def block_quant(w, levels, block=64):
     idx = ((flat / absmax).unsqueeze(-1) - levels).abs().argmin(-1)   # 4-bit codes
     return (levels[idx] * absmax).reshape(w.shape)
 
-w = torch.randn(4096)                                # normal "weights"
+w = torch.randn(65536)                               # normal "weights"; enough that the ratio is stable
 mse_nf4 = ((block_quant(w, NF4) - w) ** 2).mean().item()
 mse_uni = ((block_quant(w, UNIFORM) - w) ** 2).mean().item()
 assert len(NF4) == 16 and int((NF4 == 0).sum()) == 1 and not bool((UNIFORM == 0).any())
 assert NF4[0] == -1.0 and NF4[-1] == 1.0
 assert int((NF4 < 0).sum()) == 7 and int((NF4 > 0).sum()) == 8
-assert mse_nf4 < 0.8 * mse_uni                       # quantile levels win on normal data
+assert mse_nf4 < 0.9 * mse_uni                       # quantile levels win on normal data (measured 0.84x)
 
 bits_plain = 4 + 32 / 64                             # fp32 absmax per 64 weights
 bits_dq = 4 + 8 / 64 + 32 / (64 * 256)               # 8-bit absmax + fp32 per 256 absmaxes

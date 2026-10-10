@@ -553,69 +553,82 @@ L2-SP cuts the task-A loss increase by 39% (0.0441 vs 0.0718) and keeps 93% of t
 task-B improvement. Replay cuts forgetting by 85%. The check below reproduces every
 row of the table (`forgetting_study.py --smoke` prints the same numbers) and proves
 the L2-SP claim with margins (at least 30% less forgetting, at least 90% of the
-task-B gain).
+task-B gain). It then reruns the whole fixture on four more seeds: L2-SP forgets 21-39% less
+and keeps at least 88% of the task-B gain on every seed, and replay forgets 37-85% less
+while always moving the weights further than plain fine-tuning.
 
 ```python finetuning-check
 import torch
 
-torch.manual_seed(0)
 torch.set_num_threads(1)
-D, H = 8, 32
-
-def teacher(seed):
-    g = torch.Generator().manual_seed(seed)
-    w = torch.randn(D, 16, generator=g) / D ** 0.5
-    v = torch.randn(16, 1, generator=g) / 4
-    return lambda x: torch.tanh(x @ w) @ v
-
-f_a, f_extra = teacher(1), teacher(2)
-g = torch.Generator().manual_seed(3)
-xa = torch.randn(256, D, generator=g)                  # (256, 8) task A
-xb = torch.randn(32, D, generator=g) + 1.0             # (32, 8) task B, shifted inputs
-ya, yb = f_a(xa), f_a(xb) + 0.5 * f_extra(xb)
+D, H, f64 = 8, 32, torch.float64          # float64: Adam trajectories reproduce across platforms
 mse = torch.nn.functional.mse_loss
 
 def mlp():
-    return torch.nn.Sequential(torch.nn.Linear(D, H), torch.nn.Tanh(), torch.nn.Linear(H, 1))
+    return torch.nn.Sequential(torch.nn.Linear(D, H), torch.nn.Tanh(), torch.nn.Linear(H, 1)).to(f64)
 
-torch.manual_seed(0)
-net = mlp()
-opt = torch.optim.Adam(net.parameters(), lr=1e-2)
-for _ in range(500):
-    opt.zero_grad(); mse(net(xa), ya).backward(); opt.step()
-state = {k: v.clone() for k, v in net.state_dict().items()}
-theta_a = [p.detach().clone() for p in net.parameters()]
+def study(k=0):
+    """Pretrain on task A, then fine-tune on task B three ways. k shifts every seed."""
+    def teacher(seed):
+        g = torch.Generator().manual_seed(seed + 101 * k)
+        w = torch.randn(D, 16, generator=g) / D ** 0.5
+        v = torch.randn(16, 1, generator=g) / 4
+        return lambda x: torch.tanh(x @ w) @ v
 
-def finetune(lam, replay=False):
-    m = mlp(); m.load_state_dict(state)
-    o = torch.optim.Adam(m.parameters(), lr=1e-2)
-    for _ in range(60):
-        o.zero_grad()
-        loss = mse(m(xb), yb) + lam * sum(((p - q) ** 2).sum() for p, q in zip(m.parameters(), theta_a))
-        if replay:
-            loss = loss + mse(m(xa[:32]), ya[:32])         # replay 32 task-A examples
-        loss.backward(); o.step()
+    f_a, f_extra = teacher(1), teacher(2)
+    g = torch.Generator().manual_seed(3 + 101 * k)
+    xa = torch.randn(256, D, generator=g)                  # (256, 8) task A
+    xb = torch.randn(32, D, generator=g) + 1.0             # (32, 8) task B, shifted inputs
+    ya, yb = f_a(xa), f_a(xb) + 0.5 * f_extra(xb)
+    xa, xb, ya, yb = (t.to(f64) for t in (xa, xb, ya, yb))
+
+    torch.manual_seed(101 * k)
+    net = mlp()
+    opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+    for _ in range(500):
+        opt.zero_grad(); mse(net(xa), ya).backward(); opt.step()
+    state = {n: v.clone() for n, v in net.state_dict().items()}
+    theta_a = [p.detach().clone() for p in net.parameters()]
+
+    def finetune(lam, replay=False):
+        m = mlp(); m.load_state_dict(state)
+        o = torch.optim.Adam(m.parameters(), lr=1e-2)
+        for _ in range(60):
+            o.zero_grad()
+            loss = mse(m(xb), yb) + lam * sum(((p - q) ** 2).sum() for p, q in zip(m.parameters(), theta_a))
+            if replay:
+                loss = loss + mse(m(xa[:32]), ya[:32])     # replay 32 task-A examples
+            loss.backward(); o.step()
+        with torch.no_grad():
+            drift = sum(((p - q) ** 2).sum() for p, q in zip(m.parameters(), theta_a)).sqrt().item()
+            return mse(m(xa), ya).item(), mse(m(xb), yb).item(), drift
+
     with torch.no_grad():
-        drift = sum(((p - q) ** 2).sum() for p, q in zip(m.parameters(), theta_a)).sqrt().item()
-        return mse(m(xa), ya).item(), mse(m(xb), yb).item(), drift
+        a0, b0 = mse(net(xa), ya).item(), mse(net(xb), yb).item()
+    return (a0, b0), finetune(0.0), finetune(0.1), finetune(0.0, replay=True)
 
-with torch.no_grad():
-    a0, b0 = mse(net(xa), ya).item(), mse(net(xb), yb).item()
-a_plain, b_plain, d_plain = finetune(0.0)
-a_reg, b_reg, d_reg = finetune(0.1)
-a_rep, b_rep, d_rep = finetune(0.0, replay=True)
+runs = [study(k) for k in range(5)]                      # seed 0 is the table; 1-4 are extra seeds
+(a0, b0), (a_plain, b_plain, d_plain), (a_reg, b_reg, d_reg), (a_rep, b_rep, d_rep) = runs[0]
 forget_plain, forget_reg = a_plain - a0, a_reg - a0
 gain_plain, gain_reg = b0 - b_plain, b0 - b_reg
 assert a0 < 0.001 and abs(b0 - 0.0821) < 0.002           # task A learned, task B not yet
 assert abs(a_plain - 0.0722) < 0.005 and abs(a_reg - 0.0445) < 0.005
 assert abs(b_plain - 0.0004) < 5e-4 and abs(b_reg - 0.0056) < 5e-4
 assert round(d_plain, 3) == 0.769 and round(d_reg, 3) == 0.240
-assert forget_reg <= 0.70 * forget_plain                  # >= 30% less forgetting
-assert gain_reg >= 0.90 * gain_plain                      # >= 90% of the task-B improvement
+assert forget_reg <= 0.70 * forget_plain                  # >= 30% less forgetting (0.61x here)
+assert gain_reg >= 0.90 * gain_plain                      # >= 90% of the task-B improvement (0.94x)
 assert d_reg < d_plain                                    # stays closer to theta_A
 # Replay: forgets 85% less than plain, yet moves the weights further.
 assert abs(a_rep - 0.0110) < 5e-4 and abs(b_rep - 0.0019) < 5e-4 and round(d_rep, 3) == 1.116
 assert round(1 - (a_rep - a0) / forget_plain, 2) == 0.85 and d_rep > d_plain
+
+# The direction is not a lucky seed: on five seeds of the whole fixture L2-SP forgets
+# 21-39% less and keeps at least 88% of the gain; replay forgets 37-85% less, yet moves further.
+for k, ((a0, b0), (ap, bp, dp), (ar, br, dr), (aq, bq, dq)) in enumerate(runs):
+    assert (ar - a0) < 0.85 * (ap - a0), k                # measured worst: 0.79x
+    assert (b0 - br) > 0.80 * (b0 - bp), k                # measured worst: 0.88x
+    assert dr < 0.5 * dp, k                               # measured worst: 0.31x
+    assert (aq - a0) < 0.70 * (ap - a0) and dq > dp, k    # measured worst: 0.63x forgetting, 1.18x drift
 print("L2-SP and replay reduce forgetting; weight distance does not track it")
 ```
 
