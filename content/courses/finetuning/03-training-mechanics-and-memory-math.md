@@ -5,7 +5,7 @@
 > bytes-per-parameter budget, activation and logits memory, effective batch and
 > loss normalisation, optimizers, schedules, and how to read the curves.
 
-Before you rent a GPU you should be able to say three things: whether the run fits, roughly how long it will take, and which knob you will turn when it runs out of memory or diverges. This module is the numerical core of the course. Every later module (LoRA, distributed training, preference optimisation, RL) reuses the arithmetic here.
+Before you rent a GPU you should be able to say whether the run fits, roughly how long it will take, and which knob you will turn when it runs out of memory or diverges. This module is the numerical core of the course; every later module reuses its arithmetic.
 
 The Transformers course already derives the causal-LM objective, the mixed-precision formats, the 16 bytes per parameter rule and gradient checkpointing in [module 13](../transformers/13-training-considerations.md).
 
@@ -43,9 +43,9 @@ Full fine-tuning with AdamW in bf16 mixed precision keeps five copies of informa
 | **Total** | **16** | **16** |
 | fp32 gradient-accumulation buffer in place of bf16 grads (some DeepSpeed/Megatron setups) | 4 instead of 2 → **18** | n/a |
 
-Route A is what DeepSpeed and Megatron-style mixed precision do. Route B is what `torch.autocast` plus a plain `torch.optim.AdamW` does, and what you get from TRL by default: TRL trainers load the model in **float32 unless you pass `model_init_kwargs={"dtype": ...}`** ([SFTTrainer docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)), and `bf16=True` then autocasts the matmuls. The "18" is an assumption about extra buffers, not a law: say which one you mean.
+Route A is DeepSpeed and Megatron-style mixed precision. Route B is `torch.autocast` plus a plain `torch.optim.AdamW`, the TRL default: TRL trainers load the model in **float32 unless you pass `model_init_kwargs={"dtype": ...}`** ([SFTTrainer docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)), and `bf16=True` then autocasts the matmuls. The "18" is an assumption about extra buffers, not a law: say which one you mean.
 
-So **an 8B model needs 8e9 × 16 = 128 GB of state before a single activation** (nominal 8e9; the exact 8.03B gives 128.5 GB), and a 7B model needs 112 GB. Full fine-tuning of an 8B model therefore does not fit on one 80 GB card. 8-bit optimizer state (section 3.2) brings it to about 80 GB, still over the card once activations and overhead are added, so you need sharding or CPU offload (module [10](./10-distributed-fine-tuning-and-moe.md)), or must also drop the fp32 master copy and accept the precision risk in section 3.6.
+So **an 8B model needs 8e9 × 16 = 128 GB of state before a single activation** (nominal 8e9; the exact 8.03B gives 128.5 GB), and a 7B model needs 112 GB. That does not fit on one 80 GB card. 8-bit optimizer state (section 3.2) brings it to about 80 GB, still over once activations are added, so you need sharding or CPU offload (module [10](./10-distributed-fine-tuning-and-moe.md)).
 
 A third route deserves a warning. If you load the model in bf16 (`dtype=torch.bfloat16`) and hand it to a plain AdamW, PyTorch keeps $m$ and $v$ in the parameter dtype: **2 + 2 + 2 + 2 = 8 bytes per parameter, with no fp32 master copy**. It fits in half the memory and silently loses small updates, because updates smaller than about 0.002 (half the $2^{-8}$ spacing below 1.0) round to nothing. Check 3.5 in section 3.6 shows the update vanishing.
 
@@ -136,7 +136,7 @@ $$
 \text{activations per layer} \approx s\,b\,h\left(34 + \frac{5\,a\,s}{h}\right) \text{ bytes},
 $$
 
-with $s$ the sequence length ($T$), $b$ the micro-batch ($B$), $h$ the hidden size ($d$) and $a$ the number of heads. The $34\,sbh$ term covers the stored inputs of the QKV projection, attention output, MLP and norms, plus dropout masks. The $5as^2b$ term is the attention score matrix, its softmax and its dropout mask: it is **quadratic in sequence length**.
+with $s$ the sequence length ($T$), $b$ the micro-batch ($B$), $h$ the hidden size ($d$) and $a$ the number of heads. The $34\,sbh$ term covers the stored inputs of the QKV projection, attention output, MLP and norms, plus dropout masks. The $5as^2b$ term is the softmax output ($2as^2b$), its dropout mask ($as^2b$) and the dropout output that multiplies $V$ ($2as^2b$): it is **quadratic in sequence length**.
 
 FlashAttention never materialises the $s \times s$ scores; it recomputes them in backward from $Q$, $K$, $V$ and the softmax statistics ([Transformers module 11](../transformers/11-hardware-aware-attention.md)). **With FlashAttention or a memory-efficient SDPA kernel, the $5as/h$ term disappears** and activations become linear in $T$.
 
@@ -148,7 +148,7 @@ Worked example with Qwen3-4B dimensions ($h = 2560$, $a = 32$, $L = 36$; from it
 | FlashAttention, no checkpointing: $34\,sbh$ | 0.178 GB | **6.42 GB** |
 | FlashAttention + per-block checkpointing: $2\,sbh$ per layer kept, one layer's $34\,sbh$ during recompute | — | **0.56 GB** |
 
-Treat these as ±30% estimates. The constant 34 was derived for a 4h GELU MLP and full multi-head attention; Qwen3 uses SwiGLU with $d_{ff} = 3.8h$, grouped-query attention and a query width of 4096, not 2560. The ordering of the three rows is what matters: **eager attention at 2k context already costs more than the whole bf16 base of a 4B model, and checkpointing brings activations below 1 GB.**
+Treat these as ±30% estimates: the constant 34 assumes a 4h GELU MLP and full multi-head attention, while Qwen3 uses SwiGLU with $d_{ff} = 3.8h$, grouped-query attention and a query width of 4096. The ordering is what matters: **eager attention at 2k context already costs more than the whole bf16 base of a 4B model, and checkpointing brings activations below 1 GB.**
 
 ### The logits problem
 
@@ -158,13 +158,13 @@ $$
 151{,}936 \times 8{,}192 \times 4\ \text{bytes} = 4.98\ \text{GB per sequence}.
 $$
 
-That is one copy. A naive implementation holds the bf16 logits (2.49 GB), the fp32 upcast (4.98 GB), and then a gradient of the same shape in backward, so the transient peak is **several times the 4.98 GB**, for a single 8k sequence. At 8k context the logits can outweigh every transformer layer's checkpointed activations combined.
+That is one copy. A naive implementation holds the bf16 logits (2.49 GB), the fp32 upcast (4.98 GB) and a gradient of the same shape in backward, so the transient peak is **several times the 4.98 GB** for a single 8k sequence, more than all the checkpointed layer activations combined.
 
 The fix is to **never materialise the full logits**. Chunked (or fused) cross-entropy processes $T$ in tiles: project a tile of hidden states through the LM head, compute its log-softmax and loss, accumulate the gradient for the head weight, and discard the tile. Variants:
 
 - **Liger Kernel**'s fused linear cross-entropy, Hsu et al. (2024), [arXiv 2410.10989](https://arxiv.org/abs/2410.10989), reporting on average 20% higher throughput and 60% lower GPU memory than Hugging Face implementations across their benchmarks.
 - **Cut Cross-Entropy**, Wijmans et al. (2024), [arXiv 2411.09009](https://arxiv.org/abs/2411.09009), which computes the loss without storing logits in global memory and reports Gemma 2 (2B) loss-computation memory falling from 24 GB to 1 MB.
-- **TRL's fused LM head**, on by default for SFT, DPO, KTO, GRPO, RLOO and Distillation since [TRL v1.15.0](https://github.com/huggingface/trl/releases/tag/v1.15.0) (8 October 2026), which reports up to 6.9× longer sequences on the same GPU. Module [08](./08-frameworks-and-tooling.md) covers the switch and its interactions; the deprecation of `use_liger_kernel` in DPO/KTO/GRPO/RLOO in favour of `model_init_kwargs={"use_kernels": True}` is covered there too.
+- **TRL's fused LM head**, on by default for SFT, DPO, KTO, GRPO, RLOO and Distillation since [TRL v1.15.0](https://github.com/huggingface/trl/releases/tag/v1.15.0) (8 October 2026), which reports up to 6.9× longer sequences on the same GPU. Module [08](./08-frameworks-and-tooling.md) covers the switch and its interactions.
 
 At very long context, even fused cross-entropy and checkpointing eventually run out of room on one GPU, and sequence parallelism takes over; that is module [17](./17-long-context-extension.md).
 
@@ -209,24 +209,24 @@ The check proves that summing per-chunk losses and gradients reproduces the full
 
 **Store only each block's input in the forward pass; recompute the block's internals during backward.** Per-layer activation memory drops from $34\,sbh$ to $2\,sbh$, plus one block's internals during recompute (the 0.56 GB row above). The cost is one extra forward pass. If backward costs about twice the forward, a step goes from $F + 2F = 3F$ to $4F$: **about 33% more step time** for an order of magnitude less activation memory. [Transformers module 13](../transformers/13-training-considerations.md#134-the-memory-budget) derives the checkpoint placement trade-offs; do not re-derive them here.
 
-In TRL, gradient checkpointing is **on by default in every trainer** ([Reducing memory usage](https://huggingface.co/docs/trl/main/en/reducing_memory_usage), as of October 2026), whereas plain `TrainingArguments` defaults to off. Turn it off only when you have measured that activations fit and want that extra forward pass (a quarter of the checkpointed step time) back.
+In TRL, gradient checkpointing is **on by default in every trainer** ([Reducing memory usage, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/reducing_memory_usage)), whereas plain `TrainingArguments` defaults to off. Turn it off only when you have measured that activations fit.
 
-**Selective checkpointing** recomputes only the cheap-to-recompute, expensive-to-store parts. Korthikanti et al. recompute the attention core (the $5as/h$ term) and keep the linear-layer inputs, which removes most of the memory at a fraction of the recompute. With FlashAttention that term is already gone, so TRL's selective mode inverts the idea: it **saves the attention output** and recomputes the rest, recovering most of the checkpointing slowdown at long context for one hidden-sized tensor per layer (`gradient_checkpointing_kwargs={"selective": True}` in `SFTConfig`, per the same TRL page, as of October 2026).
+**Selective checkpointing** recomputes only what is cheap to recompute and expensive to store: Korthikanti et al. recompute the attention core (the $5as/h$ term). With FlashAttention that term is already gone, so TRL's selective mode (`gradient_checkpointing_kwargs={"selective": True}`) instead **saves the attention output**, recovering most of the slowdown at long context for one hidden-sized tensor per layer.
 
 ### Activation offloading
 
-Instead of recomputing, **move saved activations to CPU RAM during forward and bring them back for backward.** TRL implements this with PyTorch's `saved_tensors_hooks` behind `SFTConfig(activation_offloading=True)`. It trades PCIe bandwidth for memory; it works best when the copies overlap with compute and when the CPU has pinned memory to spare.
+Instead of recomputing, **move saved activations to CPU RAM during forward and bring them back for backward**: `SFTConfig(activation_offloading=True)`, built on PyTorch's `saved_tensors_hooks`. It trades PCIe bandwidth for memory and works best when the copies overlap with compute.
 
-**Unsloth's offloaded gradient checkpointing** combines both ideas: checkpoint at block boundaries, then offload those boundary tensors to CPU asynchronously. You enable it with `use_gradient_checkpointing="unsloth"` in `FastLanguageModel.get_peft_model`. Unsloth reports that it "reduces memory usage by an extra 30% and supports extremely long context fine-tunes" ([LoRA hyperparameters guide](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide)); that is a vendor claim measured on their kernels.
+**Unsloth's offloaded gradient checkpointing** (`use_gradient_checkpointing="unsloth"` in `FastLanguageModel.get_peft_model`) checkpoints at block boundaries and offloads those tensors to CPU asynchronously. Unsloth reports it "reduces memory usage by an extra 30% and supports extremely long context fine-tunes" ([LoRA hyperparameters guide](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide)), a vendor claim measured on their kernels.
 
 ### 8-bit Adam and paged optimizers
 
-Two separate ideas from bitsandbytes often get conflated:
+Two separate bitsandbytes ideas:
 
 - **8-bit optimizer state** (Dettmers et al., 2021, [8-bit Optimizers via Block-wise Quantization](https://arxiv.org/abs/2110.02861)): Adam's $m$ and $v$ are stored as 8-bit codes, quantized block-wise (each block of 2,048 values has its own fp32 scale) with a dynamic, non-linear code. State drops from 8 bytes to **about 2 bytes per parameter** (two 1-byte moments plus 4/2048 bytes of scale each). The update is still computed in 32-bit after dequantization. For full fine-tuning of an 8B model, that is 64 GB → 16 GB.
 - **Paged optimizers** (introduced with QLoRA, Dettmers et al., 2023, [arXiv 2305.14314](https://arxiv.org/abs/2305.14314)): the optimizer state is allocated in NVIDIA unified memory, so when a long sequence causes a memory spike the driver pages state out to CPU RAM instead of raising OOM. Nothing is quantized by paging itself; it is a safety valve for spikes.
 
-Both are selected through `optim`: `"adamw_8bit"` (alias of `"adamw_bnb_8bit"`), `"paged_adamw_8bit"`, `"paged_adamw_32bit"`, and Lion equivalents ([`OptimizerNames`, Transformers v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/training_args.py#L118-L158)). For LoRA, where the state is 0.34 GB, the 8-bit variant saves about 0.25 GB. **Use 8-bit and paged optimizers for full fine-tuning; for LoRA, use them only as the spike safety valve.**
+Both are selected through `optim`: `"adamw_8bit"` (alias of `"adamw_bnb_8bit"`), `"paged_adamw_8bit"`, `"paged_adamw_32bit"`, and Lion equivalents ([`OptimizerNames`, Transformers v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/training_args.py#L118-L158)). For LoRA the 8-bit variant saves about 0.25 GB. **Use 8-bit and paged optimizers for full fine-tuning; for LoRA, only as the spike safety valve.**
 
 ### OOM triage
 
@@ -245,7 +245,7 @@ flowchart TD
     Q4 -->|no| F1["Fragmentation or spikes:<br/>paged optimizer, expandable_segments,<br/>sort or bucket by length"]
 ```
 
-The order matters. A first OOM at the optimizer step means the static state does not fit, and no activation trick will save you. An OOM that appears only after hundreds of steps usually means one unusually long batch: cap `max_length`, or use packing so every batch has the same token count.
+A first OOM at the optimizer step means the static state does not fit, and no activation trick will save you. An OOM after hundreds of steps usually means one unusually long batch: cap `max_length`, or pack.
 
 ---
 
@@ -285,7 +285,7 @@ $$
 
 The buggy version gives each of the 2 tokens in the short micro-batch 3× the weight of each token in the long one. The bias is systematic: short examples are over-weighted, and the loss you log changes when you change `gradient_accumulation_steps`.
 
-This is exactly the bug Unsloth reported in the Hugging Face Trainer in October 2024. The fix, described in the HF blog post [Fixing Gradient Accumulation](https://huggingface.co/blog/gradient_accumulation) (16 October 2024), passes `num_items_in_batch` (the global trained-token count) into the loss, which then sums and divides once. Across ranks the same problem recurs: each rank must divide by the *global* count, which needs an all-reduce of token counts. That is `average_tokens_across_devices`, which **defaults to `True`** in Transformers v5 `TrainingArguments` and in `SFTConfig` as of October 2026 ([Trainer docs, v5.19.0](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer); see [issue 34242](https://github.com/huggingface/transformers/issues/34242)). If you write a custom loss, accept `num_items_in_batch` and divide by it; otherwise you have reintroduced the bug.
+Unsloth reported exactly this bug in the Hugging Face Trainer in October 2024. The fix ([Fixing Gradient Accumulation](https://huggingface.co/blog/gradient_accumulation), 16 October 2024) passes `num_items_in_batch`, the global trained-token count, into the loss. Across ranks each rank must divide by the *global* count, which needs an all-reduce of token counts: `average_tokens_across_devices`, which **defaults to `True`** in Transformers v5 `TrainingArguments` and in `SFTConfig` as of October 2026 ([Trainer docs, v5.19.0](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer); see [issue 34242](https://github.com/huggingface/transformers/issues/34242)). If you write a custom loss, accept `num_items_in_batch` and divide by it; otherwise you have reintroduced the bug.
 
 Check 3.3 builds the three versions on a tiny linear model and compares gradients.
 
@@ -333,7 +333,7 @@ print("gradient accumulation normalisation verified")
 
 The check proves that sum-then-divide-by-global-count accumulation reproduces the big-batch gradient and that per-micro-batch averaging does not. It does not test the distributed all-reduce, mixed precision accumulation, or any library's implementation.
 
-**So, is gradient accumulation identical to a bigger batch?** Mathematically yes, with two conditions: the loss is normalised by the global trained-token count, and the model has no batch-dependent layers (BatchNorm, in-batch negatives in contrastive losses, MoE load-balancing losses computed per micro-batch). Decoder LLMs mostly satisfy the second; the first is the one that bit everyone in 2024. Numerically, bf16 accumulation order can also differ slightly.
+**Gradient accumulation is identical to a bigger batch only under two conditions**: the loss is normalised by the global trained-token count, and the model has no batch-dependent layers (BatchNorm, in-batch negatives, MoE load-balancing losses computed per micro-batch). Decoder LLMs mostly satisfy the second; the first is the one that bit everyone in 2024.
 
 ---
 
@@ -341,9 +341,9 @@ The check proves that sum-then-divide-by-global-count accumulation reproduces th
 
 The [optimisation note](../../notes/deep-learning/optimization-and-training.md) derives SGD, Adam and AdamW. Here the question is narrower: what each costs in memory and when it is worth changing from the default.
 
-- **AdamW** (Loshchilov and Hutter, [arXiv 1711.05101](https://arxiv.org/abs/1711.05101)) is the default. In Transformers v5.19, `optim` defaults to `"adamw_torch_fused"` on torch ≥ 2.8, and `SFTConfig` lists `adamw_torch_fused` explicitly. **Fused** means one CUDA kernel updates all parameters' $m$, $v$ and weights together instead of launching several kernels per tensor: same maths, fewer launches, measurably faster for models with many small tensors.
-- **Adafactor** (Shazeer and Stern, 2018, [arXiv 1804.04235](https://arxiv.org/abs/1804.04235)) **factors the second moment** of each $r \times c$ matrix into a row vector and a column vector ($r + c$ numbers instead of $rc$), and by default keeps **no first moment**. For a 4096 × 14336 MLP matrix, state is 4 × (4096 + 14336) = 73.7 KB instead of 8 × 58.7M = 470 MB. The price is noisier updates and more sensitivity to the learning rate; it was the T5 default.
-- **Lion** (Chen et al., 2023, [Symbolic Discovery of Optimization Algorithms](https://arxiv.org/abs/2302.06675)) keeps **one momentum buffer** and applies the **sign** of an interpolated momentum, so every coordinate moves by exactly the learning rate. Half of Adam's state. Because sign updates have a larger norm, the paper recommends a learning rate 3 to 10 times smaller than AdamW's and a correspondingly larger weight decay.
+- **AdamW** (Loshchilov and Hutter, [arXiv 1711.05101](https://arxiv.org/abs/1711.05101)) is the default: in Transformers v5.19, `optim` defaults to `"adamw_torch_fused"` on torch ≥ 2.8, one kernel updating every tensor's $m$, $v$ and weights.
+- **Adafactor** (Shazeer and Stern, 2018, [arXiv 1804.04235](https://arxiv.org/abs/1804.04235)) **factors the second moment** of each $r \times c$ matrix into row and column vectors ($r + c$ numbers instead of $rc$) and keeps no first moment by default.
+- **Lion** (Chen et al., 2023, [Symbolic Discovery of Optimization Algorithms](https://arxiv.org/abs/2302.06675)) keeps one momentum buffer and applies its **sign**, so every coordinate moves by exactly the learning rate.
 - **Muon** (Liu et al., 2025, [arXiv 2502.16982](https://arxiv.org/abs/2502.16982)) orthogonalises each 2D momentum update with Newton–Schulz iterations; embeddings, head, norms and biases stay on AdamW ([`torch.optim.Muon`](https://docs.pytorch.org/docs/2.14/generated/torch.optim.Muon.html)). Its ~2× efficiency is a pretraining result. The paper's own SFT ablation (§3.5) found no significant advantage "when the SFT optimizer differs from the pretraining optimizer", and [Qu et al. (2026)](https://arxiv.org/abs/2605.10468) report that Muon fine-tuning of Adam-pretrained models degrades them, less so under LoRA. **Keep AdamW for fine-tuning unless you have a Muon-pretrained base and a reason.** [Transformers module 13](../transformers/13-training-considerations.md#135-optimizers-and-muon) covers Muon's role in pretraining.
 
 | Optimizer | State bytes per trainable param | Notes | When to use in fine-tuning |
@@ -382,7 +382,7 @@ $$
 
 **Linear decay** replaces the cosine with $1 - \frac{t - t_w}{T_{\text{tot}} - t_w}$. It is the `TrainingArguments` default (`lr_scheduler_type="linear"`). **Constant with warmup** holds $\eta_{\max}$ after warmup and is common for short LoRA runs and for RL.
 
-**WSD (warmup–stable–decay)** warms up, holds $\eta_{\max}$ for most of training, and then decays to zero over the last 10 to 20% of steps, linearly or with $1 - \sqrt{\cdot}$ (Hu et al., 2024, [MiniCPM](https://arxiv.org/abs/2404.06395); Hägele et al., 2024, [arXiv 2405.18392](https://arxiv.org/abs/2405.18392)). Its practical advantage is that **you do not need to know the total step count in advance**: any checkpoint from the stable phase can be branched into a short decay, and continued training resumes from the stable phase rather than from a decayed, low-LR endpoint. That makes it a natural fit for continued pretraining (module [05](./05-supervised-fine-tuning.md)). Transformers exposes it as `lr_scheduler_type="warmup_stable_decay"` with `decay_type` in {`linear`, `cosine`, `1-sqrt`} ([`get_wsd_schedule`, v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/optimization.py#L470-L520)).
+**WSD (warmup–stable–decay)** warms up, holds $\eta_{\max}$ for most of training, and then decays to zero over the last 10 to 20% of steps, linearly or with $1 - \sqrt{\cdot}$ (Hu et al., 2024, [MiniCPM](https://arxiv.org/abs/2404.06395); Hägele et al., 2024, [arXiv 2405.18392](https://arxiv.org/abs/2405.18392)). **You do not need to know the total step count in advance**: any stable-phase checkpoint can be branched into a short decay, and continued training resumes from the stable phase rather than a decayed endpoint, which suits continued pretraining (module [05](./05-supervised-fine-tuning.md)). Transformers exposes it as `lr_scheduler_type="warmup_stable_decay"` with `decay_type` in {`linear`, `cosine`, `1-sqrt`} ([`get_wsd_schedule`, v5.19.0](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/optimization.py#L470-L520)).
 
 Worked values with $\eta_{\max} = 2\times10^{-4}$, $t_w = 10$, $T_{\text{tot}} = 100$, $\eta_{\min} = 0$: at $t = 5$, $\eta = 10^{-4}$ (half-way up the warmup); at $t = 10$, $2\times10^{-4}$; at $t = 55$ the cosine argument is $\pi/2$, so $\eta = 10^{-4}$; at $t = 100$, $\eta = 0$.
 
@@ -450,16 +450,16 @@ The roughly 10× gap between the columns is systematic: Thinking Machines' [LoRA
 The [regularisation note](../../notes/deep-learning/regularization-and-normalization.md) covers the theory. For fine-tuning:
 
 - **Weight decay**: 0 to 0.1. `TrainingArguments` defaults to 0; Unsloth recommends 0.01 to 0.1 and warns against large values. Decay is excluded from biases and norm weights automatically. For LoRA, decay pulls the adapter towards zero, which means towards the base model: it is a mild regulariser towards the starting point.
-- **Dropout**: usually 0 for LoRA. Unsloth notes that "for the short training runs common in fine-tuning, lora_dropout may be an unreliable regularizer". Pretrained checkpoints like Qwen3 and Llama 3 ship with attention dropout 0 and you should leave it there.
+- **Dropout**: usually 0 for LoRA. Unsloth notes that "for the short training runs common in fine-tuning, lora_dropout may be an unreliable regularizer".
 - **NEFTune** (Jain et al., 2023, [arXiv 2310.05914](https://arxiv.org/abs/2310.05914)) adds uniform noise to the input embeddings during training only:
 
 $$
 \tilde{X}_{\text{emb}} = X_{\text{emb}} + \frac{\alpha}{\sqrt{T\,d}}\,\epsilon, \qquad \epsilon \sim \mathcal{U}(-1, 1)^{T \times d},
 $$
 
-with $T$ the sequence length (the paper writes $L$) and $d$ the embedding width. The $1/\sqrt{Td}$ scaling keeps the expected noise norm constant as length and width change. The paper reports large gains on length-unadjusted AlpacaEval (29.79% → 64.69% for LLaMA-2-7B on Alpaca), partly from longer answers; see module [09](./09-evaluating-fine-tuned-models.md). Enable it with `neftune_noise_alpha=5` (the paper's typical values are 5 to 15).
+with $T$ the sequence length (the paper writes $L$) and $d$ the embedding width. The $1/\sqrt{Td}$ scaling keeps the noise norm constant across lengths and widths. The paper reports large gains on length-unadjusted AlpacaEval (29.79% → 64.69% for LLaMA-2-7B on Alpaca), partly from longer answers; see module [09](./09-evaluating-fine-tuned-models.md). Enable it with `neftune_noise_alpha=5` (the paper's typical values are 5 to 15).
 - **Early stopping** on eval loss: set `eval_strategy="steps"`, `load_best_model_at_end=True`, `metric_for_best_model="eval_loss"` and add `EarlyStoppingCallback`. The save and eval strategies must match.
-- **Epochs**: **1 to 3 for SFT.** Unsloth: "training for more than 3 epochs offers diminishing returns and increases the risk of overfitting". Note that `SFTConfig` defaults `num_train_epochs=3.0`, the top of that range. "More epochs help small datasets" is the misconception: on 500 examples, epoch 5 teaches the model the exact phrasing of 500 answers, not the task. If the data is small, get more data or lower the learning rate.
+- **Epochs**: **1 to 3 for SFT.** Unsloth: "training for more than 3 epochs offers diminishing returns and increases the risk of overfitting". Note that `SFTConfig` defaults `num_train_epochs=3.0`, the top of that range. "More epochs help small datasets" is a misconception: on 500 examples, epoch 5 teaches the exact phrasing of 500 answers, not the task.
 
 ---
 
@@ -472,11 +472,11 @@ Module [02](./02-tokens-templates-and-the-causal-lm-objective.md) has the format
 1. **Autocast** chooses per-operation dtypes: matmuls run in bf16/fp16, while reductions, softmax and the loss stay in fp32.
 2. **An fp32 master copy** of the weights receives the update. This is the point of the 4 bytes in route A: an update of $10^{-4}$ to a weight of 1.0 is representable in fp32 but **rounds to zero in bf16**, where the spacing just below 1.0 is $2^{-8} \approx 0.0039$.
 3. **`GradScaler` is for fp16 only.** fp16 gradients below about $6\times10^{-8}$ underflow to zero; multiplying the loss by a scale such as $2^{16}$ lifts them into range, and the scaler unscales before the step and **skips any step whose gradients contain inf or NaN**, halving the scale. bf16 has fp32's range and needs no scaler.
-4. **TF32** (`tf32=True`, or `torch.set_float32_matmul_precision("high")`) lets Ampere and newer GPUs run fp32 matmuls with a 10-bit mantissa on tensor cores. It speeds up the fp32 parts of route B for free in practice.
+4. **TF32** (`tf32=True`, or `torch.set_float32_matmul_precision("high")`) lets Ampere and newer GPUs run fp32 matmuls with a 10-bit mantissa on tensor cores, speeding up the fp32 parts of route B.
 
 FP8 training (E4M3 forward, E5M2 gradients, per-tensor or block scaling) is module [11](./11-quantization-qat-and-fp8.md)'s subject. The [numerics page of the inference course](/courses/inference/00-foundations/00-05-numerics.html) and the [numerical methods note](../../notes/math/numerical-methods.md) cover rounding in depth.
 
-Three failure modes follow: small updates vanish without a master copy, long running sums in bf16 stop growing once half the spacing exceeds the addend (summing 1,000 × 0.01 stalls at 4.0), and fp16 overflows above 65,504 and underflows below about 6e-8. Check 3.5 makes them concrete, and adds the clipping rule from the next subsection.
+Check 3.5 makes three failure modes concrete: small updates vanish without a master copy, a bf16 running sum of 1,000 × 0.01 stalls at 4.0, and fp16 overflows above 65,504 and underflows below about 6e-8. It also checks the clipping rule from the next subsection.
 
 ```python finetuning-check
 import torch
@@ -525,7 +525,7 @@ $$
 g \leftarrow g \cdot \min\!\left(1,\ \frac{c}{\lVert g\rVert_2}\right),
 $$
 
-with the norm taken jointly over all trainable parameters and $c$ = `max_grad_norm`. `torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)` does this and returns the pre-clip norm, which Trainer logs as `grad_norm`. The logged `grad_norm` is measured *before* clipping, so a run that logs `grad_norm` values of 5 to 50 is being clipped every step: the effective learning rate is lower than the one you set.
+with the norm taken jointly over all trainable parameters. `torch.nn.utils.clip_grad_norm_` returns the pre-clip norm, which Trainer logs as `grad_norm`, so a run that logs `grad_norm` values of 5 to 50 is being clipped every step: the effective learning rate is lower than the one you set.
 
 Loss spikes in fine-tuning usually come from data, not from the optimizer: a batch of extremely long examples, a mislabelled or truncated example, a broken template that puts the whole conversation in the loss. Divergence (a spike that never recovers) usually means the learning rate is too high for the batch size.
 
@@ -559,20 +559,20 @@ $$
 \text{MFU} = \frac{6 \times 8\times10^{9} \times 3000}{989\times10^{12}} \approx 14.6\%.
 $$
 
-That is mediocre; a well-tuned fine-tuning run reaches 30 to 50% (module [20](./20-production-serving-and-cost.md) uses the same range). Three conventions to keep straight. **Checkpointing lowers MFU but not the formula**: the recomputed forward does real work ($8N$ hardware FLOPs per token, counted by HFU) but MFU still credits only $6N$, so a checkpointed run shows lower MFU at the same hardware efficiency. That is what makes MFU comparable across recipes. **LoRA does less work per token**: the base still back-propagates activation gradients ($2N$) but computes no weight gradients for frozen layers, so a LoRA step is closer to $4N$; quote MFU with $6N$ only for full fine-tuning and state the convention otherwise. **Short sequences and small batches waste the GPU**: the [roofline page](/courses/inference/00-foundations/00-04-roofline-and-arithmetic-intensity.html) explains why a matmul with few rows is memory-bound.
+That is mediocre; a well-tuned fine-tuning run reaches 30 to 50% (module [20](./20-production-serving-and-cost.md) uses the same range). **Checkpointing lowers MFU but not the formula**: the recomputed forward costs $8N$ hardware FLOPs per token (counted by HFU), but MFU still credits $6N$, which keeps MFU comparable across recipes. **LoRA does less work per token**: frozen layers compute activation gradients ($2N$) but no weight gradients, so a LoRA step is closer to $4N$; state the convention when you quote MFU.
 
 ### Padding waste, packing and padding-free batching
 
-If a batch pads every sequence to its longest member, the padding tokens cost full compute and train nothing. On chat data with a long-tailed length distribution, half the tokens in a batch can be padding. Two fixes, both owned by module [05](./05-supervised-fine-tuning.md):
+Padding tokens cost full compute and train nothing; on long-tailed chat data, half of a padded batch can be padding. Two fixes, both owned by module [05](./05-supervised-fine-tuning.md):
 
 - **Packing** concatenates examples into fixed-length rows (`packing=True`, best-fit-decreasing by default). With the default `bfd` strategy, packing turns `padding_free` on automatically ([SFTConfig](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)), so it inherits the same FlashAttention requirement.
 - **Padding-free batching** flattens the batch into one sequence with per-example position ids and no padding at all (`padding_free=True`).
 
-Both need attention that respects example boundaries. **In TRL that means FlashAttention-2 or 3**, whose variable-length kernels take cumulative sequence lengths and attend only within each segment without building any mask (other backends fall back to a dense block-diagonal mask; see module [02](./02-tokens-templates-and-the-causal-lm-objective.md)). SDPA can express a block-diagonal mask only by materialising a $T \times T$ mask, which costs quadratic memory and usually forces it off its fused kernels. TRL states that padding-free "is only supported with the FlashAttention 2 or 3" ([SFTConfig](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)) and warns of batch contamination otherwise. Load the model with `attn_implementation="flash_attention_2"` or a Hub kernel such as `"kernels-community/flash-attn2"`.
+**In TRL, padding-free and `bfd` packing need FlashAttention-2/3 varlen kernels** (load with `attn_implementation="flash_attention_2"`); SDPA would have to materialise a $T \times T$ block-diagonal mask (module [05](./05-supervised-fine-tuning.md)).
 
 ### torch.compile and fused kernels
 
-`torch_compile=True` in `TrainingArguments` wraps the model in `torch.compile`, which fuses elementwise operations and removes Python overhead. **It pays off on long runs with static shapes**: the first steps are slow while it compiles, and every new sequence length triggers a recompile unless shapes are padded to a few buckets (`pad_to_multiple_of`) or packing fixes them. For a 200-step LoRA experiment, compile time can exceed the saving. The [PyTorch note](../../notes/libraries/pytorch.md) covers the basics, and the [inference course page on torch.compile](/courses/inference/08-compilation-and-runtime/08-02-torch-compile.html) explains graphs, guards and recompiles.
+`torch_compile=True` in `TrainingArguments` wraps the model in `torch.compile`, which fuses elementwise operations and removes Python overhead. **It pays off on long runs with static shapes**: the first steps are slow while it compiles, and every new sequence length triggers a recompile unless shapes are padded to a few buckets (`pad_to_multiple_of`) or packing fixes them. For a 200-step LoRA experiment, compile time can exceed the saving. The [inference course page on torch.compile](/courses/inference/08-compilation-and-runtime/08-02-torch-compile.html) explains graphs, guards and recompiles.
 
 Fused kernels (Liger's RMSNorm, RoPE and SwiGLU; Hub kernels via `model_init_kwargs={"use_kernels": True}`; TRL's fused LM head) cut both memory and time. Module [08](./08-frameworks-and-tooling.md) covers which framework enables what.
 
@@ -593,9 +593,9 @@ TRL's `SFTTrainer` logs, among others ([logged metrics, v1.15.0](https://hugging
 
 Set `eval_strategy="steps"` with a held-out split, or you are reading half a picture.
 
-**Overfitting signals**: eval loss turning up while train loss keeps falling; train loss falling below about 0.2 on instruction data (Unsloth: "If your training loss drops below 0.2, your model is likely overfitting"); entropy collapsing; generations reproducing training answers verbatim.
+**Overfitting**: besides eval loss turning up, watch for train loss below about 0.2 on instruction data (Unsloth: "If your training loss drops below 0.2, your model is likely overfitting"), collapsing entropy and verbatim training answers.
 
-**Underfitting and data bugs**: a loss that starts and stays near $\ln V$ ($\ln 151{,}936 \approx 11.9$ for Qwen3) means the model is predicting uniformly, which for a pretrained model indicates broken labels, a wrong tokenizer, or freshly initialised embeddings. A loss that is suspiciously low from step 1 usually means the prompt or the chat template is in the loss: the model is being graded on predicting boilerplate it already knows. **Lower training loss is not a better model**; module [09](./09-evaluating-fine-tuned-models.md) explains how to evaluate.
+**Data bugs**: a loss that stays near $\ln V$ ($\ln 151{,}936 \approx 11.9$ for Qwen3) means uniform predictions, which for a pretrained model points to broken labels, a wrong tokenizer or freshly initialised embeddings. **Lower training loss is not a better model**; module [09](./09-evaluating-fine-tuned-models.md) explains how to evaluate.
 
 | Curve shape | Diagnosis | Action |
 |---|---|---|
@@ -638,7 +638,7 @@ args = SFTConfig(
 
 ### Checkpoints and resuming
 
-A Trainer checkpoint directory holds the model (or adapter) weights, `optimizer.pt`, `scheduler.pt`, the RNG states and `trainer_state.json`. **Resuming is more than loading weights**: without the optimizer moments and the scheduler position, the first steps after a restart are a fresh AdamW warmup at the wrong learning rate. `trainer.train(resume_from_checkpoint=True)` picks up the latest checkpoint in `output_dir` and restores model, optimizer and scheduler state.
+A Trainer checkpoint directory holds the model (or adapter) weights, `optimizer.pt`, `scheduler.pt`, the RNG states and `trainer_state.json`. **Resuming is more than loading weights**: without the optimizer moments and scheduler position, a restart is a fresh AdamW warmup at the wrong learning rate. `trainer.train(resume_from_checkpoint=True)` restores all of it from the latest checkpoint in `output_dir`.
 
 | Argument | Effect | Watch out |
 |---|---|---|
@@ -647,15 +647,15 @@ A Trainer checkpoint directory holds the model (or adapter) weights, `optimizer.
 | `save_only_model=True` | weights only, no optimizer/scheduler/RNG | **cannot resume** from it |
 | `hub_strategy` | `"end"`, `"every_save"` (default, async), `"checkpoint"` (also pushes `last-checkpoint` for resuming elsewhere), `"all_checkpoints"` | pushing full-FT checkpoints every save is slow and costly |
 
-For LoRA, checkpoints are small (the adapter plus its optimizer state, under 1 GB for 8B at $r = 16$), so saving often is cheap. Module [20](./20-production-serving-and-cost.md) covers versioning and promotion of the pushed artefacts.
+LoRA checkpoints are under 1 GB for 8B at $r = 16$, so saving often is cheap. Module [20](./20-production-serving-and-cost.md) covers versioning the pushed artefacts.
 
 ### Reproducibility
 
-`seed` (default 42) seeds Python, NumPy and torch, including model init for new heads. `data_seed` seeds the data sampler independently, so you can vary initialisation while holding data order fixed, or the reverse. `full_determinism=True` calls `enable_full_determinism()`, which turns on `torch.use_deterministic_algorithms` and the cuBLAS workspace setting; the docs warn it "will negatively impact the performance". Some kernels (FlashAttention backward, CUDA `scatter_add`/`index_add`) stay non-deterministic unless run in a deterministic mode. **What you can expect**: same hardware, same software versions, same world size and `full_determinism=True` gives bitwise-identical runs. Change the GPU model, the library version or the number of GPUs and you get a statistically equivalent run, not an identical one. Report seeds, and report the spread across 2 or 3 seeds for any claim that a change helped.
+`seed` (default 42) seeds Python, NumPy and torch; `data_seed` seeds the data sampler independently. `full_determinism=True` turns on `torch.use_deterministic_algorithms` and the cuBLAS workspace setting at a speed cost; FlashAttention backward and CUDA `scatter_add` stay non-deterministic otherwise. **What you can expect**: same hardware, same software versions, same world size and `full_determinism=True` gives bitwise-identical runs. Change the GPU model, the library version or the number of GPUs and you get a statistically equivalent run, not an identical one. Report seeds, and report the spread across 2 or 3 seeds for any claim that a change helped.
 
 ### Experiment tracking
 
-`report_to` defaults to `"none"`. Supported values include `"wandb"`, `"tensorboard"`, `"mlflow"` and `"trackio"`, Hugging Face's lightweight tracker that logs locally or to a Space (`trackio_space_id`) ([Trainer docs, v5.19.0](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer)). Whatever you use: log every 10 steps or so for runs under a few thousand steps; log eval on a schedule, not only at the end; and record the full config, the dataset revision and the git SHA of your training code with every run.
+`report_to` defaults to `"none"`; set it to `"wandb"`, `"tensorboard"`, `"mlflow"` or `"trackio"` ([Trainer docs, v5.19.0](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer)). Log every 10 steps or so, run eval on a schedule, and record the full config, the dataset revision and the git SHA of your training code with every run.
 
 ---
 
@@ -690,27 +690,27 @@ python content/courses/finetuning/code/throughput_ablation.py --full --lr-sweep 
 ```
 
 - **Smoke (CPU)**: a 2-layer toy decoder, timed with and without `torch.utils.checkpoint`; asserts identical loss and gradients. Checkpointing changes memory and time, never the maths.
-- **L3.2 (T1)**: `Qwen/Qwen3-1.7B` SFT on [`trl-lib/Capybara`](https://huggingface.co/datasets/trl-lib/Capybara) for 60 steps under four configurations: (a) no checkpointing, (b) checkpointing, (c) packing with FlashAttention-2, (d) Hub kernels via `use_kernels`. Record peak VRAM and non-padding tokens/s for each, and compute MFU with the LoRA-vs-full caveat from 3.7.
+- **L3.2 (T1)**: `Qwen/Qwen3-1.7B` SFT on [`trl-lib/Capybara`](https://huggingface.co/datasets/trl-lib/Capybara/tree/e235e846458bff3398a88aed812347f7f0756520) for 60 steps under four configurations: (a) no checkpointing, (b) checkpointing, (c) packing with FlashAttention-2, (d) Hub kernels via `use_kernels`. Record peak VRAM and non-padding tokens/s for each, and compute MFU with the LoRA-vs-full caveat from 3.7.
 - **L3.3 (T1)**: LoRA ($r = 16$, all-linear) at learning rates {2e-5, 5e-5, 1e-4, 2e-4, 5e-4} for 200 steps each, plotting final eval loss against LR. On a T2 card drop `--skip-full-ft` to add full fine-tuning at {5e-6, 1e-5, 2e-5}.
 
-**Expected qualitative outcome**: (a) runs out of memory or is the fastest at the highest VRAM; (b) cuts VRAM sharply for a 20 to 35% slowdown; (c) recovers the most throughput on Capybara's mixed lengths; (d) helps modestly. In the sweep, the LoRA curve is U-shaped with its minimum near 1e-4 to 2e-4, about an order of magnitude above the full fine-tuning optimum. Do not expect exact numbers; record your GPU, driver and library versions next to every result.
+**Expected qualitative outcome**: (a) runs out of memory or is the fastest at the highest VRAM; (b) cuts VRAM sharply for a 20 to 35% slowdown; (c) recovers the most throughput on Capybara's mixed lengths; (d) helps modestly. The LoRA sweep is U-shaped with its minimum near 1e-4 to 2e-4, about 10× the full fine-tuning optimum. Record your GPU, driver and library versions next to every result.
 
 ## Key takeaways
 
-- **Full fine-tuning with AdamW costs 16 bytes per parameter before activations** (18 with an fp32 accumulation buffer): 128 GB for 8B, 112 GB for 7B. Both the master-copy and native-autocast routes reach 16.
-- **LoRA and QLoRA move the memory from the optimizer to the frozen base and the activations.** Adapter state for 8B at $r = 16$ is 0.67 GB; the base is 16 GB in bf16 or 4.13 GB in NF4.
-- **Published minimum VRAM sits above the static estimate** because of activations, logits, overhead and 16-bit embeddings in "4-bit" models. Treat estimates as floors.
-- **Activations are linear in $B \cdot T$ with FlashAttention and quadratic without it.** Checkpointing cuts them by an order of magnitude for about 33% more step time.
-- **At long context the logits are the largest single tensor**: 4.98 GB in fp32 for one 8k Qwen3 sequence. Chunked or fused cross-entropy is exact and removes it.
-- **Gradient accumulation equals a big batch only if you divide by the global trained-token count.** Averaging per-micro-batch means over-weights short examples; `average_tokens_across_devices=True` fixes the cross-rank version.
-- **AdamW (fused) stays the fine-tuning default.** 8-bit and paged variants matter for full fine-tuning; Muon's 2× is a pretraining result, and switching optimizers on an AdamW-pretrained model is reported to hurt.
-- **The peak learning rate matters more than the schedule shape.** Start at 2e-5 for full SFT, 2e-4 for LoRA, 1e-6 for full DPO/GRPO; LoRA wants about 10× the full-FT rate.
-- **WSD lets you decide the training length late** and resume from the stable phase, which suits continued training.
-- **One to three epochs for SFT**; train loss under ~0.2 on instruction data is an overfitting alarm, not a success.
-- **bf16 without an fp32 master copy silently drops small updates**; fp16 needs a GradScaler; `grad_norm` is logged before clipping.
-- **MFU uses $6N$ FLOPs per token for full fine-tuning**; 3,000 tokens/s for 8B on an H100 is 14.6%, and LoRA does less work per token.
-- **In TRL, padding-free batching (and `bfd` packing) needs FlashAttention-2/3 varlen kernels**; `torch.compile` pays off only with long runs and stable shapes.
-- **A resumable checkpoint includes optimizer, scheduler and RNG state**; `save_only_model` checkpoints cannot resume, and determinism holds only on identical hardware and software.
+- **Full fine-tuning with AdamW costs 16 bytes per parameter before activations**, by either the master-copy or the native-autocast route.
+- **LoRA and QLoRA move the memory from the optimizer to the frozen base and the activations**, because adapter state is under 1 GB.
+- **Published minimum VRAM sits above the static estimate**, so treat every estimate as a floor.
+- **Activations are linear in $B \cdot T$ with FlashAttention and quadratic without it**, and checkpointing cuts them by an order of magnitude for about a third more step time.
+- **At long context the logits are the largest single tensor**, and chunked or fused cross-entropy removes them exactly.
+- **Gradient accumulation equals a big batch only if you divide by the global trained-token count.**
+- **AdamW (fused) stays the fine-tuning default**, since Muon's gains are a pretraining result.
+- **The peak learning rate matters more than the schedule shape**, and LoRA wants about 10× the full-FT rate.
+- **WSD lets you decide the training length late.**
+- **One to three epochs for SFT**, and train loss under ~0.2 is an overfitting alarm.
+- **bf16 without an fp32 master copy silently drops small updates.**
+- **Quote MFU with $6N$ FLOPs per token only for full fine-tuning.**
+- **In TRL, padding-free batching needs FlashAttention-2/3.**
+- **A resumable checkpoint includes optimizer, scheduler and RNG state.**
 
 ## Self-check
 
@@ -720,4 +720,4 @@ python content/courses/finetuning/code/throughput_ablation.py --full --lr-sweep 
 
 ---
 
-**Next → [04 — Data: Formats, Curation, Synthesis, and Decontamination](./04-data-curation-and-synthesis.md)**
+**Next → [04 — Data Curation and Synthesis: Formats, Dedup, Decontamination, and Synthesis](./04-data-curation-and-synthesis.md)**

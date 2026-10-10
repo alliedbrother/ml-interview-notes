@@ -88,8 +88,12 @@ before you copy a hyperparameter from an old tutorial.**
 | `loss_type` | `"nll"` (also `"dft"`) | n/a | `"chunked_nll"` is a deprecated alias of `"nll"` |
 | model dtype (string `model`) | float32 unless `model_init_kwargs["dtype"]` | n/a | a 4B model in fp32 is 16 GB of weights alone |
 
-Sources: [`sft_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L128-L134)
-and [`base_config.py`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/base_config.py#L55-L75).
+Sources: [`sft_config.py` L68-L112](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L68-L112) (the docstring for `max_length` through `loss_type`),
+[L128-L134](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L128-L134) (the overridden `TrainingArguments` defaults),
+[`base_config.py` L55-L75](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/base_config.py#L55-L75),
+[`sft_trainer.py` L535-L537](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L535-L537) (float32),
+[L885](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_trainer.py#L885) (padding-free under `bfd` and `bfd_split`)
+and [`loss_type`](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L279-L309).
 `truncation_mode="keep_end"`, `pad_token=` and `compute_loss_func=` are deprecated (gone in TRL v2.0).
 
 ### Dataset formats SFTTrainer accepts
@@ -187,7 +191,7 @@ and never applies to language-modelling data. Set it to `False` to ablate (lab L
 
 For conversational data TRL calls `apply_chat_template(..., return_assistant_tokens_mask=True)`.
 The mask "is only available for chat templates that support it via the
-`{% generation %}` keyword" ([docstring](https://github.com/huggingface/transformers/blob/v5.19.0/src/transformers/tokenization_utils_base.py#L3065-L3068)).
+`{% generation %}` keyword" ([docstring](https://github.com/huggingface/transformers/blob/c4c4605f961877852b89b97478536bb3a26b6fd1/src/transformers/tokenization_utils_base.py#L3065-L3068)).
 A minimal ChatML template with the markers:
 
 ```jinja
@@ -659,7 +663,7 @@ model = get_peft_model(model, cfg)                             # LoRA body, full
 
 The model pools the last non-pad token, found via `pad_token_id`; Qwen3's config EOS
 (`<|im_end|>`) is not the id its tokenizer pads with, so copying EOS would pool padding.
-PEFT 0.21.2 adds `score` to `modules_to_save` itself ([source](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/peft_model.py#L1827-L1836)).
+PEFT 0.21.2 adds `score` to `modules_to_save` itself ([source](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/peft_model.py#L1827-L1836)).
 **A head beats generative SFT** for a fixed label set: one forward pass, calibrated
 scores, no parse failures. Generative SFT wins for structured outputs (the running task's
 JSON has free-text fields) or changing labels. The broader classification ladder is in the
@@ -760,11 +764,15 @@ python content/courses/finetuning/code/sft_lab.py --full --task task --full-sequ
 Record the four metrics and wall-clock time per run. Expect SFT to beat the prompting
 baseline on all-fields EM, packing to cut wall time with little metric change, and
 full-sequence loss to be no better (often slightly worse) on this prompt-heavy task.
+These are T1 expectations; the course has not run this lab on a GPU, and the CPU smoke
+path checks only masking, packing and the scorer. A win on the 50-row eval is a
+held-out-template result on synthetic data ([module 01, section 1.7](./01-when-to-fine-tune.md)):
+it shows the pipeline learned the format, not real-world accuracy.
 
 ### L5.3 Continued pretraining then SFT (T1/T2)
 
 `Qwen/Qwen3-1.7B-Base`, CPT on public-domain US case law
-([`common-pile/caselaw_access_project_filtered`](https://huggingface.co/datasets/common-pile/caselaw_access_project_filtered))
+([`common-pile/caselaw_access_project_filtered`](https://huggingface.co/datasets/common-pile/caselaw_access_project_filtered/tree/50e1961a5ed8fdddcee64c9e66e1338de8953b63))
 mixed 80:20 with `HuggingFaceFW/fineweb-edu`, LoRA r=128 plus embeddings at a 10x smaller
 LR, `bfd_split` packing. Then a short SFT with `sft_lab.py`, and an MMLU-Pro subset with
 `lm_eval` before and after (module 09 explains the harness and error bars).

@@ -91,11 +91,11 @@ report calls **thinking mode fusion**: continued SFT on a mix of thinking and
 non-thinking data under one chat template, so a single checkpoint does both
 ([Qwen Team, 2025, arXiv 2505.09388](https://arxiv.org/html/2505.09388v1)). At
 inference you choose. In Hugging Face Transformers, the
-[Qwen3-0.6B model card](https://huggingface.co/Qwen/Qwen3-0.6B) documents
+[Qwen3-0.6B model card](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md) documents
 `apply_chat_template(..., enable_thinking=False)` as a hard switch (default
-`True`), plus `/think` and `/no_think` soft switches inside user messages that only
-work while thinking is enabled. The July 2025 `-2507` refresh split the line
-again: the [Qwen3-4B-Instruct-2507 card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
+`True`), plus `/think` and `/no_think` soft switches in user or system messages that only
+work while thinking is enabled. The `-2507` refresh (July–August 2025) split the line
+again: the [Qwen3-4B-Instruct-2507 card](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/README.md)
 states that it "supports only non-thinking mode", and `enable_thinking=False` is no
 longer required.
 
@@ -381,11 +381,12 @@ flagships: a **long chain-of-thought cold start** (SFT on verified problems),
 
 ### DeepSeek-R1 (2025): pure RL, then a multi-stage repair
 
-[DeepSeek-AI (2025)](https://huggingface.co/papers/2501.12948) trained **R1-Zero** with
+[DeepSeek-AI (2025)](https://arxiv.org/abs/2501.12948v2) trained **R1-Zero** with
 GRPO directly on the base, with rule-based accuracy and format rewards and no SFT; AIME
-2024 pass@1 rose from 15.6% to 77.9%. Its outputs mixed languages, so **R1** adds a
-cold-start SFT, reasoning RL, about 800k rejection-sampled SFT samples and a final RL
-stage. Those 800k samples also distilled six dense students, 1.5B to 70B ([module 13](./13-rl-with-verifiable-rewards.md)).
+2024 pass@1 rose from 15.6% to 77.9% (v2 of the paper; v1 reported 71.0%). Its outputs
+mixed languages, so **R1** adds a cold-start SFT, reasoning RL, about 800k SFT samples
+(≈600k rejection-sampled reasoning traces plus ≈200k non-reasoning samples from the
+DeepSeek-V3 pipeline) and a final RL stage. Those 800k samples also distilled six dense students, 1.5B to 70B ([module 13](./13-rl-with-verifiable-rewards.md)).
 
 **Table 2: the five recipes**
 
@@ -395,7 +396,7 @@ stage. Those 800k samples also distilled six dense students, 1.5B to 70B ([modul
 | Llama 3 ([2407.21783](https://arxiv.org/abs/2407.21783)) | human prompts with rejection-sampled responses, targeted synthetic data, small human-curated set | RM for rejection sampling; DPO each round, six rounds | none beyond DPO; PPO explored and rejected | flagship model used to improve 8B/70B post-training | weights under the Llama licence; data and code not released | 04, 12 |
 | Tulu 3 ([2411.15124](https://huggingface.co/papers/2411.15124)) | public instruction data plus persona-driven synthetic data | length-normalised DPO on on-policy pairs | RLVR: PPO, binary verifiable reward (math, constraints) | no | yes: data, code, eval, checkpoints | 05, 12, 13 |
 | Qwen3 ([2505.09388](https://arxiv.org/html/2505.09388v1)) | verified long-CoT problems (cold start); mixed thinking and non-thinking data (fusion) | inside general RL via reward-model rewards | GRPO with verifiers (stage 2); rule, reference and RM rewards (stage 4) | strong-to-weak, off- then on-policy, for 0.6B–14B and 30B-A3B | weights Apache-2.0; data not released | 13, 14 |
-| DeepSeek-R1 ([2501.12948](https://huggingface.co/papers/2501.12948)) | cold-start long-CoT; ~800k rejection-sampled samples | preference rewards in the final RL stage | GRPO; rule-based accuracy and format rewards (R1-Zero: RL only) | SFT of six Qwen/Llama students on the 800k samples | weights released; training data not released | 13, 14 |
+| DeepSeek-R1 ([2501.12948](https://huggingface.co/papers/2501.12948)) | cold-start long-CoT; ~800k SFT samples (~600k rejection-sampled reasoning, ~200k non-reasoning) | preference rewards in the final RL stage | GRPO; rule-based accuracy and format rewards (R1-Zero: RL only) | SFT of six Qwen/Llama students on the 800k samples | weights released; training data not released | 13, 14 |
 
 **What the five have in common.** SFT comes first (R1-Zero is the instructive
 exception, and R1 added SFT back). A preference or RL stage follows, and the
@@ -432,8 +433,8 @@ checklist is more specific.
 | Base vs instruct availability | is the base checkpoint released, or only the instruct one | the model collection on the Hub |
 
 The running example uses **Qwen3** because it scores well on every row: Apache-2.0
-weights (as stated on the [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) and
-[Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) cards), separate base and
+weights (as stated on the [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B/blob/c1899de289a04d12100db370d81485cdf75e47ca/README.md) and
+[Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/README.md) cards), separate base and
 post-trained checkpoints, a documented thinking switch, and first-class support in
 every framework the course uses.
 
@@ -670,10 +671,11 @@ writes `train.jsonl` (200 rows) and `eval.jsonl` (50 rows, 10 per issue type) un
 **The eval split is built only from held-out templates**: its body sentences,
 greetings, refund and tone phrases and sign-offs never occur in train, and it adds
 three order-ID forms (`ORD13303`, `ord-13303`, `order no. 13303`) that train lacks. So
-the eval set measures whether a method generalises from train phrasing to unseen
-phrasing, not whether it memorised the templates. It is still synthetic: it tests
-your pipeline (template, decoding, parsing) and that generalisation, not real-world
-traffic, and a regex written after reading the eval set could saturate it. This
+a high eval score cannot come from memorising the train templates. The eval set is
+still a held-out-template split of a synthetic 200/50 set with only two body templates
+per issue type. It checks pipeline correctness (template, decoding, parsing) and
+transfer to phrasing the train templates never use. It does not measure generalisation
+or real-world accuracy, and a regex written after reading the eval set could saturate it. This
 breaks rule 1 of section 1.3 on purpose (a free, shareable, deterministic set); on a
 real project, sample the 50 from production traffic. Open `ft_data/eval.jsonl` and
 read five emails next to their gold JSON: would a careful human agree with each label?
@@ -717,8 +719,10 @@ match for zero-shot and 5-shot on both models.
 
 **Expected outcome.** 5-shot should improve parse rate where zero-shot is below
 ceiling, and the enum fields (`issue_type`, `sentiment`), because the examples show
-the exact output shape. All-fields exact match should stay well below what SFT
-reaches in [module 05](./05-supervised-fine-tuning.md): the refund-vs-issue
+the exact output shape. All-fields exact match should stay below what SFT
+reaches in [module 05](./05-supervised-fine-tuning.md) (a T1 expectation; no GPU run of
+either lab has been recorded, and on this synthetic set the gap shows the pipeline learns
+the target format, not real-world accuracy). The refund-vs-issue
 distinction and consistent ID normalisation are behaviours that a prompt describes
 and training fixes. Do not expect specific numbers; they depend on the template
 version and decoding details.

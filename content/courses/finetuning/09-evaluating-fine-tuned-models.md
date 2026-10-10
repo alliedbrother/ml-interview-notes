@@ -51,7 +51,8 @@ already scores 0.92 schema validity, a fine-tune that reaches 0.94 has to justif
 ### Golden sets
 
 A golden set is a small, frozen, carefully labelled set of inputs with known-correct outputs. The
-course's running task uses 50 support emails. Four rules:
+course's running task uses 50 synthetic support emails built from held-out templates (module 01):
+fine for checking a pipeline, not a substitute for a set sampled from real traffic. Four rules:
 
 - **Size sets your noise floor.** At n = 50 a 95% interval on 0.8 accuracy is about ±11 points
   (9.7): enough to see 0.6 to 0.9, not 0.80 to 0.83.

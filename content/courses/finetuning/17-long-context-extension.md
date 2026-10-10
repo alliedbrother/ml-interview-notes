@@ -345,8 +345,8 @@ TRL's fused LM-head loss is on by default for SFT, DPO, KTO, GRPO, RLOO and Dist
 as of v1.15 (the guide uses 256-row chunks; module 03 has the mechanics); on Qwen3-4B it
 moves the single-GPU limit from 32k to 160k tokens. The guide's advice to set
 `loss_type="nll"` to opt out predates v1.15: in v1.15.0, `nll` *is* the fused path, and
-`chunked_nll` is a deprecated alias
-([sft_config.py](https://github.com/huggingface/trl/blob/v1.15.0/trl/trainer/sft_config.py#L279-L309)).
+`chunked_nll` is a deprecated alias; no `loss_type` value turns the fused head off
+([sft_config.py](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/sft_config.py#L279-L309)).
 
 ### Checkpointed activations and offloading
 
@@ -453,8 +453,9 @@ $$
 \quad \text{for Qwen3-8B,}
 $$
 
-so with aggressive GQA Ring moves fewer bytes at small $P$, the two tie at $P = 5$,
-and Ulysses moves less from $P = 6$ upward. Volume is not the whole story: Ulysses is
+so with aggressive GQA Ring moves fewer bytes at small $P$: the formula ties at $P = 5$,
+but of the degrees Ulysses can actually use on Qwen3-8B (2, 4, 8), Ring sends less at
+2 and 4 and Ulysses sends less at 8. Volume is not the whole story: Ulysses is
 one collective that is latency-sensitive and wants fast all-to-all (NVLink), while Ring
 is $P-1$ sequential point-to-point hops that overlap with compute when they are well tuned.
 
@@ -523,7 +524,11 @@ ring = lambda P_: (P_ - 1) * 2 * (T_long / P_) * H_kv * d_head * 2
 assert round(uly(8) / GB, 3) == 0.294 and round(ring(8) / GB, 3) == 0.470
 for P_ in range(2, 33):
     assert math.isclose(uly(P_) / ring(P_), 5 / P_, rel_tol=1e-12)
-assert uly(4) > ring(4) and math.isclose(uly(5), ring(5)) and uly(6) < ring(6)
+assert math.isclose(uly(5), ring(5))      # the formula ties at P = 5, not a usable degree
+# Ulysses degrees on Qwen3-8B: P divides the 32 query heads and P <= H_kv = 8
+usable = [P_ for P_ in range(2, H_kv + 1) if 32 % P_ == 0]
+assert usable == [2, 4, 8]
+assert uly(2) > ring(2) and uly(4) > ring(4) and uly(8) < ring(8)
 
 # Qwen3-1.7B (tied embeddings): the embedding matrix is ~18% of the model
 V17, d17, dff17, L17, H17, Hkv17 = 151_936, 2048, 6144, 28, 16, 8

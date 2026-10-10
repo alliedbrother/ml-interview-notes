@@ -62,7 +62,8 @@ N_EVAL_SMOKE, N_TRAIN_SMOKE = 20, 40
 
 # ---------------------------------------------------------------- data generation
 # Every surface component has a train pool and a disjoint eval pool, so the eval set
-# tests generalisation to unseen phrasing rather than recall of the train templates.
+# tests transfer to phrasing absent from the train templates (two templates per issue
+# type; synthetic), not recall of them.
 
 FIRST = ["Maya", "Liam", "Priya", "Jonas", "Aiko", "Diego", "Fatima", "Noah",
          "Elena", "Kwame", "Sofia", "Ravi", "Hannah", "Mateo", "Leila", "Owen"]
