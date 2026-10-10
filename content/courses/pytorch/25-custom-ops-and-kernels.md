@@ -62,6 +62,8 @@ The schema is inferred from annotations. Locally, `torch.library.infer_schema` o
 | `register_autograd` | output still `requires_grad=True` | compiled forward runs | `backward()` raises "no autograd formula was registered" |
 | `mutates_args` on a mutating op | appears to work | functionalization assumes the input unchanged | `opcheck` `test_schema`: "Argument x is not defined as mutable but was mutated" |
 
+The undeclared-mutation row is the dangerous one, because nothing errors. Locally, an op `bump(x)` that runs `x.add_(1)` but is declared `mutates_args=()` sat between two copies of `x * 2` in `f(x) = (x * 2, bump(x), x * 2)`. Eager, `aot_eager` and `aot_eager_decomp_partition` all returned `0` then `2` on `x = zeros(3)`. Running a standard common-subexpression pass (`torch.fx.passes.dialect.common.cse_pass.CSEPass`) on the AOT forward graph, legal because the graph claims to be functional, merged the two products and returned `0` for both. Inductor's fusion and reordering rely on the same assumption.
+
 In 2.8, redefining a `custom_op` with an existing name replaces it (`get_library_allowing_overwrite` destroys the old fragment), while a second `Library("ns", "DEF")` raises "Only a single TORCH_LIBRARY can be used to register the namespace". Each fence and lab here still uses its own namespace (`pytc_m25_fK`, `pytc_lab25`) so none silently replaces another's op.
 
 ## 25.3 Testing ops: opcheck
@@ -165,7 +167,7 @@ The [v3.4.0 tutorials](https://github.com/triton-lang/triton/tree/v3.4.0/python/
 
 ### 02 Fused softmax
 
-[Source](https://github.com/triton-lang/triton/blob/v3.4.0/python/tutorials/02-fused-softmax.py). Eager softmax on $M\times N$ reads $5MN + 2M$ elements and writes $3MN + 2M$; the fused kernel reads and writes $MN$ each, about 4× less traffic. A program loads a row with `BLOCK_SIZE = triton.next_power_of_2(n_cols)`, reduces in registers, stores once. In v3.4.0 it is persistent: `NUM_SM × occupancy` programs loop over rows with stride `tl.num_programs(0)`. A row must fit in one block; long rows spill, which online softmax (25.8) fixes.
+[Source](https://github.com/triton-lang/triton/blob/v3.4.0/python/tutorials/02-fused-softmax.py). Eager softmax on $M\times N$ reads $5MN + 2M$ elements and writes $3MN + 2M$; the fused kernel reads and writes $MN$ each, about 4× less traffic. A program loads a row with `BLOCK_SIZE = triton.next_power_of_2(n_cols)`, reduces in registers, stores once. In v3.4.0 it is persistent: `NUM_SM × occupancy` programs loop over rows with stride `tl.num_programs(0)`. A row must fit in one block, i.e. in one program's registers and shared memory; long rows spill or fail to compile, which online softmax (25.8) fixes by streaming the row in fixed-size blocks.
 
 ### 03 Matrix multiplication
 

@@ -34,7 +34,7 @@ Code locations: `torch/_dynamo` (`eval_frame.py` hook, `symbolic_convert.py` byt
 
 FX represents a program as a `Graph`, a linked list of `Node`s in topological order, owned by a `GraphModule` whose `forward` is Python generated from the graph. Reed et al. ([torch.fx, MLSys 2022](https://arxiv.org/abs/2112.08429)) chose a small, Python-shaped IR: six opcodes, Python callables as targets, readable codegen. Tracing `y = self.lin(x); return y * torch.sigmoid(y) + self.lin.bias.sum()` with `torch.fx.symbolic_trace` printed this locally:
 
-```python
+```text
 graph():
     %x : [num_users=1] = placeholder[target=x]
     %lin : [num_users=2] = call_module[target=lin](args = (%x,), kwargs = {})
@@ -102,7 +102,7 @@ def g(x, n):
 
 **Guards** record what translation assumed. `TORCH_LOGS="guards"` on `torch.compile(lambda x, n: (x * n).relu(), backend="eager")` printed (trimmed):
 
-```python
+```text
 TREE_GUARD_MANAGER:
 +- RootGuardManager
 | | +- EQUALS_MATCH: L['n'] == 2
@@ -148,7 +148,7 @@ Dynamo's graph is a torch-level forward; compilers want forward and backward in 
 
 **1. Trace the joint graph.** It builds `joint(primals, tangents)`, which runs the forward and then `torch.autograd.grad`, and traces it with `make_fx` under `FakeTensorMode`. `make_fx` is a `__torch_dispatch__` tracer ([module 20](./20-execution-model-dispatch-devices.md)), so it records aten overloads below autograd, backward kernels included. `make_fx(lambda x: F.gelu(x).sum())(x)` records exactly `aten.gelu.default` and `aten.sum.default`.
 
-**2. Functionalize.** In-place ops and views make meaning depend on aliasing, which every pass would otherwise have to reason about. Functionalization ([`torch.func.functionalize`](./09-torch-func-transforms.md)) rewrites `y.add_(1)` into `add(y, 1)` and views into view-replay. Mutations of *graph inputs* become extra outputs that a runtime epilogue copies back. In the lab's train-mode forward graph, `num_batches_tracked += 1` became `aten.add.Tensor(primals_4, 1)` and BN became `_native_batch_norm_legit_functional` returning new running stats; those tensors lead the output tuple. Fence 4 proves the core claim.
+**2. Functionalize.** In-place ops and views make meaning depend on aliasing, which every pass would otherwise have to reason about. Functionalization ([`torch.func.functionalize`](./09-torch-func-transforms.md)) rewrites `y.add_(1)` into `add(y, 1)` and views into view-replay. Mutations of *graph inputs* become extra outputs that a runtime epilogue copies back. In the lab's train-mode forward graph, `num_batches_tracked += 1` became `aten.add.Tensor(primals_4, 1)` and BN became `_native_batch_norm_legit_functional` returning new running stats; those tensors lead the output tuple. The flip side: functionalization trusts schemas. An opaque custom op that mutates its input without declaring it is treated as pure, so later passes may reorder or deduplicate reads around it ([module 25](./25-custom-ops-and-kernels.md) shows a measured case). Fence 4 proves the core claim.
 
 **3. Decompose.** A decomposition table maps ops to simpler ones; `core_aten_decompositions()` held about 1,000 entries locally. Passing it to `aot_autograd` turned `gelu_backward` into `mul`/`erf`/`exp`/`add` chains, while forward `gelu`, itself a Core ATen op, stayed intact. Inductor decomposes more aggressively than export.
 

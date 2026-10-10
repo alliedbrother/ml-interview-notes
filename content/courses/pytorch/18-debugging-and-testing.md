@@ -114,7 +114,7 @@ Two correct implementations rarely agree bit for bit, so the tolerance must foll
 
 NumPy's `allclose` uses rtol 1e-5, atol 1e-8 for every dtype: too loose for float64, far too strict for bf16. `assert_close` also checks shape, device and dtype (`check_dtype=False` relaxes it), treats NaN as unequal unless `equal_nan=True`, and takes `msg=`.
 
-Comparing two implementations: feed both the same seeded inputs; compute the reference in float64 so the error belongs to the code under test; justify the tolerance. Fence 3's bf16 matmul over $K = 64$ deviates from the oracle by up to 0.087: bf16 rounds each input by about $2^{-9}$ relative, and outputs have std near $\sqrt{64} = 8$, so `atol=0.25` leaves headroom. For custom backwards, `gradcheck` against finite differences is meaningful only in float64 ([gradcheck notes](https://docs.pytorch.org/docs/2.8/notes/gradcheck.html); module 08).
+Comparing two implementations: feed both the same seeded inputs; compute the reference in float64 so the error belongs to the code under test; justify the tolerance. Fence 3's bf16 matmul over $K = 64$ deviates from the oracle by up to 0.087: bf16 rounds each input by up to $2^{-8}$ relative (unit roundoff, half of $\varepsilon = 2^{-7}$), and outputs have std near $\sqrt{64} = 8$, so `atol=0.25` leaves headroom. For custom backwards, `gradcheck` against finite differences is meaningful only in float64 ([gradcheck notes](https://docs.pytorch.org/docs/2.8/notes/gradcheck.html); module 08).
 
 ## 18.7 Unit-testing models and training code
 
@@ -159,6 +159,8 @@ Batch invariance gets an explicit tolerance because batched and single-row matmu
 | `TORCH_SHOW_CPP_STACKTRACES=1` | a C++ stack trace when PyTorch detects a C++ error |
 | `CUDA_LAUNCH_BLOCKING=1` | synchronous CUDA calls, so async kernel errors surface at the guilty op (not executed here; [module 20](./20-execution-model-dispatch-devices.md)) |
 | `warnings.simplefilter("error")` in tests | warnings become failures |
+
+The Python form is scoped and reversible, which suits tests: `torch._logging.set_logs(graph_breaks=True, recompiles=True)` prints each graph break with its source line and each recompile with the failing guard (run locally: a `print` inside a compiled function and a shape change from 3 to 4 produced both), and `torch._logging.set_logs()` with no arguments restores the defaults. `TORCH_LOGS` is read once at import, so it suits whole runs.
 
 All are listed in the [environment variables index](https://docs.pytorch.org/docs/2.8/torch_environment_variables.html). For curves, `SummaryWriter` ([docs](https://docs.pytorch.org/docs/2.8/tensorboard.html); [recipe](https://docs.pytorch.org/tutorials/recipes/recipes/tensorboard_with_pytorch.html), living page, accessed 2026-10-10) writes event files; TensorBoard is not a CI dependency, so this is a fragment:
 

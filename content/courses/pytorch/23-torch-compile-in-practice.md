@@ -416,7 +416,7 @@ python content/courses/pytorch/code/23_compile_explorer.py --backend inductor
 | clean: graphs / breaks; outputs match | 1 / 0; `true` |
 | frames for `dynamic=False` / `None` / `True` | 6 / 2 / 1 |
 | `attr_recompiles` / `buffer_recompiles` | 1 / 0 |
-| regional: frames (ops) whole vs per-block | 1 (30) vs 2 (10) |
+| regional: frames (ops) whole vs per-block | 1 (30) vs 2 (5 each) |
 | regional: first-call time whole vs per-block | 0.41 s vs 0.15 s (not asserted) |
 | `train_max_param_diff` | `0.0` |
 | unittest time, loaded machine | 1.8–2.2 s |

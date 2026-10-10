@@ -227,11 +227,16 @@ restarts its patience. Frameworks are this pattern plus years of edge cases
 |---|---|---|---|---|
 | Precision | `autocast` + `GradScaler` (17) | `precision="bf16-mixed"` | `bf16=True` | `mixed_precision="bf16"` |
 | Accumulation | `/K`, step every K, `no_sync` | `accumulate_grad_batches` | `gradient_accumulation_steps` | `accelerator.accumulate(model)` |
-| Clipping | `clip_grad_norm_` after unscale | `gradient_clip_val` | `max_grad_norm` | `accelerator.clip_grad_norm_` |
+| Clipping | `clip_grad_norm_` after unscale | `gradient_clip_val` (norm by default) | `max_grad_norm` (default 1.0) | `accelerator.clip_grad_norm_` |
 | Distributed | DDP/FSDP (26, 27) | `strategy=` | launched by `accelerate`/`torchrun` | `accelerator.prepare` |
-| Checkpointing | full-state dict, atomic | `ModelCheckpoint`, `ckpt_path=` | `save_steps`, `resume_from_checkpoint` | `save_state`/`load_state` |
+| Checkpointing | full-state dict, atomic | `ModelCheckpoint`, `fit(ckpt_path=)` | `save_steps`, `train(resume_from_checkpoint=)` | `save_state`/`load_state` |
 
-They hide this module's material: the unscale/clip/step/schedule order, which
+Names verified against source at release tags: Lightning
+[`trainer.py` at 2.5.5](https://github.com/Lightning-AI/pytorch-lightning/blob/2.5.5/src/lightning/pytorch/trainer/trainer.py),
+HF [`training_args.py` at v4.57.1](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/training_args.py)
+(the version installed here), and Accelerate
+[`accelerator.py` at v1.10.1](https://github.com/huggingface/accelerate/blob/v1.10.1/src/accelerate/accelerator.py).
+Lightning and Accelerate were read, not run. They hide this module's material: the unscale/clip/step/schedule order, which
 clock the scheduler counts, which RNG states are saved, how data position is
 restored. Hyperparameter search (Ray Tune, Optuna, Ax) sits above the loop and is
 out of scope.
@@ -287,7 +292,10 @@ share storage; load each module from a fresh or cloned dict.
 accessed 2026-10-10; 0.8.0 is installed with transformers here) is a JSON header plus
 raw bytes: no code execution, zero-copy and lazy loading, but only a flat
 `dict[str, Tensor]`. It has no place for optimizer, scheduler or RNG state, so it is
-for weights, not resumable training state.
+for weights, not resumable training state. HDF5 via `h5py`, which *Deep Learning
+with PyTorch* ch. 3 uses to store arrays, belongs on the dataset side with
+memmaps ([module 14](./14-data-pipelines.md)): it holds NumPy arrays, not module
+or optimizer state.
 
 | Format | Executes code on load | Holds | Lazy | Sharded | Use for |
 |---|---|---|---|---|---|

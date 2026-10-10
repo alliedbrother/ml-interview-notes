@@ -53,7 +53,7 @@ dist.init_process_group(backend="nccl", init_method="env://",   # env:// is the 
 
 Rendezvous: each process connects to a **store**, publishes its address, and blocks until `world_size` have arrived; then the backend builds communicators. **TCPStore** runs a server on rank 0 at `MASTER_ADDR:MASTER_PORT`. Since 2.4 its server uses libuv by default, which scales to far larger jobs ([TCPStore_libuv_backend](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/intermediate_source/TCPStore_libuv_backend.rst)); `USE_LIBUV=0` restores the old server. **FileStore** (`file:///path`) uses one shared file; the lab uses it in a temp dir, so no port is needed. **HashStore** is in-memory, single-process; the fences use it.
 
-`dist.new_group(ranks=[0, 1])` makes a subgroup; *every* rank must call it, because group creation is collective. `dist.destroy_process_group()` belongs in a `finally` at exit.
+`dist.new_group(ranks=[0, 1])` makes a subgroup; *every* rank must call it, because group creation is collective. `dist.new_subgroups(group_size=8)` cuts the world into equal consecutive groups (one per 8-GPU node, say) and returns `(this rank's group, all groups)`; pass `group=` to any collective to scope it. `dist.destroy_process_group()` belongs in a `finally` at exit.
 
 | Backend | Devices | Notes ([distributed](https://docs.pytorch.org/docs/2.8/distributed.html)) |
 |---|---|---|
@@ -106,7 +106,7 @@ The total, $2(p-1)S/p$, approaches $2S$ but never exceeds it, however many ranks
 
 API points that come up in reviews:
 
-- `all_reduce` is in place and `op` is a `dist.ReduceOp`. The 2.8 docs say `AVG` is NCCL-only, but gloo accepted it in the lab with two processes. Portable code uses `SUM` and divides.
+- `all_reduce` is in place and `op` is a `dist.ReduceOp`. The 2.8 docs list `AVG` as NCCL-only. On gloo, `all_reduce(op=AVG)` did average in the lab, but `reduce_scatter_tensor(op=AVG)` silently **sums**: with two ranks holding 1 and 2 it returned 3.0, not 1.5 (rechecked locally). [Module 27](./27-fsdp2-dtensor-parallelism.md) traces this to the gloo source and shows it doubling FSDP2 gradients. Portable code uses `SUM` and divides.
 - Prefer the `_into_tensor`/`_tensor` forms (one `(world·n, …)` buffer) over list forms, which copy. `all_to_all_single` with split sizes is MoE token dispatch ([MoE](../transformers/12-mixture-of-experts.md)).
 - `async_op=True` returns a `Work`. `wait()` blocks (on GPU it orders the current stream), and `get_future()` gives a [`torch.futures`](https://docs.pytorch.org/docs/2.8/futures.html) future you can chain with `.then()`. DDP comm hooks are built on it.
 - `broadcast_object_list`/`all_gather_object` pickle objects: fine for startup config, too slow for the step loop.
@@ -222,7 +222,7 @@ Bigger batches also change optimization ([notes](../../notes/deep-learning/optim
 
 ## Reconciling the sources
 
-Raschka's appendix A ([DDP-script.py](https://github.com/rasbt/LLMs-from-scratch/blob/cdbd33e6d57a71e20ea31434841095fac50cecd8/appendix-A/01_main-chapter-code/DDP-script.py)) uses `mp.spawn` plus `DistributedSampler`, with a [torchrun variant](https://github.com/rasbt/LLMs-from-scratch/blob/cdbd33e6d57a71e20ea31434841095fac50cecd8/appendix-A/01_main-chapter-code/DDP-script-torchrun.py). The [DDP tutorial](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/intermediate_source/ddp_tutorial.rst) and [DDP series](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/beginner_source/ddp_series_theory.rst) now recommend `torchrun`. Both run the same DDP, and the lab supports both. Older material, including [dist_tuto](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/intermediate_source/dist_tuto.rst), uses `dist.reduce_op` and list `all_gather`; 2.8 prefers `ReduceOp` and the `_into_tensor` variants. The DDP paper's 25 MB bucket is still the default. The docs call `ReduceOp.AVG` NCCL-only although gloo accepted it here, so code to the docs.
+Raschka's appendix A ([DDP-script.py](https://github.com/rasbt/LLMs-from-scratch/blob/cdbd33e6d57a71e20ea31434841095fac50cecd8/appendix-A/01_main-chapter-code/DDP-script.py)) uses `mp.spawn` plus `DistributedSampler`, with a [torchrun variant](https://github.com/rasbt/LLMs-from-scratch/blob/cdbd33e6d57a71e20ea31434841095fac50cecd8/appendix-A/01_main-chapter-code/DDP-script-torchrun.py). The [DDP tutorial](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/intermediate_source/ddp_tutorial.rst) and [DDP series](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/beginner_source/ddp_series_theory.rst) now recommend `torchrun`. Both run the same DDP, and the lab supports both. Older material, including [dist_tuto](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/intermediate_source/dist_tuto.rst), uses `dist.reduce_op` and list `all_gather`; 2.8 prefers `ReduceOp` and the `_into_tensor` variants. The DDP paper's 25 MB bucket is still the default. The docs call `ReduceOp.AVG` NCCL-only; gloo honoured it for `all_reduce` here but not for `reduce_scatter_tensor`, so code to the docs.
 
 ## Worked distributed verification
 

@@ -207,8 +207,14 @@ dims raised the error in every case we tried.
 but your code specialized it to be a constant (1)". The same spec with a `(2, 3)`
 example exported as `VR[1, 8]` and then ran batch 1 correctly. Trace with examples
 ≥ 2 on dynamic dimensions, and use `min=2` where size 1 could broadcast
-differently. The capstone ([38](./38-capstone-export-quantize-serve.md)) exports
-the GPT with `Dim("T", min=2, max=128)` for this reason.
+differently. One catch: `ep.module()` does not enforce a lower bound of 2. A
+`Linear` exported with `Dim("b", min=2, max=8)` (`VR[2, 8]`) accepted batch 1,
+while `min=3` rejected 1 and 2 with "Expected input ... to be >= 3". If size 1
+is unsafe for your graph, check it at the service boundary. The capstone
+([38](./38-capstone-export-quantize-serve.md)) exports the GPT with
+`Dim("B", min=1, max=64)` and `Dim("T", min=2, max=128)`, observes the same
+accepted `T = 1`, and has its wrapper enforce the range from
+`ep.range_constraints`.
 
 ## 28.6 Control flow and data-dependent values
 
@@ -373,7 +379,7 @@ spends its time in kernels; measure before rewriting.
 | Option | Serves | When | Status |
 |---|---|---|---|
 | Python HTTP service (FastAPI etc.) | eager, compiled or exported models | the default; full control | you own batching and ops |
-| TorchServe | `.mar` archives | existing deployments only | [archived](https://github.com/pytorch/serve/blob/62c4d6a1fdc1d071dbcf758ebd756029af20bd5e/README.md) Aug 7, 2025: "no planned updates, bug fixes, new features, or security patches" |
+| TorchServe | `.mar` archives | existing deployments only | [archived](https://github.com/pytorch/serve/blob/62c4d6a1fdc1d071dbcf758ebd756029af20bd5e/README.md), repository read-only since August 2025; the README says "no planned updates, bug fixes, new features, or security patches" |
 | NVIDIA Triton Inference Server | PyTorch, ONNX, TensorRT backends | multi-model GPU fleets, dynamic batching | active |
 | vLLM / SGLang | autoregressive LLMs | paged KV cache, continuous batching | active; see [the inference course](/courses/inference/) |
 

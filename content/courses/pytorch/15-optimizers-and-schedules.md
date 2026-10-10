@@ -150,9 +150,10 @@ $\eta_{\text{peak}}\lambda_{\text{torch}}$.
 
 `amsgrad=True` divides by the running maximum of $v_t$. State memory:
 `exp_avg` and `exp_avg_sq` each match the parameter, so fp32 Adam holds **8
-bytes per parameter** of state (12 with amsgrad; SGD momentum 4), fp32 under
-autocast [mixed precision](./17-mixed-precision.md), where parameters stay fp32. With fp32 weights and grads that becomes the 16 bytes/parameter of
-[module 22](./22-memory-accounting-and-checkpointing.md).
+bytes per parameter** of state (12 with amsgrad; SGD momentum 4). The state
+stays fp32 under autocast [mixed precision](./17-mixed-precision.md), because
+the parameters do. Add 4-byte weights and 4-byte grads and you reach the 16
+bytes/parameter of [module 22](./22-memory-accounting-and-checkpointing.md).
 
 ## 15.5 The rest of the family
 
@@ -236,8 +237,9 @@ backbone.parameters(), "lr": 1e-5})` unfreezes later, with empty state.
 ## 15.8 Learning-rate schedules
 
 A scheduler keeps `last_epoch` (a step counter, despite the name) and rewrites
-`group["lr"]` on each `scheduler.step()`; the lr set at construction is the one
-used by the first optimizer step.
+`group["lr"]` on each `scheduler.step()`. The constructor itself performs step
+0, so with `LambdaLR(opt, f)` the first optimizer step already uses
+$\eta_0 f(0)$, not the bare `lr` you passed to the optimizer (measured).
 
 | Scheduler | lr at step $t$ (base $\eta_0$) |
 |---|---|

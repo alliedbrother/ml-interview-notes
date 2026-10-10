@@ -171,7 +171,7 @@ The matmul can approach 312 TFLOP/s; the add tops out near 2.0 TB/s × 1/6 ≈ 0
 
 ## 21.7 Memory profiling: what the profiler and snapshots show
 
-`profile_memory=True` adds `CPU Mem` and `Self CPU Mem` columns (and CUDA equivalents): bytes allocated minus freed, inclusive and exclusive of children. Fence 3's table shows `aten::mm` with 16 KB, one 64×64 fp32 output. `prof.export_memory_timeline("mem.html", device="cuda:0")` plots memory over time by category (parameters, gradients, optimizer state, activations); `.json` and `.raw.json.gz` suffixes give data instead. A local CPU run with `device="cpu"` wrote the JSON, but the tutorials target CUDA and CI does not exercise it.
+`profile_memory=True` adds `CPU Mem` and `Self CPU Mem` columns (and CUDA equivalents): bytes allocated minus freed, inclusive and exclusive of children. Fence 3's table shows `aten::mm` with 16 KiB (printed `16.00 Kb`), one 64×64 fp32 output. `prof.export_memory_timeline("mem.html", device="cuda:0")` plots memory over time by category (parameters, gradients, optimizer state, activations); `.json` and `.raw.json.gz` suffixes give data instead. A local CPU run with `device="cpu"` wrote the JSON, but the tutorials target CUDA and CI does not exercise it.
 
 For OOMs use the **CUDA memory snapshot** ([Understanding CUDA Memory Usage](https://docs.pytorch.org/docs/2.8/torch_cuda_memory.html)). Not executed here:
 

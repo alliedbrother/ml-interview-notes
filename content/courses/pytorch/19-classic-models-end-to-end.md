@@ -46,6 +46,25 @@ this train/dev/test discipline plainly: every decision made by looking at a spli
 leaks information from it. The MLP trains for 300 AdamW steps at batch 128,
 learning rate $10^{-2}$, 10 % linear warmup then cosine via `LambdaLR`.
 
+The step is [module 16](./16-training-loop-checkpointing.md)'s loop with nothing
+added; batches are sampled with replacement from the training split by the same
+generator that made the data:
+
+```python
+model = nn.Sequential(nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU(),
+                      nn.Linear(64, 3))                         # (B, 2) -> (B, 3)
+opt = torch.optim.AdamW(model.parameters(), lr=1e-2, weight_decay=1e-4)
+sched = warmup_cosine(opt, steps)          # LambdaLR, per step (module 15)
+model.train()
+for _ in range(steps):
+    idx = torch.randint(0, n_tr, (batch,), generator=gen)
+    loss = F.cross_entropy(model(x_tr[idx]), y_tr[idx])       # raw logits
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    opt.step()
+    sched.step()                           # after opt.step, once per step
+```
+
 The lab's `accuracy` helper runs under `@torch.inference_mode()`, saves
 `was_training = model.training`, calls `model.eval()`, and ends with
 `model.train(was_training)` rather than `model.train()`. That matters in 19.7: a

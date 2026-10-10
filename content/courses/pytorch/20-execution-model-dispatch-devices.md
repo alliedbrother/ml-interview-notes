@@ -131,6 +131,8 @@ Sections 20.6–20.8 are not executed in this course's CI (CPU only); they follo
 
 `torch.cuda.set_sync_debug_mode("warn")` ([docs](https://docs.pytorch.org/docs/2.8/generated/torch.cuda.set_sync_debug_mode.html)) warns at every synchronizing call; `"error"` turns it into a test failure.
 
+The usual offender is `loss.item()` every step: the host blocks until the GPU drains its queue, so the next step's kernels are not enqueued while the GPU finishes, and the device idles in the gap. Two fixes keep the logging: accumulate on device (`running += loss.detach()`) and call `.item()` every N steps, or copy the loss into a pinned host buffer with `non_blocking=True`, record an event, and read the value one step later after `event.synchronize()`.
+
 **Streams and events.** One stream is ordered; across streams, order explicitly:
 
 ```python
@@ -161,6 +163,7 @@ ms = start.elapsed_time(end)                    # device time between events
 | `torch.cuda.memory.CUDAPluggableAllocator` | custom allocator from a `.so`, set before first allocation |
 | `CUBLAS_WORKSPACE_CONFIG=:4096:8` | fixed cuBLAS workspaces, needed for determinism ([module 06](./06-randomness-and-reproducibility.md)) |
 | `torch.backends.cuda.cufft_plan_cache.max_size` | per-device cuFFT plan LRU size |
+| `PYTORCH_KERNEL_CACHE_PATH`, `USE_PYTORCH_KERNEL_CACHE=0` | where JIT-compiled CUDA kernels (e.g. `torch.special.zeta`) are cached; default `~/.cache/torch/kernels`, so the seconds-long first compile happens once per machine, not per process |
 
 Byte accounting and snapshots: [module 22](./22-memory-accounting-and-checkpointing.md), [CUDA memory usage](https://docs.pytorch.org/docs/2.8/torch_cuda_memory.html).
 
@@ -225,7 +228,7 @@ Creating tensors on the target device skips a host allocation and copy (a [Perfo
 
 A meta kernel runs only shape logic (for structured ops, the real kernel's own meta function) and allocates nothing; [module 10](./10-nn-module-internals.md) builds models on `meta` this way. An out-of-tree backend, per the [dispatcher](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/advanced_source/dispatcher.rst) and [extend-dispatcher](https://github.com/pytorch/tutorials/blob/ca960b6a7cd299ba00a644aa918bbcffdeb70152/advanced_source/extend_dispatcher.rst) tutorials, registers kernels for `PrivateUse1` and `AutogradPrivateUse1` and renames it with `torch.utils.rename_privateuse1_backend`, with no core changes.
 
-Two cuDNN knobs ([backends](https://docs.pytorch.org/docs/2.8/backends.html)): `cudnn.benchmark = True` autotunes convolution algorithms per shape (good for fixed shapes, bad when they change every step); `cudnn.deterministic = True` restricts to deterministic algorithms. TF32 flags are in [module 17](./17-mixed-precision.md).
+Two cuDNN knobs ([backends](https://docs.pytorch.org/docs/2.8/backends.html)): `cudnn.benchmark = True` autotunes convolution algorithms per shape (good for fixed shapes, bad when they change every step); `cudnn.deterministic = True` restricts to deterministic algorithms. Convolutions on cuDNN tensor cores and on oneDNN prefer NHWC, so `model.to(memory_format=torch.channels_last)` plus channels-last inputs avoids layout transposes inside each conv ([module 03](./03-storage-strides-views-copies.md) derives the strides; the speedup is hardware-dependent and not measured here). TF32 flags are in [module 17](./17-mixed-precision.md).
 
 ## 20.10 CPU execution: threads, NUMA, allocators
 
