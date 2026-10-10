@@ -147,7 +147,7 @@ the final test set and present the best score as an untouched estimate.
 
 ## Related courses
 
-Three long-form courses on this site go considerably deeper than these notes:
+Four long-form courses on this site go considerably deeper than these notes:
 
 - **[Transformers Deep Dive](/courses/transformers/)** — 17 modules from "why did
   we abandon RNNs?" to the configuration choices in 2026 production models, with
@@ -157,6 +157,9 @@ Three long-form courses on this site go considerably deeper than these notes:
 - **[LLM Fine-Tuning Deep Dive](/courses/finetuning/)** — 21 modules on adapting
   pretrained LLMs: SFT, LoRA/QLoRA, preference optimization, RL with verifiable
   rewards, distillation, and serving the result.
+- **[PyTorch from Tensors to LLMs](/courses/pytorch/)** — 38 modules on the
+  framework itself, from autograd and `nn.Module` through `torch.compile` and
+  distributed training to a GPT built, trained and exported on a CPU.
 
 ## The short version
 
