@@ -128,10 +128,10 @@ intermediate gives `None` and a *"not a leaf Tensor"* `UserWarning`;
 so two backward passes without zeroing leave the **sum**. Every step therefore
 starts with `optimizer.zero_grad()`, which since 2.0 sets grads to `None`.
 
-The same rule powers **gradient accumulation**: run $k$ micro-batches of size
-$B/k$, call `backward()` on each mean loss divided by $k$, and the leaf gradients
+The same rule powers **gradient accumulation**: run $K$ micro-batches of size
+$B/K$, call `backward()` on each mean loss divided by $K$, and the leaf gradients
 equal the full-batch mean-loss gradient, because gradients are linear in the
-loss. Forget the $1/k$ and the effective learning rate is $k$ times larger
+loss. Forget the $1/K$ and the effective learning rate is $K$ times larger
 (module 16 builds the loop,
 [training loop](./16-training-loop-checkpointing.md)).
 
@@ -593,7 +593,7 @@ rounding at the 1e-7 relative level, so the 1e-9 tolerance would be meaningless.
 - Autograd records a DAG of backward `Node`s as Python runs; `AccumulateGrad`
   nodes write into leaves.
 - Only leaves get `.grad`, accumulated with `+=`: zero every step, or exploit it
-  with a $1/k$ loss scale for gradient accumulation.
+  with a $1/K$ loss scale for gradient accumulation.
 - `backward(gradient=v)` and `autograd.grad` compute $v^\top J$ without forming
   $J$; `autograd.grad` returns instead of accumulating.
 - Graphs are single-use unless `retain_graph=True`; `create_graph=True` records

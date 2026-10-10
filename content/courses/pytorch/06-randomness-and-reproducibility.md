@@ -180,7 +180,7 @@ loader = torch.utils.data.DataLoader(ds, batch_size=32, shuffle=True, num_worker
                                      worker_init_fn=seed_worker, generator=data_gen)
 ```
 
-`seed_worker` is the Reproducibility note's pattern. DataLoader seeds each worker's *torch* RNG (`base_seed + worker_id`, `base_seed` drawn from the loader's generator) but not NumPy's or Python's; under `fork`, every worker inherits identical NumPy state and applies identical "random" crops. `% 2**32` folds the torch seed into NumPy's seed range. Module 14 tests this with real workers.
+`seed_worker` is the Reproducibility note's pattern, and in 2.8 its two global reseeds are redundant but harmless. Each worker already calls `torch.manual_seed` and `random.seed` with `base_seed + worker_id` (`base_seed` drawn from the loader's generator) and seeds NumPy's global RNG from the same pair ([`_utils/worker.py`](https://github.com/pytorch/pytorch/blob/v2.8.0/torch/utils/data/_utils/worker.py)). NumPy seeding arrived in 1.9; before that, forked workers inherited identical NumPy state and applied identical "random" crops. Inside a worker `torch.initial_seed()` returns `base_seed + worker_id`, and `% 2**32` folds it into NumPy's seed range. The risk that remains is RNG *objects* created in `__init__`: an `np.random.default_rng()` stored on the dataset is pickled into every worker in the same state, so all workers draw the same stream. Third-party libraries with their own RNGs are not seeded at all. Create those generators per worker in `worker_init_fn` from `get_worker_info().seed` ([module 14](./14-data-pipelines.md) §14.5 tests this with real workers).
 
 Keep three seeds distinct in your config, even if they default to the same integer:
 
