@@ -27,6 +27,10 @@ into judgement — and it is what interviewers are actually probing when they as
 | [Hugging Face](./libraries/huggingface.md) | intermediate | transformers, tokenizers, datasets, PEFT/LoRA, TRL, generation, deployment |
 | [MLOps & Serving](./libraries/mlops-and-serving.md) | advanced | tracking, versioning, feature stores, serving patterns, monitoring, drift, CI/CD |
 
+For PyTorch in depth, the course [PyTorch from Tensors to LLMs](/courses/pytorch/)
+goes from tensor strides and autograd internals to building and training a GPT
+from scratch, with executable checks in every module.
+
 ## How they stack
 
 ```mermaid

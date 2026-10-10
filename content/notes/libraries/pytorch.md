@@ -547,6 +547,9 @@ states the actual stride compatibility condition.
 
 ## Where to go next
 
+- [PyTorch from Tensors to LLMs](/courses/pytorch/) — the 38-module course
+  that takes every section above deeper, from strides and autograd internals
+  to a GPT trained from scratch on a CPU.
 - [TensorFlow & Keras](./tensorflow.md) — the other framework, and what it does
   differently.
 - [Hugging Face ecosystem](./huggingface.md) — pretrained models on top of this.
