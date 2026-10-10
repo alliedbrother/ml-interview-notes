@@ -133,9 +133,9 @@ assert k3.var().item() < k1.var().item() / 100            # ~1.3e-4 vs ~1.9e-2
 print("k1/k3 KL estimators verified")
 ```
 
-Here the exact KL is 0.00969; both Monte Carlo means land within $10^{-4}$, with $\mathrm{var}(k_1)\approx0.019$
-and $\mathrm{var}(k_3)\approx0.00013$. The check does not show $k_3$ is better when the policies are far
-apart; it is not, and Schulman's note shows its variance growing fast as the ratio spreads.
+Here the exact KL is 0.00969. The $k_3$ mean lands within about $10^{-5}$ (standard error $2.6\times10^{-5}$);
+$k_1$'s standard error is $3.1\times10^{-4}$, so the check allows it four. $\mathrm{var}(k_1)\approx0.019$, $\mathrm{var}(k_3)\approx0.00013$.
+Far apart, $k_3$ is not better: Schulman's note shows its variance growing fast as the ratio spreads.
 
 ---
 
@@ -448,8 +448,8 @@ an error. Clip-higher is the first defense. TRL adds:
 - **Entropy bonus:** `entropy_coef > 0` subtracts $\alpha\mathcal{H}$ (mean per-token entropy).
 - **Adaptive entropy** (Skywork-OR1): `use_adaptive_entropy=True` raises the coefficient while
   entropy is at or below `entropy_target` and lowers it otherwise. The default target (0.2 nats) is
-  Skywork-OR1's value; per-token entropy in RL runs is typically ~0.2–1 nats and falls, so check
-  your early `entropy` log before choosing a target.
+  Skywork-OR1's value (their controlled runs hold entropy near 0.2); TRL's own [docstring](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/grpo_config.py#L309-L316)
+  instead claims 2–10 nats, so the default "almost never triggers". Read your early `entropy` log first.
 - **High-entropy minority tokens:** [Wang et al. (2025)](https://huggingface.co/papers/2506.01939),
   "Beyond the 80/20 Rule", found about 20% of CoT tokens are high-entropy forks and that RLVR mostly
   adjusts those; restricting the gradient to the top 20% matched full updates on Qwen3-8B and beat
@@ -781,8 +781,8 @@ Start from Unsloth's Qwen3 (4B) GRPO notebook (listed in its
 [RL guide](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide)), swap in the GSM8K
 correctness and format rewards from `reward_functions.py`, and train with LoRA and colocated vLLM on
 a free T4 (fp16 only). Record `reward`, per-function rewards and `completions/mean_length`. Expect
-format reward to saturate within ~100 steps and correctness to rise more slowly; if it is flat past
-~300 steps, work through debugging prompt 1.
+(T0 expectation, unverified here; the CPU smoke cannot reproduce it) format reward to saturate in
+roughly 100 steps and correctness to rise more slowly; if flat past ~300 steps (Unsloth's warning), see debugging prompt 1.
 
 ### L13.2 (T1/T2): the loss-type × scale ablation
 

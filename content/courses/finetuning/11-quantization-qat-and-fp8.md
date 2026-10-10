@@ -185,9 +185,11 @@ Inside the representable range, the gradient passes through unchanged. Outside, 
 
 ### Check: STE gradient and a QAT win
 
-The fixture is a linear regression $8 \to 1$ whose features are correlated in pairs. Correlation is what gives QAT room to compensate: rounding one weight down can be offset by rounding its correlated partner up. Path (a) is the ordinary full-precision least-squares optimum, rounded to int4 with one absmax scale (PTQ). Path (b) starts from the same optimum, keeps that scale frozen, and runs 300 SGD steps with fake quantization in the forward pass and the STE in the backward pass, keeping the best checkpoint after converting with the identical rounding. Post-quantization MSE: full precision $0.00224$, PTQ $0.0456$, QAT $0.0129$. **QAT is 72% lower than PTQ.** The check asserts at least 20%.
+The fixture is a linear regression $8 \to 1$ whose features are correlated in pairs. Correlation is what gives QAT room to compensate: rounding one weight down can be offset by rounding its correlated partner up. The data comes in three splits drawn from the same distribution: 256 training rows, 256 validation rows, and 4,096 test rows. Path (a) is the ordinary full-precision least-squares optimum on the training rows, rounded to int4 with one absmax scale (PTQ). Path (b) starts from the same optimum, keeps that scale frozen, and runs 300 SGD steps on the training rows with fake quantization in the forward pass and the STE in the backward pass. After each step it converts with the identical rounding and scores the quantized weights on the validation rows. The kept checkpoint is the one with the lowest validation MSE, and the reported number is its MSE on the test rows, which played no part in training or selection.
 
-This check proves the masked STE gradient (1 inside the clamp range, 0 outside) and that QAT beats PTQ on this fixture with the same int4 scheme.
+Test MSE after quantization: full precision $0.0027$, PTQ $0.0460$, the validation-selected QAT checkpoint (step 297) $0.0126$, **73% lower than PTQ**. The check asserts at least 50% lower. The trajectory matters as much as the winner. The final iterate scores $0.0242$ (47% lower), and the median iterate $0.0513$ is *worse* than PTQ, because the latent weights keep oscillating across rounding boundaries. Over 30 random $10^{-7}$ nudges to the starting weights, the final iterate lands anywhere from 47% to 73% lower, while the validation-selected checkpoint stays at 73% lower every time. That is why QAT runs keep checkpoints and select on held-out data. Selecting on the training MSE instead would have picked the same step here, but in general it reports the best of 300 draws scored on the data that chose them, which is an upper bound, not a result.
+
+This check proves the masked STE gradient (1 inside the clamp range, 0 outside) and that, on this fixture with the same int4 scheme, a QAT checkpoint selected on held-out data beats PTQ on separate test data.
 
 ```python finetuning-check
 import torch
@@ -206,40 +208,53 @@ assert w.grad.tolist() == [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]
 # Regression 8 -> 1 with pairwise-correlated features (float64 so the run is platform-independent)
 f64 = torch.float64
 g = torch.Generator().manual_seed(10)
-X = torch.randn(256, 8, generator=g)                       # (N, 8)
-for a, b in ((1, 0), (3, 2), (5, 4), (7, 6)):
-    X[:, a] = X[:, b] + 0.3 * torch.randn(256, generator=g)
+
+def pairs(n):                                                # (n, 8): column 2k+1 tracks column 2k
+    X = torch.randn(n, 8, generator=g)
+    for a, b in ((1, 0), (3, 2), (5, 4), (7, 6)):
+        X[:, a] = X[:, b] + 0.3 * torch.randn(n, generator=g)
+    return X
+
+X = pairs(256)
 w_true = torch.randn(8, generator=g) * 0.5
 y = X @ w_true + 0.05 * torch.randn(256, generator=g)       # (N,)
-X, y = X.to(f64), y.to(f64)
+splits = {"train": (X.to(f64), y.to(f64))}
+for name, n in (("val", 256), ("test", 4096)):              # same distribution, unseen rows
+    Xn = pairs(n)
+    splits[name] = (Xn.to(f64), (Xn @ w_true + 0.05 * torch.randn(n, generator=g)).to(f64))
 
-def mse(w):
-    return ((X @ w - y) ** 2).mean()
+def mse(w, split):
+    X_, y_ = splits[split]
+    return ((X_ @ w - y_) ** 2).mean()
 
-# (a) full-precision optimum, then PTQ with an int4 symmetric absmax scale (one channel)
-w_fp = torch.linalg.lstsq(X, y.unsqueeze(1)).solution.squeeze(1)
+# (a) full-precision optimum on train, then PTQ with an int4 symmetric absmax scale (one channel)
+X_tr, y_tr = splits["train"]
+w_fp = torch.linalg.lstsq(X_tr, y_tr.unsqueeze(1)).solution.squeeze(1)
 s = w_fp.abs().max() / 7                                     # observer scale, frozen for QAT too
-ptq = mse(fake_quant(w_fp, s)).item()
+w_ptq = fake_quant(w_fp, s)
+ptq = mse(w_ptq, "test").item()
 
-# (b) QAT: start at the same optimum, fake-quant forward, STE backward, same frozen scale.
-# Keep the best quantized checkpoint, as you would with a validation metric. Rounding makes
-# the raw SGD trajectory chaotic (a 1e-7 nudge to w_fp changes the final iterate a lot), but
-# the best checkpoint is stable, and it can never be worse than PTQ (step 0 is a candidate).
+# (b) QAT: train on train, select the checkpoint on val, report on test. Step 0 (= PTQ) is
+# a candidate. The raw trajectory is chaotic (rounding flips), so only the selected
+# checkpoint is asserted; the final and median iterates are reported in the prose.
 w = w_fp.clone().requires_grad_()
 opt = torch.optim.SGD([w], lr=0.02)
 sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda t: 1 - t / 300)
-qat = ptq
+best_val, best_w = mse(w_ptq, "val").item(), w_ptq
 for _ in range(300):
-    loss = mse(fake_quant(w, s))
+    loss = mse(fake_quant(w, s), "train")
     opt.zero_grad(); loss.backward(); opt.step(); sched.step()
-    qat = min(qat, mse(fake_quant(w.detach(), s)).item())  # convert = the same rounding
+    w_q = fake_quant(w.detach(), s)                         # convert = the same rounding
+    if mse(w_q, "val").item() < best_val:
+        best_val, best_w = mse(w_q, "val").item(), w_q
+qat = mse(best_w, "test").item()
 
-assert abs(mse(w_fp).item() - 0.00224) < 5e-5
-assert abs(ptq - 0.0456) < 5e-4
-assert qat < 0.8 * ptq                                       # measured: 0.0129, 72% lower
+assert abs(mse(w_fp, "test").item() - 0.0027) < 1e-4
+assert abs(ptq - 0.0460) < 5e-4
+assert qat < 0.5 * ptq                                       # measured: 0.0126, 73% lower
 ```
 
-It does not prove that QAT always helps. The STE is a biased gradient, latent weights can oscillate across a rounding boundary, and on some seeds of this toy QAT gains little. Recovery on real LLMs is an empirical claim, so check the numbers below.
+It does not prove that QAT always helps. The STE is a biased gradient, and this very run shows latent weights oscillating across rounding boundaries. Seed 10 is also one of the better draws of this fixture: across 40 generator seeds, the validation-selected checkpoint lands at a median of 25% below PTQ on test data. On 12 of the 40, no checkpoint beats PTQ on validation, so QAT gains nothing. On one, the selected checkpoint is 2% worse than PTQ on test, because validation noise picked it. Recovery on real LLMs is an empirical claim, so check the numbers below.
 
 ### torchao: `QATConfig` prepare and convert
 

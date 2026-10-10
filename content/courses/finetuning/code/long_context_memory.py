@@ -10,7 +10,8 @@ Purpose
     Ulysses all-to-all and Ring KV traffic (bytes each rank sends). Asserts the
     module's worked numbers for the Qwen3-8B config at T = 131,072: 39.8 GB of bf16
     logits, 19.3 GB of bf16 KV cache, and 0.294 GB (Ulysses) vs 0.470 GB (Ring) per
-    layer forward at P = 8, a 5/P ratio that ties at P = 5.
+    layer forward at P = 8, a 5/P ratio: Ring sends less at the usable Ulysses
+    degrees 2 and 4, Ulysses less at 8.
 
 Hardware tier: CPU only (stdlib). There is no --full mode: the GPU-side
 measurement of this module (L17.2, tier T3) is the TRL/Accelerate run described
@@ -110,11 +111,14 @@ def smoke() -> None:
     assert round(u8 / GB, 3) == 0.294 and round(r8 / GB, 3) == 0.470
     for P in range(2, 33):
         assert math.isclose(ulysses_bytes_per_layer(c, T, P) / ring_bytes_per_layer(c, T, P), 5 / P, rel_tol=1e-12)
-    assert u4 > r4 and math.isclose(ulysses_bytes_per_layer(c, T, 5), ring_bytes_per_layer(c, T, 5))
-    assert ulysses_bytes_per_layer(c, T, 6) < ring_bytes_per_layer(c, T, 6)
+    # the formula ties at P = 5, but Ulysses can only use P that divides H and is <= H_kv
+    assert math.isclose(ulysses_bytes_per_layer(c, T, 5), ring_bytes_per_layer(c, T, 5))
+    usable = [P for P in range(2, c.H_kv + 1) if c.H % P == 0]
+    assert usable == [2, 4, 8]
+    assert u4 > r4 and ulysses_bytes_per_layer(c, T, 2) > ring_bytes_per_layer(c, T, 2) and u8 < r8
     assert ulysses_max_degree(c, replicate_kv=False) == 8 and ulysses_max_degree(c, replicate_kv=True) == 32
     table(c, [8192, 32_768, 131_072], [1, 8])
-    print("\nsmoke OK: 39.8 GB logits, 19.3 GB KV cache at 131,072 tokens; Ulysses/Ring = 5/P, tie at P=5")
+    print("\nsmoke OK: 39.8 GB logits, 19.3 GB KV cache at 131,072 tokens; Ulysses/Ring = 5/P; Ring wins at P=2,4, Ulysses at P=8")
 
 
 def main() -> None:

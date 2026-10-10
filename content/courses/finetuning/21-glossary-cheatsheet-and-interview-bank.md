@@ -53,7 +53,7 @@ Start from a measured gap on a golden set, never from a method. Knowledge gaps g
 | Same-prompt preference pairs | **DPO** (`sigmoid`, often plus `sft`) | needs reference log-probs, not necessarily a second model | [12](./12-preference-optimization.md) |
 | Thumbs-up/down logs, no pairs | **KTO** | unpaired; set `desirable_weight` so the class ratio sits in [1, 4/3] | [04](./04-data-curation-and-synthesis.md), [12](./12-preference-optimization.md) |
 | Pairs plus a base model, want one stage, no reference | **ORPO** (experimental) | NLL plus odds-ratio term | [12](./12-preference-optimization.md) |
-| Pairs with length exploitation, no reference | **SimPO** (experimental `CPOTrainer`, `loss_type="simpo"`, `cpo_alpha=0`) or DPO `sigmoid_norm` | `sigmoid_norm` is length-normalised DPO and keeps the reference | [12](./12-preference-optimization.md) |
+| Pairs with length exploitation | **SimPO** (experimental `CPOTrainer`, `loss_type="simpo"`, `cpo_alpha=0`) or DPO `sigmoid_norm` | `sigmoid_norm` is length-normalised DPO and keeps the reference | [12](./12-preference-optimization.md) |
 | Noisy labels | DPO `robust` or `ipo` | bounded response to flipped labels | [12](./12-preference-optimization.md) |
 | A reward model, no RL infrastructure | **Best-of-N** distillation or iterative DPO | Best-of-N is the baseline every trained method must beat | [12](./12-preference-optimization.md) |
 | Prompts plus a programmatic verifier | **GRPO** (TRL defaults) | group baseline, no critic | [13](./13-rl-with-verifiable-rewards.md) |
@@ -68,16 +68,13 @@ All names are `GRPOConfig` fields in TRL v1.15 ([13](./13-rl-with-verifiable-rew
 | Symptom or goal | Setting | Module |
 |---|---|---|
 | Sensible start | `loss_type="dapo"`, `scale_rewards="group"`, `beta=0.0`, `num_generations=8`, `learning_rate=1e-6`, temperature 1.0 (all defaults) | [13](./13-rl-with-verifiable-rewards.md) |
-| Wrong answers get longer; want no length bias | `loss_type="dr_grpo"` and `scale_rewards=False` | [13](./13-rl-with-verifiable-rewards.md) |
 | Group std over-weights nearly solved or hopeless prompts | `scale_rewards="batch"` (Lite PPO) or `False` | [13](./13-rl-with-verifiable-rewards.md) |
 | Must stay near the base (keep chat ability) | `beta>0` (DeepSeek-R1 used 0.001); loads a reference; `use_bias_correction_kl=True` is the default | [13](./13-rl-with-verifiable-rewards.md) |
-| Entropy collapse, low-probability tokens cannot grow | `epsilon_high=0.28` (clip-higher), `entropy_coef`, `top_entropy_quantile=0.2` | [13](./13-rl-with-verifiable-rewards.md) |
 | MoE instability, off-policy updates | `importance_sampling_level="sequence"` (GSPO) with `loss_type="grpo"`, `epsilon=3e-4`, `epsilon_high=4e-4` | [13](./13-rl-with-verifiable-rewards.md) |
 | Truncated answers penalised as wrong | `mask_truncated_completions=True` or `trl.rewards.get_soft_overlong_punishment` | [13](./13-rl-with-verifiable-rewards.md) |
 | Clipped tokens lose all gradient | `loss_type="cispo"`, `epsilon_high≈5` | [13](./13-rl-with-verifiable-rewards.md) |
 | Several rewards, one dominates the std | `multi_objective_aggregation="normalize_then_sum"` (GDPO) | [13](./13-rl-with-verifiable-rewards.md) |
 | vLLM and trainer log-probs disagree | keep `vllm_importance_sampling_correction=True` (`sequence_mask`, `vllm_importance_sampling_clip_max=3.0`); `cast_lm_head_to_fp32=True` | [13](./13-rl-with-verifiable-rewards.md) |
-| Answers hit the cap | raise `max_completion_length` (default 512) | [13](./13-rl-with-verifiable-rewards.md) |
 
 ### 1.5 Which parallelism?
 
@@ -113,10 +110,6 @@ All names are `GRPOConfig` fields in TRL v1.15 ([13](./13-rl-with-verifiable-rew
 | Many tenants on one base | vLLM multi-LoRA; size `max_loras`, `max_lora_rank`, `max_cpu_loras` | [20](./20-production-serving-and-cost.md) |
 | Adapter is DoRA, IA3, prefix, or rank above `max_lora_rank` | merge (or `save_as_lora` conversion) | [07](./07-the-wider-peft-landscape.md), [20](./20-production-serving-and-cost.md) |
 | Trained with QLoRA | never merge into the 4-bit base; dequantize to bf16 first | [06](./06-lora-and-qlora.md), [11](./11-quantization-qat-and-fp8.md) |
-| Combine two LoRAs into one adapter | `add_weighted_adapter` with `cat` (exact) or `svd` with explicit `svd_rank` | [18](./18-model-merging-and-composition.md) |
-| Combine full fine-tunes of one base | mergekit TIES or DARE-TIES, swept on a dev split | [18](./18-model-merging-and-composition.md) |
-| Recover general ability after domain SFT | interpolate back toward the instruct model, $w \in [0.3, 0.7]$ | [18](./18-model-merging-and-composition.md) |
-| Laptop or phone | merged GGUF (Q4_K_M/Q5_K_M/Q8_0) with an explicit Ollama `TEMPLATE` and stops | [11](./11-quantization-qat-and-fp8.md), [20](./20-production-serving-and-cost.md) |
 | Different bases or tokenizers | do not merge; distil instead | [18](./18-model-merging-and-composition.md), [14](./14-distillation-and-reasoning.md) |
 
 ### 1.8 OOM triage in priority order
@@ -198,7 +191,7 @@ Notation: $\hat r = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$, $h = \hat r_w
 | FP4 (bitsandbytes) | E2M1 fixed grid | 4 | alternative QLoRA base; NF4 beat it | [06](./06-lora-and-qlora.md) |
 | int8 (LLM.int8 / W8A8) | vector-wise scales with outlier decomposition (threshold 6.0); SmoothQuant for W8A8 | 8 | loading, serving | [06](./06-lora-and-qlora.md), [11](./11-quantization-qat-and-fp8.md) |
 | int4 group (W4A16) | one scale per $g$ = 32–128 weights ($16/g$ bits overhead) | ~4.1–4.5 | GPTQ, AWQ serving | [11](./11-quantization-qat-and-fp8.md) |
-| FP8 E4M3 / E5M2 | 4/3 and 5/2 exponent/mantissa; max 448 and 57,344 | 8 | forward / gradients in FP8 training; W8A8-FP8 serving | [11](./11-quantization-qat-and-fp8.md) |
+| FP8 E4M3 / E5M2 | 4/3 and 5/2 exponent/mantissa (maxima in Part 6) | 8 | forward / gradients in FP8 training; W8A8-FP8 serving | [11](./11-quantization-qat-and-fp8.md) |
 | MXFP4 | E2M1, one E8M0 scale per 32 | 4.25 | gpt-oss experts; Blackwell | [11](./11-quantization-qat-and-fp8.md) |
 | NVFP4 | E2M1, E4M3 scale per 16 + FP32 tensor scale | 4.5 | Blackwell training and serving | [11](./11-quantization-qat-and-fp8.md) |
 | GPTQ | column-wise rounding with inverse-Hessian error compensation; calibration data | 3–8 | vLLM, SGLang; QA-LoRA merges back | [11](./11-quantization-qat-and-fp8.md) |
@@ -232,6 +225,8 @@ Notation: $\hat r = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$, $h = \hat r_w
 
 ### 2.8 Deprecated and removed (do not use)
 
+The stale arguments readers hit most. The full stale-API table, with sources, is in [08](./08-frameworks-and-tooling.md).
+
 | Stale | Current | Version | Module |
 |---|---|---|---|
 | `tokenizer=` in TRL trainers | `processing_class=` | renamed TRL v0.12 | [08](./08-frameworks-and-tooling.md) |
@@ -245,27 +240,10 @@ Notation: $\hat r = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$, $h = \hat r_w
 | `loss_type="chunked_nll"` | `loss_type="nll"` (the default, fused LM head since v1.15) | deprecated alias | [05](./05-supervised-fine-tuning.md), [08](./08-frameworks-and-tooling.md) |
 | `PPOTrainer`, `PPOConfig`, value-head models | GRPO/RLOO, or verl/OpenRLHF/slime | removed TRL v1.13 | [08](./08-frameworks-and-tooling.md), [12](./12-preference-optimization.md) |
 | BCO, PRM, XPO, NashMD, GRPOWithReplayBuffer, GSPO-token trainers; `trl.losses` | KTO; GRPO `importance_sampling_level="sequence"` | removed TRL v1.14 | [08](./08-frameworks-and-tooling.md) |
-| MiniLLM trainer; `GKDTrainer` as the default | `DistillationTrainer` (`beta=1.0` for MiniLLM's reverse KL) | MiniLLM removed v1.15; Distillation stable since v1.10 | [14](./14-distillation-and-reasoning.md) |
-| ORPO/CPO/Online DPO/GKD/GOLD/AsyncGRPO as stable | they live in `trl.experimental` | TRL v1.0 split | [08](./08-frameworks-and-tooling.md) |
 | `nn.DataParallel` | `accelerate launch` (DDP/FSDP2) | refused TRL v1.15 | [10](./10-distributed-fine-tuning-and-moe.md) |
 | `trl vllm-serve` | `vllm serve --weight-transfer-config '{"backend": "nccl"}'` | deprecated in v1.15, removal in v2.0.0 ([source](https://github.com/huggingface/trl/blob/v1.15.0/trl/scripts/vllm_serve.py#L286-L290)) | [13](./13-rl-with-verifiable-rewards.md) |
-| GRPO/RLOO `use_vllm=True` assuming server mode | `vllm_mode="server"` explicitly | default `colocate` since v1.0 | [08](./08-frameworks-and-tooling.md) |
-| `packing="bfd-requeue"` | `packing_strategy="bfd_split"` | renamed TRL v1.0 | [08](./08-frameworks-and-tooling.md) |
-| TRL `examples/scripts/...` paths | the trainer doc pages | reorganised v1.11 | [08](./08-frameworks-and-tooling.md) |
-| DPO `padding_free=True` | padding (falls back with a warning) | unavailable after the DPO refactor | [12](./12-preference-optimization.md) |
-| PEFT adapter on `lm_head` in DPO/KTO/GRPO/RLOO | `modules_to_save=["lm_head"]` | raises since TRL v1.15 | [06](./06-lora-and-qlora.md) |
-| PEFT `Bone` | MiSS | removed PEFT v0.19 | [07](./07-the-wider-peft-landscape.md) |
-| AutoGPTQ backend | GPTQModel | deprecated PEFT v0.20 | [11](./11-quantization-qat-and-fp8.md) |
-| PEFT < 0.18 with Transformers v5 | PEFT ≥ 0.18 | incompatible | [08](./08-frameworks-and-tooling.md) |
-| TensorFlow/Flax, slow tokenizers, `use_fast=` | PyTorch only, unified Rust tokenizers | Transformers v5 | [02](./02-tokens-templates-and-the-causal-lm-objective.md) |
 | FSDP1 flags (`fsdp_use_orig_params`, `fsdp_sync_module_states`, `fsdp_backward_prefetch`, `fsdp_sharding_strategy`) | `fsdp_version: 2`, `fsdp_reshard_after_forward`; `accelerate to-fsdp2` | FSDP2 | [10](./10-distributed-fine-tuning-and-moe.md) |
-| torchtune | TRL, Axolotl, Unsloth; torchao for QAT | wound down 2025 | [08](./08-frameworks-and-tooling.md) |
 | vLLM `--rope-scaling` | `--hf-overrides` with `rope_parameters` | vLLM v0.20 | [17](./17-long-context-extension.md) |
-| TGI for new deployments | vLLM or SGLang | maintenance mode, archived March 2026 | [20](./20-production-serving-and-cost.md) |
-| "GRPO always normalises by length and std" | TRL default `loss_type="dapo"`, `beta=0.0`, `scale_rewards` in {`group`,`batch`,False} | TRL v1 | [13](./13-rl-with-verifiable-rewards.md) |
-| LoRA on `q_proj`/`v_proj` only | `target_modules="all-linear"` | PEFT fallback is still q/v | [06](./06-lora-and-qlora.md) |
-| Raw AlpacaEval / raw MT-Bench as the chat metric | LC AlpacaEval, Arena-Hard, calibrated judges | 2024–26 | [09](./09-evaluating-fine-tuned-models.md) |
-| GRPO `max_completion_length` 256 | 512 | since TRL v1.10 | [13](./13-rl-with-verifiable-rewards.md) |
 
 ---
 
@@ -273,9 +251,7 @@ Notation: $\hat r = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$, $h = \hat r_w
 
 **Causal-LM loss with mask, and token vs sequence averaging** ([02](./02-tokens-templates-and-the-causal-lm-objective.md)) — mean NLL over the trained set $\mathcal{M}$ (`-100` positions leave numerator and denominator); HF/TRL average per token, so with 2 and 6 trained tokens at losses 1.0 and 0.5 they give 0.625, not the per-sequence 0.75.
 
-$$\mathcal{L} = -\frac{1}{|\mathcal{M}|}\sum_{(b,t)\in\mathcal{M}} \log p_\theta(x_{b,t+1}\mid x_{b,\le t})$$
-
-$$\mathcal{L}_{\text{tok}} = \frac{\sum_b\sum_t \ell_{b,t}}{\sum_b n_b} \qquad \mathcal{L}_{\text{seq}} = \frac{1}{B}\sum_b \frac{1}{n_b}\sum_t \ell_{b,t}$$
+$$\mathcal{L} = -\frac{1}{|\mathcal{M}|}\sum_{(b,t)\in\mathcal{M}} \log p_\theta(x_{b,t+1}\mid x_{b,\le t}) \qquad \mathcal{L}_{\text{tok}} = \frac{\sum_b\sum_t \ell_{b,t}}{\sum_b n_b} \qquad \mathcal{L}_{\text{seq}} = \frac{1}{B}\sum_b \frac{1}{n_b}\sum_t \ell_{b,t}$$
 
 **Bytes per parameter** ([03](./03-training-mechanics-and-memory-math.md)) — full FT with AdamW in mixed precision; LoRA pays 16 B only on adapters; QLoRA base is 4.127 bits.
 
@@ -287,17 +263,11 @@ $$B_{\text{eff}} = B \times K \times R \qquad \mathcal{L}_{\text{correct}} = \fr
 
 **Warmup plus cosine, and MFU** ([03](./03-training-mechanics-and-memory-math.md)) — linear warmup for $t < t_w$, then cosine to $\eta_{\min}$; MFU counts $6N$ FLOPs per token for full FT (forward $2N$, backward $4N$), and LoRA is closer to $4N$.
 
-$$\eta_t = \eta_{\max}\frac{t}{t_w} \;(t<t_w), \qquad \eta_t = \eta_{\min} + \tfrac12(\eta_{\max}-\eta_{\min})\Big(1+\cos\big(\pi\tfrac{t-t_w}{T_{\text{tot}}-t_w}\big)\Big)$$
+$$\eta_t = \eta_{\max}\frac{t}{t_w} \;(t<t_w), \qquad \eta_t = \eta_{\min} + \tfrac12(\eta_{\max}-\eta_{\min})\Big(1+\cos\big(\pi\tfrac{t-t_w}{T_{\text{tot}}-t_w}\big)\Big) \qquad \text{MFU} = \frac{6N \cdot \text{tokens/s}}{\text{peak FLOP/s}}$$
 
-$$\text{MFU} = \frac{6N \cdot \text{tokens/s}}{\text{peak FLOP/s}}$$
+**LoRA update, parameter count, rsLoRA scale and NF4 bits** ([06](./06-lora-and-qlora.md)) — $B$ (the up-projection) starts at zero, so $\nabla_A = 0$ at step 0; rsLoRA's $\alpha/\sqrt r$ keeps high ranks learning without retuning the LR (4× $\alpha/r$ at $r=16$). NF4 stores an fp32 absmax per 64 weights; double quantization makes those absmaxes 8-bit with one fp32 constant per 256 blocks.
 
-**LoRA update, parameter count and rsLoRA scale** ([06](./06-lora-and-qlora.md)) — $B$ (the up-projection) starts at zero, so $\nabla_A = 0$ at step 0; rsLoRA's $\alpha/\sqrt r$ keeps high ranks learning without retuning the LR (4× $\alpha/r$ at $r=16$).
-
-$$W' = W_0 + \gamma_r B A,\quad \gamma_r = \frac{\alpha}{r}\ \text{or}\ \frac{\alpha}{\sqrt r} \qquad \#\text{params} = r\,(d_{\text{in}} + d_{\text{out}}) \text{ per matrix}$$
-
-**NF4 bits with double quantization** ([06](./06-lora-and-qlora.md)) — fp32 absmax per 64 weights, then 8-bit absmaxes with one fp32 constant per 256 blocks.
-
-$$4 + \tfrac{32}{64} = 4.5 \;\longrightarrow\; 4 + \tfrac{8}{64} + \tfrac{32}{64\cdot 256} = 4.126953125 \text{ bits}$$
+$$\begin{gathered} W' = W_0 + \gamma_r B A,\quad \gamma_r = \frac{\alpha}{r}\ \text{or}\ \frac{\alpha}{\sqrt r} \qquad \#\text{params} = r\,(d_{\text{in}} + d_{\text{out}}) \text{ per matrix} \\ 4 + \tfrac{32}{64} = 4.5 \;\longrightarrow\; 4 + \tfrac{8}{64} + \tfrac{32}{64\cdot 256} = 4.126953125 \text{ bits} \end{gathered}$$
 
 **DoRA** ([07](./07-the-wider-peft-landscape.md)) — one magnitude per output feature (PEFT `norm(dim=1)`), initialised to $\lVert W_0\rVert$ so step 0 is the base.
 
@@ -305,9 +275,7 @@ $$W' = m \odot \frac{W_0 + \gamma_r BA}{\lVert W_0 + \gamma_r BA\rVert_c}$$
 
 **Unbiased pass@k and the Wilson interval** ([09](./09-evaluating-fine-tuned-models.md)) — $n$ samples with $c$ correct, product form avoids overflow ($n=10$, $c=3$, $k=5$ gives 0.917; plug-in 0.832); Wilson for $k$ of $n$ ($n = 50$ at 0.8 gives [0.670, 0.888]).
 
-$$\widehat{\text{pass@}k} = 1 - \frac{\binom{n-c}{k}}{\binom{n}{k}} = 1 - \prod_{i=n-c+1}^{n}\Big(1 - \frac{k}{i}\Big)$$
-
-$$\frac{\hat p + \frac{z^2}{2n}}{1 + \frac{z^2}{n}} \pm \frac{z}{1 + \frac{z^2}{n}}\sqrt{\frac{\hat p(1-\hat p)}{n} + \frac{z^2}{4n^2}}$$
+$$\widehat{\text{pass@}k} = 1 - \frac{\binom{n-c}{k}}{\binom{n}{k}} = 1 - \prod_{i=n-c+1}^{n}\Big(1 - \frac{k}{i}\Big) \qquad \frac{\hat p + \frac{z^2}{2n}}{1 + \frac{z^2}{n}} \pm \frac{z}{1 + \frac{z^2}{n}}\sqrt{\frac{\hat p(1-\hat p)}{n} + \frac{z^2}{4n^2}}$$
 
 **ZeRO per-GPU model state** ([10](./10-distributed-fine-tuning-and-moe.md)) — $\Psi$ parameters, $N_d$ data-parallel degree, $K=12$ optimizer bytes per parameter for mixed-precision Adam; stages 1, 2, 3.
 
@@ -325,67 +293,33 @@ $$\max_\pi\ \mathbb{E}_{x,\,y\sim\pi}\big[r(x,y)\big] - \beta\,\mathrm{KL}\big(\
 
 $$\pi^*(y\mid x) = \frac{\pi_{\text{ref}}(y\mid x)\,e^{r(x,y)/\beta}}{Z(x)} \qquad \hat r_\theta(x,y) = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$$
 
-**DPO loss and gradient** ([12](./12-preference-optimization.md)) — $\log 2 \approx 0.693$ at initialisation; the gradient is self-paced, with weight 0.5 at init and near 0 once a pair is learned.
+**DPO loss and gradient, KTO value, SimPO** ([12](./12-preference-optimization.md)) — the per-pair losses with TRL's names are in table 2.2. DPO's loss is $\log 2 \approx 0.693$ at initialisation and its gradient is self-paced, with weight 0.5 at init and near 0 once a pair is learned. KTO: $\Delta$ the log-ratio, $z_0$ a detached batch KL estimate. SimPO: reference-free, length-normalised, target margin $\gamma$ (default 0.5 in TRL's CPO).
 
-$$\mathcal{L}_{\text{DPO}} = -\mathbb{E}\Big[\log\sigma\Big(\beta\log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)} - \beta\log\frac{\pi_\theta(y_l)}{\pi_{\text{ref}}(y_l)}\Big)\Big]$$
+$$\begin{gathered} \mathcal{L}_{\text{DPO}} = -\mathbb{E}\big[\log\sigma(\hat r_w - \hat r_l)\big] \qquad \nabla_\theta\mathcal{L}_{\text{DPO}} = -\beta\,\mathbb{E}\big[\sigma(\hat r_l - \hat r_w)\,(\nabla\log\pi_\theta(y_w) - \nabla\log\pi_\theta(y_l))\big] \\ v = \begin{cases}\lambda_D\,\sigma(\beta(\Delta - z_0)) & \text{desirable}\\ \lambda_U\,\sigma(\beta(z_0 - \Delta)) & \text{undesirable}\end{cases} \quad \mathcal{L}_{\text{KTO}} = \mathbb{E}[\lambda_y - v] \qquad \mathcal{L}_{\text{SimPO}} = -\log\sigma\Big(\frac{\beta}{\lvert y_w\rvert}\log\pi_\theta(y_w) - \frac{\beta}{\lvert y_l\rvert}\log\pi_\theta(y_l) - \gamma\Big) \end{gathered}$$
 
-$$\nabla_\theta\mathcal{L}_{\text{DPO}} = -\beta\,\mathbb{E}\big[\sigma(\hat r_l - \hat r_w)\,(\nabla\log\pi_\theta(y_w) - \nabla\log\pi_\theta(y_l))\big]$$
+**RLOO and GRPO advantages, clipped surrogate, GSPO sequence ratio** ([13](./13-rl-with-verifiable-rewards.md)) — both advantages sum to zero over a group, so equal rewards give zero gradient; TRL's GRPO std is Bessel-corrected with $\varepsilon = 10^{-4}$. The clipped surrogate gives zero gradient once a token has moved past the band in the advantage's direction; GSPO replaces $\rho_t$ with the geometric mean of token ratios, clipped once per sequence.
 
-**KTO value and SimPO** ([12](./12-preference-optimization.md)) — KTO: $\Delta$ the log-ratio, $z_0$ a detached batch KL estimate; SimPO: reference-free, length-normalised, target margin $\gamma$ (default 0.5 in TRL's CPO).
-
-$$v = \begin{cases}\lambda_D\,\sigma(\beta(\Delta - z_0)) & \text{desirable}\\ \lambda_U\,\sigma(\beta(z_0 - \Delta)) & \text{undesirable}\end{cases} \qquad \mathcal{L}_{\text{KTO}} = \mathbb{E}[\lambda_y - v]$$
-
-$$\mathcal{L}_{\text{SimPO}} = -\log\sigma\Big(\frac{\beta}{\lvert y_w\rvert}\log\pi_\theta(y_w) - \frac{\beta}{\lvert y_l\rvert}\log\pi_\theta(y_l) - \gamma\Big)$$
-
-**RLOO and GRPO advantages** ([13](./13-rl-with-verifiable-rewards.md)) — both sum to zero over a group; equal rewards give zero gradient. TRL's GRPO std is Bessel-corrected with $\varepsilon = 10^{-4}$.
-
-$$\hat A_i^{\text{RLOO}} = \frac{k}{k-1}(r_i - \bar r) \qquad \hat A_i^{\text{GRPO}} = \frac{r_i - \operatorname{mean}(r)}{\operatorname{std}(r) + \varepsilon}$$
-
-**Clipped surrogate** ([13](./13-rl-with-verifiable-rewards.md)) — zero gradient once a token has moved past the band in the advantage's direction.
-
-$$\mathcal{L}^{\text{clip}}_t = \min\big(\rho_t\hat A_t,\ \operatorname{clip}(\rho_t, 1-\epsilon, 1+\epsilon_{\text{high}})\hat A_t\big), \qquad \rho_t = \frac{\pi_\theta(y_t\mid\cdot)}{\pi_{\text{old}}(y_t\mid\cdot)}$$
-
-**GSPO sequence ratio** ([13](./13-rl-with-verifiable-rewards.md)) — geometric mean of token ratios, clipped once per sequence.
-
-$$s_i(\theta) = \Big(\frac{\pi_\theta(o_i\mid q)}{\pi_{\text{old}}(o_i\mid q)}\Big)^{1/|o_i|} = \exp\Big(\frac{1}{|o_i|}\sum_t\log\rho_{i,t}\Big)$$
+$$\begin{gathered} \hat A_i^{\text{RLOO}} = \frac{k}{k-1}(r_i - \bar r) \qquad \hat A_i^{\text{GRPO}} = \frac{r_i - \operatorname{mean}(r)}{\operatorname{std}(r) + \varepsilon} \\ \mathcal{L}^{\text{clip}}_t = \min\big(\rho_t\hat A_t,\ \operatorname{clip}(\rho_t, 1-\epsilon, 1+\epsilon_{\text{high}})\hat A_t\big),\quad \rho_t = \frac{\pi_\theta(y_t\mid\cdot)}{\pi_{\text{old}}(y_t\mid\cdot)} \qquad s_i(\theta) = \Big(\frac{\pi_\theta(o_i\mid q)}{\pi_{\text{old}}(o_i\mid q)}\Big)^{1/|o_i|} = \exp\Big(\frac{1}{|o_i|}\sum_t\log\rho_{i,t}\Big) \end{gathered}$$
 
 **k3 KL estimator, TIS and MIS** ([13](./13-rl-with-verifiable-rewards.md)) — $k_3$ with $r = \pi_{\text{ref}}/\pi$ is unbiased and never negative; for IS, $\rho = \pi^{\text{train}}_{\text{old}}/\pi^{\text{vllm}}$, and TRL's default is `sequence_mask` on the full product of token ratios with $C_{\max} = 3$.
 
-$$k_3 = (r - 1) - \log r, \qquad \mathbb{E}_\pi[k_3] = \mathrm{KL}(\pi\,\|\,\pi_{\text{ref}})$$
-
-$$w_{\text{TIS}} = \operatorname{clip}(\rho, C_{\min}, C_{\max}) \qquad w_{\text{MIS}} = \rho\cdot\mathbb{1}[C_{\min}\le\rho\le C_{\max}]$$
+$$k_3 = (r - 1) - \log r, \qquad \mathbb{E}_\pi[k_3] = \mathrm{KL}(\pi\,\|\,\pi_{\text{ref}}) \qquad w_{\text{TIS}} = \operatorname{clip}(\rho, C_{\min}, C_{\max}) \qquad w_{\text{MIS}} = \rho\cdot\mathbb{1}[C_{\min}\le\rho\le C_{\max}]$$
 
 **Forward KL, reverse KL, generalised JSD, and the on-policy distillation advantage** ([14](./14-distillation-and-reasoning.md)) — forward is mass-covering, reverse mode-seeking, $\mathrm{JSD}_{0.5} \le \log 2$. With $p = p_T$, $q = q_S$ the JSD expression vanishes at $\beta \in \{0, 1\}$, so TRL defines those endpoints as the pure forward (`beta=0`) and reverse (`beta=1`) KL; the OPD path sum is a one-sample estimate of $-\mathrm{KL}(q_S\|p_T)$.
 
-$$\mathrm{KL}(p_T\|q_S) \qquad \mathrm{KL}(q_S\|p_T) \qquad \mathrm{JSD}_\beta = \beta\,\mathrm{KL}(p\|m) + (1-\beta)\,\mathrm{KL}(q\|m),\ m = \beta p + (1-\beta)q$$
-
-$$A_t = \log p_T(y_t\mid y_{<t}) - \log q_S(y_t\mid y_{<t})$$
+$$\mathrm{KL}(p_T\|q_S) \qquad \mathrm{KL}(q_S\|p_T) \qquad \mathrm{JSD}_\beta = \beta\,\mathrm{KL}(p\|m) + (1-\beta)\,\mathrm{KL}(q\|m),\ m = \beta p + (1-\beta)q \qquad A_t = \log p_T(y_t\mid y_{<t}) - \log q_S(y_t\mid y_{<t})$$
 
 **InfoNCE / MNRL and NDCG@k** ([16](./16-multimodal-and-embedding-fine-tuning.md)) — a $B$-way softmax over in-batch candidates with scale $s = 20$ by default; IDCG is the DCG of the ideal ordering.
 
-$$\mathcal{L}_{\text{MNRL}} = -\frac{1}{B}\sum_{i=1}^{B}\log\frac{\exp(s\cos(q_i,d_i))}{\sum_{j=1}^{B}\exp(s\cos(q_i,d_j))}$$
+$$\mathcal{L}_{\text{MNRL}} = -\frac{1}{B}\sum_{i=1}^{B}\log\frac{\exp(s\cos(q_i,d_i))}{\sum_{j=1}^{B}\exp(s\cos(q_i,d_j))} \qquad \text{DCG@}k = \sum_{i=1}^{k}\frac{2^{rel_i}-1}{\log_2(i+1)}, \qquad \text{NDCG@}k = \frac{\text{DCG@}k}{\text{IDCG@}k}$$
 
-$$\text{DCG@}k = \sum_{i=1}^{k}\frac{2^{rel_i}-1}{\log_2(i+1)}, \qquad \text{NDCG@}k = \frac{\text{DCG@}k}{\text{IDCG@}k}$$
+**RoPE frequency, PI, NTK base, YaRN ramp and temperature** ([17](./17-long-context-extension.md)) — $r_i = T_0/\lambda_i$ counts rotations in the trained window; PI divides every $\theta_i$ by $s$. YaRN's ramp bounds are $\alpha = 1$ and $\beta = 32$ (Transformers' `beta_slow` and `beta_fast`, not LoRA's α or DPO's β); $\sqrt{1/t} = 1.1386$ at $s = 4$.
 
-**RoPE frequency, PI and NTK base** ([17](./17-long-context-extension.md)) — $r_i = T_0/\lambda_i$ counts rotations in the trained window; PI divides every $\theta_i$ by $s$.
+$$\begin{gathered} \theta_i = b^{-2i/d},\quad \lambda_i = \frac{2\pi}{\theta_i} \qquad \theta_i^{\text{PI}} = \frac{\theta_i}{s} \qquad b' = b\,s^{d/(d-2)} \\ \gamma(r) = \operatorname{clamp}\Big(\frac{r-\alpha}{\beta-\alpha}, 0, 1\Big),\quad \theta'_i = (1-\gamma(r_i))\frac{\theta_i}{s} + \gamma(r_i)\,\theta_i,\quad \sqrt{1/t} = 0.1\ln s + 1 \end{gathered}$$
 
-$$\theta_i = b^{-2i/d},\quad \lambda_i = \frac{2\pi}{\theta_i} \qquad \theta_i^{\text{PI}} = \frac{\theta_i}{s} \qquad b' = b\,s^{d/(d-2)}$$
+**Task arithmetic, DARE, TIES and SLERP** ([18](./18-model-merging-and-composition.md)) — the per-tensor rules are in table 2.7. Add task vectors to combine, negate to forget, and treat $\lambda$ as a real hyperparameter; DARE's drop-and-rescale is unbiased with variance $\tau_j^2\,p/(1-p)$; TIES trims to top-$k$%, elects $\gamma_p$ by summed mass and averages only the agreeing values $\mathcal{A}_p$; SLERP follows the arc, so equal-norm inputs stay on the sphere (the lerp midpoint of unit vectors shrinks to $\cos(\Omega/2)$), and its direction matches normalised lerp only at $t \in \{0, \tfrac12, 1\}$.
 
-**YaRN ramp and temperature** ([17](./17-long-context-extension.md)) — ramp bounds $\alpha = 1$ and $\beta = 32$ (Transformers' `beta_slow` and `beta_fast`, not LoRA's α or DPO's β); $\sqrt{1/t} = 1.1386$ at $s = 4$.
-
-$$\gamma(r) = \operatorname{clamp}\Big(\frac{r-\alpha}{\beta-\alpha}, 0, 1\Big),\quad \theta'_i = (1-\gamma(r_i))\frac{\theta_i}{s} + \gamma(r_i)\,\theta_i,\quad \sqrt{1/t} = 0.1\ln s + 1$$
-
-**Task arithmetic and DARE** ([18](./18-model-merging-and-composition.md)) — add task vectors to combine, negate to forget, treat $\lambda$ as a real hyperparameter; DARE's drop-and-rescale is unbiased with variance $\tau_j^2\,p/(1-p)$.
-
-$$\tau_i = \theta_i - \theta_0,\quad \theta = \theta_0 + \lambda\sum_i w_i\tau_i \qquad \tilde\tau_j = \frac{m_j\,\tau_j}{1-p},\ m_j\sim\text{Bernoulli}(1-p)$$
-
-**TIES** ([18](./18-model-merging-and-composition.md)) — trim to top-$k$%, elect $\gamma_p$ by summed mass, average only agreeing values $\mathcal{A}_p$.
-
-$$\gamma_p = \operatorname{sign}\Big(\sum_i\hat\tau_{i,p}\Big), \qquad \tau_p = \frac{1}{|\mathcal{A}_p|}\sum_{i\in\mathcal{A}_p}\hat\tau_{i,p}, \qquad \theta = \theta_0 + \lambda\tau$$
-
-**SLERP** ([18](./18-model-merging-and-composition.md)) — follows the arc, so equal-norm inputs stay on the sphere (the lerp midpoint of unit vectors shrinks to $\cos(\Omega/2)$); its direction matches normalised lerp only at $t \in \{0, \tfrac12, 1\}$.
-
-$$\text{slerp}(a,b;t) = \frac{\sin((1-t)\Omega)}{\sin\Omega}a + \frac{\sin(t\Omega)}{\sin\Omega}b, \qquad \cos\Omega = \hat a\cdot\hat b$$
+$$\begin{gathered} \tau_i = \theta_i - \theta_0,\quad \theta = \theta_0 + \lambda\sum_i w_i\tau_i \qquad \tilde\tau_j = \frac{m_j\,\tau_j}{1-p},\ m_j\sim\text{Bernoulli}(1-p) \\ \gamma_p = \operatorname{sign}\Big(\sum_i\hat\tau_{i,p}\Big),\quad \tau_p = \frac{1}{|\mathcal{A}_p|}\sum_{i\in\mathcal{A}_p}\hat\tau_{i,p} \qquad \text{slerp}(a,b;t) = \frac{\sin((1-t)\Omega)}{\sin\Omega}a + \frac{\sin(t\Omega)}{\sin\Omega}b,\quad \cos\Omega = \hat a\cdot\hat b \end{gathered}$$
 
 **L2-SP and KL-to-base** ([19](./19-safety-forgetting-and-responsible-fine-tuning.md)) — decay toward the pretrained weights, or penalise behaviour drift on general prompts.
 
@@ -439,20 +373,14 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 ## Part 5 — Glossary
 
 - **-100 (ignore index)** — label value that removes a position from both numerator and denominator of the cross-entropy; its logits get zero gradient. ([02](./02-tokens-templates-and-the-causal-lm-objective.md))
-- **AdaLoRA** — SVD-form LoRA that prunes singular values to move rank budget to the layers that need it. ([07](./07-the-wider-peft-landscape.md))
 - **Adapter** — small trainable parameters added to a frozen base (for example LoRA matrices), saved and served separately. ([06](./06-lora-and-qlora.md))
 - **Advantage** — reward minus a baseline, $\hat A = R - b$; the per-sample weight on $\nabla\log\pi$. ([13](./13-rl-with-verifiable-rewards.md))
 - **Alpha (`lora_alpha`)** — sets the LoRA scale $\gamma_r = \alpha/r$; coupled to the learning rate, so fix it and sweep the LR. ([06](./06-lora-and-qlora.md))
 - **APIGen** — function-call data generation with format, execution and semantic checks (xLAM 60k). ([04](./04-data-curation-and-synthesis.md), [15](./15-agentic-and-tool-use-fine-tuning.md))
-- **APO** — anchored preference losses: `apo_zero` pushes the chosen response up, `apo_down` pushes both down. ([12](./12-preference-optimization.md))
-- **APOLLO** — memory-efficient full-parameter optimiser with channel-wise scaling estimated in a random low-rank space; rank-1 APOLLO-Mini. ([07](./07-the-wider-peft-landscape.md))
 - **Assistant mask / `assistant_only_loss`** — trains only assistant tokens; needs `{% generation %}` markers in the template. ([02](./02-tokens-templates-and-the-causal-lm-objective.md), [05](./05-supervised-fine-tuning.md))
 - **Async GRPO** — `AsyncGRPOTrainer`: rollouts stream from a vLLM server into a queue; samples older than `max_staleness` are dropped. ([13](./13-rl-with-verifiable-rewards.md))
 - **AWQ** — post-training int4 that scales up the ~1% salient channels found from activation magnitude before rounding. ([11](./11-quantization-qat-and-fp8.md))
-- **BAdam** — block coordinate descent: Adam on one transformer block at a time. ([07](./07-the-wider-peft-landscape.md))
 - **BEMA** — bias-corrected exponential moving average of the policy's iterates, used as a moving DPO reference (experimental `BEMACallback(update_ref_model=True)`). ([12](./12-preference-optimization.md))
-- **Best-of-N** — sample $N$ responses, return the reward model's best; the KL-efficient baseline to beat. ([12](./12-preference-optimization.md))
-- **BFD packing** — best-fit-decreasing bins of examples into `max_length` rows with position-id resets (`packing_strategy="bfd"`). ([05](./05-supervised-fine-tuning.md))
 - **Bits-per-byte** — total NLL in bits divided by UTF-8 bytes; compares models across tokenizers. ([02](./02-tokens-templates-and-the-causal-lm-objective.md))
 - **BOS / EOS / PAD** — begin, end and padding tokens; EOS (or the turn-end token) must be a training target. ([02](./02-tokens-templates-and-the-causal-lm-objective.md))
 - **Bradley–Terry** — $P(y_w\succ y_l) = \sigma(r_w - r_l)$; reward models are logistic regression on reward differences. ([12](./12-preference-optimization.md))
@@ -469,77 +397,56 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 - **Cross-encoder (reranker)** — scores a (query, document) pair with joint attention; accurate, not precomputable. ([16](./16-multimodal-and-embedding-fine-tuning.md))
 - **DAPO** — token-level loss, clip-higher, dynamic sampling and overlong handling; TRL's default `loss_type`. ([13](./13-rl-with-verifiable-rewards.md))
 - **DARE** — drop delta entries with probability $p$ and rescale survivors by $1/(1-p)$ before merging. ([18](./18-model-merging-and-composition.md))
-- **DDP** — Distributed Data Parallel: replicate the model, all-reduce gradients. ([10](./10-distributed-fine-tuning-and-moe.md))
 - **Decontamination** — removing eval items from training data with normalised n-gram (13-gram) and embedding checks. ([04](./04-data-curation-and-synthesis.md))
 - **DFT (Dynamic Fine-Tuning)** — SFT loss with each token's NLL scaled by its stop-gradient probability (`loss_type="dft"`). ([05](./05-supervised-fine-tuning.md))
 - **DistillationTrainer** — TRL's stable, always on-policy distillation trainer; generalised JSD with `beta=1.0` (reverse KL) by default; shared vocabulary. ([14](./14-distillation-and-reasoning.md))
 - **DoRA** — LoRA on the direction plus a learned magnitude per output feature. ([07](./07-the-wider-peft-landscape.md))
-- **Double quantization (DQ)** — quantizing QLoRA's absmax constants to 8 bits: 4.127 instead of 4.5 bits/param. ([06](./06-lora-and-qlora.md))
 - **DPO** — preference loss $-\log\sigma(\hat r_w - \hat r_l)$ on implicit-reward margins; no reward model, no RL loop. ([12](./12-preference-optimization.md))
 - **Dr. GRPO** — removes GRPO's per-sequence length normalisation and std scaling (`loss_type="dr_grpo"`, `scale_rewards=False`). ([13](./13-rl-with-verifiable-rewards.md))
 - **Dynamic sampling** — DAPO's resampling until every group has mixed rewards; not supported in TRL `GRPOTrainer`. ([13](./13-rl-with-verifiable-rewards.md))
-- **Effective batch** — micro-batch × accumulation steps × data-parallel ranks; tokens per step matter more than sequences. ([03](./03-training-mechanics-and-memory-math.md))
 - **Embedding model (bi-encoder)** — maps text to one vector so cosine tracks relevance. ([16](./16-multimodal-and-embedding-fine-tuning.md))
 - **Emergent misalignment** — narrow fine-tuning (insecure code) producing broad misaligned behaviour on unrelated prompts. ([19](./19-safety-forgetting-and-responsible-fine-tuning.md))
 - **`enable_tower_connector_lora`** — vLLM `LoRAConfig` flag for LoRA on a VLM's vision tower and connector; experimental, off by default, some models only (Qwen-VL series). ([16](./16-multimodal-and-embedding-fine-tuning.md), [20](./20-production-serving-and-cost.md))
 - **Entropy collapse** — per-token entropy falls early, groups become identical, learning stops silently. ([13](./13-rl-with-verifiable-rewards.md))
 - **`environment_factory`** — GRPO argument building one stateful environment per rollout: `reset()`, public methods as tools, optional `get_reward()`. ([15](./15-agentic-and-tool-use-fine-tuning.md))
 - **Evol-Instruct** — rewrites instructions to be harder (in-depth) or rarer (in-breadth), with an elimination step. ([04](./04-data-curation-and-synthesis.md))
-- **Expert parallelism (EP)** — MoE experts on different ranks with all-to-all dispatch and combine. ([10](./10-distributed-fine-tuning-and-moe.md))
 - **Exposure bias** — training on reference prefixes but generating from your own; errors compound with length. ([14](./14-distillation-and-reasoning.md), [09](./09-evaluating-fine-tuned-models.md))
-- **Forward vs reverse KL** — $\mathrm{KL}(p_T\|q_S)$ is mass-covering; $\mathrm{KL}(q_S\|p_T)$ is mode-seeking. ([14](./14-distillation-and-reasoning.md))
-- **FP8 E4M3 / E5M2** — 8-bit floats with max 448 (forward) and 57,344 (gradients); always scaled. ([11](./11-quantization-qat-and-fp8.md))
 - **`frac_reward_zero_std`** — TRL metric: fraction of groups with identical rewards, i.e. wasted generation. ([13](./13-rl-with-verifiable-rewards.md))
 - **FSDP2** — PyTorch per-parameter `DTensor` sharding; frozen and trainable, mixed dtypes coexist. ([10](./10-distributed-fine-tuning-and-moe.md))
 - **Fused LM head** — computes per-token log-probs from hidden states in tiles without building the logits tensor; TRL default since v1.15, replacing Liger's fused cross-entropy (other kernels now come from the Kernels Hub via `use_kernels`). ([03](./03-training-mechanics-and-memory-math.md), [08](./08-frameworks-and-tooling.md))
 - **GaLore** — projects gradients to a low-rank subspace refreshed by SVD; full-rank weights, compressed optimizer state. ([07](./07-the-wider-peft-landscape.md))
-- **GDPO** — normalise each reward function per group before summing. ([13](./13-rl-with-verifiable-rewards.md))
 - **GGUF / k-quants** — llama.cpp file format; Q4_K_M is about 4.89 bits/weight. ([11](./11-quantization-qat-and-fp8.md))
 - **GKD** — generalised knowledge distillation: `lmbda` mixes on-policy data, `beta` sets the JSD. ([14](./14-distillation-and-reasoning.md))
 - **GOLD** — General Online Logit Distillation: on-policy distillation across tokenizers via text-aligned spans and ULD. ([14](./14-distillation-and-reasoning.md))
 - **Golden set** — small, frozen, versioned eval set with known-correct outputs; never in training data. ([09](./09-evaluating-fine-tuned-models.md))
-- **GPTQ** — column-wise post-training quantization that pushes rounding error onto unquantized columns using $H = 2XX^\top$. ([11](./11-quantization-qat-and-fp8.md))
 - **GradCache** — embed a big batch without gradients, then backprop cached embedding gradients mini-batch by mini-batch (`CachedMultipleNegativesRankingLoss`). ([16](./16-multimodal-and-embedding-fine-tuning.md))
-- **Gradient accumulation** — several micro-batches per optimizer step; exact only with global token normalisation. ([03](./03-training-mechanics-and-memory-math.md))
 - **Gradient checkpointing** — keep block inputs, recompute internals in backward: about 33% more step time. ([03](./03-training-mechanics-and-memory-math.md))
 - **GRPO** — group-relative policy optimisation: the group mean reward as the baseline (optionally divided by the group std), no critic. ([13](./13-rl-with-verifiable-rewards.md))
 - **GSPO** — sequence-level, length-normalised importance ratio clipped per sequence; stable for MoE. ([13](./13-rl-with-verifiable-rewards.md))
 - **Guard model** — separate classifier on inputs and/or outputs (Llama Guard, WildGuard). ([19](./19-safety-forgetting-and-responsible-fine-tuning.md))
 - **Hard negatives** — passages that look relevant but are not; mined with a margin to avoid false negatives. ([16](./16-multimodal-and-embedding-fine-tuning.md))
-- **HSDP** — hybrid sharding: shard within a node, replicate across nodes. ([10](./10-distributed-fine-tuning-and-moe.md))
 - **IA3** — learned vectors that rescale keys, values and the MLP intermediate activation (input of `down_proj`); mergeable. ([07](./07-the-wider-peft-landscape.md))
 - **Implicit reward** — $\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$; the DPO policy is its own reward model. ([12](./12-preference-optimization.md))
 - **Importance sampling (TIS / MIS)** — corrects the training–inference mismatch (sampler and trainer log-probs differ even with identical weights, so "on-policy" RL is off-policy) by reweighting with $\pi^{\text{train}}/\pi^{\text{vllm}}$, truncated (TIS) or masked outside a band (MIS). ([13](./13-rl-with-verifiable-rewards.md))
 - **Inoculation prompting** — framing reward hacking as acceptable during RL training, which limited how far the learned hacking generalised into broad misalignment. ([19](./19-safety-forgetting-and-responsible-fine-tuning.md))
 - **Intruder dimensions** — new high-ranking singular vectors in LoRA-trained weights; `reduce_intruder_dimension` mitigates. ([06](./06-lora-and-qlora.md))
 - **IPO** — squared loss to a finite target margin $1/(2\tau)$ on per-token average log-ratios. ([12](./12-preference-optimization.md))
-- **k3 estimator** — $(r-1)-\log r$: unbiased, non-negative per-token KL estimate. ([13](./13-rl-with-verifiable-rewards.md))
 - **KTO** — preference learning from unpaired desirable/undesirable labels with a prospect-theory value function. ([12](./12-preference-optimization.md))
-- **L2-SP** — weight decay toward the pretrained weights instead of zero. ([19](./19-safety-forgetting-and-responsible-fine-tuning.md))
 - **Likelihood displacement** — DPO lowering both chosen and rejected likelihoods, moving mass to unseen responses. ([12](./12-preference-optimization.md))
 - **Linear mode connectivity** — no loss barrier on the straight line between two solutions; typically holds for fine-tunes of one pretrained base, the premise of weight averaging. ([18](./18-model-merging-and-composition.md))
 - **LLM-as-judge** — an LLM grading or comparing outputs; biased by position, length and self-preference. Length-controlled AlpacaEval fits a GLM and reports the win rate with the length difference set to zero. ([09](./09-evaluating-fine-tuned-models.md))
 - **LoftQ** — alternates quantization and low-rank fitting so $Q + \gamma_r BA \approx W$ at QLoRA init. ([06](./06-lora-and-qlora.md))
-- **LongLoRA / S²-Attn** — LoRA context extension with trainable embeddings and norms; shifted sparse attention at training only. ([17](./17-long-context-extension.md))
-- **LongRoPE** — searched per-frequency rescale factors with short and long sets. ([17](./17-long-context-extension.md))
 - **LoRA** — low-rank update $W_0 + \gamma_r BA$ with $B=0$ at init. ([06](./06-lora-and-qlora.md))
-- **LoRA+ / LoRA-FA** — optimiser-only variants (higher LR on $B$; frozen $A$) that still produce plain LoRA. ([07](./07-the-wider-peft-landscape.md))
 - **Magpie** — self-synthesis from only the pre-query template; the aligned model writes the user turn. ([04](./04-data-curation-and-synthesis.md))
 - **Matryoshka embeddings** — loss summed over nested prefix dimensions so truncated embeddings work. ([16](./16-multimodal-and-embedding-fine-tuning.md))
 - **MCP (Model Context Protocol)** — JSON-RPC protocol through which servers expose tools (`tools/list`, `inputSchema`); the client renders them as the template's `tools=` list, so the model never sees MCP. ([15](./15-agentic-and-tool-use-fine-tuning.md))
 - **mergekit** — standard tool for full-checkpoint merges from YAML; LGPL-3.0 again since v0.1.4. ([18](./18-model-merging-and-composition.md))
-- **MFU** — model FLOPs utilisation, $6N\cdot$tokens/s over peak. ([03](./03-training-mechanics-and-memory-math.md))
 - **MinHash / LSH** — Jaccard estimate from $k$ hash minima; banding finds near-duplicate candidates. ([04](./04-data-curation-and-synthesis.md))
 - **MNRL** — MultipleNegativesRankingLoss: InfoNCE with in-batch negatives. ([16](./16-multimodal-and-embedding-fine-tuning.md))
-- **Model soup / model stock** — an average of fine-tunes of one base (greedy soup adds a model only if the held-out score improves); model stock computes the merge weight $t$ from pairwise cosines of task vectors. ([18](./18-model-merging-and-composition.md))
 - **MoE (mixture of experts)** — router picks top-$k$ of $E$ expert MLPs; memory follows total parameters. ([02](./02-tokens-templates-and-the-causal-lm-objective.md), [10](./10-distributed-fine-tuning-and-moe.md))
 - **MPO** — DPO `sigmoid` + `bco_pair` + `sft` losses with weights 0.8/0.2/1.0; the usual VLM recipe. ([16](./16-multimodal-and-embedding-fine-tuning.md))
-- **MXFP4 / NVFP4** — FP4 E2M1 elements sharing an E8M0 scale per 32 (MX), or an E4M3 scale per 16 plus an FP32 tensor scale (NV). ([11](./11-quantization-qat-and-fp8.md))
-- **NDCG@k** — position-discounted graded relevance normalised by the ideal ordering. ([16](./16-multimodal-and-embedding-fine-tuning.md))
 - **NEFTune** — uniform noise scaled by $\alpha/\sqrt{Td}$ on input embeddings during training. ([03](./03-training-mechanics-and-memory-math.md))
 - **NF4** — 4-bit NormalFloat: 16 levels at normal quantiles, absmax per 64 weights. ([06](./06-lora-and-qlora.md))
-- **NTK-aware scaling** — changes the RoPE base to $b\,s^{d/(d-2)}$ so slow dimensions interpolate and fast ones do not. ([17](./17-long-context-extension.md))
-- **OFT** — multiplies weights by a learned orthogonal (Cayley) matrix, preserving pairwise neuron angles. ([07](./07-the-wider-peft-landscape.md))
 - **On-policy distillation (OPD)** — student samples, teacher scores each token, per-token reverse KL as the advantage. ([14](./14-distillation-and-reasoning.md))
 - **On-policy / off-policy** — training on the current model's own samples vs on another model's or a fixed dataset. ([01](./01-when-to-fine-tune.md), [12](./12-preference-optimization.md))
 - **ORPO** — single-stage SFT plus odds-ratio preference term, no reference model. ([12](./12-preference-optimization.md))
@@ -550,10 +457,7 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 - **pass@k** — probability that at least one of $k$ samples is correct; estimate without bias from $n \ge k$. ([09](./09-evaluating-fine-tuned-models.md))
 - **PiSSA** — initialises LoRA from the top-$r$ singular vectors of $W$; the frozen part is the residual. ([06](./06-lora-and-qlora.md))
 - **Policy** — the model being trained when generation is treated as acting, $\pi_\theta$. ([12](./12-preference-optimization.md), [13](./13-rl-with-verifiable-rewards.md))
-- **Position interpolation (PI)** — divide positions by $s$ so every angle stays in the trained range. ([17](./17-long-context-extension.md))
-- **PPO** — clipped-ratio policy gradient with a learned value function and GAE; removed from TRL in v1.13. ([13](./13-rl-with-verifiable-rewards.md))
 - **Prefix-preserving template** — rendering turns $1..k$ is a prefix of rendering $1..k{+}1$; required for multi-turn RL. ([02](./02-tokens-templates-and-the-causal-lm-objective.md), [15](./15-agentic-and-tool-use-fine-tuning.md))
-- **Prefix tuning / prompt tuning** — trainable key/value vectors prepended at every layer, or trainable virtual-token embeddings prepended to the input only. ([07](./07-the-wider-peft-landscape.md))
 - **Process reward model (PRM)** — scores each reasoning step rather than only the outcome. ([12](./12-preference-optimization.md))
 - **Punica / SGMV and S-LoRA** — a segmented gather matrix-vector kernel doing per-row adapter shrink/expand in one launch; S-LoRA pages adapter weights and KV cache in one unified pool. ([20](./20-production-serving-and-cost.md))
 - **QA-LoRA** — group-pooled LoRA whose update folds into GPTQ zero points, so it merges without re-quantization. ([11](./11-quantization-qat-and-fp8.md))
@@ -572,7 +476,6 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 - **RLOO** — REINFORCE with a leave-one-out baseline; KL in the reward in TRL. ([13](./13-rl-with-verifiable-rewards.md))
 - **RLVR** — RL with verifiable rewards: sample, check with a program, reinforce passing answers. ([13](./13-rl-with-verifiable-rewards.md))
 - **Rollout** — a completion sampled from the current policy during RL. ([13](./13-rl-with-verifiable-rewards.md))
-- **RoPE** — rotary position embedding: pair $i$ rotates by $m\theta_i$, $\theta_i = b^{-2i/d}$. ([17](./17-long-context-extension.md))
 - **rsLoRA** — LoRA scale $\alpha/\sqrt r$ (`use_rslora=True`). ([06](./06-lora-and-qlora.md))
 - **RULER** — synthetic long-context suite: multi-key needles, variable tracking, aggregation, QA. ([17](./17-long-context-extension.md))
 - **Safetensors** — tensor container with a JSON header; unlike pickle, cannot execute code on load. ([20](./20-production-serving-and-cost.md))
@@ -582,9 +485,7 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 - **Shallow alignment** — safety concentrated in the first few output tokens, so small updates undo it. ([19](./19-safety-forgetting-and-responsible-fine-tuning.md))
 - **SimPO** — reference-free, length-normalised preference loss with target margin $\gamma$. ([12](./12-preference-optimization.md))
 - **SLERP** — spherical interpolation between two models' tensors along the arc, so the midpoint does not shrink the way a linear average of unit vectors does. ([18](./18-model-merging-and-composition.md))
-- **Spectrum** — trains the top fraction of matrices by signal-to-noise ratio of singular values. ([07](./07-the-wider-peft-landscape.md))
 - **SPLADE / ColBERT** — learned sparse vocabulary vectors / late-interaction token vectors scored by MaxSim. ([16](./16-multimodal-and-embedding-fine-tuning.md))
-- **STE** — straight-through estimator: treat rounding as identity in the backward pass, inside the clamp. ([11](./11-quantization-qat-and-fp8.md))
 - **Superficial alignment hypothesis** — LIMA's claim that alignment mostly selects formats learned in pretraining. ([01](./01-when-to-fine-tune.md))
 - **Task vector** — $\tau = \theta_{\text{ft}} - \theta_0$. ([18](./18-model-merging-and-composition.md))
 - **Thinking mode fusion** — Qwen3 SFT stage mixing thinking and non-thinking data (empty think blocks) in one template. ([01](./01-when-to-fine-tune.md), [14](./14-distillation-and-reasoning.md))
@@ -595,7 +496,6 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 - **Ulysses** — all-to-all re-sharding from sequence to heads around attention; capped by KV heads. ([17](./17-long-context-extension.md))
 - **Verifier** — program that checks a completion (tests, answer checker, schema) and returns a reward. ([13](./13-rl-with-verifiable-rewards.md))
 - **vLLM colocate vs server mode** — rollouts in the trainer's process on shared GPUs vs a separate `vllm serve` with NCCL weight sync. ([13](./13-rl-with-verifiable-rewards.md))
-- **Wilson interval** — binomial confidence interval that behaves at small $n$ and near 0 or 1. ([09](./09-evaluating-fine-tuned-models.md))
 - **WSD schedule** — warmup, stable, decay; decide training length late and resume from the stable phase. ([03](./03-training-mechanics-and-memory-math.md))
 - **YaRN** — per-dimension RoPE interpolation by wavelength plus an attention temperature. ([17](./17-long-context-extension.md))
 - **ZeRO** — sharding optimizer state (1), plus gradients (2), plus parameters (3) across data-parallel ranks. ([10](./10-distributed-fine-tuning-and-moe.md))
@@ -608,35 +508,23 @@ $$n^* = \frac{C_{\text{train}}}{P_{\text{shot}}\,c_{\text{in}} - \Delta c} \qqua
 |---|---|---|
 | Full-FT AdamW state (mixed precision) | 16 B/param (18 with an fp32 accumulation buffer): 128 GB for 8B, 112 GB for 7B before activations | [03](./03-training-mechanics-and-memory-math.md) |
 | Llama-3-8B, all-linear, r = 16 | 41,943,040 LoRA params (≈0.52%); 0.67 GB state; 84 MB bf16 file | [03](./03-training-mechanics-and-memory-math.md), [06](./06-lora-and-qlora.md) |
-| 8B static memory: LoRA / QLoRA | 16.67 GB / 4.80 GB before activations | [03](./03-training-mechanics-and-memory-math.md) |
 | NF4 | 4.5 bits without DQ, 4.127 (4.126953125) with DQ; blocks of 64, DQ blocks of 256 | [06](./06-lora-and-qlora.md) |
 | QLoRA headline; FSDP + QLoRA | 65B on one 48 GB GPU; 70B on two 24 GB GPUs (with CPU offload) | [06](./06-lora-and-qlora.md), [10](./10-distributed-fine-tuning-and-moe.md) |
 | LoRA vs full FT | LR ≈ 10× the full-FT optimum; compute ≈ 2/3 ($4N$ vs $6N$ FLOPs per token) | [06](./06-lora-and-qlora.md), [20](./20-production-serving-and-cost.md) |
 | Typical peak LRs | SFT full 2e-5 (1e-5–2e-5); LoRA 2e-4 (1e-4–2e-4); DPO 1e-6; GRPO full 1e-6, LoRA 5e-6 | [03](./03-training-mechanics-and-memory-math.md) |
 | `SFTConfig` defaults | LR 2e-5, `max_length` 1024, checkpointing on, bf16 on, 3 epochs, `keep_start`, float32 load unless `dtype` | [05](./05-supervised-fine-tuning.md) |
 | DPO | β = 0.1, LR 1e-6; loss at zero margin $\ln 2 \approx 0.693$; initial gradient ∓0.05 per sequence | [12](./12-preference-optimization.md) |
-| KTO class weighting | $\lambda_D n_D / (\lambda_U n_U) \in [1, 4/3]$ | [12](./12-preference-optimization.md) |
 | GRPO TRL defaults | β = 0, `loss_type="dapo"`, `scale_rewards="group"`, G = 8, ε = 0.2, `max_completion_length` 512, LR 1e-6 | [13](./13-rl-with-verifiable-rewards.md) |
 | DeepSeek-R1 KL coefficient | β = 0.001 | [13](./13-rl-with-verifiable-rewards.md) |
 | DAPO clip | ε = 0.2, ε_high = 0.28 | [13](./13-rl-with-verifiable-rewards.md) |
-| TRL IS correction | `sequence_mask`, `vllm_importance_sampling_clip_max` 3.0, no lower bound | [13](./13-rl-with-verifiable-rewards.md) |
 | ZeRO, 7.5B on 64 GPUs | 120 / 31.4 / 16.6 / 1.9 GB (baseline, stages 1–3) | [10](./10-distributed-fine-tuning-and-moe.md) |
-| ZeRO-3 traffic | about 1.5× DDP | [10](./10-distributed-fine-tuning-and-moe.md) |
 | Logits, Qwen3, one 8k sequence fp32 | 151,936 × 8,192 × 4 B ≈ 4.98 GB (39.8 GB bf16 at 131k) | [03](./03-training-mechanics-and-memory-math.md), [17](./17-long-context-extension.md) |
 | KV cache, Qwen3-4B/8B bf16 | 147,456 B ≈ 0.15 MB per token | [02](./02-tokens-templates-and-the-causal-lm-objective.md), [20](./20-production-serving-and-cost.md) |
-| MFU | 8B full FT at 3,000 tok/s on an H100 (989 TFLOP/s dense) = 14.6%; good runs 35–50% | [03](./03-training-mechanics-and-memory-math.md) |
 | YaRN | α = 1, β = 32; $\sqrt{1/t}$ = 1.1386 at s = 4 | [17](./17-long-context-extension.md) |
 | FP8 maxima | E4M3 448, E5M2 57,344 | [11](./11-quantization-qat-and-fp8.md) |
-| Q4_K_M | 4.89 bits/weight (Llama-3.1-8B: 4.58 GiB) | [11](./11-quantization-qat-and-fp8.md), [20](./20-production-serving-and-cost.md) |
-| vLLM LoRA defaults (engine args) | `--max-loras` 1, `--max-lora-rank` 16 | [20](./20-production-serving-and-cost.md) |
 | OPD vs RL (Qwen3-8B, Qwen3 report Table 21) | 1,800 vs 17,920 GPU-hours; AIME'24 74.4 vs 67.6 | [14](./14-distillation-and-reasoning.md) |
-| OPD vs extrapolated SFT (Thinking Machines) | ~9× fewer FLOPs, ~30× counting teacher generation | [14](./14-distillation-and-reasoning.md) |
 | LIMA | 1,000 curated examples, 65B base | [01](./01-when-to-fine-tune.md) |
-| s1K | 1,000 of 59,029 questions; AIME24 50% → 57% with budget forcing | [14](./14-distillation-and-reasoning.md) |
-| DeepSeek-R1 | ~800k SFT samples; R1-Zero AIME'24 pass@1 15.6% → 77.9% | [01](./01-when-to-fine-tune.md) |
 | Qi et al. harmful fine-tuning | 10 examples, under USD 0.20, jailbreak GPT-3.5 Turbo; benign Alpaca 5.5% → 31.8% harmful | [19](./19-safety-forgetting-and-responsible-fine-tuning.md) |
-| Emergent misalignment | ~20% misaligned answers (GPT-4o, 6,000 insecure-code examples) | [19](./19-safety-forgetting-and-responsible-fine-tuning.md) |
-| Replay | 5–20% (SFT heuristic); 10–30% general text for CPT | [04](./04-data-curation-and-synthesis.md), [05](./05-supervised-fine-tuning.md) |
 | Wilson, n = 50 at 0.8 | [0.670, 0.888], about ±11 points | [09](./09-evaluating-fine-tuned-models.md) |
 | pass@5, n = 10, c = 3 | 0.917 (plug-in 0.832) | [09](./09-evaluating-fine-tuned-models.md) |
 | GRPO cost, 8B, 8 × 512 × 500 × 1,024 | 2.10B tokens; 233.0 + 70.7 = 303.7 GPU-h; generation 77% | [20](./20-production-serving-and-cost.md) |

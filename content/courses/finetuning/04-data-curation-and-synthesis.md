@@ -118,10 +118,10 @@ splits.push_to_hub("you/support-email-sft", private=True)
 |---|---|---|
 | `batched=True` | hands your function 1,000 rows at a time by default | none; use it for tokenizers and anything vectorized |
 | `num_proc` | forks worker processes | a non-picklable closure or a changing global breaks fingerprint caching: silent recompute or a stale cache hit |
-| `streaming=True` ([guide](https://huggingface.co/docs/datasets/main/en/stream)) | returns an `IterableDataset` read lazily | no `len()`; shuffles only within a buffer (default 1,000); `take`/`skip` lock shard order, so shuffle first |
+| `streaming=True` ([guide](https://huggingface.co/docs/datasets/main/en/stream), as of October 2026) | returns an `IterableDataset` read lazily | no `len()`; shuffles only within a buffer (default 1,000); `take`/`skip` lock shard order, so shuffle first |
 | `IterableDataset` in TRL | trains without materializing the set | **TRL trainers require `max_steps`**: epochs are undefined ([SFTTrainer reference](https://huggingface.co/docs/trl/v1.15.0/en/sft_trainer)) |
 | `interleave_datasets([a, b], probabilities=[0.8, 0.2], seed=0)` | draws from sources in fixed ratios | how section 4.8's replay mix is built without materializing it |
-| `push_to_hub` | writes Parquet shards; `README.md` is the **dataset card** ([guide](https://huggingface.co/docs/datasets/main/en/dataset_card)) | a card without provenance (generator models, terms, filters, thresholds, dedup and decontamination settings) cannot be audited; release content is [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)'s |
+| `push_to_hub` | writes Parquet shards; `README.md` is the **dataset card** ([guide](https://huggingface.co/docs/datasets/main/en/dataset_card), as of October 2026) | a card without provenance (generator models, terms, filters, thresholds, dedup and decontamination settings) cannot be audited; release content is [module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)'s |
 
 ---
 
@@ -673,7 +673,7 @@ This proves the bookkeeping, not TRL's tokenizer-level behavior: measure real le
 | Part | Tier | Model | Data | Script |
 |---|---|---|---|---|
 | L4.1 formats, dedup, decontam, length | CPU | none (smoke) / `Qwen/Qwen3-0.6B` tokenizer (full) | inline corpus or module 01's `ft_data/train.jsonl` | [build_sft_dataset.py](./code/build_sft_dataset.py) |
-| L4.2 Magpie generation | T1 or API | [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) (non-thinking, Apache-2.0) | generated | [build_sft_dataset.py](./code/build_sft_dataset.py) `--magpie` |
+| L4.2 Magpie generation | T1 or API | [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/tree/cdbee75f17c01a7cc42f958dc650907174af0554) (non-thinking, Apache-2.0) | generated | [build_sft_dataset.py](./code/build_sft_dataset.py) `--magpie` |
 | L4.3 rejection-sampled math | T1 | same teacher | [`openai/gsm8k`](https://huggingface.co/datasets/openai/gsm8k), config `main`, split `train` | [rejection_sample_gsm8k.py](./code/rejection_sample_gsm8k.py) |
 
 ```bash

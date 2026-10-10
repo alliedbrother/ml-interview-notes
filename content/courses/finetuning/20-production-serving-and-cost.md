@@ -5,9 +5,8 @@
 > compatibility checklist, the MLOps loop, and a defensible cost model for
 > training and serving.
 
-A fine-tune that scores well in a notebook is not yet a product. It becomes useful only
-when it is served reliably, at a latency users accept, for a cost the business can carry,
-and when you can retrain and roll it back without drama. The
+A fine-tune becomes useful only when it is served reliably, at an acceptable latency and
+cost, and can be retrained and rolled back without drama. The
 [Inference course](/courses/inference/) owns engine internals; start with
 [LoRA and pooling models](/courses/inference/07-architectures/07-05-lora-and-pooling-models.html)
 for the engine-side view of adapters. General MLOps lives in the
@@ -18,17 +17,13 @@ what is specific to fine-tuned LLMs.
 
 ## 20.1 Merged model or base plus adapters?
 
-You have trained a LoRA adapter (module 06). There are two families of serving options,
-and the choice is mostly about how many fine-tunes share one base.
+The choice is mostly about how many fine-tunes share one base.
 
 **Merge** when there is one task, one model, and latency matters. Merging computes
 $W = W_0 + \gamma_r B_{\text{lora}} A$ once and writes a plain checkpoint, so inference
 costs exactly what the base costs. Merge into a **bf16 copy of the base, then quantize**
 (AWQ, GPTQ, FP8, GGUF; see [module 11](./11-quantization-qat-and-fp8.md)). Merging into an
-already-quantized base rounds the small update away. PEFT's `merge_and_unload()` merges into
-the wrapped base model and returns it unwrapped: use the return value
-(`model = model.merge_and_unload()`) and do not keep using the old `PeftModel`.
-`merge_adapter()`/`unmerge_adapter()` toggle in place; the lifecycle is in
+already-quantized base rounds the small update away. The PEFT merge lifecycle (`merge_and_unload()`, `merge_adapter()`) and per-forward `set_adapter()` switching are in
 [module 06](./06-lora-and-qlora.md).
 
 **Serve unmerged adapters** when many tenants or tasks share one base. One copy of an 8B
@@ -48,11 +43,7 @@ $A, B$ pairs. Section 20.3 is about making that gather cheap.
 Exotic adapters change the calculus. DoRA rescales the merged weight's column norms
 (see [module 07](./07-the-wider-peft-landscape.md)); IA3, prefix tuning, and the long tail
 of 2025-26 PEFT methods are not supported by the multi-LoRA kernels in mainstream
-engines. **If it is not plain LoRA on supported module types, plan to merge.** A
-deployed engine also needs `--max-lora-rank` at least as large as your largest adapter
-(section 20.2), so rank-256 research adapters often end up merged too. PEFT's
-`set_adapter()` switching (module 06) is for notebooks: one adapter per forward, no mixed
-batches.
+engines. **If it is not plain LoRA on supported module types, plan to merge.**
 
 **Table 1. Serving options for a fine-tune.**
 
@@ -62,10 +53,9 @@ batches.
 | Merged then quantized (AWQ/GPTQ/FP8/GGUF) | lower than bf16 (memory-bound decode) | 25-50% of bf16 | low, plus a quantization eval gate | one task, cost- or edge-constrained |
 | Base + adapters, unmerged (multi-LoRA) | base plus a few percent to tens of percent, depending on kernel, rank mix, and batch | one base plus about 0.1-2% per resident adapter; less with a quantized base | medium: adapter registry, limits, cache sizing; a quantized base needs adapters validated on it | many tenants or tasks on one base |
 
-Do not take the latency column as a benchmark. Measure on your traffic with the
+The latency column is not a benchmark: measure your traffic with the
 [profiling and capacity](/courses/inference/10-benchmarking/10-05-profiling-and-capacity.html)
-method; Lab L20.1 does exactly that comparison. Many *full* fine-tunes of one base
-are a different problem (BitDelta, section 20.3).
+method, as Lab L20.1 does. Many *full* fine-tunes of one base are a different problem (BitDelta, section 20.3).
 
 ## 20.2 Serving engines
 
@@ -93,36 +83,26 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 The three limits are the knobs you size
 ([engine-args reference](https://docs.vllm.ai/en/v0.31.0/configuration/engine_args/)).
 `--max-loras` (default 1) is the number of adapters that can appear **in one batch**; each
-GPU slot reserves rank-`max_lora_rank` buffers, so size it to the distinct adapters you
-expect per step. `--max-lora-rank` (default 16; allowed values 1, 8, 16, 32, 64, 128, 256,
-320, 512) is the largest rank any loaded adapter may have. `--max-cpu-loras` (no default
-listed; at least `max_loras`) is the host-memory cache, sized to the tenant working set.
-The default `--max-loras 1` is the most common surprise: mixed-adapter batches serialize
-until you raise it. Keep `--max-lora-rank` tight. A server sized for rank 64 pads every
-rank-8 adapter's compute to 64 (section 20.3).
+GPU slot reserves rank-`max_lora_rank` buffers. The default of 1 is the most common
+surprise: mixed-adapter batches serialize until you raise it. `--max-lora-rank` (default 16;
+allowed 1, 8, 16, 32, 64, 128, 256, 320, 512) is the largest loadable rank; keep it tight,
+because a server sized for rank 64 pads every rank-8 adapter to 64 (section 20.3).
+`--max-cpu-loras` (at least `max_loras`) is the host-memory cache for the tenant working set.
 
 **Dynamic loading.** With the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`,
 vLLM exposes `POST /v1/load_lora_adapter` (`lora_name`, `lora_path`) and
-`POST /v1/unload_lora_adapter` (`lora_name`). The vLLM docs warn that this feature "comes
-with security risks" and should not be used in production outside an isolated, fully
-trusted environment. **Anyone who can reach the endpoint can make your server load
-arbitrary weights from an arbitrary path.** If you need it, put it behind an authenticated
-admin API, allow-list the adapter directory, and log every load. **LoRA resolvers** are the on-demand variant: the
-`lora_filesystem_resolver` plugin loads adapters from `VLLM_LORA_RESOLVER_CACHE_DIR`, and
-`lora_hf_hub_resolver` from the repos in `VLLM_LORA_RESOLVER_HF_REPO_LIST` (both enabled
-via `VLLM_PLUGINS`, and both also require `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`, so the
-same security caveat applies); the docs call remote download "insecure and not intended for
-use in production environments".
+`POST /v1/unload_lora_adapter` (`lora_name`). **LoRA resolvers** load on demand: the
+`lora_filesystem_resolver` plugin from `VLLM_LORA_RESOLVER_CACHE_DIR`, `lora_hf_hub_resolver`
+from the repos in `VLLM_LORA_RESOLVER_HF_REPO_LIST` (both enabled via `VLLM_PLUGINS`, both
+requiring the same environment variable). Both are arbitrary-weight loaders; read the
+security rules in section 20.4 before turning either on.
 
-**Multimodal and MoE caveats.** vLLM serves LoRA on the vision tower and connector only
-behind the experimental `enable_tower_connector_lora` option (off by default, and only for
-some models such as the Qwen-VL series); otherwise adapters apply to the language model
-([module 16](./16-multimodal-and-embedding-fine-tuning.md)). For MoE models, PEFT-style
-fused "3D" expert LoRA weights and per-expert "2D" weights are different layouts; serving
-both requires `--enable-mixed-moe-lora-format` and a per-adapter `is_3d_lora_weight`, and
-the docs warn that vLLM trusts the declared layout, so a wrong value can silently produce
-garbage outputs with no error at load time. Expert LoRA training is in
-[module 10](./10-distributed-fine-tuning-and-moe.md).
+**Multimodal and MoE caveats.** LoRA on the vision tower and connector needs the
+experimental `enable_tower_connector_lora` (off by default, some models such as Qwen-VL);
+otherwise adapters apply to the language model ([module 16](./16-multimodal-and-embedding-fine-tuning.md)).
+For MoE, fused "3D" and per-expert "2D" expert LoRA layouts differ; mixing them needs
+`--enable-mixed-moe-lora-format` and a per-adapter `is_3d_lora_weight`, and a wrong value
+silently gives garbage ([module 10](./10-distributed-fine-tuning-and-moe.md) covers training).
 
 ### The rest of the map
 
@@ -151,10 +131,10 @@ for testing. For the engine decision itself read
 
 ## 20.3 Multi-tenant LoRA serving
 
-You have one base and many adapters. A naive server either (a) batches only requests that
-share an adapter, starving throughput when traffic is spread across tenants, or (b) merges
-and unmerges per batch, which is far too slow. What you want is one batch with rows from
-many adapters: one large GEMM for the shared base, plus a per-row low-rank correction.
+A naive server either batches only requests that share an adapter, starving throughput
+when traffic is spread across tenants, or merges and unmerges per batch, which is far too
+slow. The goal is one batch with rows from many adapters: one GEMM for the shared base, plus
+a per-row low-rank correction.
 
 ### Punica: SGMV
 
@@ -169,19 +149,18 @@ $B_{\text{lora}}(\cdot)$; rows with no adapter are masked out).
 ### S-LoRA: unified paging
 
 Sheng et al. (2023) [S-LoRA](https://arxiv.org/abs/2311.03285) attacked memory. Adapters
-live in host memory and are fetched to the GPU when running requests need them; adapter
-weights (sized by rank) and KV-cache blocks (sized by sequence length) share **one paged
-memory pool** ("Unified Paging"), so neither fragments the other. S-LoRA reports thousands
-of adapters on one GPU with up to 4x the throughput of vLLM's then-naive LoRA path. vLLM's `max_loras` (GPU slots) and `max_cpu_loras` (host cache) are
-the operator-facing version of this hierarchy.
+live in host memory and are fetched to the GPU on demand; adapter weights (sized by rank)
+and KV-cache blocks (sized by sequence length) share **one paged memory pool** ("Unified
+Paging"), so neither fragments the other. S-LoRA reports thousands of adapters on one GPU
+with up to 4x the throughput of vLLM's then-naive LoRA path. vLLM's `max_loras` (GPU slots)
+and `max_cpu_loras` (host cache) expose this hierarchy.
 
 ### Proving the gather is exact
 
 The check below runs seven requests (adapter ids `[0, 2, 1, 1, 0, 2, -1]`, ranks 2, 4, 8;
-`-1` is no adapter) through a `(16, 12)` layer twice: a per-request loop, and SGMV-style
-(zero-pad to rank 8, stack, gather by id, two batched matmuls). It asserts they agree, that
-only one side of the padding must be zero, and counts the waste. For the six adapted rows,
-padding to rank 8 computes
+`-1` is no adapter) through a `(16, 12)` layer as a per-request loop and SGMV-style (zero-pad
+to rank 8, gather by id, two batched matmuls). It asserts they agree, that only one side of
+the padding must be zero, and counts the waste: for the six adapted rows, padding computes
 $6 \times 2 \cdot 8 \cdot (12 + 16) = 2{,}688$ LoRA FLOPs, of which only
 $2 \cdot 28 \cdot (2+8+4+4+2+8) = 1{,}568$ are useful: **1,120 FLOPs, 41.7%, are spent on
 zeros.**
@@ -267,9 +246,8 @@ option, not a flag.
 
 ## 20.4 The compatibility checklist
 
-Most "the model got worse after deployment" incidents are not model problems. They are
-contract violations between what the trainer saw and what the engine does. Two rules sit
-outside the checks below: ship the tokenizer files unchanged (same special-token ids, new
+Most "worse after deployment" incidents are contract violations between what the trainer
+saw and what the engine does, not model problems. Two rules sit outside the checks below: ship the tokenizer files unchanged (same special-token ids, new
 tokens included; [module 02](./02-tokens-templates-and-the-causal-lm-objective.md)), and
 ship weights as `.safetensors` only.
 
@@ -374,26 +352,28 @@ shows.
   repos you have read and pinned to a commit.
 - **Pickle (`.bin`, `.pt`) can execute arbitrary code on load; safetensors cannot.**
   `save_pretrained` writes safetensors by default; accept nothing else.
+- **Runtime adapter loading is an arbitrary-weights endpoint.** The vLLM docs say
+  `VLLM_ALLOW_RUNTIME_LORA_UPDATING` "comes with security risks" and call resolver remote
+  download "insecure and not intended for use in production environments": anyone who can
+  reach the endpoint can make the server load weights from any path. If you need it, put it
+  behind an authenticated admin API, allow-list the adapter directory, and log every load.
 - **Community adapters are a supply chain.** Pin `revision=` to a commit SHA and record the
   hash. A format-safe adapter can still be backdoored, so run your safety regression suite
   ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md)) on third-party adapters too.
 
 ## 20.5 Latency and throughput (pointer section)
 
-The engine techniques belong to the Inference course. For each, the one thing a fine-tuner
-must preserve:
+The Inference course owns these techniques; for each, what a fine-tune must preserve:
 
 | Technique | Inference-course page | What the fine-tune must preserve |
 |---|---|---|
 | Continuous batching | [continuous batching](/courses/inference/01-the-core-loop/01-03-continuous-batching.html) (also [transformers module 14](../transformers/14-inference-optimizations.md)) | short, terminating outputs: a fine-tune that forgets to stop holds a batch slot to `max_tokens` |
-| Paged attention | [PagedAttention](/courses/inference/02-memory-and-kv-cache/02-02-pagedattention.html) | a known KV cost per token (below); long-context fine-tunes (module 17) multiply it |
+| Paged attention | [PagedAttention](/courses/inference/02-memory-and-kv-cache/02-02-pagedattention.html) | a known KV cost per token; long-context fine-tunes (module 17) multiply it |
 | Prefix caching | [prefix caching](/courses/inference/02-memory-and-kv-cache/02-03-prefix-caching-hash.html) | a stable system prompt at position 0, in training and serving; caches are per adapter under multi-LoRA |
 | Speculative decoding | [speculative decoding](/courses/inference/06-decoding-algorithms/06-02-speculative-decoding.html) | drafter acceptance rate, and the base's MTP heads if it has them |
 | Quantized serving | [module 11](./11-quantization-qat-and-fp8.md) owns the methods | [module 09](./09-evaluating-fine-tuned-models.md)'s suite passing on the quantized artifact |
 
-Qwen3-8B stores $2 \cdot 36 \cdot 8 \cdot 128 \cdot 2 = 147{,}456$ bytes (about 0.15 MB) of
-bf16 KV per token, so a 700-token request holds about 103 MB. Fine-tuning shifts the
-target's distribution, so a drafter (a small model, an EAGLE head, or the model's own MTP
+Fine-tuning shifts the target's distribution, so a drafter (a small model, an EAGLE head, or the model's own MTP
 heads in DeepSeek-V3, Qwen3-Next, GLM-4.5) trained for the base loses acceptance. Check
 whether your training stack updates or at least preserves MTP heads, measure acceptance
 after fine-tuning, and re-train the EAGLE head on your fine-tune's outputs if it falls. vLLM
@@ -404,19 +384,17 @@ per step when a draft model is available).
 
 ### Package for reproducibility
 
-Every served artifact should answer three questions from its repository alone: what
-base, what data, what config. The Hugging Face Hub is the usual registry.
+Every served artifact should answer from its repository alone: what base, what data, what
+config. The Hugging Face Hub is the usual registry.
 
-- **`push_to_hub` and `hub_strategy`.** With `push_to_hub=True`, the Trainer (and every
-  TRL trainer built on it) pushes on save. As of the
-  [Transformers v5.19 Trainer docs](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer),
-  `hub_strategy` defaults to `"every_save"` (push each save, asynchronously); `"checkpoint"`
-  also pushes the latest checkpoint to a `last-checkpoint` folder so a preempted spot job
-  can resume; `"end"` pushes once; `"all_checkpoints"` pushes every checkpoint.
+- **`push_to_hub` and `hub_strategy`.** With `push_to_hub=True` every Trainer-based TRL
+  trainer pushes on save (strategies `"every_save"`, `"checkpoint"`, `"end"`: module 03's
+  checkpoint table; [Trainer docs, v5.19](https://huggingface.co/docs/transformers/v5.19.0/en/main_classes/trainer)).
+  For spot jobs, `SFTConfig(push_to_hub=True, hub_model_id="acme/qwen3-8b-support-lora",
+  hub_private_repo=True, hub_strategy="checkpoint", save_steps=200)` also pushes a
+  `last-checkpoint` folder, so a preempted job can resume.
 - **Version adapters by revision.** Tag each promoted adapter (`v2026-10-01-support`) and
   pin the tag's commit SHA in serving configs. "Latest `main`" is not a version.
-- **Example.** `SFTConfig(push_to_hub=True, hub_model_id="acme/qwen3-8b-support-lora",
-  hub_private_repo=True, hub_strategy="checkpoint", save_steps=200)` keeps a spot job resumable.
 - **Reproducible configs.** Commit the exact TRL/Axolotl YAML, library versions, seeds,
   and the dataset revision next to the weights, with a model card
   ([module 19](./19-safety-forgetting-and-responsible-fine-tuning.md) owns the template).
@@ -425,9 +403,8 @@ base, what data, what config. The Hugging Face Hub is the usual registry.
 
 ### The loop
 
-A fine-tune decays. Users change, products change, and the base model you started from is
-superseded. **Treat the fine-tune as a pipeline that runs on a schedule, not a model you
-trained once.**
+A fine-tune decays as users, products, and base models change. **Treat it as a pipeline
+that runs on a schedule, not a model you trained once.**
 
 ```mermaid
 flowchart LR
@@ -453,21 +430,20 @@ The pieces that are specific to LLM fine-tunes:
   ([module 04](./04-data-curation-and-synthesis.md)).
 - **Regression gates in CI.** A retrain is promoted only if module 09's suite passes
   thresholds, for example: task metric not below the incumbent's lower CI bound, JSON parse
-  rate at or above 99.5%, safety refusal rate within an agreed tolerance, general-capability
+  rate at or above a threshold your golden set can resolve (99.5% needs well over 200 items;
+  on the course's 50-row set, require 50/50), safety refusal rate within an agreed tolerance, general-capability
   probes (IFEval-style) not down more than an agreed margin.
 - **Rollback.** Because adapters are small and versioned by tag, rollback is a config
   change: point the `--lora-modules` entry (or the alias your router maps) back at the
   previous revision. Keep the previous adapter resident during canary.
 
-### Monitoring in production
-
-| Signal | How to compute | Why it matters for a fine-tune |
-|---|---|---|
-| Input drift | embedding centroid distance or a classifier between this week's and the training inputs; length and language histograms | the fine-tune was trained on last quarter's distribution |
-| Format-failure rate | fraction of outputs that fail JSON parse or schema validation | the first thing a bad template, quantization, or stop-token bug breaks |
-| Tool-call validity | parsed tool calls with valid name and argument schema | parser/template mismatch shows here first |
-| Refusal rate | refusal classifier or keyword heuristics, by segment | over-refusal after safety tuning, under-refusal after domain tuning |
-| Cost per request | GPU-seconds (or API spend) divided by requests, per tenant | the number finance asks about; drives section 20.7 |
+- **Monitoring.** Track, per tenant: *input drift* (embedding-centroid distance or a
+  classifier between this week's and the training inputs; length and language histograms);
+  *format-failure rate* and *tool-call validity* (JSON or schema failures, invalid tool names
+  or arguments: the first things a template, quantization, or stop-token bug breaks);
+  *refusal rate* by segment (over-refusal after safety tuning, under-refusal after domain
+  tuning); *user feedback* (thumbs-down, escalations); latency; and *cost per request*
+  (GPU-seconds or API spend per request, which drives section 20.7).
 
 The [observability and failure page](/courses/inference/09-serving-system/09-05-observability-and-failure.html)
 covers engine metrics; the [MLOps note](../../notes/libraries/mlops-and-serving.md) covers
@@ -482,9 +458,9 @@ weights from a Hub checkpoint's safetensors or GGUF headers.
 
 ### Compute: why LoRA costs about two-thirds
 
-Module 03 derived $6N$ FLOPs per token for full fine-tuning (forward, input gradient, weight
-gradient, each $2N$; Kaplan et al. (2020) [rule](https://arxiv.org/abs/2001.08361)) and about
-$4N$ for LoRA, because frozen weights need no weight-gradient GEMM. For $D$ training tokens:
+[Module 03](./03-training-mechanics-and-memory-math.md) derives the
+[Kaplan et al. (2020)](https://arxiv.org/abs/2001.08361) $6N$ FLOPs per token for full
+fine-tuning and about $4N$ for LoRA (no weight-gradient GEMM for frozen weights). For $D$ tokens:
 
 $$
 C_{\text{LoRA}} \approx 4ND \approx \tfrac{2}{3}\, C_{\text{full}}.
@@ -492,22 +468,14 @@ $$
 
 Thinking Machines' [LoRA Without Regret](https://thinkingmachines.ai/blog/lora/)
 (Schulman et al., September 2025) states the same: LoRA takes "slightly more than 2/3 of the
-FLOPs that full fine-tuning does per pass". With gradient checkpointing on both sides the
-hardware work is about $6N$ (LoRA) vs $8N$ (full), so expect roughly a quarter, not a third,
-off wall-clock; module 03 explains why MFU still counts the model FLOPs. QLoRA adds
-dequantization work, so it is usually slower than LoRA in wall-clock at the same FLOP count.
+FLOPs that full fine-tuning does per pass". Checkpointing and QLoRA dequantization shift
+wall-clock (module 03).
 
-Convert FLOPs to time with
-
-$$
-\text{GPU-hours} = \frac{C}{\text{peak FLOP/s} \times \text{MFU} \times 3600}.
-$$
-
+Convert FLOPs to time with $\text{GPU-hours} = C / (\text{peak FLOP/s} \times \text{MFU} \times 3600)$.
 Peak for an H100 SXM in dense bf16 is 989 TFLOP/s (NVIDIA's
 [H100 page](https://www.nvidia.com/en-us/data-center/h100/) lists 1,979 "with sparsity";
-dense is half). A well-tuned fine-tuning run reaches 30-50% MFU (module 03; its worked
-example of 3,000 tok/s on 8B is only 14.6%, so 40% is an optimistic assumption). We use
-40%, so the effective rate is $3.956 \times 10^{14}$ FLOP/s.
+dense is half). We assume 40% MFU, the optimistic end of module 03's 30-50% range, so the
+effective rate is $3.956 \times 10^{14}$ FLOP/s.
 
 ### Scenario (a): SFT of an 8B model with LoRA on 50M tokens
 
@@ -517,10 +485,8 @@ C_{\text{LoRA}} = 4 \cdot 8\times10^{9} \cdot 5\times10^{7} = 1.6\times10^{18}.
 $$
 
 That is 1.685 GPU-hours for full fine-tuning and 1.123 for LoRA. At an **assumed** USD 2.50
-per H100-hour (an illustrative on-demand price, not a quote), the LoRA run is about USD
-2.81 of compute. The surprise is how cheap SFT is: the real cost of scenario (a) is data
-curation and evaluation, not GPUs. In practice add 20-50% for evaluation passes, restarts,
-and sweeps.
+per H100-hour (illustrative, not a quote), the LoRA run is about USD 2.81 of compute: SFT's
+real cost is data curation and evaluation. Add 20-50% for eval passes, restarts, and sweeps.
 
 ### Scenario (b): GRPO of an 8B model
 
@@ -531,11 +497,9 @@ $$
 8 \cdot 512 \cdot 500 \cdot 1024 = 2{,}097{,}152{,}000 \text{ tokens}.
 $$
 
-**Generation.** Assume vLLM decodes an 8B model at 2,500 tokens/s per GPU at the batch sizes
-RL produces (an assumption; measure yours). This is lower than the serving figure in
-scenario (c) because 1,024-token completions grow the KV cache per sequence and colocated
-training memory caps the rollout batch; with dedicated server-mode vLLM it is often several
-times higher. Generation takes $2.097\times10^9 / 2500 / 3600 = 233.0$ GPU-hours.
+**Generation.** Assume vLLM decodes an 8B model at 2,500 tokens/s per GPU at RL batch sizes
+(an assumption; measure yours). It is below scenario (c)'s figure because long completions
+grow the KV cache and colocated training memory caps the rollout batch. Generation takes $2.097\times10^9 / 2500 / 3600 = 233.0$ GPU-hours.
 
 **Training.** The policy update processes the same completion tokens (ignoring prompt tokens
 and, with `num_iterations > 1`, the extra old-policy forward; both add to training, not
@@ -624,8 +588,7 @@ are in [module 08](./08-frameworks-and-tooling.md).
 
 ### Build vs buy
 
-[Module 01](./01-when-to-fine-tune.md) asked whether a fine-tune beats prompting a frontier
-API. Here we add the infrastructure. Let $R$ be requests per day, $a$ the API cost per
+This extends [module 01](./01-when-to-fine-tune.md)'s break-even with infrastructure. Let $R$ be requests per day, $a$ the API cost per
 request, $v$ the variable self-hosted GPU cost per request, and $F$ the fixed monthly cost
 of owning the model (ops time, monitoring, amortized training). Over a 30-day month:
 
@@ -644,11 +607,10 @@ USD 2.50/h, 3,000 tok/s), $v \approx$ USD 0.0000926 per request. Take $F$ = USD 
 ops plus a USD 3,000 training run amortized over 6 months = USD 5,500/month. Then
 $R^* \approx 428{,}943$ requests/day.
 
-This is a **fluid** model: it bills fractional GPUs. Its GPU spend at 1M requests/day is
-$30 \cdot 10^6 \cdot v$ = USD 2,778/month, while scenario (c)'s three whole GPUs cost USD
-180/day = USD 5,400/month. The gap is integer rounding (2 GPUs instead of 1.54: USD 822)
-plus the N+1 spare (USD 1,800). For a conservative break-even, add the spare to $F$ and
-check the integer GPU count near $R^*$; `cost_model.py` prints this reconciliation.
+This is a **fluid** model that bills fractional GPUs: USD 2,778/month at 1M requests/day,
+against USD 5,400 for scenario (c)'s three whole GPUs. The gap is integer rounding (USD 822)
+plus the N+1 spare (USD 1,800). For a conservative break-even, add the spare to $F$;
+`cost_model.py` prints this reconciliation.
 
 The check below asserts the three-volume comparison, the break-even, and the throughput
 sensitivity.
@@ -729,10 +691,9 @@ measures Llama-3.1-8B at:
 | Q8_0 | 8.50 | 7.95 | near-lossless reference; parity testing; larger machines |
 | F16 | 16.00 | 14.96 | the conversion intermediate, not a deployment target |
 
-Rules of thumb for 1-8B fine-tunes: a 1.7B model at Q8_0 or a 4B at Q4_K_M fits a phone
-with 8 GB RAM; an 8B at Q4_K_M fits a 16 GB laptop with room for context. **Fine-tunes
-for narrow formats (JSON) are more fragile under aggressive quantization than chat models,
-so run the parity eval at the quant you ship.**
+A 1.7B at Q8_0 or a 4B at Q4_K_M fits an 8 GB phone; an 8B at Q4_K_M fits a 16 GB laptop
+with room for context. **Narrow-format (JSON) fine-tunes are more fragile under aggressive
+quantization than chat models, so run the parity eval at the quant you ship.**
 
 ### Export to GGUF and Ollama
 
@@ -773,14 +734,12 @@ PARAMETER stop "<|endoftext|>"
 PARAMETER temperature 0
 ```
 
-This template is for a fine-tune trained with thinking disabled, as in the running example.
-Qwen3's chat template with `enable_thinking=False` ends the generation prompt with an empty
-think block (`<think>\n\n</think>\n\n`), so the Ollama template must too; without it, the
-prompt the model sees in Ollama is one it never saw in training. **Verify parity on the eval
+The running example trains with thinking disabled, and Qwen3's template with
+`enable_thinking=False` ends the generation prompt with an empty think block
+(`<think>\n\n</think>\n\n`), so the Ollama template must too. **Verify parity on the eval
 set, not on one prompt** (Lab L20.2).
 
-Other tools write GGUF too (Unsloth's exporters, `axolotl export`); whatever the tool, run
-the same parity check. On Apple silicon, [`mlx-lm`](https://github.com/ml-explore/mlx-lm/blob/ba8a08fd2ed72bbc53de84f89933f91fe4743e4a/mlx_lm/LORA.md)
+Unsloth's exporters and `axolotl export` write GGUF too; run the same parity check. On Apple silicon, [`mlx-lm`](https://github.com/ml-explore/mlx-lm/blob/ba8a08fd2ed72bbc53de84f89933f91fe4743e4a/mlx_lm/LORA.md)
 trains LoRA, DoRA, or full fine-tunes and fuses adapters (`mlx_lm.fuse`), but its GGUF
 export is limited to Llama-family models in fp16; for other architectures convert the fused
 model with llama.cpp. On phones, llama.cpp runs GGUF on Android and iOS, and PyTorch's
@@ -799,16 +758,14 @@ python content/courses/finetuning/code/gguf_parity.py --smoke
 python content/courses/finetuning/code/cost_model.py --smoke
 ```
 
-`multi_lora_serving.py --smoke` checks the batched layer on a different 32-request batch,
-so its padding-waste figure differs from the 41.7% above. Both serving scripts read module
-01's eval file (rows of `{id, email, gold}`) and prompt with its `SYSTEM_PROMPT` and
+Both serving scripts read module 01's eval file (rows of `{id, email, gold}`) and prompt with its `SYSTEM_PROMPT` and
 thinking off; pass `--smoke --eval-jsonl ./ft_data/eval.jsonl` to validate your copy on CPU.
 
 ### L20.1: one base, three adapters, one dynamic load (T1)
 
-- **Setup:** `Qwen/Qwen3-1.7B` plus three LoRA adapters from modules 05-06 (three seeds, or
-  three `issue_type` subsets); module 01's 50-row eval set (`fit_or_not_baseline.py
-  --data-only` writes `ft_data/eval.jsonl`); vLLM 0.31.x, PEFT 0.21.x, one 24 GB GPU.
+- **Setup:** `Qwen/Qwen3-1.7B` plus three LoRA adapters from modules 05-06 (three seeds or
+  `issue_type` subsets); module 01's 50-row `ft_data/eval.jsonl` (`fit_or_not_baseline.py
+  --data-only`); vLLM 0.31.x, PEFT 0.21.x, one 24 GB GPU.
 - **Run:** launches `vllm serve` on `127.0.0.1` with `--max-loras 3 --max-lora-rank 16`,
   load-tests round-robin across adapters at concurrency 1, 8, 32, loads a fourth adapter at
   runtime (local process only), then repeats against a merged model.
@@ -853,8 +810,7 @@ python content/courses/finetuning/code/cost_model.py --gpu-price 3.10 --decode-t
 
 ### L20.4: capstone (T1 to T3)
 
-Take one task end to end (the support-email task by default, a task from your own work is
-better) and produce the evidence below.
+Take one task end to end (the support-email task, or better, your own) and produce:
 
 | Criterion | Evidence required (owning modules) |
 |---|---|

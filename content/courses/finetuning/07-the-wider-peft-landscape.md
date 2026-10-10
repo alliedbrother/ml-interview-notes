@@ -61,7 +61,7 @@ and serve the base shape with zero added latency.
 ### Prompt tuning, prefix tuning, P-tuning
 
 Soft prompts adapt the *input* rather than the weights. The [PEFT soft-prompt
-guide](https://huggingface.co/docs/peft/conceptual_guides/prompting) covers four variants.
+guide](https://huggingface.co/docs/peft/v0.21.0/en/conceptual_guides/prompting) covers four variants.
 
 - **Prompt tuning** (Lester et al., 2021, [The Power of Scale for Parameter-Efficient Prompt
   Tuning](https://arxiv.org/abs/2104.08691)): prepend $n$ trainable embedding vectors to the input
@@ -78,7 +78,7 @@ guide](https://huggingface.co/docs/peft/conceptual_guides/prompting) covers four
   with a small LSTM or MLP encoder. **P-tuning v2** ([arXiv 2110.07602](https://arxiv.org/abs/2110.07602))
   adds prompts at every layer, essentially prefix tuning, and made soft prompts competitive at small scale.
 
-[PEFT's prefix tuning](https://huggingface.co/docs/peft/v0.21.0/en/package_reference/prefix_tuning) applies the prefix only to the decoder of encoder-decoder models, unlike the paper. Since v0.19, zero or KV-cache initialisation cuts run-to-run variance ([v0.19.0 notes](https://github.com/huggingface/peft/releases/tag/v0.19.0)).
+[PEFT's prefix tuning](https://huggingface.co/docs/peft/v0.21.0/en/package_reference/prefix_tuning) applies the prefix only to the decoder of encoder-decoder models, unlike the paper. Since v0.19, `init_weights="zero"` cuts run-to-run variance ([v0.19.0 notes](https://github.com/huggingface/peft/releases/tag/v0.19.0)); PEFT can also initialise a prefix from an existing KV cache.
 
 **When soft prompts still make sense.** One frozen model serves thousands of tenants, each adapter
 must be tiny, and you cannot touch the serving graph. A 20-token prompt for a 4096-wide model is
@@ -455,7 +455,7 @@ baseline.
 **ReFT** (Wu et al., 2024, [Representation Finetuning](https://arxiv.org/abs/2404.03592)) sits outside
 the table because it edits hidden states, not weights. LoReFT learns a low-rank intervention on the
 representations at chosen layers and positions, and the paper reports interventions 15x–65x more
-parameter-efficient than LoRA. It ships in [pyreft](https://github.com/stanfordnlp/pyreft), not PEFT,
+parameter-efficient than LoRA. It ships in [pyreft](https://github.com/stanfordnlp/pyreft/tree/dafd0995a366d7b47160a337dcc388eda7431821), not PEFT,
 and an intervention cannot be merged into $W_0$ or served by vLLM.
 
 ---
@@ -626,11 +626,11 @@ method is not in the suite):
 | LoRA r=32 (q, v only) | 47.8% | 9.2M | 22.3 GB | none merged; small unmerged | yes | **yes** (rank ≤ `max_lora_rank`) | default |
 | QLoRA | – (module 06) | as LoRA | lowest (4-bit base) | as LoRA | merge into a bf16 copy, then quantise | yes | default on small GPUs |
 | DoRA r=32 (q, v) | 46.9% | 9.3M | 24.5 GB | large unmerged (+139% time, PEFT bench) | yes | **no** | merge, then serve |
-| IA3 (k, v, down; lr 1e-3) | 39.8% (45.5% with all-attention targets, lr 5e-3, 0.63M params) | 0.29M | 23.2 GB | none merged; tiny unmerged | yes | no | tiny-storage, many tasks |
+| IA3 (k, v, down; lr 1e-3) | 39.8% (45.5% with all-linear targets, lr 5e-3, 0.63M params) | 0.29M | 23.2 GB | none merged; tiny unmerged | yes | no | tiny-storage, many tasks |
 | Prompt tuning (200 tokens, vocab init) | 34.3% | 0.61M | 24.4 GB | context tokens | **no** | no | frozen-model multi-task |
 | Prefix tuning (50 tokens, init from prefix) | 41.6% | 2.9M | 20.6 GB | KV prefix every layer | **no** | no | rare |
 | OFT r=32 (q, v) | 49.1% | 8.2M | 22.3 GB | none merged | yes | no | diffusion; LLM niche |
-| AdaLoRA (target r=8 from 32) | 37.3% | 18.4M | 22.8 GB | none merged | yes | no | rare |
+| AdaLoRA (init r=64, target r=32) | 37.3% | 18.4M | 22.8 GB | none merged | yes | no | rare |
 | VeRA (r=256) | 35.4% | 0.13M | 21.6 GB | none merged | yes | no | storage-bound |
 | GaLore | – | all | between LoRA and full FT | none (it is the model) | n/a | yes (full model) | CPT on one GPU |
 | Spectrum | – | top x% | scales with x | none | n/a | yes (full model) | Axolotl users, SFT/CPT |
@@ -645,14 +645,14 @@ baseline above. So do rsLoRA at rank 64 (51.3%, against 47.4% for plain rank-64 
 Most "method X beats LoRA by 2 points" claims fail one of these tests:
 
 1. **Matched trainable parameters.** A method with 2x LoRA's parameters should be compared with LoRA
-   at 2x rank. AdaLoRA (18.4M) and LoHa (18.4M, in the suite) carry about twice LoRA's 9.2M.
+   at 2x rank. AdaLoRA (18.4M, starting at rank 64) and LoHa (18.4M, in the suite) carry about twice LoRA's 9.2M.
 2. **Matched targets.** The suite's own LoRA baseline targets only `q_proj` and `v_proj`. With
    all-linear targeting (module 06) the baseline gets stronger, and many published gaps were
    measured against q/v-only LoRA.
 3. **Hyperparameters tuned per method (LR, init, targets).** This is the largest effect in the
    suite. Prompt tuning moves from **5.7% to 34.3%** with a better LR and vocabulary initialisation
    (LR alone: 5.7% to 23.4%). Prefix tuning moves from **18.6% to 41.6%** with 50 tokens, prefix init
-   and LR 5e-3. IA3 moves from 31.1% to 45.5% with a higher LR and wider targets. A paper that tunes
+   and LR 5e-3. IA3 moves from 31.1% to 45.5% with a higher LR and all-linear targets. A paper that tunes
    its own method and reuses LoRA's defaults is measuring the tuning, not the method.
 4. **Same data, steps and evaluation.** Identical tokens seen, identical prompts and decoding,
    identical test split.

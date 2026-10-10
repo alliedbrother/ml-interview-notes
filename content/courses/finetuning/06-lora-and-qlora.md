@@ -119,8 +119,9 @@ with torch.no_grad():
 print("step-0 identity, step-0 gradients, gamma^2 first step and merge/unmerge verified")
 ```
 
-This proves the algebra for one fp32 layer. It does not prove that merging is exact in
-bf16 or into a quantised base; section 6.7 shows where that breaks.
+This proves the algebra for one layer, in float64 so the merged and unmerged sums agree
+on any BLAS (in fp32 they differ by up to about 1e-6). It does not prove that merging is exact
+in bf16 or into a quantised base; section 6.7 shows where that breaks.
 
 ### Parameter count for a whole model
 
@@ -151,15 +152,9 @@ heads of dimension 128 (so K and V output 1024), 8,030,261,248 parameters.
 thirds) and 81% of the base linear weights** (176.2M of 218.1M). GQA shrinks attention
 in the base, so the MLP's share of the base exceeds its share of the adapter
 ([transformers module 07](../transformers/07-ffn-and-activations.md) explains the MLP's
-size). The check below recomputes the table and both shares, then builds real LoRA
-modules for a scaled-down config ($d = 64$, $d_{kv} = 16$, $d_{ff} = 224$, $L = 2$,
-$r = 4$) and compares their tensor sizes with the formula.
+size). The check below recomputes the table and both shares.
 
 ```python finetuning-check
-import math
-import torch
-torch.manual_seed(0)
-
 def shapes_for(d, d_kv, d_ff):                       # (d_in, d_out) of the 7 linears
     return {"q_proj": (d, d), "k_proj": (d, d_kv), "v_proj": (d, d_kv), "o_proj": (d, d),
             "gate_proj": (d, d_ff), "up_proj": (d, d_ff), "down_proj": (d_ff, d)}
@@ -180,33 +175,15 @@ base = sum(i * o for i, o in llama.values())         # base linear weights per l
 assert mlp_lora == 55_296 and mlp_lora / per_layer == 0.675
 assert mlp_base == 176_160_768 and base == 218_103_808
 assert round(mlp_base / base, 2) == 0.81             # not two thirds: GQA shrinks attention
-
-class LoRALinear(torch.nn.Module):
-    def __init__(self, base, r, alpha):
-        super().__init__()
-        self.base, self.scaling = base, alpha / r
-        base.weight.requires_grad_(False)
-        self.A = torch.nn.Parameter(torch.empty(r, base.in_features))   # (r, d_in)
-        self.B = torch.nn.Parameter(torch.zeros(base.out_features, r))  # (d_out, r)
-        torch.nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-    def forward(self, x):
-        return self.base(x) + self.scaling * (x @ self.A.T) @ self.B.T
-
-small = shapes_for(64, 16, 224)
-layers = [LoRALinear(torch.nn.Linear(i, o, bias=False), r=4, alpha=8)
-          for _ in range(2) for i, o in small.values()]
-trainable = sum(p.numel() for m in layers for p in m.parameters() if p.requires_grad)
-assert trainable == 4 * 2 * sum(i + o for i, o in small.values()) == 10_240
-print("Table 1 and the module-level count verified")
+print("Table 1 and the two MLP shares verified")
 ```
 
 This proves the counting and the two MLP shares. It does not prove PEFT targets the
-same modules: read `print_trainable_parameters()` and `targeted_module_names`.
+same modules: read `print_trainable_parameters()` and `targeted_module_names`. Lab L6.1
+counts real modules.
 
-AdamW's two fp32 moments for 42M adapter parameters take about 0.34 GB, against
-roughly 64 GB for all 8B parameters. Module 03 does the full budget (the
-[~16–18 bytes/param rule](./03-training-mechanics-and-memory-math.md)); under LoRA the
-frozen weights and activations dominate.
+Optimiser state for the adapter is small (about 0.34 GB); [module 03](./03-training-mechanics-and-memory-math.md)
+does the full budget, in which frozen weights and activations dominate.
 
 ### Merged vs unmerged inference
 
@@ -235,7 +212,7 @@ in (typically 8 to 128). **Alpha** sets $\gamma_r = \alpha/r$. The
 [Unsloth guide](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide)
 recommends $\alpha = r$ or $2r$; Thinking Machines fix $\alpha = 32$ for every rank. As
 of October 2026 the PEFT defaults are `r=8`, `lora_alpha=8`
-([config.py, v0.21.2](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/tuners/lora/config.py#L632-L653)).
+([config.py at eaa35c7](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/tuners/lora/config.py#L632-L653)).
 
 ### Alpha and the learning rate are coupled
 
@@ -286,8 +263,8 @@ steps at the same learning rate.
 **Target every linear layer, including the MLP**: `target_modules="all-linear"` (all
 linears except the output head), which the PEFT docs recommend. Omitting
 `target_modules` is a trap: PEFT falls back to a per-architecture default, still
-`["q_proj", "v_proj"]` for Llama and Qwen3 ([constants.py,
-v0.21.2](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/utils/constants.py#L85-L104)),
+`["q_proj", "v_proj"]` for Llama and Qwen3 ([constants.py at
+eaa35c7](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/utils/constants.py#L85-L104)),
 a relic of the original paper's GPT-3 experiments. Thinking Machines find that
 "attention-only with rank 256 underperforms MLP-only with rank 128", so **at matched
 parameter count the MLP is where LoRA's capacity pays**. Table 1 gives the reason: about
@@ -430,7 +407,7 @@ a saving of 0.373 bits per parameter, matching the paper: 4.5 GB without DQ and 
 with it for 8B parameters, against 16 GB in bf16 (embeddings, norms and usually
 `lm_head` stay 16-bit, so real footprints are higher). The check below quantises 65,536
 normal weights block-wise onto NF4 and onto a uniform 16-level grid, asserts NF4's MSE
-is more than 10% lower (it measures about 16% lower, and 15-17% on other seeds), then
+is more than 10% lower (it measures about 16% lower, and 14-19% across 20 seeds), then
 asserts the bit and memory arithmetic.
 
 ```python finetuning-check
@@ -468,8 +445,8 @@ assert gigabytes(8e9, 16) == 16.0
 print("NF4 beats uniform 4-bit on normal weights; 4.5 and 4.127 bits/param verified")
 ```
 
-This proves NF4's advantage on synthetic normal data with one seed (MSE about 0.0083
-against 0.0109). It does not prove that NF4 is optimal for real weight
+This proves NF4's advantage on synthetic normal data with one seed (MSE about 0.0084
+against 0.0101). It does not prove that NF4 is optimal for real weight
 distributions with heavy-tailed outliers. Module
 [11](./11-quantization-qat-and-fp8.md) covers the alternatives.
 
@@ -558,7 +535,7 @@ peft_model.save_pretrained("final", path_initial_model_for_weight_conversion="in
 PEFT's `LoraModel.subtract_mutated_init` computes $\Delta W = BA - B_0A_0$ and stores
 it as a standard rank-$2r$ LoRA against the *original* base, which loads, combines and
 toggles like any other adapter. Conversion is unsupported when rsLoRA is combined with
-`rank_pattern` or `alpha_pattern` ([peft_model.py, v0.21.2](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/peft_model.py#L268-L277)).
+`rank_pattern` or `alpha_pattern` ([peft_model.py at eaa35c7](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/peft_model.py#L268-L277)).
 
 ---
 
@@ -612,7 +589,7 @@ hidden states by `lm_head.weight` directly (the fused LM head), so an adapter on
 `lm_head` would get no gradient and they raise `ValueError`. **To train the head, use
 `modules_to_save=["lm_head"]`**, which replaces the weight itself
 ([DPO trainer docs, v1.15.0](https://huggingface.co/docs/trl/v1.15.0/en/dpo_trainer);
-[source](https://github.com/huggingface/trl/blob/v1.15.0/trl/trainer/dpo_trainer.py)).
+[source](https://github.com/huggingface/trl/blob/dae7b6adc8d2729cfa8d21bc8480656ede769240/trl/trainer/dpo_trainer.py#L814-L821)).
 
 ---
 
@@ -663,7 +640,7 @@ PEFT has two merge APIs with different semantics
 Now the trap. After QLoRA the base in memory is 4-bit, and PEFT will let you merge
 into it. For a bitsandbytes 4-bit layer it dequantises the weight, adds $\Delta W$, and
 **re-quantises the sum to NF4**, warning that this "may get different generations due to
-rounding errors" ([bnb.py, v0.21.2](https://github.com/huggingface/peft/blob/v0.21.2/src/peft/tuners/lora/bnb.py#L376-L402)).
+rounding errors" ([bnb.py at eaa35c7](https://github.com/huggingface/peft/blob/eaa35c777c7ba554a2a3639ac9c79bb690f39a57/src/peft/tuners/lora/bnb.py#L376-L402)).
 The trouble is scale. $\Delta W$ is a few percent of $W$, and NF4's level spacing is
 several percent of each block's absmax. Re-quantisation rounds most of the update away
 and moves weights that sit near level boundaries by a full step.
@@ -751,7 +728,9 @@ LoRA, prefill the whole context again: its weights differ on every token. **Acti
 LoRA (aLoRA)** (Greenewald et al., 2025, [arXiv 2504.12397](https://arxiv.org/abs/2504.12397);
 PEFT 0.18+, `LoraConfig(alora_invocation_tokens=[...])`) applies the adapter only from an
 invocation sequence onwards, so **the earlier KV cache is the base model's** and is
-reused. PEFT reports order-of-magnitude adapter-inference speedups in vLLM. aLoRA cannot
+reused. PEFT's [`LoraConfig` docs](https://huggingface.co/docs/peft/v0.21.0/en/package_reference/lora)
+report adapter-inference speedups "of an order of magnitude or more" on vLLM, depending
+on the shared context length. aLoRA cannot
 be merged, is causal-LM only, often needs `r=32`, and the invocation string must appear
 in training data exactly as at inference.
 
@@ -828,16 +807,7 @@ every matmul), and eval losses within a small margin on this post-training-sized
 
 **Goal:** see the 4-bit trap in numbers. Smoke mode trains a QLoRA-style adapter on
 the toy model's NF4-quantised linears and asserts that merging then re-quantising is
-over 10× worse than a bf16 merge. Its output:
-
-```text
-[5] merge error vs QLoRA reference: bf16 copy 6.04e-03, re-quantised NF4 7.68e-01 (127x)
-    mean ||delta||/||W0|| = 0.056; mean cos(delta kept after re-quantisation, delta) = 0.48
-```
-
-The cosine is higher than the 6.7 check's 0.14 because the toy adapter is larger
-(‖ΔW‖/‖W₀‖ = 0.056 against 0.03); the trap shrinks as the update grows. Full mode
-repeats the comparison with real bitsandbytes NF4. **Record** both mean logit errors and
+over 10× worse than a bf16 merge. Full mode repeats the comparison with real bitsandbytes NF4. **Record** both mean logit errors and
 a few generations from each path. **Expect** path A at bf16 rounding level and path B
 far above it.
 
@@ -848,9 +818,7 @@ far above it.
 - **LoRA learns $\Delta W = \gamma_r BA$ with $W_0$ frozen, $B$ zero-initialised**: step 0
   is the pretrained model, yet $\nabla_B = \gamma_r g(Ax)^\top \neq 0$; both zero is a
   saddle. Merged inference costs nothing extra.
-- **Count parameters as $r(d_{\text{in}}+d_{\text{out}})$ per matrix**: Llama 3 8B,
-  all-linear, $r = 16$ is 41,943,040 parameters (0.52%), two thirds of them in the MLP,
-  which holds 81% of the base linear weights.
+- **Count $r(d_{\text{in}}+d_{\text{out}})$ per matrix**: Llama 3 8B, all-linear, $r = 16$ is 41.9M (0.52%), two thirds in the MLP, which holds 81% of base linear weights.
 - **Alpha and learning rate are coupled** ($\eta\gamma_r^2$ under SGD, roughly
   $\eta\gamma_r$ under Adam): fix alpha and sweep the LR. **rsLoRA's $\alpha/\sqrt r$**
   keeps high ranks learning when you do not retune.
@@ -861,8 +829,7 @@ far above it.
   (CPT, very large SFT) it learns less and forgets less.
 - **QLoRA stores the frozen base in NF4** (quantile levels, block 64, double-quantised
   scales: 4.127 bits/param) and computes in bf16; only bf16 adapters train.
-- **Init variants pick the starting subspace** from weights (PiSSA, OLoRA, MiCA), data
-  (EVA, CorDA, LoRA-GA) or quantisation error (LoftQ); convert mutated inits back.
+- **Init variants pick the starting subspace** from weights (PiSSA, OLoRA, MiCA), data (EVA, CorDA, LoRA-GA) or quantisation error (LoftQ); convert mutated inits back.
 - **Use `trainable_token_indices` for new tokens** and `modules_to_save=["lm_head"]` in
   TRL trainers, which reject adapters on `lm_head`.
 - **Use the return value of `merge_and_unload()`; merge into bf16, then quantise.**
