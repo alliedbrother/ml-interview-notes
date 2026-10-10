@@ -23,7 +23,7 @@ import torch
 
 
 # Exact fence count; raise it when checks are added so a deletion fails CI.
-MIN_CHECKS = 71
+MIN_CHECKS = 72
 
 ROOT = Path(__file__).resolve().parents[1]
 COURSE = ROOT / "content/courses/finetuning"
