@@ -3,7 +3,7 @@
 > **Prerequisites:** modules 28, 29 and 37.
 > **You will learn:** how to export the capstone GPT with `torch.export` and a dynamic sequence length, save it as `.pt2`, reload it and prove it computes the same function; where export stops (Python-side KV-cache bookkeeping, data-dependent control flow) and the options for crossing that line; int8 weight-only quantization from scratch: per-channel scales, size, quality and agreement measurements; why `torch.ao.quantization` is deprecated in 2.8 and what torchao, AOTInductor and ExecuTorch do in production; a minimal, tested serving contract, and a retrospective map of every PyTorch feature the capstone used.
 
-The checkpoint from [module 33](./33-capstone-pretraining.md) is a `state_dict`: 3,518,663 bytes that mean nothing without `llm/model.py`. Shipping the model needs an artifact that carries its own computation, a smaller file, and an interface that cannot be misused. This module builds all three and measures each against the fp32 model.
+Where the build stands: [module 33](./33-capstone-pretraining.md)'s 875,264-parameter checkpoint scores 2.963 nats per token on story XI (2.946 at stride 64), module 35 samples it through a verified KV cache, module 36 adapted it with 45,056 LoRA parameters, and module 37 showed compile, checkpointing, DDP and FSDP2 leave its math unchanged. It is still a `state_dict`, `gpt_sherlock.pt` at 3,519,703 bytes on disk (3,518,663 when the same dict is serialized to memory, the figure every size comparison below uses; the zip container's metadata differs between a named file and a buffer), and those bytes mean nothing without `llm/model.py`. Shipping the model needs an artifact that carries its own computation, a smaller file, and an interface that cannot be misused. This module builds all three and measures each against the fp32 model.
 
 The tools are from [module 28](./28-export-and-deployment.md) and [module 29](./29-quantization-and-compression.md). What is new is a real model with a tied head, a context limit and a KV cache. The code is in [`code/llm/export.py`](./code/llm/export.py) and [`code/38_export_quantize.py`](./code/38_export_quantize.py). The final section looks back over the whole course.
 
@@ -89,7 +89,7 @@ There are three ways out:
 - **(b) Buffer mutation.** Register the cache as buffers and write with `index_copy_`. Export functionalizes the write and lists it in `graph_signature.buffers_to_mutate`.
 - **(c) `torch.cond`** keeps the prefill and decode branches in one program ([module 28](./28-export-and-deployment.md)).
 
-The fragment below is the core of (a). While writing this module, a probe exported it in 0.57 s (177 nodes), fed "Sherlock Holmes" one token at a time, and matched the `KVCache` path within 2.9e-6.
+The fragment below is the core of (a). One local run exported it in 0.57 s (177 nodes), fed "Sherlock Holmes" one token at a time, and matched the `KVCache` path within 2.9e-6.
 
 ```python
 class DecodeStep(nn.Module):                     # one token in; cache in and out
@@ -258,10 +258,14 @@ Each row is a feature that code in modules 30–38 actually calls:
 | `torch.export`, `Dim`, `.pt2`, AOTInductor, ExecuTorch | this module | [28](./28-export-and-deployment.md) |
 | per-channel int8, `quantize_dynamic`, torchao | this module | [29](./29-quantization-and-compression.md) |
 | byte-level BPE, story splits | every capstone module | [30](./30-capstone-corpus-and-tokenizer.md) |
+| batch $k$ = f(seed, k), exact-once eval windows | resume (33), every NLL (34, 36, 38) | [31](./31-capstone-data-pipeline.md) |
 | static KV cache, offset masks | decoding (35), export limits (38) | [32](./32-capstone-gpt-model.md), [35](./35-capstone-generation-kv-cache.md) |
-| sliding-window NLL, baselines | quality bars (34, 38) | [34](./34-capstone-evaluation.md) |
+| hashed checkpoint + manifest, `load_pretrained` | the fixed reference for 34–38 | [33](./33-capstone-pretraining.md) |
+| sliding-window NLL, baselines | quality bars (34, 36, 38) | [34](./34-capstone-evaluation.md) |
+| collect-then-`setattr` module surgery, `unwrap` | LoRA (36), the int8 Linear swap (38) | [36](./36-capstone-lora-finetuning.md) |
+| wrappers from outside, state-dict key hooks | checkpointing, DDP, FSDP2 (37) | [37](./37-capstone-scaling-the-recipe.md) |
 
-Module 01's eager model underlies every row. Three modules have no row of their own: `torch.func` (09), custom `autograd.Function` (08) and custom ops/Triton (25). Each would pay off only with a need this small decoder never had.
+Read bottom-up, the table is the dependency graph of the [course index](./00-README.md) run in reverse. Tensors (02–06) became token ids, windows and seeded randomness; autograd and `nn` (07–13) became the model and its loss; training practice (14–19) became a pretraining run that resumes bit for bit; performance and compilers (20–24) and scale and deployment (26–29) became modules 37 and 38. Every capstone module then consumed its predecessor's frozen artifact: corpus and tokenizer hashes (30), token tensors (31), the model interface (32), the committed weights (33), the evaluation functions (34) and the generator (35) that modules 36 and 38 import. Module 01's eager model underlies every row. Three modules have no row of their own: `torch.func` (09), custom `autograd.Function` (08) and custom ops/Triton (25). Each would pay off only with a need this small decoder never had.
 
 Next steps follow from the model's limits. Modernize it with RoPE, RMSNorm, SwiGLU and GQA ([`/courses/transformers/code/modern_decoder.py`](/courses/transformers/code/modern_decoder.py), [Transformers 16](../transformers/16-end-to-end-forward-pass.md)); RoPE also removes the 128-position wall. Add data, because one book is about 15 epochs at our budget. Run [build-nanogpt](https://github.com/karpathy/build-nanogpt/blob/6104ab1b53920f6e2159749676073ff7d815c1fa/train_gpt2.py) on a GPU with bf16, Inductor and the DDP verified in [module 37](./37-capstone-scaling-the-recipe.md). Each step reuses the contracts drilled here: equal logits, deltas against a frozen reference, hashed artifacts. [The PyTorch notes](../../notes/libraries/pytorch.md) condense the review.
 
@@ -432,7 +436,7 @@ The test took 4.5 s wall locally, about 0.7 s of which was `import torch`.
 - A tied weight appears in the signature under both names, with one dead placeholder, but is stored once. Graph passes must respect the alias.
 - The KV-cache decode step exports once the cache and the position are explicit tensors. Static shapes are the price, and CUDA-graph replay is the payoff.
 - Per-channel int8 weight-only shrank the file 2.98× (fp32 embeddings limit it), moved val NLL by +0.0003 nats and agreed on 64 of 64 tokens. Speed needs real kernels.
-- `torch.ao.quantization` is deprecated in 2.8 and removed in 2.10: use torchao `quantize_`, PT2E for graphs, and AOTInductor or ExecuTorch to leave Python.
+- `torch.ao.quantization` is deprecated in 2.8 and scheduled for removal in 2.10: use torchao `quantize_`, PT2E for graphs, and AOTInductor or ExecuTorch to leave Python.
 - Serving starts from a pure, validated, RNG-free `complete()`. HTTP is a thin wrapper around it.
 
 ## Self-check

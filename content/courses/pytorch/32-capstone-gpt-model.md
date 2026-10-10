@@ -245,7 +245,7 @@ v = cache.v[self.layer_idx, :, :, :end]
 
 Growing the cache with `torch.cat` copies everything every step (quadratic total) and changes shapes, which defeats CUDA graphs and `torch.compile` guards; a static buffer keeps one shape.
 
-Memory is `2 · L · B · H · max_len · d_head · bytes` = `2 · 4 · 1 · 4 · 128 · 32 · 4` = 262,144 bytes (256 KiB) per sequence, 7.5 % of our weights. GPT-2 small at 1,024 tokens needs 36 MiB per sequence in bf16, more than its 249 MB of weights from batch 7 up; see [Transformers 14](../transformers/14-inference-optimizations.md).
+Memory is `2 · L · B · H · max_len · d_head · bytes` = `2 · 4 · 1 · 4 · 128 · 32 · 4` = 524,288 bytes (512 KiB) per sequence at `max_len = 128`, which is what `KVCache(cfg, 1, 128).nbytes` reports and 15 % of our 3,501,056 weight bytes. It grows linearly in both B and `max_len`, so a batch of 7 full-length sequences already caches more bytes than the model holds. GPT-2 small at 1,024 tokens needs 36 MiB per sequence in bf16, more than its 249 MB of weights from batch 7 up; see [Transformers 14](../transformers/14-inference-optimizations.md).
 
 Two keyword-only extras, `position_ids` (B, T) and `key_mask` (B, T_k), serve [module 35](./35-capstone-generation-kv-cache.md)'s left-padded batches. A padding query would see no key and softmax over all `−inf` is NaN, so the combined mask always lets a query see itself. The test checks that a left-padded prompt reproduces the unpadded logits within `1e-5`.
 

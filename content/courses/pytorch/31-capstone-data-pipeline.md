@@ -32,7 +32,7 @@ Position 5 sees `To Sherlock` and must put probability on ` Holmes`; position 0 
 | val | XI | 23,848 | 0 | 47,696 B (46.6 KiB) | 186.3 KiB |
 | test | XII | 25,216 | 0 | 50,432 B (49.3 KiB) | 197.0 KiB |
 
-The counts are deterministic given the committed corpus and tokenizer; the syllabus's pre-tokenizer estimates (217,375 / 23,838 / 25,203) are within 0.1 %, and the test allows ±2 %.
+The counts are deterministic given the committed corpus and tokenizer, and these three numbers recur in every later capstone module. The lab test allows ±2 % on the counts; `load_corpus()` already refuses a corpus whose hash differs.
 
 **Two dtypes.** On disk, `uint16`: $V = 512 \le 65{,}535$, so two bytes per token. In memory, `int64`: on 2.8, `nn.Embedding` rejects `uint16` indices ("Expected tensor for argument #1 'indices' to have one of the following scalar types: Long, Int") and `F.cross_entropy` rejects even `int32` targets ("expected scalar type Long but found Int"), both checked locally. Converting the whole split at load time costs 1.66 MiB here; converting per batch is the only option when the stream exceeds RAM.
 
@@ -55,7 +55,7 @@ def get_batch(tokens, block_size, batch_size, generator):
     return windows[:, :-1].contiguous(), windows[:, 1:].contiguous()
 ```
 
-It is not measurably faster than nanoGPT's slices plus `torch.stack`: over three local runs of 1,000 batches at `(32, 128)` (Apple M2 Pro, 4 threads), slice-and-stack took 45–70 µs and unfold-gather 32–74 µs, order flipping between runs. Both are about a thousandth of a training step (the syllabus probe of module 33's recipe: 800 steps in ≈ 55 s, ≈ 69 ms each). The value of `unfold` is that "all windows" becomes a testable tensor.
+It is not measurably faster than nanoGPT's slices plus `torch.stack`: over three local runs of 1,000 batches at `(32, 128)` (Apple M2 Pro, 4 threads), slice-and-stack took 45–70 µs and unfold-gather 32–74 µs, order flipping between runs. Both are about a thousandth of a training step (module 33's full run: 800 steps in ≈ 55 s, ≈ 69 ms each). The value of `unfold` is that "all windows" becomes a testable tensor.
 
 `RandomWindowDataset(tokens, block_size, num_samples, seed)` is the same sampling as a map-style `Dataset` for `DataLoader` users ([module 14](./14-data-pipelines.md), [docs](https://docs.pytorch.org/docs/2.8/data.html)): `set_epoch(e)` draws all offsets from `Generator().manual_seed(seed + e)`, so item $i$ depends only on `(seed, e, i)`, not on sampler or workers.
 
@@ -255,11 +255,11 @@ Scope: single process, whole corpus in RAM, no streaming from disk at scale, no 
 
 ## Key takeaways
 
-- **The objective is a shift.** `x = w[:, :-1]`, `y = w[:, 1:]` over `(T + 1)`-token windows: $ predictions with contexts 1…$.
+- **The objective is a shift.** `x = w[:, :-1]`, `y = w[:, 1:]` over `(T + 1)`-token windows: $T$ predictions with contexts $1 \dots T$.
 - **All windows are one view.** `tokens.unfold(0, T + 1, 1)` costs no memory; indexing it copies only the batch.
 - **`uint16` on disk, `int64` in memory, range checked.** A cast wraps 70,000 to 4,464 silently.
-- **Evaluation needs an exact target set.** Stride plus mask plus a right-aligned tail scores each of  - 1$ targets once; stride sets the context distribution, so report it.
-- **Batch $ = f(seed, k).** Resume restores one integer and never fast-forwards a sampler.
+- **Evaluation needs an exact target set.** Stride plus mask plus a right-aligned tail scores each of the $n - 1$ targets once; stride sets the context distribution, so report it.
+- **Batch $k$ = f(seed, k).** Resume restores one integer and never fast-forwards a sampler.
 - **Workers are for expensive samples**, not a 50 µs gather.
 - **Boundaries are a choice.** 0.53 % of windows straddle an EOT here; allowing it is standard.
 

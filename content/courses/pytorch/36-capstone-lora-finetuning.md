@@ -3,7 +3,7 @@
 > **Prerequisites:** modules 10, 15 and 35.
 > **You will learn:** supervised fine-tuning (SFT) data: templates, EOT, and masking the prompt out of the loss; full fine-tuning vs LoRA: trainable parameters, optimizer-state memory, quality and forgetting; LoRA from scratch as an `nn.Module` wrapper: initialization, scaling, merge/unmerge, adapter-only checkpoints; how to freeze precisely and verify what the optimizer actually updates; a classification-head variant (replace the LM head) and where QLoRA/DoRA fit.
 
-The module-33 GPT continues Victorian prose; it does not answer questions. Here we teach it a format (`Q: ...`, `A: ...`, stop) from 60 templated examples, twice: updating all 875,264 parameters, and through a 45,056-parameter low-rank adapter written from scratch in [`code/llm/lora.py`](./code/llm/lora.py). Data and evaluation live in [`code/llm/sft.py`](./code/llm/sft.py), the experiment in [`code/36_lora_finetune.py`](./code/36_lora_finetune.py).
+The build so far: the committed module-33 GPT (val 2.963 nats per token at stride 128), measured against baselines in module 34 and sampled through a verified KV cache in module 35. It continues Victorian prose; it does not answer questions. Here we teach it a format (`Q: ...`, `A: ...`, stop) from 60 templated examples, twice: updating all 875,264 parameters, and through a 45,056-parameter low-rank adapter written from scratch in [`code/llm/lora.py`](./code/llm/lora.py). Data and evaluation live in [`code/llm/sft.py`](./code/llm/sft.py), the experiment in [`code/36_lora_finetune.py`](./code/36_lora_finetune.py).
 
 The engineering is the point: a loss that ignores the prompt, surgery that leaves the base bit-identical, a 183 KiB adapter that reloads to identical logits, and a forgetting measurement less flattering to LoRA than the folklore.
 
@@ -175,7 +175,7 @@ Variance matters too. Over seeds 1337, 1, 2, 3, 4 (batch order and $A$'s init), 
 
 Merged, an adapted Linear is an ordinary Linear (inference costs what the base costs; `unwrap_lora` hands module 38 a plain model). Unmerged, one base can serve a different adapter per request.
 
-Merging is exact algebra, not exact arithmetic. In float64 merged and unmerged logits agreed to 3.6e-14; in float32, after training, they differed by up to 4.1e-5 on logits as large as 24.7, because $(W + \Delta W)x$ rounds differently from $Wx + \Delta W x$. The contract is therefore `rtol=1e-5, atol=1e-5`, not a bare `atol`. Unmerging is not bit-exact either (logits moved by 3.2e-5), so keep the original weights if you need them bit for bit.
+Merging is exact algebra, not exact arithmetic. In float64 merged and unmerged logits agreed to 3.6e-14; in float32, after training, they differed by up to 4.1e-5 on logits as large as 24.7, because $(W + \Delta W)x$ rounds differently from $Wx + \Delta W x$. A bare `atol=1e-5` ("merged equals unmerged within 1e-5") would fail by a factor of four, through no bug. The contract is therefore `rtol=1e-5, atol=1e-5`: `assert_close` then allows $10^{-5} + 10^{-5}\cdot|	ext{logit}|$, about 2.6e-4 at a logit of 24.7, which scales with the magnitude that sets the rounding error. The float64 check keeps the bar tight where rounding is negligible. Unmerging is not bit-exact either (logits moved by 3.2e-5), so keep the original weights if you need them bit for bit.
 
 The adapter checkpoint is just the filtered state dict:
 

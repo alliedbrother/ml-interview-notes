@@ -152,7 +152,7 @@ How to read it:
 - **Val is still improving at step 800**, by 0.08 nats over the last 200 steps against 0.22 over the 200 before; the schedule ended, the model did not converge. In this data-limited regime more unique data, a smaller model or more regularisation (dropout, decay) help val; training longer mostly lowers the train number.
 - **The grad norm rises as the loss falls**, from 0.56 to 1.19, so clipping is active late in training. A norm that jumps 10× in one step is different: a bad batch or the start of a divergence.
 
-**Baselines.** Uniform guessing scores ln 512 = 6.238. Fitted on stories I–X, an add-one unigram scores 5.222 on val and a plain add-0.1 bigram 3.688 (computed locally while writing this module; module 34 builds the baselines properly, and 3.67 is the interpolated-bigram bar the tests use). The GPT matches the bigram at step 200 (3.670) and ends 0.7 nats below it, which is the part of the loss that comes from context longer than one token.
+**Baselines.** Uniform guessing scores ln 512 = 6.238. Fitted on stories I–X, an add-one unigram scores 5.222 on val and a plain add-0.1 bigram 3.688. Module 34 builds the baselines properly; its bigram backs off to the unigram per context and scores 3.669, and that 3.67 is the bar the tests use. The GPT matches the bigram at step 200 (3.670) and ends 0.7 nats below either version, which is the part of the loss that comes from context longer than one token.
 
 ## 33.6 Checkpoints that actually resume
 
@@ -176,7 +176,7 @@ Not resumed here, but needed in production (module 16): scheduler and `GradScale
 
 ## 33.7 The committed checkpoint
 
-Modules 34–38 need fixed weights: 34 asserts behaviour of *this* model, 35 compares cached and uncached generation token for token, 38 measures int8 quality loss against these fp32 weights. CI cannot afford the full run on every push (the course plan estimates 90–110 s on a 4-vCPU runner; not measured here), and a different CPU would produce slightly different weights anyway. So the 3.4 MiB file is committed once, with a manifest that makes it verifiable.
+Modules 34–38 need fixed weights: 34 asserts behaviour of *this* model, 35 compares cached and uncached generation token for token, 38 measures int8 quality loss against these fp32 weights. CI cannot afford the full run on every push (an estimated 90–110 s on a 4-vCPU runner; not measured here), and a different CPU would produce slightly different weights anyway. So the 3.4 MiB file is committed once, with a manifest that makes it verifiable.
 
 `gpt_sherlock.pt` is `model.state_dict()` only: fp32, 3,519,703 bytes, with `wte.weight` and `lm_head.weight` sharing one storage so it is written once. `gpt_sherlock.json` records:
 
@@ -364,7 +364,7 @@ python content/courses/pytorch/code/33_pretrain.py --steps 800 --output-dir /tmp
 python site/test_pytorch_33_pretrain.py
 ```
 
-**Producing the artifact** (writer-side, once; not run in CI):
+**Producing the artifact** (run once by the course author; not run in CI):
 
 ```bash
 python content/courses/pytorch/code/33_pretrain.py --steps 800 --save-artifact --json-out /tmp/pretrain.json

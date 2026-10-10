@@ -43,25 +43,25 @@ to it rather than deriving it again.
 [13 Initialization, Loss Functions, and Stable Outputs](./13-initialization-and-losses.md)
 
 **Training in practice (14–19).**
-[14 Data Pipelines](./14-data-pipelines.md) ·
+[14 Data Pipelines: Dataset, DataLoader, Samplers, and Collation](./14-data-pipelines.md) ·
 [15 Optimizers and Learning-Rate Schedules](./15-optimizers-and-schedules.md) ·
 [16 The Training Loop: Evaluation, Checkpointing, and Exact Resume](./16-training-loop-checkpointing.md) ·
 [17 Mixed Precision and Numerical Formats](./17-mixed-precision.md) ·
 [18 Debugging and Testing PyTorch Code](./18-debugging-and-testing.md) ·
-[19 Classic Models End to End](./19-classic-models-end-to-end.md)
+[19 Classic Models End to End: MLP, CNN, RNN, and Transfer Learning](./19-classic-models-end-to-end.md)
 
 **Performance and compilers (20–25).**
-[20 How PyTorch Executes](./20-execution-model-dispatch-devices.md) ·
+[20 How PyTorch Executes: Dispatcher, Tensor Subclasses, and Devices](./20-execution-model-dispatch-devices.md) ·
 [21 Profiling and Benchmarking](./21-profiling-and-benchmarking.md) ·
 [22 Memory Accounting, Activation Checkpointing, and Offload](./22-memory-accounting-and-checkpointing.md) ·
 [23 torch.compile in Practice](./23-torch-compile-in-practice.md) ·
 [24 Compiler Internals: Dynamo, FX, AOTAutograd, and Inductor](./24-compiler-internals-fx-inductor.md) ·
-[25 Custom Operators and Kernels](./25-custom-ops-and-kernels.md)
+[25 Custom Operators and Kernels: torch.library, C++ Extensions, and Triton](./25-custom-ops-and-kernels.md)
 
 **Scale and deployment (26–29).**
 [26 Distributed Training: Process Groups, Collectives, and DDP](./26-distributed-collectives-and-ddp.md) ·
 [27 Sharded Training: FSDP2, DTensor, Tensor and Pipeline Parallelism](./27-fsdp2-dtensor-parallelism.md) ·
-[28 Export and Deployment](./28-export-and-deployment.md) ·
+[28 Export and Deployment: torch.export, AOTInductor, ONNX, and ExecuTorch](./28-export-and-deployment.md) ·
 [29 Quantization, Pruning, and Compression](./29-quantization-and-compression.md)
 
 **Capstone: build an LLM (30–38).**
@@ -69,10 +69,10 @@ to it rather than deriving it again.
 [31 Token Datasets and the Training Data Pipeline](./31-capstone-data-pipeline.md) ·
 [32 The GPT Model, Line by Line](./32-capstone-gpt-model.md) ·
 [33 Pretraining the GPT on CPU](./33-capstone-pretraining.md) ·
-[34 Evaluating the Model](./34-capstone-evaluation.md) ·
+[34 Evaluating the Model: Perplexity, Bits per Byte, and Baselines](./34-capstone-evaluation.md) ·
 [35 Generation and the KV Cache](./35-capstone-generation-kv-cache.md) ·
 [36 Fine-Tuning with LoRA from Scratch](./36-capstone-lora-finetuning.md) ·
-[37 Scaling the Recipe](./37-capstone-scaling-the-recipe.md) ·
+[37 Scaling the Recipe: compile, DDP, FSDP, and Profiling](./37-capstone-scaling-the-recipe.md) ·
 [38 Export, Quantize, and Serve the LLM](./38-capstone-export-quantize-serve.md)
 
 ### Dependency graph
@@ -149,10 +149,18 @@ not executed here. From the repository root:
 ```bash
 python3.11 -m venv .venv-pytorch
 .venv-pytorch/bin/python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-.venv-pytorch/bin/python -m pip install numpy==1.26.4 tokenizers==0.22.1
+.venv-pytorch/bin/python -m pip install numpy==1.26.4
 .venv-pytorch/bin/python site/test_pytorch_course.py
 .venv-pytorch/bin/python -m unittest discover -s site -p "test_pytorch_[0-9]*.py"
 ```
+
+Those two packages are all the fences, labs and tests import. NumPy backs the
+memmapped token files of modules 14 and 31, the NumPy RNG state in module 16's checkpoints, and a few fences in modules 02,
+05, 25 and 31. One optional extra: `pip install tokenizers==0.22.1` enables
+`30_build_tokenizer.py --compare-hf`, which is skipped without it and never run
+by the tests. Nothing imports `transformers`. Plain fragments that mention
+torchao, ExecuTorch, ONNX, FastAPI or Triton are not executed, and none of
+those packages is needed.
 
 The first test command runs the **`pytorch-check` fences**. These are code
 blocks whose info string is exactly `python pytorch-check`. Each fence is a
@@ -160,7 +168,7 @@ self-contained CPU program: it has its own imports and at least one
 `assert`, and it ends with a `print`. The runner executes each fence in a
 fresh namespace with stdout captured. It seeds `torch.manual_seed(0)` first,
 refuses network sockets, and fails any fence that takes more than 10 s or
-leaves the default dtype, thread count or grad mode changed. Plain `python`
+leaves the default dtype, thread count, grad mode, deterministic-algorithms flag or quantized engine changed. Plain `python`
 blocks are teaching fragments. They may show CUDA or Triton code and are
 not executed. The second command runs the lab tests. Each lab is a script in
 `./code/` with a matching `site/test_pytorch_NN_*.py`. The tests check
@@ -173,17 +181,21 @@ speedups.
    gradients, a custom `autograd.Function` passes `gradcheck`, and you can
    predict every parameter, buffer and `state_dict` key of a module before
    printing it.
-2. **After module 19**, you can train an MLP, a small CNN and a character GRU,
-   stop any of them mid-run, and resume to bit-identical weights. You can
-   also find five seeded bugs by symptom alone.
+2. **After module 19**, you can stop a training run mid-way and resume it to
+   bit-identical weights (module 16), find five seeded bugs by symptom alone,
+   and train an MLP, a small CNN, a character GRU and a fine-tuned frozen
+   backbone end to end.
 3. **After module 29**, you can trace dispatcher keys, profile a step,
    explain each graph break, register a custom op that passes `opcheck`,
    show that 2-process gloo DDP and FSDP2 match single-process training, and
    round-trip a model through `torch.export` and int8 quantization.
-4. **After module 38**, you have a 875,264-parameter GPT that you tokenized,
-   pretrained, evaluated against n-gram baselines, sampled with a verified KV
-   cache, LoRA-fine-tuned, profiled and exported. Each step is backed by a
-   test that runs in CI.
+4. **After module 38**, you have an 875,264-parameter GPT that you built on
+   your own byte-level BPE tokenizer (217,572 training tokens), pretrained on
+   CPU (val 2.946 nats per token at stride 64, against 3.669 for the best
+   bigram baseline), sampled through a verified KV cache, fine-tuned with a
+   45,056-parameter LoRA adapter, checked under compile, DDP and FSDP2,
+   exported with `torch.export` and quantized to int8 (2.98× smaller). Each
+   step is backed by a test that runs in CI.
 
 | Symbol | Meaning |
 |---|---|
