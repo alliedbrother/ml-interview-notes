@@ -343,9 +343,9 @@ import torch.nn.functional as F
 
 torch.manual_seed(10)
 world, per_rank = 4, 2
-x = torch.randn(world * per_rank, 5)
+x = torch.randn(world * per_rank, 5, dtype=torch.float64)   # f64: per-rank vs full-batch sum order
 y = torch.randint(0, 3, (world * per_rank,))
-w = torch.randn(3, 5, requires_grad=True)
+w = torch.randn(3, 5, dtype=torch.float64, requires_grad=True)
 
 # Full-batch mean-loss gradient in one process.
 F.cross_entropy(x @ w.T, y).backward()
@@ -359,7 +359,7 @@ for r in range(world):
     F.cross_entropy(x[sl] @ w.T, y[sl]).backward()
     rank_grads.append(w.grad.clone())
 ddp_grad = torch.stack(rank_grads).sum(0) / world
-torch.testing.assert_close(ddp_grad, full_grad, atol=1e-6, rtol=1e-6)
+torch.testing.assert_close(ddp_grad, full_grad, atol=1e-12, rtol=0)
 
 # Reduce-scatter: rank r keeps shard r of the SUM of all ranks' (padded) gradients.
 pad = (-10) % world                                 # 10 elements padded to 12

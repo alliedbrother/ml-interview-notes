@@ -419,8 +419,8 @@ env.reset(0)
 assert env.target == 7                                   # seed 0 hides 7
 trajs = {"A": [4, 7], "B": [4, 6, 7], "C": [1, 2, 3]}
 out = {k: run(GuessEnv(), g) for k, g in trajs.items()}
-R = torch.tensor([out[k][3] for k in "ABC"])
-torch.testing.assert_close(R, torch.tensor([0.9, 0.81, 0.0]))
+R = torch.tensor([out[k][3] for k in "ABC"], dtype=torch.float64)
+torch.testing.assert_close(R, torch.tensor([0.9, 0.81, 0.0], dtype=torch.float64))
 # Outcome-only rewards (get_reward) cannot tell A from B; the discounted return can.
 outcome = []
 for k in "ABC":
@@ -429,8 +429,8 @@ assert outcome == [1.0, 1.0, 0.0]
 
 # Group-relative advantages (population std).
 adv = (R - R.mean()) / R.std(unbiased=False)
-torch.testing.assert_close(adv.sum(), torch.tensor(0.0), atol=1e-6, rtol=0)
-torch.testing.assert_close(adv, torch.tensor([0.815, 0.593, -1.408]), atol=1e-3, rtol=0)
+torch.testing.assert_close(adv.sum(), torch.tensor(0.0, dtype=torch.float64), atol=1e-12, rtol=0)
+torch.testing.assert_close(adv, torch.tensor([0.815, 0.593, -1.408], dtype=torch.float64), atol=1e-3, rtol=0)
 
 # Reward-to-go per turn for B: G_k = sum_j gamma^(j-k) r_j  -> [0.81, 0.9, 1.0]
 rb = out["B"][2]

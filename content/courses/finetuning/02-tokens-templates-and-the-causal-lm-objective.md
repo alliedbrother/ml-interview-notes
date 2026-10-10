@@ -192,7 +192,7 @@ import torch.nn.functional as F
 
 torch.manual_seed(0)
 B, T, V = 2, 6, 11
-logits = torch.randn(B, T, V, requires_grad=True)          # (B, T, V)
+logits = torch.randn(B, T, V, dtype=torch.float64, requires_grad=True)  # (B, T, V); f64 so op order can't flake
 labels = torch.randint(0, V, (B, T))                       # (B, T), unshifted
 labels[0, :2] = -100                                        # prompt tokens of row 0
 labels[1, :3] = -100                                        # prompt tokens of row 1
@@ -207,12 +207,12 @@ manual = nll[keep].sum() / keep.sum()
 assert int(keep.sum()) == 6                                 # 4 trained targets in row 0, 2 in row 1
 
 ref = F.cross_entropy(logits[:, :-1].reshape(-1, V), tgt.reshape(-1), ignore_index=-100)
-torch.testing.assert_close(manual, ref, atol=1e-6, rtol=0)
+torch.testing.assert_close(manual, ref, atol=1e-12, rtol=0)
 
 # HF style: pad labels with one -100 on the right, shift, score all T positions
 hf_tgt = F.pad(labels, (0, 1), value=-100)[:, 1:]
 hf = F.cross_entropy(logits.reshape(-1, V), hf_tgt.reshape(-1), ignore_index=-100)
-torch.testing.assert_close(hf, ref, atol=1e-6, rtol=0)
+torch.testing.assert_close(hf, ref, atol=1e-12, rtol=0)
 
 ref.backward()
 row_grad = logits.grad.abs().sum(-1)                        # (B, T)

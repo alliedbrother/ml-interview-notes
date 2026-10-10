@@ -548,9 +548,9 @@ assert zero == {(ratios[3].item(), 1.0), (ratios[0].item(), -1.0)}, zero   # (1.
 assert surrogate_grad(0.7, 1.0) == 1.0 and surrogate_grad(1.35, -1.0) == -1.0
 
 # GSPO: sequence ratio = geometric mean of token ratios, clipped once
-s = torch.exp(ratios.log().mean())
+s = torch.exp(ratios.double().log().mean())                # f64, compared with a float64 product
 geo = math.prod(ratios.tolist()) ** (1 / 4)
-assert abs(s.item() - geo) < 1e-6 and abs(s.item() - 0.99686) < 1e-4
+assert abs(s.item() - geo) < 1e-12 and abs(s.item() - 0.99686) < 1e-4
 assert 1 - eps_low <= s.item() <= 1 + eps_high       # sequence not clipped, though token 1.35 would be
 
 # training-inference IS correction on a fixture of log-probs (one 4-token sequence)

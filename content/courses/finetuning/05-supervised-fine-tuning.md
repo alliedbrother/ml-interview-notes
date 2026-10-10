@@ -539,7 +539,7 @@ This check asserts the loss, the per-token gradient scaling, and that DFT never 
 import torch
 import torch.nn.functional as F
 torch.manual_seed(0)
-logits = torch.randn(5, 7, requires_grad=True)       # (tokens, V)
+logits = torch.randn(5, 7, dtype=torch.float64, requires_grad=True)  # (tokens, V); f64
 targets = torch.tensor([0, 3, 6, 2, 2])
 
 logp = F.log_softmax(logits, -1)
@@ -553,17 +553,17 @@ dft = (p.detach() * nll).mean()                      # loss_type="dft"
 with torch.no_grad():
     probs = torch.softmax(logits, -1)
     ref = sum(float(probs[i, targets[i]]) * -float(torch.log(probs[i, targets[i]])) for i in range(5)) / 5
-assert abs(dft.item() - ref) < 1e-6
+assert abs(dft.item() - ref) < 1e-12
 
 # Gradient: DFT gradient == per-token CE gradient scaled by sg(p_t).
 g_dft, = torch.autograd.grad(dft, logits, retain_graph=True)
 g_tok, = torch.autograd.grad(nll.sum(), logits, retain_graph=True)  # row t = grad of token t's CE
 expected = g_tok * p.detach()[:, None] / 5
-torch.testing.assert_close(g_dft, expected, atol=1e-6, rtol=0)
+torch.testing.assert_close(g_dft, expected, atol=1e-12, rtol=0)
 
 # Analytic form of the CE row gradient: softmax - onehot.
-onehot = F.one_hot(targets, 7).float()
-torch.testing.assert_close(g_tok, torch.softmax(logits, -1) - onehot, atol=1e-6, rtol=0)
+onehot = F.one_hot(targets, 7).double()
+torch.testing.assert_close(g_tok, torch.softmax(logits, -1) - onehot, atol=1e-12, rtol=0)
 
 # Every weight p_t < 1, so DFT <= CE, and low-probability tokens are damped most.
 assert bool((p < 1).all()) and dft.item() <= ce.item()

@@ -190,15 +190,16 @@ zeros.**
 import torch
 
 torch.manual_seed(0)
+f64 = torch.float64  # float64 so the two summation orders agree to ~1e-15 on any BLAS
 d_out, d_in = 16, 12
-W0 = torch.randn(d_out, d_in)
+W0 = torch.randn(d_out, d_in, dtype=f64)
 ranks = [2, 4, 8]
 alpha = 16.0
-As = [torch.randn(r, d_in) * 0.1 for r in ranks]          # (r, d_in)
-Bs = [torch.randn(d_out, r) * 0.1 for r in ranks]         # (d_out, r)
+As = [torch.randn(r, d_in, dtype=f64) * 0.1 for r in ranks]    # (r, d_in)
+Bs = [torch.randn(d_out, r, dtype=f64) * 0.1 for r in ranks]   # (d_out, r)
 scales = [alpha / r for r in ranks]
 ids = torch.tensor([0, 2, 1, 1, 0, 2, -1])
-X = torch.randn(len(ids), d_in)                            # (n, d_in), one token per request
+X = torch.randn(len(ids), d_in, dtype=f64)                 # (n, d_in), one token per request
 
 # Reference: one request at a time.
 ref = []
@@ -212,8 +213,8 @@ ref = torch.stack(ref)                                     # (n, d_out)
 # Batched: pad to max rank, extra slot = "no adapter" (all zeros).
 R = max(ranks)
 n_slots = len(ranks) + 1
-A_pad = torch.zeros(n_slots, R, d_in)
-B_pad = torch.zeros(n_slots, d_out, R)
+A_pad = torch.zeros(n_slots, R, d_in, dtype=f64)
+B_pad = torch.zeros(n_slots, d_out, R, dtype=f64)
 for k, r in enumerate(ranks):
     A_pad[k, :r] = As[k]
     B_pad[k, :, :r] = scales[k] * Bs[k]                    # fold the scale into B
@@ -225,14 +226,14 @@ def batched(A_stack, B_stack):
     return X @ W0.T + expand
 
 out = batched(A_pad, B_pad)
-torch.testing.assert_close(out, ref, atol=1e-6, rtol=0)
+torch.testing.assert_close(out, ref, atol=1e-12, rtol=0)
 
 # Padding only needs zeros on one side: garbage in B's padded columns is harmless
 # because the matching rows of A are zero, so the shrink output is zero there.
 B_garbage = B_pad.clone()
 for k, r in enumerate(ranks):
     B_garbage[k, :, r:] = 123.0
-torch.testing.assert_close(batched(A_pad, B_garbage), ref, atol=1e-6, rtol=0)
+torch.testing.assert_close(batched(A_pad, B_garbage), ref, atol=1e-12, rtol=0)
 
 # FLOP accounting for the adapted rows (2 FLOPs per multiply-add).
 adapted = [a for a in ids.tolist() if a >= 0]

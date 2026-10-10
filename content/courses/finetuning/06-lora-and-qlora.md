@@ -80,25 +80,25 @@ import torch
 torch.manual_seed(0)
 d_in, d_out, r, alpha = 16, 12, 4, 8
 gamma = alpha / r                                    # 2.0
-base = torch.nn.Linear(d_in, d_out)
-A = torch.empty(r, d_in)
+base = torch.nn.Linear(d_in, d_out, dtype=torch.float64)   # f64: merged vs unmerged sum orders differ
+A = torch.empty(r, d_in, dtype=torch.float64)
 torch.nn.init.kaiming_uniform_(A, a=math.sqrt(5))    # PEFT's default for A
 A.requires_grad_()
-B = torch.zeros(d_out, r, requires_grad=True)        # zero-init up-projection
+B = torch.zeros(d_out, r, dtype=torch.float64, requires_grad=True)  # zero-init up-projection
 
 def lora_forward(x, B):                              # x: (T, d_in)
     return base(x) + gamma * (x @ A.T) @ B.T         # (T, d_out)
 
-x = torch.randn(5, d_in)
+x = torch.randn(5, d_in, dtype=torch.float64)
 assert torch.equal(lora_forward(x, B), base(x))      # exact no-op at step 0
 
-target = torch.randn(5, d_out)
+target = torch.randn(5, d_out, dtype=torch.float64)
 loss = ((lora_forward(x, B) - target) ** 2).sum()
 loss.backward()
 g = 2 * (base(x) - target)                           # dL/dh, (T, d_out)
 assert torch.count_nonzero(A.grad) == 0              # gamma * B^T g x^T with B = 0
 assert torch.count_nonzero(B.grad) > 0
-torch.testing.assert_close(B.grad, gamma * g.T @ (x @ A.T).detach(), atol=1e-5, rtol=1e-5)
+torch.testing.assert_close(B.grad, gamma * g.T @ (x @ A.T).detach(), atol=1e-10, rtol=0)
 
 # One SGD step from B = 0 gives delta W = -lr * gamma^2 * g^T x A^T A: it scales as gamma^2.
 lr = 1e-3
@@ -113,9 +113,9 @@ with torch.no_grad():
     W0 = base.weight.clone()
     unmerged = lora_forward(x, B)
     base.weight += gamma * B @ A                     # merge
-    torch.testing.assert_close(base(x), unmerged, atol=1e-6, rtol=0)
+    torch.testing.assert_close(base(x), unmerged, atol=1e-12, rtol=0)
     base.weight -= gamma * B @ A                     # unmerge
-    torch.testing.assert_close(base.weight, W0, atol=1e-6, rtol=0)
+    torch.testing.assert_close(base.weight, W0, atol=1e-12, rtol=0)
 print("step-0 identity, step-0 gradients, gamma^2 first step and merge/unmerge verified")
 ```
 

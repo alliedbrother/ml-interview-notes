@@ -586,8 +586,8 @@ import torch.nn.functional as F
 
 torch.manual_seed(0)
 B, d, s = 4, 8, 20.0
-q = torch.randn(B, d)
-docs = torch.randn(B, d)
+q = torch.randn(B, d, dtype=torch.float64)                 # f64: by-hand vs fused CE order
+docs = torch.randn(B, d, dtype=torch.float64)
 
 def cos_matrix(a, b):
     return F.normalize(a, dim=-1) @ F.normalize(b, dim=-1).T   # (B, B') cosines
@@ -598,7 +598,7 @@ def mnrl(q, docs, s=20.0):
 # by hand: log-softmax over each row, take the diagonal
 logits = s * cos_matrix(q, docs)
 by_hand = -(logits.diag() - torch.logsumexp(logits, dim=1)).mean()
-torch.testing.assert_close(by_hand, mnrl(q, docs), atol=1e-6, rtol=1e-6)
+torch.testing.assert_close(by_hand, mnrl(q, docs), atol=1e-12, rtol=0)
 
 # moving query 0 toward its positive lowers the loss
 q_moved = q.clone()
@@ -607,8 +607,8 @@ assert mnrl(q_moved, docs) < mnrl(q, docs)
 
 # extra negative columns always enlarge the softmax denominator, so any of them raise the loss;
 # a hard negative (one that scores high for query 0) raises it more than a random one
-hard = q[0] + 0.1 * torch.randn(d)
-easy = torch.randn(B, d)                              # random negatives, one per query
+hard = q[0] + 0.1 * torch.randn(d, dtype=torch.float64)
+easy = torch.randn(B, d, dtype=torch.float64)                              # random negatives, one per query
 hard_negs = easy.clone()
 hard_negs[0] = hard                                   # same columns, except query 0's is hard
 with_easy = F.cross_entropy(s * cos_matrix(q, torch.cat([docs, easy])), torch.arange(B))
