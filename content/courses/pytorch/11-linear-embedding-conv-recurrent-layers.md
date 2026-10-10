@@ -226,6 +226,16 @@ causes **checkerboard artifacts**. The common alternatives:
 and no FLOPs. This is Shi et al.'s [sub-pixel convolution](https://arxiv.org/abs/1609.05158).
 `PixelUnshuffle` inverts it.
 
+`nn.Upsample` is a parameter-free wrapper over `F.interpolate` with `mode` in
+`"nearest"` (default), `"bilinear"`, `"bicubic"`, `"trilinear"` and the
+`"linear"` 1-D case. For the linear modes, `align_corners` decides whether the
+corner pixels of input and output are aligned. Upsampling the row `[0, 1]` by 2
+gives `[0, 0.25, 0.75, 1]` with the default `align_corners=False` and
+`[0, 1/3, 2/3, 1]` with `True` (both checked on CPU). A model trained with one
+setting and served with the other shifts every feature map by a fraction of a
+pixel; ports between frameworks hit this often
+([docs](https://docs.pytorch.org/docs/2.8/generated/torch.nn.Upsample.html)).
+
 ## 11.7 Pooling and adaptive pooling
 
 Pooling uses the conv size formula, with `stride` defaulting to `kernel_size`, and

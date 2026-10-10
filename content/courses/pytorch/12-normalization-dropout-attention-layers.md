@@ -178,7 +178,10 @@ is_causal=False, scale=None, enable_gqa=False)`:
   query 0 should see keys 0 to 60 but sees only key 0. The lab measured a max output
   error of 3.34 there. Pass `ones(T_q, T_k).tril(diagonal=T_k - T_q)` instead
   ([module 32](./32-capstone-gpt-model.md), [module 35](./35-capstone-generation-kv-cache.md)).
-  Passing both `attn_mask` and `is_causal` is an error.
+  Never pass both `attn_mask` and `is_causal=True`. The docs and the math backend
+  reject it ("Explicit attn_mask should not be set when is_causal=True"), but on this
+  CPU build the default dispatch accepted the pair and silently ignored the mask
+  (output equal to `is_causal` alone).
 - **`scale`** (keyword-only) replaces $1/\sqrt{d_{\text{head}}}$; **`enable_gqa=True`**
   (2.5+) lets `H_kv` divide `H` ([transformers/09](../transformers/09-mqa-gqa-mla.md));
   the docs call it experimental.
@@ -217,8 +220,9 @@ differed from the manual reference by up to 6e-7, forced math by exactly 0. How 
 kernels avoid the `(T_q, T_k)` matrix is in
 [transformers/11](../transformers/11-hardware-aware-attention.md).
 
-Do not rely on fully masked rows: on CPU, an all-`False` SDPA row returned zeros while
-MHA with every key padded returned NaN. Mask the loss instead.
+Do not rely on fully masked rows: on CPU, an all-`False` SDPA row returned zeros, and
+MHA with every key padded returned zeros with `need_weights=False` (the SDPA path) but
+NaN with the default `need_weights=True`. Mask the loss instead.
 
 ## 12.7 nn.MultiheadAttention and the Transformer layers
 

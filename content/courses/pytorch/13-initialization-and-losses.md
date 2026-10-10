@@ -193,6 +193,27 @@ flowchart LR
     D -->|no| F[vanishing or exploding updates]
 ```
 
+**Data-dependent init (LSUV).** Instead of deriving a gain, measure it. Mishkin &
+Matas's layer-sequential unit-variance init
+([arXiv:1511.06422](https://arxiv.org/abs/1511.06422)), which fast.ai's course
+rebuilds with hooks, starts each weight orthogonal, then walks the layers in order
+on one real batch and divides each weight by its output's std until that std is 1:
+
+```python
+with torch.no_grad():
+    h = x_batch                                       # one real (B, d) batch
+    for m in net:
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight); nn.init.zeros_(m.bias)
+            for _ in range(5):                        # converges in a few passes
+                m.weight.div_(m(h).std())
+        h = m(h)
+```
+
+On a 10-layer width-64 ReLU MLP this ran locally and left every `Linear` output at
+std 1. It adapts to any nonlinearity or odd layer without a gain table, at the cost
+of depending on the batch you happened to use.
+
 Residuals and pre-LN make transformers far more forgiving; what remains is
 residual-stream variance growing with depth (13.5).
 
@@ -336,6 +357,10 @@ the full list is in the [nn docs](https://docs.pytorch.org/docs/2.8/nn.html).
 | `HingeEmbeddingLoss` | distances, $y\in\{\pm1\}$ | $x$ if $y=1$, $\max(0, m-x)$ if $y=-1$ | similarity learning |
 | `CosineEmbeddingLoss` | $x_1, x_2$ vectors, $y\in\{\pm1\}$ | $1-\cos$ or $\max(0,\cos-m)$ | embedding pairs |
 | `TripletMarginLoss` | anchor, positive, negative | $\max(0, d(a,p)-d(a,n)+m)$ | metric learning |
+| `TripletMarginWithDistanceLoss` | anchor, positive, negative, `distance_function=` | same hinge with any distance (e.g. $1-\cos$) | metric learning on non-Euclidean scores |
+| `SoftMarginLoss` | scores, $y\in\{\pm1\}$ | $\log(1+e^{-yx})$ | binary logistic loss with $\pm1$ labels |
+| `MultiMarginLoss(p=1, margin=1)` | scores `(N, C)`, int64 class | $\frac1C\sum_{i\neq y}\max(0, m - x_y + x_i)^p$ | multi-class SVM hinge |
+| `MultiLabelMarginLoss` | scores `(N, C)`, int64 target indices padded with $-1$ | $\frac1C\sum_{j\in Y,\,i\notin Y}\max(0, 1-(x_j-x_i))$ | multi-label ranking hinge |
 | `MultiLabelSoftMarginLoss` | logits, $\{0,1\}$ targets | BCE-with-logits averaged over classes | multi-label |
 | `PoissonNLLLoss(log_input=True)` | log-rate, counts | $e^{x} - yx$ | count data |
 | `GaussianNLLLoss` | mean, target, **variance** | $\tfrac12(\log\sigma^2 + (x-y)^2/\sigma^2)$ | heteroscedastic regression |

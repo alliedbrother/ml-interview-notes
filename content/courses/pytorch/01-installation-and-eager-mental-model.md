@@ -171,6 +171,24 @@ blog](https://pytorch.org/blog/pytorch-2-8/) files new features under
 [29](./29-quantization-and-compression.md)), and the ONNX exporter's default
 moves from TorchScript to `torch.export` in 2.9 (module [28](./28-export-and-deployment.md)).
 
+**Three compatibility layers.** The BC policy covers the Python API only. A
+pure-Python dependency written against 2.7 usually keeps working on 2.8 unless
+it calls something removed or changed (a deprecation warning is the early
+signal). Compiled extensions are different: anything that links libtorch
+(torchvision's C++ ops, flash-attn, xformers, your own `cpp_extension` build)
+uses the C++ ABI, which is not stable across minor releases, so a `.so` built
+for 2.7 typically fails at import with `undefined symbol` or, worse, loads and
+crashes. That is why the torchvision 0.23.0 wheel declares `torch==2.8.0`
+exactly (PyPI metadata). Custom ops registered through `torch.library` fail the
+same way when their compiled kernels mismatch, and their Python registrations
+can also collide or change schema. 2.8 ships a limited stable C++ surface
+(`torch::stable::Tensor`, listed as Unstable in the release notes) aimed at
+extensions that survive upgrades; module [25](./25-custom-ops-and-kernels.md)
+covers building ops. Detect mismatches with `pip check`, an import smoke test
+of every compiled dependency in CI, and `python -m torch.utils.collect_env`.
+TorchScript, the 1.x deployment path, is legacy (the pinned C++ export tutorial
+calls it deprecated); new deployment work goes through `torch.export` (module [28](./28-export-and-deployment.md)).
+
 This course pins `torch==2.8.0` because its assertions are about exact
 behaviour: `grad_fn` names, what `torch.export` emits, defaults, deprecation
 warnings. Read the matching docs at `https://docs.pytorch.org/docs/2.8/`, never

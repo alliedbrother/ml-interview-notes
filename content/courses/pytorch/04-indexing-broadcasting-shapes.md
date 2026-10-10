@@ -122,6 +122,8 @@ For histogram-like updates use `index_put_(..., accumulate=True)` (gave
   [`nonzero` docs](https://docs.pytorch.org/docs/2.8/generated/torch.nonzero.html):
   "When input is on CUDA, `torch.nonzero()` causes host-device synchronization."
   Boolean indexing goes through `nonzero`. (From the docs; GPU not executed here.)
+  [Module 21](./21-profiling-and-benchmarking.md) shows how these syncs look in a
+  profiler trace.
 - **Graph break under `torch.compile`.** `torch._dynamo.explain` on
   `lambda x: (x[x > 0] * 2).sum()` reported 2 graphs, 1 break, reason "Operator
   `aten.nonzero.default`'s output shape depends on input Tensor data"; the
@@ -146,9 +148,11 @@ mean, multiply by the mask and divide by `mask.sum(dim, keepdim=True)`.
 | `nonzero_static(m, size=k)` | yes, `(k, ndim)` padded with `fill_value` | designed to avoid it | needs an upper bound `k` |
 
 `torch.where(cond, a, b)` evaluates both branches everywhere, so
-`torch.where(x > 0, x.log(), 0.)` still computes `log` of negatives, and the
-`nan` in the unused branch poisons gradients. Sanitise first:
-`x.clamp_min(eps).log()`.
+`torch.where(x > 0, x.log(), 0.)` still computes `log` of zeros and negatives.
+The forward output is clean, but the backward multiplies the zero mask by the
+unused branch's local gradient $1/x$: at `x = 0` that is `0 · inf = nan`. On
+`x = [-1, 0, 2]` the gradient was `[-0., nan, 0.5]`. Sanitise the input first:
+`x.clamp_min(eps).log()` (module 05 returns to this).
 
 ## 4.4 gather and scatter, with the index-shape rule
 
@@ -369,8 +373,9 @@ If the `opt_einsum` package is installed, PyTorch picks an order through
 `torch.backends.opt_einsum`; the einsum docs say this "occurs when there are at
 least three inputs" and otherwise contraction runs left to right. Here
 `torch.backends.opt_einsum.is_available()` returned `True` with `strategy`
-`"auto"` (see [backends](https://docs.pytorch.org/docs/2.8/backends.html)); the
-submodule must be imported explicitly before you touch it.
+`"auto"` (see [backends](https://docs.pytorch.org/docs/2.8/backends.html)). The
+submodule is not loaded by `import torch`: `torch.backends.opt_einsum` raised
+`AttributeError` until `import torch.backends.opt_einsum` ran.
 
 einsum lowers to permutes, reshapes and `bmm`. When the output order forces
 non-contiguous intermediates, extra copies can make it slower than a `matmul`

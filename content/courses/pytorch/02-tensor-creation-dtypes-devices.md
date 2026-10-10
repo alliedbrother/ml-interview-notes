@@ -219,8 +219,8 @@ as true division. Fence 2 asserts every row:
 Rows 3 and 4 are the subtle pair. A 0-d float64 tensor is weak against float16
 (same category) but decides the width outright against int32. Integers behave
 the same way: `uint8 tensor + torch.tensor(1000)` stays `uint8`, and
-`uint8 tensor + 1000` produced `233` per element here, a silent wraparound
-(1000 mod 256). In image code, widen before arithmetic.
+`torch.tensor([1, 2], dtype=torch.uint8) + 1000` produced `[233, 234]` here, a
+silent wraparound (1001 mod 256 = 233). In image code, widen before arithmetic.
 
 The weak-scalar rule is deliberate: `x * 0.5` on a bf16 activation stays bf16
 instead of upcasting the whole tensor to float32.

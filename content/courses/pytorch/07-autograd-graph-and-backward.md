@@ -384,6 +384,17 @@ match PyTorch's contract: leaves accumulate, intermediates are recomputed.
 
 Then delete it: `torch.Tensor` does all of this vectorized, in C++, safely.
 
+Two classic exercises sit on either side of this lab. The official
+[Learning PyTorch with Examples](https://docs.pytorch.org/tutorials/beginner/pytorch_with_examples.html)
+tutorial (living page, accessed 2026-10-10) fits a polynomial four times: NumPy with
+hand-written gradients, tensors with hand-written gradients, tensors with autograd,
+then `nn`; the step from the second to the third is exactly the closures above
+disappearing. Karpathy's makemore part 4 ("backprop ninja") goes the other way and
+writes the tensor-level backward of an MLP by hand (cross-entropy, BatchNorm, tanh,
+matmul), checking each against autograd: the same VJP rules, with broadcasting turned
+into sums over the broadcast dims. Module 08's lab does that check for a custom
+`Function` with `gradcheck`.
+
 ## Reconciling the sources
 
 The PyTorch [Autograd mechanics](https://docs.pytorch.org/docs/2.8/notes/autograd.html)

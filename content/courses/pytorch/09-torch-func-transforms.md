@@ -248,7 +248,12 @@ Every method pays for the result: $B \times P$ floats.
 | lab MLP (20 → 64 → 5) | 1,669 | 32 | 213,632 B = 208.6 KiB |
 | GPT-2 small | 124,439,808 | 32 | 15.93 GB = 14.83 GiB |
 
-The second row is why DP-SGD at scale avoids materialising $g_i$: for a Linear on one
+The GPT-2 small $P$ is the default
+[`GPT2Config`](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/models/gpt2/configuration_gpt2.py)
+($V = 50257$, 1,024 positions, $d_{model} = 768$, $L = 12$, biases, tied input and
+output embeddings), counted as the unique parameters of a randomly initialised
+`GPT2LMHeadModel` with transformers 4.57.1 (the untied count would add another
+$50257 \times 768$). The second row is why DP-SGD at scale avoids materialising $g_i$: for a Linear on one
 vector, $\|\delta_i a_i^\top\|_F = \|\delta_i\|\,\|a_i\|$, so per-example norms (all
 clipping needs) come from activations and output gradients directly.
 [Opacus](https://arxiv.org/abs/2109.12298) (Yousefpour et al. 2021) is the production
@@ -314,6 +319,13 @@ when forward and backward use only PyTorch ops
 | `make_functional`, `make_functional_with_buffers` | `functional_call` | not drop-in: keep the module, pass dicts |
 | `combine_state_for_ensemble` | `stack_module_state` | returns two dicts |
 | `torch.autograd.functional.jacobian/hessian` | `jacrev`/`jacfwd`/`hessian` | composable, often faster |
+
+Debugging inside a transform is harder because tensors are wrappers: a `print(x.shape)`
+inside `vmap(f)` over a `(3, 4)` input shows `(4,)`. `torch.func.debug_unwrap(x)`
+returns the underlying tensor, here `(3, 4)`; under `vmap(grad(f))`,
+`debug_unwrap(x, recurse=False)` peels only the innermost (grad) level and still shows
+`(4,)` (both observed on 2.8). Use it for printing and inspection only; computing with
+the unwrapped tensor escapes the transform and breaks the result.
 
 On 2.8 `functorch.make_functional` still runs but warns that it "is deprecated as of
 PyTorch 2.0" (observed). If you keep parameters in a dict and update them out of

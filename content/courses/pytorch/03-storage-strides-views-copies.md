@@ -226,8 +226,10 @@ stored.
 
 For a token stream, `ids.unfold(0, T + 1, T)` yields `(T+1)`-long windows
 whose first `T` positions are inputs and last `T` targets; `step=1` yields
-every window for free (the capstone pipeline in
-[module 31](./31-capstone-data-pipeline.md) windows this way). Applied twice
+every window for free. The capstone pipeline in
+[module 31](./31-capstone-data-pipeline.md) builds `tokens.unfold(0, T + 1, 1)`
+over the whole training stream, then indexes `B` random rows (a copy of just
+those rows) to form a batch. Applied twice
 to a `(1, 1, 4, 4)` image, `img.unfold(2, 2, 2).unfold(3, 2, 2)` gives a 2×2
 grid of 2×2 patches, shape `(1, 1, 2, 2, 2, 2)`, strides
 `(16, 16, 8, 2, 4, 1)`, still a view: the first half of im2col in

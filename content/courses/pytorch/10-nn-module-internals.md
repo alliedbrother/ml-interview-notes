@@ -190,7 +190,10 @@ module's `requires_grad`). It is the only way to load into a `meta` module;
 without it, 2.8 warns that copying into a meta parameter "is a no-op". Parameter
 objects are replaced, so create the optimizer afterwards. A quirk measured on
 2.8: `assign=True` writes `assign_to_params_buffers=True` into the *caller's*
-`sd._metadata`, so a later default load from the same dict also assigns. Use a
+`sd._metadata`, so a later default load from the same dict also assigns. Two
+models loaded that way end up sharing the dict's storage (measured: equal
+`data_ptr`), and training one silently trains the other. A plain dict built with
+`{k: v.clone() for k, v in sd.items()}` has no `_metadata` and is safe; use a
 fresh dict per load.
 
 **Versioning.** A class's `_version` is saved in `_metadata` and passed to

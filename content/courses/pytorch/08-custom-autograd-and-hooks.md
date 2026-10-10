@@ -125,6 +125,25 @@ with fwAD.dual_level():
 
 Losses have $m = 1$, so training is reverse mode; forward mode wins when $n \ll m$. A custom Function participates only if it defines `jvp(ctx, *tangents)`, saving what it needs with `ctx.save_for_forward`; without it, forward AD through the Function raises. Fence 3 builds a `(7, 3)` Jacobian from 3 forward passes. `torch.func.jvp`/`jacfwd` (module 09) sit on the same machinery; the [forward-mode AD tutorial](https://docs.pytorch.org/tutorials/intermediate/forward_ad_usage.html) (living page, accessed 2026-10-10) covers the API.
 
+**`torch.autograd.functional`** is the older, non-composable wrapper layer over the
+same engine ([docs](https://docs.pytorch.org/docs/2.8/autograd.html#functional-higher-level-api)):
+`vjp`, `jvp`, `vhp`, `hvp`, `jacobian` and `hessian`, each taking `(func, inputs, v)`
+and returning tensors, never functions. Signatures checked on 2.8.0:
+
+| Function | How 2.8 computes it | Gotcha |
+|---|---|---|
+| `vjp(f, x, v)` | one backward | none; same as `autograd.grad` |
+| `jvp(f, x, v)` | the double-backward trick (two reverse passes), not dual numbers | slower than `fwAD`; per its docstring |
+| `vhp(f, x, v)` / `hvp(f, x, v)` | reverse over reverse | docstring: `hvp` is "significantly slower than `vhp`"; for a twice-differentiable scalar $f$ they are equal, so call `vhp` |
+| `jacobian(f, x, vectorize=False, strategy="reverse-mode")` | one VJP per output row in a Python loop | `vectorize=True` batches the rows with vmap; `strategy="forward-mode"` (requires `vectorize=True`) uses JVPs |
+| `hessian(f, x, vectorize=False, outer_jacobian_strategy="reverse-mode")` | jacobian of the gradient | same knobs |
+
+Locally, `hvp` and `vhp` matched `H @ v` to $2.2\times10^{-16}$ in float64, and the
+three `jacobian` strategies agreed exactly. New code should use `torch.func`
+([module 09](./09-torch-func-transforms.md)), whose transforms compose and return
+functions; `autograd.functional` remains useful for a one-off Jacobian in a test, as
+fence 3 does.
+
 ## 8.7 Hooks on tensors and nodes
 
 | Hook | Fires when | May modify | Typical use |

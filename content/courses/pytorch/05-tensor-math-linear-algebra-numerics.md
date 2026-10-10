@@ -128,6 +128,27 @@ and unequal batch sizes even when they would broadcast, a useful strictness.
 `(in, out)` must be transposed on load
 ([module 11](./11-linear-embedding-conv-recurrent-layers.md)).
 
+### Matmul from scratch, three ways
+
+The fast.ai route to matmul makes the shape rules concrete. For `a` of shape
+`(m, k)` and `b` of shape `(k, n)`:
+
+```python
+# teaching fragment; all three matched a @ b within 1e-5 on (64, 32) @ (32, 48)
+c1 = torch.zeros(m, n)                       # 1. Python loops: one dot per output
+for i in range(m):
+    for j in range(n):
+        c1[i, j] = (a[i] * b[:, j]).sum()
+c2 = (a[:, :, None] * b[None, :, :]).sum(1)  # 2. broadcast (m,k,1)*(1,k,n) -> (m,k,n), sum k
+c3 = torch.einsum("ik,kj->ij", a, b)         # 3. einsum: k absent from output, so summed
+```
+
+Version 2 is module 04's broadcasting with a reduction: correct, but it
+materialises an `(m, k, n)` intermediate, $k$ times the output. Version 1 pays
+Python overhead per element: one local CPU run took 11.6 ms against 1.6 µs for
+`a @ b`. A BLAS GEMM avoids both by tiling the $k$ loop through cache and
+registers, which is why every real model calls `matmul`.
+
 ### Counting FLOPs and bytes
 
 Each of the $m \cdot n$ outputs of an `(m, k) @ (k, n)` product is a length-$k$ dot
@@ -553,8 +574,8 @@ print("logsumexp:", round(lse.item(), 4), "log_softmax:", stable.tolist())
 - `matmul` promotes 1-D operands (prepend for the first, append for the second),
   then broadcasts batch dims; `bmm` does neither. `nn.Linear` weights are
   `(out, in)`.
-- Use `solve`, not `inv`: a third of the factorisation work and a backward-stable
-  residual. Assert it per seed, not as a law.
+- Use `solve`, not `inv`: a third of the work of forming $A^{-1}$ and a
+  backward-stable residual. Assert it per seed, not as a law.
 - Never compare eigen/singular vectors directly; compare reconstructions.
 - Naive `log(softmax)`, `log(1+x)` and $E[x^2]-E[x]^2$ lose digits or emit
   `inf`/`nan`; use `log_softmax`, `torch.special`, two-pass variance.
