@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import statistics
+import sys
 import tempfile
 import time
 
@@ -275,7 +276,28 @@ def main(argv=None):
     return result
 
 
+def main_with_json_stdout(argv=None):
+    """Run ``main`` with file descriptor 1 pointed at stderr; return its result.
+
+    gloo's TCP transport (the Linux default; macOS builds use libuv) prints
+    "[Gloo] Rank 0 is connected to 1 peer ranks. ..." with C++ ``std::cout``
+    (third_party/gloo at torch v2.8.0, gloo/transport/tcp/context.cc), and
+    spawned ranks inherit the parent's fd 1, so ``contextlib.redirect_stdout``
+    cannot catch it. Swapping the descriptor sends that chatter to stderr and
+    keeps stdout for the one JSON document.
+    """
+    sys.stdout.flush()
+    json_fd = os.dup(1)
+    os.dup2(2, 1)
+    try:
+        return main(argv)
+    finally:
+        sys.stdout.flush()
+        os.dup2(json_fd, 1)
+        os.close(json_fd)
+
+
 if __name__ == "__main__":
-    out = main()
+    out = main_with_json_stdout()
     if out:
         print(json.dumps(out, indent=2))

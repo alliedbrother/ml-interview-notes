@@ -6,6 +6,7 @@ cannot re-import a digit-named module from inside the unittest process.
 
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,24 @@ ROOT = Path(__file__).resolve().parents[1]
 CODE = ROOT / "content/courses/pytorch/code"
 SCRIPT = CODE / "27_fsdp_tp_gloo.py"
 _STATE = {}
+
+
+def last_json_document(text):
+    """Return the JSON object that ends ``text``.
+
+    The lab sends native gloo chatter to stderr, but a stray line on stdout (a
+    future torch log, a debug print) must not turn a numerical contract into a
+    JSONDecodeError, so parse from the last line that opens a top-level object.
+    """
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r"^\{", text, re.M))):
+        try:
+            obj, end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if not text[end:].strip():
+            return obj
+    raise AssertionError(f"stdout does not end with a JSON object: {text[-500:]!r}")
 
 
 def setUpModule():
@@ -49,7 +68,7 @@ class ShardedTrainingContracts(unittest.TestCase):
         self.assertEqual(self.proc.returncode, 0, self.proc.stderr[-3000:])
         self.assertIsNotNone(self.result)
         self.assertEqual(self.result["world_size"], 2)
-        self.assertEqual(json.loads(self.proc.stdout), self.result)
+        self.assertEqual(last_json_document(self.proc.stdout), self.result)
 
     def test_fsdp2_matches_single_process(self):
         r = self.result

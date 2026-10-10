@@ -11,6 +11,7 @@ checks do. Never runs Inductor, never retrains the committed checkpoint.
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,24 @@ LAB_NAME = "pytorch_37_scale_recipe"
 lab = scale = None
 _STATE = {}
 _PROCS = {}
+
+
+def last_json_document(text):
+    """Return the JSON object that ends ``text``.
+
+    The lab sends native gloo chatter to stderr, but a stray line on stdout (a
+    future torch log, a debug print) must not turn a numerical contract into a
+    JSONDecodeError, so parse from the last line that opens a top-level object.
+    """
+    decoder = json.JSONDecoder()
+    for match in reversed(list(re.finditer(r"^\{", text, re.M))):
+        try:
+            obj, end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if not text[end:].strip():
+            return obj
+    raise AssertionError(f"stdout does not end with a JSON object: {text[-500:]!r}")
 
 
 def setUpModule():
@@ -77,7 +96,7 @@ def spawned_result(command):
     if proc.returncode != 0:
         raise AssertionError(f"{command} failed:\n{stderr[-3000:]}")
     result = json.loads(out.read_text())
-    assert json.loads(stdout) == result
+    assert last_json_document(stdout) == result
     return result[command]
 
 
