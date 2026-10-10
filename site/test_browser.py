@@ -26,7 +26,8 @@ def main():
              "/notes/math/linear-algebra/", "/notes/ml/linear-models/",
              "/courses/transformers/03-self-attention-from-scratch/",
              "/courses/inference/", "/courses/inference/02-memory-and-kv-cache/02-02-pagedattention.html",
-             "/courses/inference/labs/02-kv-cache-sizing/README.html"]
+             "/courses/inference/labs/02-kv-cache-sizing/README.html",
+             "/courses/finetuning/", "/courses/finetuning/06-lora-and-qlora/"]
     if args.quick:
         paths = paths[:1]
     if args.linear_algebra:

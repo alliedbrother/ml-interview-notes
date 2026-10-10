@@ -619,7 +619,7 @@ def card(href: str, kicker: str, title: str, blurb: str, meta: str = "") -> str:
     slug = href.strip("/").split("/")[-1]
     cover = (f'<div class="course-cover course-cover--{slug}"><img src="/assets/covers/{slug}.webp" '
              f'alt="{html.escape(title)} diagram" width="1000" height="480" loading="lazy"></div>'
-             if slug in ("transformers", "inference", "pytorch") else "")
+             if slug in ("transformers", "inference", "finetuning", "pytorch") else "")
     icons = {"math": "sigma", "libraries": "blocks", "ml": "chart-no-axes-combined", "deep-learning": "network", "nlp": "messages-square"}
     symbol = f'<span class="category-symbol category-symbol--{slug}"><i data-lucide="{icons[slug]}"></i></span>' if slug in icons else ""
     return (

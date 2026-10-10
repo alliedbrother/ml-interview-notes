@@ -582,3 +582,5 @@ equivalently deployed model is useful.
 - [Attention & Transformers](./attention-and-transformers.md) — the architecture
   being adapted.
 - [Hugging Face ecosystem](../libraries.md) — `peft`, `trl`, and the tooling.
+- [LoRA and QLoRA in Depth](/courses/finetuning/06-lora-and-qlora/) — the
+  fine-tuning course's treatment of parameter-efficient LLM adaptation.

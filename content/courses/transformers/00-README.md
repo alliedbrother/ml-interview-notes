@@ -114,7 +114,8 @@ are no pretrained downloads or GPU requirements for those checks.
    not language-model quality. The overfit exercise makes that distinction explicit.
 
 Read 01-08 for concepts, continue through 16 for implementation, and use 09-14
-alongside the [inference course](/courses/inference/) for serving systems. The
+alongside the [inference course](/courses/inference/) for serving systems. For
+post-training, continue with the [fine-tuning course](/courses/finetuning/). The
 companion course [PyTorch from Tensors to LLMs](/courses/pytorch/) covers the
 framework underneath this code: autograd, `nn.Module`, `torch.compile` and
 distributed training.

@@ -758,3 +758,6 @@ function, ask what maximising it to the extreme would look like.**
   was trained.
 - [Attention & Transformers](./attention-and-transformers.md) — the policy
   architecture in every LLM RL setup.
+- [Preference Optimization](/courses/finetuning/12-preference-optimization/) and
+  [RL with Verifiable Rewards](/courses/finetuning/13-rl-with-verifiable-rewards/)
+  — RLHF, DPO and GRPO applied to LLMs.

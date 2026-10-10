@@ -345,3 +345,6 @@ measure verifier false accepts and judge disagreement on high-consequence cases.
 - [Text Generation & Decoding](./text-generation-and-decoding.md) — sampling and
   constrained output.
 - [NLP Evaluation](./nlp-evaluation.md) — measuring generation quality.
+- [Preference Optimization](/courses/finetuning/12-preference-optimization/) and
+  [RL with Verifiable Rewards](/courses/finetuning/13-rl-with-verifiable-rewards/)
+  — RLHF, DPO and GRPO in depth.

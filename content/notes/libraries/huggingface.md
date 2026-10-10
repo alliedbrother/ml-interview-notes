@@ -543,3 +543,7 @@ references: [Trainer](https://huggingface.co/docs/transformers/main_classes/trai
   actually doing.
 - [The Inference Engineering Course](/courses/inference/) — how serving engines
   make generation fast.
+- [LLM Fine-Tuning Deep Dive](/courses/finetuning/) — SFT with TRL
+  ([05](/courses/finetuning/05-supervised-fine-tuning/)), `peft` LoRA/QLoRA
+  ([06](/courses/finetuning/06-lora-and-qlora/)), and the wider framework landscape
+  ([08](/courses/finetuning/08-frameworks-and-tooling/)).

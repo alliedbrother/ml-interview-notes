@@ -74,6 +74,10 @@ flowchart TD
   architecture from first principles.
 - **[The Inference Engineering Course](/courses/inference/)** — 14 chapters on
   serving these models efficiently.
+- **[LLM Fine-Tuning Deep Dive](/courses/finetuning/)** — 21 modules on adapting
+  these models after pretraining.
+- **[PyTorch from Tensors to LLMs](/courses/pytorch/)** — 38 modules on the
+  framework underneath, ending with a GPT built and trained from scratch.
 
 ## The short version
 

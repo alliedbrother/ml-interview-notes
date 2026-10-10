@@ -73,6 +73,46 @@ def inference():
     im.save(OUT/"inference.webp",quality=94)
 
 
+def finetuning():
+    im=Image.new("RGB",(1000,480),"#f5efe6")
+    d=ImageDraw.Draw(im)
+    ink,frozen,hot="#8a6546",(222,213,200),(184,104,48)
+    label(d,(46,38),"03 / LLM FINE-TUNING",ink,17)
+    label(d,(807,40),"W + B·A",ink,15)
+    label(d,(46,72),"W  FROZEN",ink,15)
+    for r in range(8):
+        for c in range(8):
+            shade=((r*5+c*3)%7)*4
+            x,y=46+c*36,100+r*36
+            d.rounded_rectangle((x,y,x+30,y+30),radius=3,fill=tuple(v-shade for v in frozen))
+    label(d,(352,214),"+",ink,54)
+    label(d,(430,72),"B",ink,15)
+    label(d,(530,72),"A",ink,15)
+    b=[.9,.35,.7,.15,.55,1,.25,.8]
+    a=[.6,1,.3,.75,.2,.9,.5,.4]
+    mix=lambda v:tuple(round(x+(y-x)*v) for x,y in zip((236,214,190),hot))
+    for r in range(8):
+        for c in range(2):
+            v=b[r] if c==0 else 1-b[r]*.6
+            d.rounded_rectangle((430+c*36,100+r*36,460+c*36,130+r*36),radius=3,fill=mix(v))
+    for r in range(2):
+        for c in range(8):
+            v=a[c] if r==0 else 1-a[c]*.6
+            d.rounded_rectangle((530+c*36,100+r*36,560+c*36,130+r*36),radius=3,fill=mix(v))
+    d.line((530,184,815,184),fill="#d6c3ab",width=2)
+    for r in range(6):
+        for c in range(8):
+            v=.12+.8*(b[r+2]*a[c]+(1-b[r+2]*.6)*(1-a[c]*.6))/2
+            x,y=530+c*36,198+r*31
+            d.rounded_rectangle((x,y,x+30,y+25),radius=3,fill=mix(v))
+    label(d,(840,214),"ΔW",ink,30)
+    label(d,(840,256),"rank 2",ink,15)
+    label(d,(46,421),"FREEZE THE BASE. TRAIN THE DELTA.",ink,15)
+    for i,v in enumerate((.15,.4,.7,1)):
+        d.rounded_rectangle((825+i*29,408,848+i*29,431),radius=3,fill=mix(v))
+    im.save(OUT/"finetuning.webp",quality=94)
+
+
 def pytorch():
     im=Image.new("RGB",(1000,480),"#f6eeeb")
     d=ImageDraw.Draw(im)
@@ -113,4 +153,5 @@ def pytorch():
 if __name__ == "__main__":
     attention()
     inference()
+    finetuning()
     pytorch()

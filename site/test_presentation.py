@@ -48,6 +48,7 @@ def main():
     download_roots = (
         (ROOT / "content/notes/_examples", OUT / "assets/examples"),
         (ROOT / "content/courses/transformers/code", OUT / "courses/transformers/code"),
+        (ROOT / "content/courses/finetuning/code", OUT / "courses/finetuning/code"),
         (ROOT / "content/courses/pytorch/code", OUT / "courses/pytorch/code"),
     )
     for standalone, destination in download_roots:
